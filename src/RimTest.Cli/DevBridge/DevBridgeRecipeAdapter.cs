@@ -15,6 +15,12 @@ public interface IDevBridgeRecipeAdapter
     Task<DevBridgeRecipeRunResult> RunAsync(
         string recipeId,
         CancellationToken cancellationToken = default);
+
+    Task<DevBridgeRecipeRunResult> RunAsync(
+        string recipeId,
+        string? workflowId,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(recipeId, cancellationToken);
 }
 
 public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
@@ -148,14 +154,21 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                 blockedBy));
     }
 
-    public async Task<DevBridgeRecipeRunResult> RunAsync(
+    public Task<DevBridgeRecipeRunResult> RunAsync(
         string recipeId,
         CancellationToken cancellationToken = default)
     {
-        DevBridgeProcessResult process = await InvokeAsync(
-            "run",
+        return RunAsync(recipeId, workflowId: null, cancellationToken);
+    }
+
+    public async Task<DevBridgeRecipeRunResult> RunAsync(
+        string recipeId,
+        string? workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        DevBridgeProcessResult process = await InvokeRecipeRunAsync(
             recipeId,
-            options.RunTimeout,
+            workflowId,
             cancellationToken).ConfigureAwait(false);
         using ParsedEnvelope? envelope = ParseEnvelope(
             process,
@@ -164,7 +177,7 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             out DevBridgeAdapterStatus? failure);
         if (envelope is null)
         {
-            return FailedRun(recipeId, failure!, null);
+            return FailedRun(recipeId, failure!, null, workflowId);
         }
 
         JsonElement root = envelope.Root;
@@ -174,7 +187,8 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             return FailedRun(
                 recipeId,
                 MalformedStatus(envelope, process, "run response recipe id did not match the request."),
-                null);
+                null,
+                workflowId);
         }
 
         if (!TryGetBoolean(root, "success", out bool passed) ||
@@ -189,12 +203,29 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             !TryGetNullableString(root, "finalNextAction", out string? nextAction) ||
             !TryGetNullableBoolean(root, "restartRequired", out bool? restartRequired) ||
             !TryGetNullableInt(root, "launchesConsumed", out int? launchesConsumed) ||
+            !TryGetNullableString(root, "workflowId", out string? responseWorkflowId) ||
             !TryGetOperations(root, out List<DevBridgeOperationSummary> operations))
         {
             return FailedRun(
                 recipeId,
                 MalformedStatus(envelope, process, "run response is missing typed result fields."),
-                null);
+                null,
+                workflowId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(workflowId) &&
+            !string.IsNullOrWhiteSpace(responseWorkflowId) &&
+            !string.Equals(workflowId, responseWorkflowId, StringComparison.Ordinal))
+        {
+            return FailedRun(
+                recipeId,
+                MalformedStatus(
+                    envelope,
+                    process,
+                    "DevBridge returned a workflow id that did not match the request."),
+                null,
+                workflowId,
+                errorCode: "DEVBRIDGE_WORKFLOW_ID_MISMATCH");
         }
 
         if (passed &&
@@ -208,7 +239,8 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                     process,
                     "DEVBRIDGE_RESULT_CONFLICT",
                     "DevBridge returned success with a non-success process result."),
-                passed);
+                passed,
+                workflowId);
         }
 
         DevBridgeOutcomeKind outcome = passed
@@ -237,14 +269,16 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             nextAction,
             restartRequired,
             launchesConsumed,
-            operations);
+            operations,
+            responseWorkflowId ?? workflowId);
     }
 
     private async Task<DevBridgeProcessResult> InvokeAsync(
         string operation,
         string recipeId,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? workflowId = null)
     {
         if (string.IsNullOrWhiteSpace(recipeId))
         {
@@ -255,18 +289,26 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                 StartError: "Recipe id is required.");
         }
 
+        var arguments = new List<string>
+        {
+            "--root",
+            options.RootPath,
+            "test",
+            "recipe",
+            operation,
+            recipeId,
+            "--json"
+        };
+        if (!string.IsNullOrWhiteSpace(workflowId))
+        {
+            arguments.Add("--workflow-id");
+            arguments.Add(workflowId);
+        }
+
         var request = new DevBridgeProcessRequest(
             options.CommandPath,
             options.RootPath,
-            [
-                "--root",
-                options.RootPath,
-                "test",
-                "recipe",
-                operation,
-                recipeId,
-                "--json"
-            ],
+            arguments,
             timeout,
             options.MaxStdoutBytes,
             options.MaxStderrBytes);
@@ -291,6 +333,63 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                 string.Empty,
                 string.Empty,
                 StartError: exception.Message);
+        }
+    }
+
+    private async Task<DevBridgeProcessResult> InvokeRecipeRunAsync(
+        string recipeId,
+        string? workflowId,
+        CancellationToken cancellationToken)
+    {
+        DevBridgeProcessResult process = await InvokeAsync(
+            "run",
+            recipeId,
+            options.RunTimeout,
+            cancellationToken,
+            workflowId).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(workflowId) ||
+            !IsWorkflowOptionRejected(process))
+        {
+            return process;
+        }
+
+        // An older coordinator rejects the additive request option before it can
+        // mutate lifecycle state. Retry once without the optional context and
+        // retain the caller's workflow locally.
+        return await InvokeAsync(
+            "run",
+            recipeId,
+            options.RunTimeout,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool IsWorkflowOptionRejected(DevBridgeProcessResult process)
+    {
+        if (process.Cancelled || process.TimedOut ||
+            process.StdoutTruncated || string.IsNullOrWhiteSpace(process.Stdout))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                process.Stdout,
+                new JsonDocumentOptions
+                {
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 32
+                });
+            JsonElement root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object &&
+                TryGetString(root, "schemaVersion", out string? schema) &&
+                string.Equals(schema, DevBridgeRecipeSchemas.Run, StringComparison.Ordinal) &&
+                TryGetString(root, "errorCode", out string? errorCode, allowNull: true) &&
+                string.Equals(errorCode, "TEST_RECIPE_USAGE", StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
@@ -502,7 +601,11 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                 !TryGetString(operation, "errorCode", out string? errorCode, allowNull: true) ||
                 !TryGetFailedAssertionPointers(
                     operation,
-                    out List<string> failedAssertions))
+                    out List<string> failedAssertions) ||
+                !TryGetNullableString(operation, "operationId", out string? operationId) ||
+                !TryGetNullableString(operation, "workflowId", out string? workflowId) ||
+                !TryGetNullableInt(operation, "generation", out int? generation) ||
+                !TryGetNullableString(operation, "launchId", out string? launchId))
             {
                 return false;
             }
@@ -511,7 +614,11 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
                 tool!,
                 success,
                 errorCode,
-                failedAssertions));
+                failedAssertions,
+                operationId,
+                workflowId,
+                generation,
+                launchId));
         }
 
         return true;
@@ -600,8 +707,15 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
     private static DevBridgeRecipeRunResult FailedRun(
         string recipeId,
         DevBridgeAdapterStatus status,
-        bool? passed)
+        bool? passed,
+        string? workflowId = null,
+        string? errorCode = null)
     {
+        if (errorCode is not null)
+        {
+            status = status with { ErrorCode = errorCode };
+        }
+
         return new DevBridgeRecipeRunResult(
             recipeId,
             status,
@@ -615,7 +729,8 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             null,
             null,
             null,
-            []);
+            [],
+            workflowId);
     }
 
     private static DevBridgeAdapterStatus SuccessStatus(

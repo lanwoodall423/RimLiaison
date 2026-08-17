@@ -29,6 +29,35 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
                 "At least one non-empty changed path is required.");
         }
 
+        RimContextProcessResult index;
+        try
+        {
+            index = await transport.ExecuteAsync(
+                    CreateIndexRequest(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return Failure(
+                RimContextImpactOutcome.Cancelled,
+                "RIMTEST_CANCELLED",
+                "The RimContext client process was cancelled.");
+        }
+        catch (Exception exception)
+        {
+            return Failure(
+                RimContextImpactOutcome.InfrastructureFailure,
+                "RIMCONTEXT_TRANSPORT_FAILED",
+                BoundError(exception.Message));
+        }
+
+        RimContextImpactResult? indexFailure = ParseIndexResult(index);
+        if (indexFailure is not null)
+        {
+            return indexFailure;
+        }
+
         RimContextProcessResult process;
         try
         {
@@ -120,161 +149,187 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
 
         using (document)
         {
-        JsonElement root = document.RootElement;
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_RESPONSE_INVALID",
-                "RimContext JSON response root must be an object.",
-                process.ExitCode);
-        }
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_RESPONSE_INVALID",
+                    "RimContext JSON response root must be an object.",
+                    process.ExitCode);
+            }
 
-        if (!TryGetString(root, "schemaVersion", out string? schemaVersion))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_SCHEMA_MISSING",
-                "RimContext response did not contain schemaVersion.",
-                process.ExitCode);
-        }
+            if (!TryGetString(root, "schemaVersion", out string? schemaVersion))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_SCHEMA_MISSING",
+                    "RimContext response did not contain schemaVersion.",
+                    process.ExitCode);
+            }
 
-        if (!string.Equals(schemaVersion, RimContextSchemas.Envelope, StringComparison.Ordinal))
-        {
-            return Failure(
-                RimContextImpactOutcome.IncompatibleSchema,
-                "RIMCONTEXT_SCHEMA_UNSUPPORTED",
-                $"Expected {RimContextSchemas.Envelope}; received {schemaVersion}.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!string.Equals(schemaVersion, RimContextSchemas.Envelope, StringComparison.Ordinal))
+            {
+                return Failure(
+                    RimContextImpactOutcome.IncompatibleSchema,
+                    "RIMCONTEXT_SCHEMA_UNSUPPORTED",
+                    $"Expected {RimContextSchemas.Envelope}; received {schemaVersion}.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!TryGetString(root, "command", out string? command) ||
-            !string.Equals(command, "affected", StringComparison.Ordinal))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_COMMAND_INVALID",
-                "RimContext response was not an affected command envelope.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!TryGetString(root, "command", out string? command) ||
+                !string.Equals(command, "affected", StringComparison.Ordinal))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_COMMAND_INVALID",
+                    "RimContext response was not an affected command envelope.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!TryGetString(root, "status", out string? responseStatus))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_STATUS_MISSING",
-                "RimContext response did not contain status.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!TryGetString(root, "status", out string? responseStatus))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_STATUS_MISSING",
+                    "RimContext response did not contain status.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (string.Equals(responseStatus, "error", StringComparison.Ordinal))
-        {
-            return ParseError(root, process, schemaVersion!);
-        }
+            if (string.Equals(responseStatus, "error", StringComparison.Ordinal))
+            {
+                return ParseError(root, process, schemaVersion!);
+            }
 
-        if (responseStatus is not ("ok" or "partial"))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_STATUS_INVALID",
-                "RimContext response status was not ok, partial, or error.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (responseStatus is not ("ok" or "partial"))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_STATUS_INVALID",
+                    "RimContext response status was not ok, partial, or error.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!root.TryGetProperty("data", out JsonElement data) ||
-            data.ValueKind != JsonValueKind.Object)
-        {
-            return Failure(
-                responseStatus == "partial"
-                    ? RimContextImpactOutcome.Unknown
-                    : RimContextImpactOutcome.MalformedResponse,
-                responseStatus == "partial"
-                    ? "RIMCONTEXT_RESULT_TRUNCATED"
-                    : "RIMCONTEXT_DATA_MISSING",
-                responseStatus == "partial"
-                    ? "RimContext returned a partial affected result."
-                    : "RimContext response did not contain affected data.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!root.TryGetProperty("data", out JsonElement data) ||
+                data.ValueKind != JsonValueKind.Object)
+            {
+                return Failure(
+                    responseStatus == "partial"
+                        ? RimContextImpactOutcome.Unknown
+                        : RimContextImpactOutcome.MalformedResponse,
+                    responseStatus == "partial"
+                        ? "RIMCONTEXT_RESULT_TRUNCATED"
+                        : "RIMCONTEXT_DATA_MISSING",
+                    responseStatus == "partial"
+                        ? "RimContext returned a partial affected result."
+                        : "RimContext response did not contain affected data.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!TryGetStringArray(data, "changed", out List<string> changed) ||
-            changed.Count == 0 ||
-            !TryGetBoolean(data, "truncated", out bool dataTruncated))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_DATA_INVALID",
-                "RimContext affected data did not contain typed changed/truncated fields.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!TryGetStringArray(data, "changed", out List<string> changed) ||
+                changed.Count == 0 ||
+                !TryGetBoolean(data, "truncated", out bool dataTruncated))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_DATA_INVALID",
+                    "RimContext affected data did not contain typed changed/truncated fields.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!TryGetMatches(data, "direct", "direct", out List<RimContextImpact> direct) ||
-            !TryGetMatches(data, "dependent", "dependent", out List<RimContextImpact> dependent) ||
-            !TryGetMatches(data, "runtime_risk", "runtimeRisk", out List<RimContextImpact> runtimeRisk))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_MATCHES_INVALID",
-                "RimContext affected data contained an invalid impact entry.",
-                process.ExitCode,
-                schemaVersion);
-        }
+            if (!TryGetMatches(data, "direct", "direct", out List<RimContextImpact> direct) ||
+                !TryGetMatches(data, "dependent", "dependent", out List<RimContextImpact> dependent) ||
+                !TryGetMatches(data, "runtime_risk", "runtimeRisk", out List<RimContextImpact> runtimeRisk))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_MATCHES_INVALID",
+                    "RimContext affected data contained an invalid impact entry.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
 
-        if (!TryGetMetaTruncated(root, out bool envelopeTruncated))
-        {
-            return Failure(
-                RimContextImpactOutcome.MalformedResponse,
-                "RIMCONTEXT_META_INVALID",
-                "RimContext response meta.truncated was not a boolean.",
-                process.ExitCode,
-                schemaVersion);
-        }
-        var impacts = direct
-            .Concat(dependent)
-            .Concat(runtimeRisk)
-            .ToArray();
-        bool truncated = dataTruncated || envelopeTruncated || responseStatus == "partial";
-        if (truncated)
-        {
+            if (!TryGetMetaTruncated(root, out bool envelopeTruncated))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_META_INVALID",
+                    "RimContext response meta.truncated was not a boolean.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
+            var impacts = direct
+                .Concat(dependent)
+                .Concat(runtimeRisk)
+                .ToArray();
+            bool truncated = dataTruncated || envelopeTruncated || responseStatus == "partial";
+            if (truncated)
+            {
+                return new RimContextImpactResult(
+                    new RimContextAdapterStatus(
+                        RimContextImpactOutcome.Unknown,
+                        "RIMCONTEXT_RESULT_TRUNCATED",
+                        "RimContext did not prove that the affected result was complete.",
+                        process.ExitCode,
+                        schemaVersion),
+                    changed,
+                    impacts,
+                    true);
+            }
+
+            if (process.ExitCode is > 0)
+            {
+                return Failure(
+                    RimContextImpactOutcome.InfrastructureFailure,
+                    "RIMCONTEXT_RESULT_CONFLICT",
+                    "RimContext returned a successful envelope with a failing process exit code.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
+
             return new RimContextImpactResult(
                 new RimContextAdapterStatus(
-                    RimContextImpactOutcome.Unknown,
-                    "RIMCONTEXT_RESULT_TRUNCATED",
-                    "RimContext did not prove that the affected result was complete.",
+                    RimContextImpactOutcome.Success,
+                    null,
+                    null,
                     process.ExitCode,
-                    schemaVersion),
+                    ResponseSchema: schemaVersion),
                 changed,
                 impacts,
-                true);
+                false);
         }
+    }
 
-        if (process.ExitCode is > 0)
+    private RimContextProcessRequest CreateIndexRequest()
+    {
+        var arguments = new List<string>
         {
-            return Failure(
-                RimContextImpactOutcome.InfrastructureFailure,
-                "RIMCONTEXT_RESULT_CONFLICT",
-                "RimContext returned a successful envelope with a failing process exit code.",
-                process.ExitCode,
-                schemaVersion);
+            "index",
+            "--root",
+            options.RootPath
+        };
+        if (!string.IsNullOrWhiteSpace(options.StorePath))
+        {
+            arguments.Add("--store");
+            arguments.Add(options.StorePath!);
         }
 
-        return new RimContextImpactResult(
-            new RimContextAdapterStatus(
-                RimContextImpactOutcome.Success,
-                null,
-                null,
-                process.ExitCode,
-                ResponseSchema: schemaVersion),
-            changed,
-            impacts,
-            false);
-        }
+        arguments.Add("--json");
+        arguments.Add("--compact");
+
+        return new RimContextProcessRequest(
+            options.CommandPath,
+            options.RootPath,
+            arguments,
+            options.Timeout,
+            options.MaxStdoutBytes,
+            options.MaxStderrBytes);
     }
 
     private RimContextProcessRequest CreateRequest(IReadOnlyList<string> changedPaths)
@@ -306,6 +361,119 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
             options.Timeout,
             options.MaxStdoutBytes,
             options.MaxStderrBytes);
+    }
+
+    private static RimContextImpactResult? ParseIndexResult(
+        RimContextProcessResult process)
+    {
+        if (process.Cancelled)
+        {
+            return Failure(
+                RimContextImpactOutcome.Cancelled,
+                "RIMTEST_CANCELLED",
+                "The RimContext client process was cancelled.",
+                process.ExitCode);
+        }
+
+        if (process.TimedOut)
+        {
+            return Failure(
+                RimContextImpactOutcome.Timeout,
+                "RIMCONTEXT_CLIENT_TIMEOUT",
+                "The bounded RimContext client process timed out.",
+                process.ExitCode);
+        }
+
+        if (!string.IsNullOrWhiteSpace(process.StartError))
+        {
+            return Failure(
+                RimContextImpactOutcome.Unavailable,
+                "RIMCONTEXT_START_FAILED",
+                BoundError(process.StartError),
+                process.ExitCode);
+        }
+
+        if (process.StdoutTruncated || process.StderrTruncated)
+        {
+            return Failure(
+                RimContextImpactOutcome.InfrastructureFailure,
+                "RIMCONTEXT_OUTPUT_LIMIT_EXCEEDED",
+                "The RimContext client exceeded the adapter output bound.",
+                process.ExitCode);
+        }
+
+        if (string.IsNullOrWhiteSpace(process.Stdout))
+        {
+            return Failure(
+                RimContextImpactOutcome.Unavailable,
+                "RIMCONTEXT_NO_STRUCTURED_RESPONSE",
+                "RimContext produced no structured JSON response.",
+                process.ExitCode);
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                process.Stdout,
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 32
+                });
+            JsonElement root = document.RootElement;
+            string? schemaVersion = null;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !TryGetString(root, "schemaVersion", out schemaVersion) ||
+                !string.Equals(schemaVersion, RimContextSchemas.Envelope, StringComparison.Ordinal) ||
+                !TryGetString(root, "command", out string? command) ||
+                !string.Equals(command, "index", StringComparison.Ordinal) ||
+                !TryGetString(root, "status", out string? status))
+            {
+                return Failure(
+                    RimContextImpactOutcome.MalformedResponse,
+                    "RIMCONTEXT_INDEX_RESPONSE_INVALID",
+                    "RimContext index response did not match its versioned contract.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
+
+            if (string.Equals(status, "error", StringComparison.Ordinal))
+            {
+                return ParseError(root, process, schemaVersion!);
+            }
+
+            if (status == "partial")
+            {
+                return Failure(
+                    RimContextImpactOutcome.Unknown,
+                    "RIMCONTEXT_INDEX_PARTIAL",
+                    "RimContext indexing completed with diagnostics; affected selection is conservative.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
+
+            if (!string.Equals(status, "ok", StringComparison.Ordinal) ||
+                process.ExitCode is > 0)
+            {
+                return Failure(
+                    RimContextImpactOutcome.InfrastructureFailure,
+                    "RIMCONTEXT_INDEX_RESULT_CONFLICT",
+                    "RimContext returned an unsuccessful index result.",
+                    process.ExitCode,
+                    schemaVersion);
+            }
+
+            return null;
+        }
+        catch (JsonException)
+        {
+            return Failure(
+                RimContextImpactOutcome.MalformedResponse,
+                "RIMCONTEXT_MALFORMED_JSON",
+                "RimContext returned malformed structured JSON.",
+                process.ExitCode);
+        }
     }
 
     private static RimContextImpactResult ParseError(

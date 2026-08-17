@@ -34,17 +34,20 @@ public sealed class CatalogTestExecutionService
         CatalogDocument catalog,
         string testId,
         long started,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? workflowId = null)
     {
         CatalogTestRunResult run = await recipeRunner.RunAsync(
                 catalog,
                 testId,
-                cancellationToken)
+                cancellationToken,
+                workflowId)
             .ConfigureAwait(false);
         RimTestResult normalized = RimTestResultFactory.FromRun(
             run.TestId,
             run.RecipeResult,
-            ElapsedMilliseconds(started));
+            ElapsedMilliseconds(started),
+            workflowId);
 
         if (run.RecipeResult.Status.Outcome == DevBridgeOutcomeKind.TestFailure)
         {
@@ -54,7 +57,7 @@ public sealed class CatalogTestExecutionService
                 IRimErrorDiagnosisAdapter? adapter = diagnosisFactory?.Invoke();
                 diagnosis = adapter is null
                     ? UnavailableDiagnosis("RIMERROR_NOT_CONFIGURED")
-                    : await TryDiagnoseAsync(adapter, run, cancellationToken)
+                    : await TryDiagnoseAsync(adapter, run, workflowId, cancellationToken)
                         .ConfigureAwait(false);
             }
             catch (Exception)
@@ -71,6 +74,7 @@ public sealed class CatalogTestExecutionService
     private static async Task<RimErrorDiagnosisResult> TryDiagnoseAsync(
         IRimErrorDiagnosisAdapter adapter,
         CatalogTestRunResult result,
+        string? workflowId,
         CancellationToken cancellationToken)
     {
         DevBridgeRecipeRunResult run = result.RecipeResult;
@@ -80,7 +84,18 @@ public sealed class CatalogTestExecutionService
             run.Generation,
             run.EvidenceId ?? run.Evidence,
             run.FailureFingerprint,
-            run.Status.ErrorCode);
+            run.Status.ErrorCode,
+            workflowId ?? run.WorkflowId,
+            run.Operations
+                .Select(static operation => new RimErrorOperationCorrelation(
+                    operation.OperationId,
+                    operation.Tool,
+                    operation.Success,
+                    operation.ErrorCode,
+                    operation.WorkflowId,
+                    operation.Generation,
+                    operation.LaunchId))
+                .ToArray());
         try
         {
             RimErrorDiagnosisResult? diagnosis = await adapter.DiagnoseAsync(

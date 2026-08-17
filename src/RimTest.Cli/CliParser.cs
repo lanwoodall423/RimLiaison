@@ -1,3 +1,5 @@
+using RimTest.Stack;
+
 namespace RimTest;
 
 internal enum CliCommand
@@ -12,7 +14,9 @@ internal enum CliCommand
     RecipePlan,
     RecipeRun,
     Affected,
-    SuiteRun
+    SuiteRun,
+    Doctor,
+    Init
 }
 
 internal sealed record CliRequest(
@@ -22,6 +26,7 @@ internal sealed record CliRequest(
     string? RecipeListPath,
     string? DevBridgePath,
     string? DevBridgeRootPath,
+    string? DevBridgeProject,
     string? RimErrorPath,
     string? RimErrorLogPath,
     string? RimErrorStorePath,
@@ -32,8 +37,14 @@ internal sealed record CliRequest(
     int RimContextDepth,
     int RimContextLimit,
     bool Explain,
+    string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
     bool RunSelected,
+    bool InitForce,
+    bool CatalogExplicit,
+    bool FallbackSuiteExplicit,
+    bool DevBridgeProjectExplicit,
+    StackManifestResolution StackManifest,
     bool HelpRequested);
 
 internal sealed class CliParseException : Exception
@@ -48,10 +59,14 @@ internal static class CliParser
 {
     public static CliRequest Parse(IReadOnlyList<string> args)
     {
+        StackManifestResolution stackManifest = StackManifestResolver.Discover();
         string? catalogPath = null;
+        bool catalogExplicit = false;
         string? recipeListPath = null;
         string? devBridgePath = null;
         string? devBridgeRootPath = null;
+        string? devBridgeProject = null;
+        bool devBridgeProjectExplicit = false;
         string? rimErrorPath = null;
         string? rimErrorLogPath = null;
         string? rimErrorStorePath = null;
@@ -63,12 +78,15 @@ internal static class CliParser
         string? fallbackSuite = string.IsNullOrWhiteSpace(configuredFallbackSuite)
             ? null
             : configuredFallbackSuite;
+        bool fallbackSuiteExplicit = false;
         int rimContextDepth = 8;
         int rimContextLimit = 100;
         bool explain = false;
+        string? affectedBase = null;
         bool depthSpecified = false;
         bool limitSpecified = false;
         bool runSelected = false;
+        bool initForce = false;
         bool helpRequested = false;
         var positionals = new List<string>();
 
@@ -79,6 +97,7 @@ internal static class CliParser
             {
                 case "--catalog":
                     catalogPath = ReadOptionValue(args, ref index, argument);
+                    catalogExplicit = true;
                     break;
                 case "--recipes":
                     recipeListPath = ReadOptionValue(args, ref index, argument);
@@ -88,6 +107,10 @@ internal static class CliParser
                     break;
                 case "--devbridge-root":
                     devBridgeRootPath = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--devbridge-project":
+                    devBridgeProject = ReadOptionValue(args, ref index, argument);
+                    devBridgeProjectExplicit = true;
                     break;
                 case "--rimerror":
                     rimErrorPath = ReadOptionValue(args, ref index, argument);
@@ -109,6 +132,7 @@ internal static class CliParser
                     break;
                 case "--fallback-suite":
                     fallbackSuite = ReadOptionValue(args, ref index, argument);
+                    fallbackSuiteExplicit = true;
                     break;
                 case "--depth":
                     depthSpecified = true;
@@ -131,8 +155,20 @@ internal static class CliParser
                 case "--explain":
                     explain = true;
                     break;
+                case "--base":
+                    affectedBase = ReadOptionValue(args, ref index, argument);
+                    if (affectedBase.StartsWith("-", StringComparison.Ordinal))
+                    {
+                        throw new CliParseException("Option --base must be a Git reference, not an option.");
+                    }
+
+                    break;
                 case "--run":
                     runSelected = true;
+                    break;
+                case "--force":
+                case "--update":
+                    initForce = true;
                     break;
                 case "--json":
                     // RimTest's machine-readable contract is the default;
@@ -158,10 +194,16 @@ internal static class CliParser
             return new CliRequest(
                 CliCommand.List,
                 null,
-                ResolveDefaultCatalogPath(),
+                catalogPath ??
+                    (stackManifest.Manifest is not null
+                        ? StackManifestResolver.CatalogPath(stackManifest)
+                        : ResolveDefaultCatalogPath()),
                 recipeListPath,
                 devBridgePath,
                 devBridgeRootPath,
+                devBridgeProject ??
+                    Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_PROJECT") ??
+                    stackManifest.Manifest?.DevBridgeProject,
                 rimErrorPath,
                 rimErrorLogPath,
                 rimErrorStorePath,
@@ -172,8 +214,14 @@ internal static class CliParser
                 rimContextDepth,
                 rimContextLimit,
                 explain,
+                null,
                 [],
                 false,
+                initForce,
+                catalogExplicit,
+                fallbackSuiteExplicit,
+                devBridgeProjectExplicit,
+                stackManifest,
                 true);
         }
 
@@ -203,8 +251,14 @@ internal static class CliParser
                 command = CliCommand.RunTest;
                 id = positionals[1];
                 break;
-            case "affected" when positionals.Count > 1:
+            case "affected" when positionals.Count >= 1:
                 command = CliCommand.Affected;
+                break;
+            case "doctor" when positionals.Count == 1:
+                command = CliCommand.Doctor;
+                break;
+            case "init" when positionals.Count == 1:
+                command = CliCommand.Init;
                 break;
             case "suite" when positionals.Count == 3 &&
                 string.Equals(positionals[1], "show", StringComparison.OrdinalIgnoreCase):
@@ -234,32 +288,72 @@ internal static class CliParser
             case "recipe":
             case "test":
             case "affected":
+            case "doctor":
+            case "init":
                 throw new CliParseException("The command arguments are invalid.");
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
         }
 
-        if (command != CliCommand.Affected &&
-            (rimContextPath is not null ||
-             rimContextRootPath is not null ||
-             rimContextStorePath is not null ||
-             fallbackSuite is not null ||
+        if (fallbackSuite is null && command is CliCommand.Affected or CliCommand.Init)
+        {
+            fallbackSuite = stackManifest.Manifest?.FallbackSuite;
+        }
+
+        if (command is not (CliCommand.Affected or CliCommand.Init) &&
+            (fallbackSuite is not null ||
              explain ||
              depthSpecified ||
              limitSpecified ||
+             affectedBase is not null ||
              runSelected))
         {
             throw new CliParseException(
                 "RimContext selection options are only valid for affected.");
         }
 
+        if (initForce && command != CliCommand.Init)
+        {
+            throw new CliParseException("--force/--update is only valid for init.");
+        }
+
+        if (command is not (CliCommand.Affected or CliCommand.Doctor) &&
+            (rimContextPath is not null ||
+             rimContextRootPath is not null ||
+             rimContextStorePath is not null))
+        {
+            throw new CliParseException(
+                "RimContext configuration options are only valid for affected or doctor.");
+        }
+
+        if (catalogPath is null)
+        {
+            catalogPath = stackManifest.Manifest is not null
+                ? StackManifestResolver.CatalogPath(stackManifest)
+                : ResolveDefaultCatalogPath();
+        }
+
+        if (devBridgeProject is null)
+        {
+            devBridgeProject = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_PROJECT") ??
+                stackManifest.Manifest?.DevBridgeProject;
+        }
+
+        if (rimContextRootPath is null && stackManifest.Manifest is not null &&
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RIMTEST_RIMCONTEXT_ROOT")) &&
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RIMCONTEXT_ROOT")))
+        {
+            rimContextRootPath = stackManifest.RepositoryRoot;
+        }
+
         return new CliRequest(
             command,
             id,
-            catalogPath ?? ResolveDefaultCatalogPath(),
+            catalogPath,
             recipeListPath,
             devBridgePath,
             devBridgeRootPath,
+            devBridgeProject,
             rimErrorPath,
             rimErrorLogPath,
             rimErrorStorePath,
@@ -270,10 +364,16 @@ internal static class CliParser
             rimContextDepth,
             rimContextLimit,
             explain,
+            affectedBase,
             positionals
                 .Skip(1)
                 .ToArray(),
             runSelected,
+            initForce,
+            catalogExplicit,
+            fallbackSuiteExplicit,
+            devBridgeProjectExplicit,
+            stackManifest,
             false);
     }
 
@@ -290,7 +390,9 @@ internal static class CliParser
                 "suite run <suite>",
                 "validate",
                 "run <test>",
-                "affected <changed-path> [<changed-path> ...]",
+                "affected [<changed-path> ...]",
+                "doctor",
+                "init",
                 "recipe show <recipe>",
                 "recipe plan <recipe>",
                 "recipe run <recipe>"
@@ -301,6 +403,7 @@ internal static class CliParser
                 "--recipes <devbridge-recipe-list.json>",
                 "--devbridge <DevBridge.cmd>",
                 "--devbridge-root <DevBridge2-root>",
+                "--devbridge-project <alias>",
                 "--rimerror <rimerror command>",
                 "--rimerror-log <log path>",
                 "--rimerror-store <RimError store>",
@@ -311,8 +414,10 @@ internal static class CliParser
                 "--depth <1..8>",
                 "--limit <1..100>",
                 "--explain",
+                "--base <git-ref> (with affected)",
                 "--json (default output)",
-                "--run (with affected)"
+                "--run (with affected)",
+                "--force/--update (with init)"
             }
         };
 

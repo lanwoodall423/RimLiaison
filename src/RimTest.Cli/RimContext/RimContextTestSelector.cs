@@ -52,6 +52,30 @@ public sealed class RimContextTestSelector
             };
         }
 
+        if (!context.Status.IsSuccess &&
+            IsStaleContext(context.Status.ErrorCode))
+        {
+            RimTestSelectionResult conservative = Conservative(
+                catalog,
+                fallbackSuite,
+                explain,
+                "CONTEXT_STALE",
+                context.Status.Error,
+                nextAction: "rimctx index --json");
+            return conservative.Tests.Count > 0
+                ? conservative
+                : new RimTestSelectionResult
+                {
+                    Status = "blocked",
+                    ReasonCount = 1,
+                    ErrorCode = "CONTEXT_STALE",
+                    NextAction = "rimctx index --json",
+                    Reasons = explain
+                        ? conservative.Reasons
+                        : null
+                };
+        }
+
         if (!context.Status.IsSuccess)
         {
             return Conservative(
@@ -188,7 +212,8 @@ public sealed class RimContextTestSelector
         bool explain,
         string errorCode,
         string? error,
-        IReadOnlyList<RimContextImpact>? impacts = null)
+        IReadOnlyList<RimContextImpact>? impacts = null,
+        string? nextAction = null)
     {
         IReadOnlyList<string> fallbackTests = [];
         string? selectedFallback = null;
@@ -247,6 +272,7 @@ public sealed class RimContextTestSelector
             Tests = fallbackTests,
             ReasonCount = Math.Max(1, impacts?.Count ?? 0),
             ErrorCode = finalErrorCode,
+            NextAction = nextAction,
             FallbackSuite = selectedFallback,
             Reasons = explain ? reasons : null,
             ReasonsTruncated = explain && impacts is not null && impacts.Count > MaximumExplanationReasons
@@ -264,6 +290,12 @@ public sealed class RimContextTestSelector
             Reason = string.IsNullOrWhiteSpace(error) ? errorCode : error,
             Tests = []
         };
+
+    private static bool IsStaleContext(string? errorCode) => errorCode is
+        "INDEX_NOT_FOUND" or
+        "INDEX_INCOMPATIBLE" or
+        "ROOT_MISMATCH" or
+        "CONTEXT_STALE";
 
     private static IReadOnlyList<RimTestSelectionReason> ProjectReasons(
         IReadOnlyList<MappedImpact> mapped,

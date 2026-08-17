@@ -372,12 +372,29 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
                 devBridge = new
                 {
                     schemaVersion = DevBridgeRunSchema,
+                    workflowId = request.WorkflowId,
                     runId = request.RunId,
                     testId = request.TestId,
                     generation = request.Generation,
                     failureCode = request.FailureCode,
                     evidence = request.EvidenceId
-                }
+                },
+                rimBridge = request.Operations is { Count: > 0 }
+                    ? new
+                    {
+                        workflowId = request.WorkflowId,
+                        operations = request.Operations.Select(static operation => new
+                        {
+                            operationId = operation.OperationId,
+                            operationName = operation.OperationName,
+                            success = operation.Success,
+                            errorCode = operation.ErrorCode,
+                            workflowId = operation.WorkflowId,
+                            generation = operation.Generation,
+                            launchId = operation.LaunchId
+                        })
+                    }
+                    : null
             },
             IntegrationJsonOptions);
     }

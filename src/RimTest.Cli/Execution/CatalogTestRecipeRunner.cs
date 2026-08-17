@@ -13,7 +13,8 @@ public interface ICatalogTestRecipeRunner
     Task<CatalogTestRunResult> RunAsync(
         CatalogDocument catalog,
         string testId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? workflowId = null);
 }
 
 public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
@@ -28,7 +29,8 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
     public async Task<CatalogTestRunResult> RunAsync(
         CatalogDocument catalog,
         string testId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? workflowId = null)
     {
         CatalogTest? test = CatalogNavigator.FindTest(catalog, testId);
         if (test is null)
@@ -38,6 +40,7 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
 
         DevBridgeRecipeRunResult result = await adapter.RunAsync(
             test.Recipe,
+            workflowId,
             cancellationToken).ConfigureAwait(false);
         return new CatalogTestRunResult(test.Id, test.Recipe, result);
     }

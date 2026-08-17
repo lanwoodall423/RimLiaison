@@ -43,7 +43,18 @@ public sealed record RimErrorDiagnosisRequest(
     int? Generation,
     string? EvidenceId,
     string? FailureFingerprint,
-    string? FailureCode);
+    string? FailureCode,
+    string? WorkflowId = null,
+    IReadOnlyList<RimErrorOperationCorrelation>? Operations = null);
+
+public sealed record RimErrorOperationCorrelation(
+    string? OperationId,
+    string? OperationName,
+    bool Success,
+    string? ErrorCode,
+    string? WorkflowId,
+    int? Generation,
+    string? LaunchId);
 
 /// <summary>
 /// The bounded fields RimTest exposes from RimError's current latest --json
