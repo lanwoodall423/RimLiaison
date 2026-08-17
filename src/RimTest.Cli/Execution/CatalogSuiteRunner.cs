@@ -28,7 +28,8 @@ public sealed class CatalogSuiteRunner
         CatalogDocument catalog,
         string suiteId,
         IReadOnlyList<string> testIds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? workflowId = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(testIds);
@@ -115,7 +116,8 @@ public sealed class CatalogSuiteRunner
                         catalog,
                         testId,
                         started,
-                        cancellationToken)
+                        cancellationToken,
+                        workflowId)
                     .ConfigureAwait(false);
                 results.Add(execution.Result);
                 if (string.Equals(execution.Result.Status, "cancelled", StringComparison.Ordinal))

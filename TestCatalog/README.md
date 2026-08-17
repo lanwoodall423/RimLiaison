@@ -4,17 +4,14 @@ The catalog is deliberately metadata-only. Each test names an existing DevBridge
 
 ## Agent workflow
 
-RimContext tells RimTest what matters. RimTest decides what tests to run. DevBridge2 runs them safely. RimBridgeServer exercises the game. RimError explains failures.
-
-The shortest affected-change workflow is:
-
-    rimtest affected --run --json
-
-Run it from the repository root with its `TestCatalog/rimtest.catalog.json` and the configured sibling tools. The target repository supplies this metadata-only catalog; RimTest never infers it by indexing source. A successful command returns one compact suite result and exits 0; no follow-up context retrieval is needed. A failed command returns only the failed test references and, when available, the RimError diagnostic id needed for the next source-level action. Use the explicit owner commands documented below only when deeper inspection is needed.
+The canonical agent loop is documented in the repository [README](../README.md). Run it from the repository root with its `TestCatalog/rimtest.catalog.json` and the configured sibling tools. The target repository supplies this metadata-only catalog; RimTest never infers it by indexing source. A successful command returns one compact suite result and exits 0; no follow-up context retrieval is needed. A failed command returns only the failed test references and, when available, the RimError diagnostic id needed for the next source-level action. Use the explicit owner commands documented below only when deeper inspection is needed.
 
 RimTest is an execution frontend and result aggregator, not a lifecycle manager, game-operation runner, repository indexer, or diagnostic analyzer. It delegates those responsibilities to the existing ecosystem boundaries.
 
-The default file is TestCatalog/rimtest.catalog.json relative to the current working directory. Pass --catalog to select another file.
+The default file is `catalog` from the discovered `.rimdev/stack.json`; without a manifest it remains
+`TestCatalog/rimtest.catalog.json` relative to the current working directory. Pass `--catalog` to
+select another file. `--fallback-suite` overrides the manifest's fallback suite, and the existing
+`RIMTEST_FALLBACK_SUITE` environment variable remains higher priority than the manifest.
 
 Use --recipes followed by a DevBridge2 devbridge-test-recipe-list/v1 JSON file when deterministic recipe-reference checking is available. Without that option, recipe existence is reported as skipped.
 
@@ -39,7 +36,11 @@ Example:
       ]
     }
 
-The command output is compact JSON. list and suites intentionally return only ids and recipe mappings; show commands return detailed metadata.
+The command output is compact JSON. list and suites intentionally return only ids and recipe mappings; show commands return detailed metadata. Run results may include the optional workflow-level workflowId; this is a correlation reference, not a replacement for DevBridge's runId, generation, lease, launch, or operation identifiers. The complete cross-stack contract is in docs/correlation-contract.md.
+
+`doctor --json` uses the versioned `rimtest-doctor/v1` envelope. Its `nextAction` values are
+canonical owner commands; the response never includes installation paths, credentials, or owner
+transcripts.
 
 Catalog exit codes are 0 for success, 2 for invalid input or catalog data, 3 for an unresolved conservative selection without a fallback suite, 4 when a requested test or suite is absent, and 10 for an unexpected internal error. `run <test>` additionally uses 1 for a recipe test failure, 10 for DevBridge refusal or other infrastructure failure, 124 for a bounded client timeout, and 130 for cancellation. Direct adapter commands retain their operation-specific refusal/not-found code; malformed or incompatible DevBridge responses are infrastructure errors (10).
 
@@ -55,7 +56,9 @@ Ctrl+C cancels RimTest's client wait. If DevBridge already accepted a long-runni
 
 ## Catalog test results
 
-`run <test>` emits one compact `rimtest-result/v1` JSON object. A pass contains `schemaVersion`, `status`, `test`, `durationMs`, and an optional stable `runId`. A failure contains those identifying fields plus optional `failureFingerprint`, `evidenceId`, `generation`, and `errorCode`. An available RimError diagnosis is projected to `id`, `category`, `method`, `source`, and `line`; the full report remains with RimError. It does not copy logs, operations, stack traces, or evidence contents. Invalid catalog/configuration, infrastructure, timeout, and cancellation results use `invalid`, `infrastructure`, or `cancelled` statuses with a compact `errorCode`.
+`run <test>` emits one compact `rimtest-result/v1` JSON object. A pass contains `schemaVersion`, `status`, `test`, `durationMs`, and optional `workflowId` and stable `runId`. A failure contains those identifying fields plus optional `failureFingerprint`, `evidenceId`, `generation`, and `errorCode`. An available RimError diagnosis is projected to `id`, `category`, `method`, `source`, and `line`; the full report remains with RimError. It does not copy logs, operations, stack traces, or evidence contents. Invalid catalog/configuration, infrastructure, timeout, and cancellation results use `invalid`, `infrastructure`, or `cancelled` statuses with a compact `errorCode`.
+
+When a deterministic recovery step exists, the result also includes `nextAction`: stale or missing context points to `rimctx index --json`, DevBridge infrastructure issues point to `DevBridge.cmd doctor --json`, and an available diagnosis points to `rimerror show <id>`. Passing results and failures without a meaningful next step omit the field.
 
 ## Agent-facing output budgets
 
@@ -69,7 +72,7 @@ Configure the command with `--rimerror` or `RIMTEST_RIMERROR_CMD`/`RIMERROR_CMD`
 
 ## RimContext affected-test selection
 
-`affected <changed-path> [<changed-path> ...]` delegates impact computation to the current RimContext CLI command:
+`affected [<changed-path> ...]` delegates indexing and impact computation to the current RimContext CLI command. Before asking for impact, RimTest refreshes RimContext's own index so edits made after `doctor` cannot be evaluated against stale definitions or types. With no paths, RimTest discovers tracked, staged, and relevant untracked Git changes automatically; explicit paths take precedence. Use `--base <git-ref>` when a Git base is required:
 
     rimctx affected PATH [PATH ...] --root PATH --depth 1..8 --limit N --json
 
@@ -81,11 +84,13 @@ Normal output is a compact `rimtest-selection/v1` object, for example:
 
 `--explain` adds bounded impact-to-test reasons. Tests are sorted by ordinal id and duplicate matches are removed. A complete empty RimContext impact result is `status: "ok"` with no tests. A truncated, unavailable, malformed, incompatible, or uncovered result is `status: "conservative"`; it never means that no tests are needed. Use `--fallback-suite <suite>` (or `RIMTEST_FALLBACK_SUITE`) to select a broader configured suite. Without a usable fallback suite, the command returns exit code 3 so an agent must handle the uncertainty explicitly. A fallback suite selected successfully still returns exit code 0 and retains `status: "conservative"`.
 
+When automatic Git discovery finds no changes, RimTest returns `status: "ok"` with an empty test list and does not invoke DevBridge, including when `--run` is present. This is the explicit clean-worktree result; a Git discovery failure is `status: "blocked"` and never means that no tests are needed.
+
 RimContext command discovery uses `--rimcontext`, then `RIMTEST_RIMCONTEXT_CMD`/`RIMCONTEXT_CMD`, then a sibling RimContext/rimctx.cmd. The workspace root uses `--rimcontext-root`, `RIMTEST_RIMCONTEXT_ROOT`/`RIMCONTEXT_ROOT`, or the current directory. An optional store uses `--rimcontext-store` or `RIMTEST_RIMCONTEXT_STORE`/`RIMCONTEXT_STORE`. `--depth` defaults to 8 and `--limit` defaults to 100; both are forwarded unchanged to RimContext. Ctrl+C cancels the bounded RimContext client wait.
 
 ## Suite execution
 
-`suite run <suite>` and `affected <changed-path> [<changed-path> ...] --run` execute selected catalog tests sequentially through the existing DevBridge recipe adapter. A suite with more than one test first calls each recipe's existing DevBridge `test recipe plan` operation. Planning is a preflight gate only: RimTest does not interpret it as permission to share a generation, lease, game state, or launch, and it does not skip a recipe because `alreadySatisfied` is true. If planning cannot establish that every recipe is executable, no recipe run is started.
+`suite run <suite>` and `affected [<changed-path> ...] --run` execute selected catalog tests sequentially through the existing DevBridge recipe adapter. A suite with more than one test first calls each recipe's existing DevBridge `test recipe plan` operation. Planning is a preflight gate only: RimTest does not interpret it as permission to share a generation, lease, game state, or launch, and it does not skip a recipe because `alreadySatisfied` is true. If planning cannot establish that every recipe is executable, no recipe run is started.
 
 The MVP policy is continue after ordinary test or infrastructure failures so the result identifies all failures; Ctrl+C or a DevBridge cancellation stops launching new children. There is no parallel or distributed execution. This leaves lifecycle, readiness, leases, profiles, recovery, and any safe state reuse entirely with DevBridge2.
 

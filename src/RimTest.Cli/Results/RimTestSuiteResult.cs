@@ -19,6 +19,10 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("suite")]
     public required string Suite { get; init; }
 
+    [JsonPropertyName("workflowId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WorkflowId { get; init; }
+
     [JsonPropertyName("passed")]
     public int Passed { get; init; }
 
@@ -51,6 +55,10 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("fallbackSuite")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FallbackSuite { get; init; }
+
+    [JsonPropertyName("nextAction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NextAction { get; init; }
 }
 
 public sealed class RimTestSuiteFailure
@@ -86,7 +94,8 @@ public static class RimTestSuiteResultFactory
         long durationMs,
         string? selectionStatus = null,
         string? selectionErrorCode = null,
-        string? fallbackSuite = null)
+        string? fallbackSuite = null,
+        string? workflowId = null)
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
@@ -124,6 +133,9 @@ public static class RimTestSuiteResultFactory
         {
             Status = status,
             Suite = execution.SuiteId,
+            WorkflowId = workflowId ?? children
+                .Select(static child => child.WorkflowId)
+                .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
             Passed = passed,
             Failed = failed,
             DurationMs = Math.Max(0, durationMs),
@@ -145,7 +157,11 @@ public static class RimTestSuiteResultFactory
                     StringComparison.Ordinal)
                 ? selectionErrorCode
                 : null,
-            FallbackSuite = fallbackSuite
+            FallbackSuite = fallbackSuite,
+            NextAction = children
+                .OrderBy(static child => child.Test, StringComparer.Ordinal)
+                .Select(static child => child.NextAction)
+                .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action))
         };
     }
 }

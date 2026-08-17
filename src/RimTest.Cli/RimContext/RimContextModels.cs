@@ -196,6 +196,10 @@ public sealed class RimTestSelectionResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ErrorCode { get; init; }
 
+    [JsonPropertyName("nextAction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NextAction { get; init; }
+
     [JsonPropertyName("fallbackSuite")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FallbackSuite { get; init; }

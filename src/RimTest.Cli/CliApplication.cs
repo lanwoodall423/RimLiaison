@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using RimTest.Catalog;
 using RimTest.DevBridge;
+using RimTest.Doctor;
 using RimTest.Execution;
+using RimTest.Git;
 using RimTest.RimError;
 using RimTest.RimContext;
 using RimTest.Results;
+using RimTest.Stack;
 
 namespace RimTest;
 
@@ -72,9 +75,12 @@ public static class CliApplication
         IDevBridgeRecipeAdapter? recipeAdapter = null,
         CancellationToken cancellationToken = default,
         IRimErrorDiagnosisAdapter? diagnosisAdapter = null,
-        IRimContextImpactAdapter? impactAdapter = null)
+        IRimContextImpactAdapter? impactAdapter = null,
+        IDevBridgeProcessTransport? processTransport = null,
+        IGitChangeProvider? gitChangeProvider = null)
     {
         long started = Stopwatch.GetTimestamp();
+        string? workflowId = null;
         try
         {
             CliRequest request = CliParser.Parse(args);
@@ -84,6 +90,10 @@ public static class CliApplication
                 return CliExitCodes.Success;
             }
 
+            workflowId = NeedsWorkflowCorrelation(request)
+                ? WorkflowCorrelation.Create()
+                : null;
+
             if (request.Command is CliCommand.RecipeShow or
                 CliCommand.RecipePlan or
                 CliCommand.RecipeRun)
@@ -92,17 +102,39 @@ public static class CliApplication
                     request,
                     stdout,
                     recipeAdapter,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    workflowId).ConfigureAwait(false);
+            }
+
+            if (request.Command == CliCommand.Doctor)
+            {
+                return await ExecuteDoctorCommandAsync(
+                        request,
+                        stdout,
+                        stderr,
+                        processTransport,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (request.Command == CliCommand.Init)
+            {
+                StackInitResult result = StackInitializer.Run(request);
+                WriteJson(stdout, result.Output);
+                return result.ExitCode;
             }
 
             return await ExecuteCatalogCommandAsync(
                 request,
                 stdout,
+                stderr,
                 recipeAdapter,
                 diagnosisAdapter,
                 impactAdapter,
+                gitChangeProvider,
                 cancellationToken,
-                started).ConfigureAwait(false);
+                started,
+                workflowId).ConfigureAwait(false);
         }
         catch (CliParseException exception)
         {
@@ -113,7 +145,8 @@ public static class CliApplication
                     RimTestResultFactory.Invalid(
                         testId,
                         "CLI_INVALID",
-                        ElapsedMilliseconds(started)));
+                        ElapsedMilliseconds(started),
+                        workflowId));
                 return CliExitCodes.InvalidInput;
             }
 
@@ -131,7 +164,8 @@ public static class CliApplication
                     stdout,
                     RimTestResultFactory.Cancelled(
                         testId,
-                        ElapsedMilliseconds(started)));
+                        ElapsedMilliseconds(started),
+                        workflowId));
                 return CliExitCodes.Cancelled;
             }
 
@@ -154,7 +188,8 @@ public static class CliApplication
                     RimTestResultFactory.Infrastructure(
                         testId,
                         "INTERNAL_ERROR",
-                        ElapsedMilliseconds(started)));
+                        ElapsedMilliseconds(started),
+                        workflowId));
                 return CliExitCodes.InternalError;
             }
 
@@ -171,62 +206,69 @@ public static class CliApplication
         CliRequest request,
         TextWriter stdout,
         IDevBridgeRecipeAdapter? recipeAdapter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? workflowId)
     {
         IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
         switch (request.Command)
         {
             case CliCommand.RecipeShow:
-            {
-                DevBridgeRecipeShowResult result = await adapter.ShowAsync(
-                    request.Id!,
-                    cancellationToken).ConfigureAwait(false);
-                var output = new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
-                    ["recipe"] = result.RecipeId,
-                    ["outcome"] = OutcomeName(result.Status.Outcome)
-                };
-                if (result.Definition.HasValue)
-                {
-                    output["definition"] = result.Definition.Value;
-                }
+                    DevBridgeRecipeShowResult result = await adapter.ShowAsync(
+                        request.Id!,
+                        cancellationToken).ConfigureAwait(false);
+                    var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["recipe"] = result.RecipeId,
+                        ["outcome"] = OutcomeName(result.Status.Outcome)
+                    };
+                    if (result.Definition.HasValue)
+                    {
+                        output["definition"] = result.Definition.Value;
+                    }
 
-                AddStatusFields(output, result.Status);
-                WriteJson(stdout, output);
-                return ExitCodeFor(result.Status.Outcome);
-            }
+                    AddStatusFields(output, result.Status);
+                    WriteJson(stdout, output);
+                    return ExitCodeFor(result.Status.Outcome);
+                }
             case CliCommand.RecipePlan:
-            {
-                DevBridgeRecipePlanResult result = await adapter.PlanAsync(
-                    request.Id!,
-                    cancellationToken).ConfigureAwait(false);
-                var output = new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
-                    ["recipe"] = result.RecipeId,
-                    ["outcome"] = OutcomeName(result.Status.Outcome)
-                };
-                if (result.Plan is not null)
-                {
-                    output["alreadySatisfied"] = result.Plan.AlreadySatisfied;
-                    output["estimatedRimWorldLaunches"] =
-                        result.Plan.EstimatedRimWorldLaunches;
-                    output["steps"] = result.Plan.Steps;
-                    output["nextAction"] = result.Plan.NextAction;
-                    output["blockedBy"] = result.Plan.BlockedBy;
-                }
+                    DevBridgeRecipePlanResult result = await adapter.PlanAsync(
+                        request.Id!,
+                        cancellationToken).ConfigureAwait(false);
+                    var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["recipe"] = result.RecipeId,
+                        ["outcome"] = OutcomeName(result.Status.Outcome)
+                    };
+                    if (result.Plan is not null)
+                    {
+                        output["alreadySatisfied"] = result.Plan.AlreadySatisfied;
+                        output["estimatedRimWorldLaunches"] =
+                            result.Plan.EstimatedRimWorldLaunches;
+                        output["steps"] = result.Plan.Steps;
+                        output["nextAction"] = result.Plan.NextAction;
+                        output["blockedBy"] = result.Plan.BlockedBy;
+                    }
 
-                AddStatusFields(output, result.Status);
-                WriteJson(stdout, output);
-                return ExitCodeFor(result.Status.Outcome);
-            }
+                    AddStatusFields(output, result.Status);
+                    WriteJson(stdout, output);
+                    return ExitCodeFor(result.Status.Outcome);
+                }
             case CliCommand.RecipeRun:
-            {
-                DevBridgeRecipeRunResult result = await adapter.RunAsync(
-                    request.Id!,
-                    cancellationToken).ConfigureAwait(false);
-                WriteRunResult(result.RecipeId, result.RecipeId, result, stdout);
-                return ExitCodeFor(result.Status.Outcome);
-            }
+                {
+                    DevBridgeRecipeRunResult result = await adapter.RunAsync(
+                        request.Id!,
+                        workflowId,
+                        cancellationToken).ConfigureAwait(false);
+                    WriteRunResult(
+                        result.RecipeId,
+                        result.RecipeId,
+                        result,
+                        stdout,
+                        workflowId);
+                    return ExitCodeFor(result.Status.Outcome);
+                }
             default:
                 throw new InvalidOperationException("Unknown recipe command.");
         }
@@ -235,11 +277,14 @@ public static class CliApplication
     private static async Task<int> ExecuteCatalogCommandAsync(
         CliRequest request,
         TextWriter stdout,
+        TextWriter stderr,
         IDevBridgeRecipeAdapter? recipeAdapter,
         IRimErrorDiagnosisAdapter? diagnosisAdapter,
         IRimContextImpactAdapter? impactAdapter,
+        IGitChangeProvider? gitChangeProvider,
         CancellationToken cancellationToken,
-        long started)
+        long started,
+        string? workflowId)
     {
         CatalogLoadResult loaded = CatalogLoader.Load(request.CatalogPath);
         if (loaded.Catalog is null)
@@ -250,7 +295,8 @@ public static class CliApplication
                     request.Id!,
                     FirstErrorCode(loaded.Errors, "CATALOG_INVALID"),
                     started,
-                    stdout);
+                    stdout,
+                    workflowId: workflowId);
             }
 
             WriteError(stdout, "CATALOG_INVALID", loaded.Errors);
@@ -269,7 +315,8 @@ public static class CliApplication
                         request.Id!,
                         FirstErrorCode(recipeList.Errors, "RECIPE_LIST_INVALID"),
                         started,
-                        stdout);
+                        stdout,
+                        workflowId: workflowId);
                 }
 
                 WriteError(stdout, "RECIPE_LIST_INVALID", recipeList.Errors);
@@ -289,7 +336,8 @@ public static class CliApplication
                     request.Id!,
                     FirstErrorCode(validation.Errors, "CATALOG_INVALID"),
                     started,
-                    stdout);
+                    stdout,
+                    workflowId: workflowId);
             }
 
             WriteError(stdout, "CATALOG_INVALID", validation.Errors);
@@ -309,100 +357,177 @@ public static class CliApplication
             case CliCommand.Validate:
                 return WriteValidation(loaded.Catalog, validation, stdout);
             case CliCommand.SuiteRun:
-            {
-                CatalogSuite? suite = CatalogNavigator.FindSuite(loaded.Catalog, request.Id!);
-                if (suite is null)
                 {
-                    WriteError(
-                        stdout,
-                        "SUITE_NOT_FOUND",
-                        [new CatalogIssue(
+                    CatalogSuite? suite = CatalogNavigator.FindSuite(loaded.Catalog, request.Id!);
+                    if (suite is null)
+                    {
+                        WriteError(
+                            stdout,
+                            "SUITE_NOT_FOUND",
+                            [new CatalogIssue(
                             "SUITE_NOT_FOUND",
                             $"Suite was not found: {request.Id}.",
                             "id")]);
-                    return CliExitCodes.NotFound;
-                }
+                        return CliExitCodes.NotFound;
+                    }
 
-                return await RunSuiteAsync(
-                        loaded.Catalog,
-                        suite.Id,
-                        CatalogNavigator.ResolvedTestIds(loaded.Catalog, suite.Id),
-                        request,
-                        stdout,
-                        recipeAdapter,
-                        diagnosisAdapter,
-                        started,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            case CliCommand.Affected:
-            {
-                IRimContextImpactAdapter adapter = impactAdapter ?? CreateRimContextAdapter(request);
-                var selector = new RimContextTestSelector(adapter);
-                RimTestSelectionResult selection = await selector.SelectAsync(
-                        loaded.Catalog,
-                        request.ChangedPaths,
-                        request.FallbackSuite,
-                        request.Explain,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                if (request.RunSelected &&
-                    selection.Status == "conservative" &&
-                    selection.Tests.Count == 0)
-                {
-                    WriteJson(stdout, selection);
-                    return SelectionExitCode(selection);
-                }
-
-                if (request.RunSelected &&
-                    selection.Status is "ok" or "conservative")
-                {
                     return await RunSuiteAsync(
                             loaded.Catalog,
-                            "affected",
-                            selection.Tests,
+                            suite.Id,
+                            CatalogNavigator.ResolvedTestIds(loaded.Catalog, suite.Id),
                             request,
                             stdout,
                             recipeAdapter,
                             diagnosisAdapter,
                             started,
                             cancellationToken,
-                            selection.Status,
-                            selection.ErrorCode,
-                            selection.FallbackSuite)
+                            workflowId: workflowId)
                         .ConfigureAwait(false);
                 }
-
-                WriteJson(stdout, selection);
-                return SelectionExitCode(selection);
-            }
-            case CliCommand.RunTest:
-            {
-                CatalogTest? test = CatalogNavigator.FindTest(loaded.Catalog, request.Id!);
-                if (test is null)
+            case CliCommand.Affected:
                 {
-                    return WriteRimTestInvalid(
-                        request.Id!,
-                        "TEST_NOT_FOUND",
-                        started,
-                        stdout,
-                        invalidExitCode: CliExitCodes.InvalidInput);
-                }
+                    IReadOnlyList<string> changedPaths = request.ChangedPaths;
+                    if (changedPaths.Count == 0)
+                    {
+                        IGitChangeProvider git = gitChangeProvider ?? new SystemGitChangeProvider();
+                        GitChangeDiscoveryResult discovered;
+                        try
+                        {
+                            discovered = await git.DiscoverAsync(
+                                    AffectedGitRoot(request),
+                                    request.AffectedBase,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception exception)
+                        {
+                            stderr.WriteLine("rimtest: Git change discovery failed.");
+                            discovered = new GitChangeDiscoveryResult(
+                                false,
+                                [],
+                                "GIT_DISCOVERY_FAILED",
+                                exception.Message);
+                        }
 
-                IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
-                var executor = CreateTestExecutor(request, adapter, diagnosisAdapter);
-                CatalogTestExecutionResult execution = await executor.RunAsync(
-                        loaded.Catalog,
-                        test.Id,
-                        started,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                WriteJson(stdout, execution.Result);
-                return RimTestExitCodeFor(execution.Run.RecipeResult.Status.Outcome);
-            }
+                        if (!discovered.Resolved)
+                        {
+                            var blocked = new RimTestSelectionResult
+                            {
+                                Status = "blocked",
+                                ReasonCount = 1,
+                                ErrorCode = discovered.ErrorCode ?? "GIT_DISCOVERY_FAILED",
+                                NextAction = "git status --short"
+                            };
+                            WriteJson(stdout, blocked);
+                            return SelectionExitCode(blocked);
+                        }
+
+                        changedPaths = discovered.Paths;
+                        if (changedPaths.Count == 0)
+                        {
+                            var clean = new RimTestSelectionResult
+                            {
+                                Status = "ok",
+                                Tests = [],
+                                ReasonCount = 0
+                            };
+                            WriteJson(stdout, clean);
+                            return CliExitCodes.Success;
+                        }
+                    }
+
+                    IRimContextImpactAdapter adapter = impactAdapter ?? CreateRimContextAdapter(request);
+                    var selector = new RimContextTestSelector(adapter);
+                    RimTestSelectionResult selection = await selector.SelectAsync(
+                            loaded.Catalog,
+                            changedPaths,
+                            request.FallbackSuite,
+                            request.Explain,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (request.RunSelected &&
+                        selection.Status == "conservative" &&
+                        selection.Tests.Count == 0)
+                    {
+                        WriteJson(stdout, selection);
+                        return SelectionExitCode(selection);
+                    }
+
+                    if (request.RunSelected &&
+                        selection.Status is "ok" or "conservative")
+                    {
+                        return await RunSuiteAsync(
+                                loaded.Catalog,
+                                "affected",
+                                selection.Tests,
+                                request,
+                                stdout,
+                                recipeAdapter,
+                                diagnosisAdapter,
+                                started,
+                                cancellationToken,
+                                selection.Status,
+                                selection.ErrorCode,
+                                selection.FallbackSuite,
+                                workflowId)
+                            .ConfigureAwait(false);
+                    }
+
+                    WriteJson(stdout, selection);
+                    return SelectionExitCode(selection);
+                }
+            case CliCommand.RunTest:
+                {
+                    CatalogTest? test = CatalogNavigator.FindTest(loaded.Catalog, request.Id!);
+                    if (test is null)
+                    {
+                        return WriteRimTestInvalid(
+                            request.Id!,
+                            "TEST_NOT_FOUND",
+                            started,
+                            stdout,
+                            invalidExitCode: CliExitCodes.InvalidInput,
+                            workflowId: workflowId);
+                    }
+
+                    IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
+                    var executor = CreateTestExecutor(request, adapter, diagnosisAdapter);
+                    CatalogTestExecutionResult execution = await executor.RunAsync(
+                            loaded.Catalog,
+                            test.Id,
+                            started,
+                            cancellationToken,
+                            workflowId)
+                        .ConfigureAwait(false);
+                    WriteJson(stdout, execution.Result);
+                    return RimTestExitCodeFor(execution.Run.RecipeResult.Status.Outcome);
+                }
             default:
                 throw new InvalidOperationException("Unknown catalog command.");
         }
+    }
+
+    private static string AffectedGitRoot(CliRequest request) =>
+        request.RimContextRootPath ??
+        Environment.GetEnvironmentVariable("RIMTEST_RIMCONTEXT_ROOT") ??
+        Environment.GetEnvironmentVariable("RIMCONTEXT_ROOT") ??
+        Environment.CurrentDirectory;
+
+    private static async Task<int> ExecuteDoctorCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        TextWriter stderr,
+        IDevBridgeProcessTransport? processTransport,
+        CancellationToken cancellationToken)
+    {
+        var runner = new RimTestDoctorRunner(stderr);
+        DoctorRunResult result = await runner.RunAsync(
+                request,
+                processTransport ?? new SystemDevBridgeProcessTransport(),
+                cancellationToken)
+            .ConfigureAwait(false);
+        WriteJson(stdout, result.Output);
+        return result.ExitCode;
     }
 
     private static int WriteTestList(CatalogDocument catalog, TextWriter stdout)
@@ -539,14 +664,16 @@ public static class CliApplication
         string errorCode,
         long started,
         TextWriter stdout,
-        int invalidExitCode = CliExitCodes.InvalidInput)
+        int invalidExitCode = CliExitCodes.InvalidInput,
+        string? workflowId = null)
     {
         WriteJson(
             stdout,
             RimTestResultFactory.Invalid(
                 testId,
                 errorCode,
-                ElapsedMilliseconds(started)));
+                ElapsedMilliseconds(started),
+                workflowId));
         return invalidExitCode;
     }
 
@@ -660,7 +787,8 @@ public static class CliApplication
         CancellationToken cancellationToken,
         string? selectionStatus = null,
         string? selectionErrorCode = null,
-        string? fallbackSuite = null)
+        string? fallbackSuite = null,
+        string? workflowId = null)
     {
         IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
         var executor = CreateTestExecutor(request, adapter, diagnosisAdapter);
@@ -669,14 +797,16 @@ public static class CliApplication
                 catalog,
                 suiteId,
                 testIds,
-                cancellationToken)
+                cancellationToken,
+                workflowId)
             .ConfigureAwait(false);
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
             execution,
             ElapsedMilliseconds(started),
             selectionStatus,
             selectionErrorCode,
-            fallbackSuite);
+            fallbackSuite,
+            workflowId);
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
     }
@@ -688,6 +818,7 @@ public static class CliApplication
             "ok" => CliExitCodes.Success,
             "invalid" => CliExitCodes.InvalidInput,
             "cancelled" => CliExitCodes.Cancelled,
+            "blocked" => CliExitCodes.ConservativeSelection,
             "conservative" when selection.Tests.Count > 0 => CliExitCodes.Success,
             "conservative" => CliExitCodes.ConservativeSelection,
             _ => CliExitCodes.InternalError
@@ -708,7 +839,8 @@ public static class CliApplication
         string testId,
         string recipeId,
         DevBridgeRecipeRunResult result,
-        TextWriter stdout)
+        TextWriter stdout,
+        string? workflowId = null)
     {
         var output = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -716,6 +848,11 @@ public static class CliApplication
             ["recipe"] = recipeId,
             ["outcome"] = OutcomeName(result.Status.Outcome)
         };
+        string? effectiveWorkflowId = result.WorkflowId ?? workflowId;
+        if (!string.IsNullOrWhiteSpace(effectiveWorkflowId))
+        {
+            output["workflowId"] = effectiveWorkflowId;
+        }
         if (result.Passed.HasValue)
         {
             output["passed"] = result.Passed.Value;
@@ -754,6 +891,12 @@ public static class CliApplication
         if (result.FinalNextAction is not null)
         {
             output["finalNextAction"] = result.FinalNextAction;
+        }
+
+        string? nextAction = NextActionFor(result.Status.Outcome);
+        if (nextAction is not null)
+        {
+            output["nextAction"] = nextAction;
         }
 
         if (result.RestartRequired.HasValue)
@@ -819,6 +962,22 @@ public static class CliApplication
             _ => "success"
         };
     }
+
+    private static bool NeedsWorkflowCorrelation(CliRequest request) =>
+        request.Command is CliCommand.RecipeRun or
+            CliCommand.RunTest or
+            CliCommand.SuiteRun ||
+        request.Command == CliCommand.Affected && request.RunSelected;
+
+    private static string? NextActionFor(DevBridgeOutcomeKind outcome) => outcome switch
+    {
+        DevBridgeOutcomeKind.DevBridgeRefusal or
+        DevBridgeOutcomeKind.InfrastructureFailure or
+        DevBridgeOutcomeKind.Timeout or
+        DevBridgeOutcomeKind.MalformedResponse or
+        DevBridgeOutcomeKind.IncompatibleSchema => "DevBridge.cmd doctor --json",
+        _ => null
+    };
 
     private static int ExitCodeFor(DevBridgeOutcomeKind outcome)
     {

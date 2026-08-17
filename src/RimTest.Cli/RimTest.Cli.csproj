@@ -8,4 +8,8 @@
     <AssemblyName>RimTest.Cli</AssemblyName>
     <RootNamespace>RimTest</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\templates\AGENTS.md"
+                      LogicalName="RimTest.CanonicalAgents.md" />
+  </ItemGroup>
 </Project>

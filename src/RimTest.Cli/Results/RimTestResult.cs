@@ -56,6 +56,10 @@ public sealed class RimTestResult
     [JsonPropertyName("test")]
     public required string Test { get; init; }
 
+    [JsonPropertyName("workflowId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WorkflowId { get; init; }
+
     [JsonPropertyName("durationMs")]
     public long DurationMs { get; init; }
 
@@ -90,6 +94,10 @@ public sealed class RimTestResult
     [JsonPropertyName("diagnosticErrorCode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DiagnosticErrorCode { get; init; }
+
+    [JsonPropertyName("nextAction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NextAction { get; init; }
 }
 
 public static class RimTestResultFactory
@@ -97,7 +105,8 @@ public static class RimTestResultFactory
     public static RimTestResult FromRun(
         string testId,
         DevBridgeRecipeRunResult run,
-        long durationMs)
+        long durationMs,
+        string? workflowId = null)
     {
         string status = run.Status.Outcome switch
         {
@@ -112,6 +121,7 @@ public static class RimTestResultFactory
         {
             Status = status,
             Test = testId,
+            WorkflowId = workflowId ?? run.WorkflowId,
             DurationMs = BoundDuration(durationMs),
             RunId = run.RunId,
             Generation = includeFailureDetails ? run.Generation : null,
@@ -123,19 +133,22 @@ public static class RimTestResultFactory
                 : null,
             ErrorCode = includeFailureDetails
                 ? run.Status.ErrorCode
-                : null
+                : null,
+            NextAction = NextActionFor(run.Status.Outcome)
         };
     }
 
     public static RimTestResult Invalid(
         string testId,
         string errorCode,
-        long durationMs = 0)
+        long durationMs = 0,
+        string? workflowId = null)
     {
         return new RimTestResult
         {
             Status = "invalid",
             Test = testId,
+            WorkflowId = workflowId,
             DurationMs = BoundDuration(durationMs),
             ErrorCode = errorCode
         };
@@ -144,25 +157,30 @@ public static class RimTestResultFactory
     public static RimTestResult Infrastructure(
         string testId,
         string errorCode,
-        long durationMs = 0)
+        long durationMs = 0,
+        string? workflowId = null)
     {
         return new RimTestResult
         {
             Status = "infrastructure",
             Test = testId,
+            WorkflowId = workflowId,
             DurationMs = BoundDuration(durationMs),
-            ErrorCode = errorCode
+            ErrorCode = errorCode,
+            NextAction = NextActionForError(errorCode)
         };
     }
 
     public static RimTestResult Cancelled(
         string testId,
-        long durationMs = 0)
+        long durationMs = 0,
+        string? workflowId = null)
     {
         return new RimTestResult
         {
             Status = "cancelled",
             Test = testId,
+            WorkflowId = workflowId,
             DurationMs = BoundDuration(durationMs),
             ErrorCode = "RIMTEST_CANCELLED"
         };
@@ -184,6 +202,7 @@ public static class RimTestResultFactory
             SchemaVersion = result.SchemaVersion,
             Status = result.Status,
             Test = result.Test,
+            WorkflowId = result.WorkflowId,
             DurationMs = result.DurationMs,
             RunId = result.RunId,
             Generation = result.Generation,
@@ -202,8 +221,36 @@ public static class RimTestResultFactory
                 : null,
             DiagnosticErrorCode = diagnosis.IsAvailable && diagnosis.Diagnosis is not null
                 ? null
-                : diagnosis.Status.ErrorCode
+                : diagnosis.Status.ErrorCode,
+            NextAction = diagnosis.IsAvailable && diagnosis.Diagnosis is not null
+                ? $"rimerror show {diagnosis.Diagnosis.Id}"
+                : result.NextAction
         };
+    }
+
+    private static string? NextActionFor(DevBridgeOutcomeKind outcome) => outcome switch
+    {
+        DevBridgeOutcomeKind.DevBridgeRefusal or
+        DevBridgeOutcomeKind.InfrastructureFailure or
+        DevBridgeOutcomeKind.Timeout or
+        DevBridgeOutcomeKind.MalformedResponse or
+        DevBridgeOutcomeKind.IncompatibleSchema => "DevBridge.cmd doctor --json",
+        _ => null
+    };
+
+    private static string? NextActionForError(string errorCode)
+    {
+        if (string.IsNullOrWhiteSpace(errorCode))
+        {
+            return null;
+        }
+
+        return errorCode.StartsWith("DEVBRIDGE_", StringComparison.Ordinal) ||
+            errorCode.StartsWith("RIMBRIDGE_", StringComparison.Ordinal) ||
+            errorCode.StartsWith("READINESS_", StringComparison.Ordinal) ||
+            errorCode.StartsWith("TEST_RECIPE_", StringComparison.Ordinal)
+            ? "DevBridge.cmd doctor --json"
+            : null;
     }
 
     private static long BoundDuration(long durationMs)

@@ -4,6 +4,7 @@ using RimTest;
 using RimTest.Catalog;
 using RimTest.DevBridge;
 using RimTest.Execution;
+using RimTest.Git;
 using RimTest.RimError;
 using RimTest.RimContext;
 using RimTest.Results;
@@ -25,8 +26,13 @@ internal static class Program
         ("suite and validation commands work", SuiteAndValidationCommandsWork),
         ("invalid catalog fails before command output", InvalidCatalogFailsBeforeCommand),
         ("catalog test delegates recipe id", CatalogTestDelegatesRecipeId),
+        ("workflow correlation reaches DevBridge", WorkflowCorrelationReachesDevBridge),
+        ("old DevBridge responses remain compatible", OldDevBridgeResponsesRemainCompatible),
+        ("old DevBridge request parsers remain compatible", OldDevBridgeRequestParsersRemainCompatible),
+        ("mismatched workflow ids fail closed", MismatchedWorkflowIdsFailClosed),
         ("catalog run CLI delegates execution", CatalogRunCliDelegatesExecution),
         ("run result categories are compact", RunResultCategoriesAreCompact),
+        ("compact final output includes workflow id", CompactFinalOutputIncludesWorkflowId),
         ("agent output contracts are golden and bounded", AgentOutputContractsAreGoldenAndBounded),
         ("RimError diagnosis is normalized", RimErrorDiagnosisIsNormalized),
         ("RimError unavailable degrades", RimErrorUnavailableDegrades),
@@ -52,6 +58,8 @@ internal static class Program
         ("RimContext unavailable is conservative", RimContextUnavailableIsConservative),
         ("RimContext selection ordering is deterministic", RimContextSelectionOrderingIsDeterministic),
         ("RimContext adapter parses affected v1", RimContextAdapterParsesAffectedV1),
+        ("RimContext refreshes before affected", RimContextAdapterRefreshesBeforeAffected),
+        ("RimContext partial refresh is conservative", RimContextPartialRefreshIsConservative),
         ("affected CLI emits compact selection", AffectedCliEmitsCompactSelection),
         ("affected run pass is compact", AffectedRunPassIsCompact),
         ("suite all-pass aggregation is compact", SuiteAllPassAggregationIsCompact),
@@ -62,7 +70,27 @@ internal static class Program
         ("suite plan refusal blocks execution", SuitePlanRefusalBlocksExecution),
         ("suite child infrastructure failure is summarized", SuiteChildInfrastructureFailureIsSummarized),
         ("affected run uses conservative fallback", AffectedRunUsesConservativeFallback),
-        ("suite run CLI is deterministic", SuiteRunCliIsDeterministic)
+        ("suite run CLI is deterministic", SuiteRunCliIsDeterministic),
+        ("doctor healthy output is compact", DoctorHealthyOutputIsCompact),
+        ("doctor reads DevBridge RimBridge status shape", DoctorReadsDevBridgeRimBridgeStatusShape),
+        ("doctor reports blocked component", DoctorReportsBlockedComponent),
+        ("stack manifest defaults are used", StackManifestDefaultsAreUsed),
+        ("explicit CLI overrides beat manifest", ExplicitCliOverridesBeatManifest),
+        ("malformed stack schema is blocked", MalformedStackSchemaIsBlocked),
+        ("unknown stack schema is blocked", UnknownStackSchemaIsBlocked),
+        ("missing stack manifest is blocked", MissingStackManifestIsBlocked),
+        ("local configuration does not leak", LocalConfigurationDoesNotLeak),
+        ("init creates an empty repository handoff", InitCreatesEmptyRepositoryHandoff),
+        ("init preserves existing AGENTS", InitPreservesExistingAgents),
+        ("init preserves existing manifest", InitPreservesExistingManifest),
+        ("affected discovers Git changes without paths", AffectedDiscoversGitChangesWithoutPaths),
+        ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
+        ("Git discovery includes staged and untracked files", GitDiscoveryIncludesStagedAndUntrackedFiles),
+        ("explicit affected paths take precedence", ExplicitAffectedPathsTakePrecedence),
+        ("Git discovery failure is conservative", GitDiscoveryFailureIsConservative),
+        ("RimError diagnosis provides drill-down next action", RimErrorDiagnosisProvidesNextAction),
+        ("DevBridge failure provides doctor next action", DevBridgeFailureProvidesNextAction),
+        ("RimContext stale result provides recovery next action", RimContextStaleProvidesNextAction)
     ];
 
     public static int Main()
@@ -273,6 +301,156 @@ internal static class Program
         AssertEqual("assembler-fixture", result.RecipeId);
         AssertEqual(DevBridgeOutcomeKind.Success, result.RecipeResult.Status.Outcome);
         AssertEqual("assembler-fixture", transport.Requests.Single().Arguments[5]);
+    }
+
+    private static void WorkflowCorrelationReachesDevBridge()
+    {
+        const string workflowId = "rw-correlation-1";
+        var transport = new FakeTransport(
+            (request, _) =>
+            {
+                int index = request.Arguments.ToList().IndexOf("--workflow-id");
+                Assert(index >= 0 && request.Arguments[index + 1] == workflowId,
+                    "RimTest did not pass workflowId to DevBridge.");
+                return ProcessResult(
+                    $$"""
+                    {
+                      "schemaVersion":"devbridge-test-recipe-run/v1",
+                      "recipe":"fixture",
+                      "success":true,
+                      "workflowId":"{{workflowId}}",
+                      "generation":2,
+                      "operations":[
+                        {"tool":"rimworld/fixture","success":true,"operationId":"op-1","workflowId":"{{workflowId}}","generation":2,"launchId":"launch-2"}
+                      ]
+                    }
+                    """);
+            });
+
+        DevBridgeRecipeRunResult result = CreateAdapter(transport)
+            .RunAsync("fixture", workflowId)
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(DevBridgeOutcomeKind.Success, result.Status.Outcome);
+        AssertEqual(workflowId, result.WorkflowId);
+        AssertEqual("op-1", result.Operations.Single().OperationId);
+        AssertEqual(workflowId, result.Operations.Single().WorkflowId);
+    }
+
+    private static void OldDevBridgeResponsesRemainCompatible()
+    {
+        var transport = new FakeTransport(
+            (_, _) => ProcessResult(
+                """
+                {
+                  "schemaVersion":"devbridge-test-recipe-run/v1",
+                  "recipe":"fixture",
+                  "success":true,
+                  "generation":2
+                }
+                """));
+
+        DevBridgeRecipeRunResult result = CreateAdapter(transport)
+            .RunAsync("fixture", "rw-old-response")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(DevBridgeOutcomeKind.Success, result.Status.Outcome);
+        AssertEqual("rw-old-response", result.WorkflowId);
+    }
+
+    private static void OldDevBridgeRequestParsersRemainCompatible()
+    {
+        int calls = 0;
+        var transport = new FakeTransport(
+            (request, _) =>
+            {
+                calls++;
+                bool hasWorkflowOption = request.Arguments.Contains(
+                    "--workflow-id", StringComparer.Ordinal);
+                if (calls == 1)
+                {
+                    Assert(hasWorkflowOption, "The first request must carry workflowId.");
+                    return ProcessResult(
+                        """
+                        {
+                          "schemaVersion":"devbridge-test-recipe-run/v1",
+                          "recipe":"fixture",
+                          "success":false,
+                          "errorCode":"TEST_RECIPE_USAGE",
+                          "error":"unknown recipe run option."
+                        }
+                        """,
+                        exitCode: 2);
+                }
+
+                Assert(!hasWorkflowOption, "Compatibility retry must omit workflowId.");
+                return ProcessResult(
+                    """
+                    {
+                      "schemaVersion":"devbridge-test-recipe-run/v1",
+                      "recipe":"fixture",
+                      "success":true,
+                      "generation":2
+                    }
+                    """);
+            });
+
+        DevBridgeRecipeRunResult result = CreateAdapter(transport)
+            .RunAsync("fixture", "rw-old-parser")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(2, calls);
+        AssertEqual(DevBridgeOutcomeKind.Success, result.Status.Outcome);
+        AssertEqual("rw-old-parser", result.WorkflowId);
+    }
+
+    private static void MismatchedWorkflowIdsFailClosed()
+    {
+        var transport = new FakeTransport(
+            (_, _) => ProcessResult(
+                """
+                {
+                  "schemaVersion":"devbridge-test-recipe-run/v1",
+                  "recipe":"fixture",
+                  "success":true,
+                  "workflowId":"rw-other"
+                }
+                """));
+
+        DevBridgeRecipeRunResult result = CreateAdapter(transport)
+            .RunAsync("fixture", "rw-requested")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(DevBridgeOutcomeKind.MalformedResponse, result.Status.Outcome);
+        AssertEqual("DEVBRIDGE_WORKFLOW_ID_MISMATCH", result.Status.ErrorCode);
+        AssertEqual("rw-requested", result.WorkflowId);
+    }
+
+    private static void CompactFinalOutputIncludesWorkflowId()
+    {
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+
+        CliResult result = RunCatalogCliWithAdapter(
+            CreateCatalog(),
+            adapter,
+            "run",
+            "assembler-smoke",
+            "--json");
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+
+        Assert(root.TryGetProperty("workflowId", out JsonElement workflow) &&
+               workflow.GetString()!.StartsWith("rw-", StringComparison.Ordinal),
+            "RimTest final output did not expose the workflow id.");
+        Assert(!root.TryGetProperty("operations", out _),
+            "RimTest final output embedded operation telemetry.");
+        Assert(!result.Stdout.Contains("Player.log", StringComparison.Ordinal),
+            "RimTest final output embedded log content.");
     }
 
     private static void PlanPreservesNoLaunchResult()
@@ -660,6 +838,12 @@ internal static class Program
                     Assert(integration.Contains(
                         "\"evidence\":\"evidence-7\"",
                         StringComparison.Ordinal), "Evidence was not passed to RimError.");
+                    Assert(integration.Contains(
+                        "\"workflowId\":\"rw-diagnosis-7\"",
+                        StringComparison.Ordinal), "Workflow id was not passed to RimError.");
+                    Assert(integration.Contains(
+                        "\"operationId\":\"op-7\"",
+                        StringComparison.Ordinal), "RimBridge operation metadata was not passed to RimError.");
                     integrationVerified = true;
                     return ProcessResult(
                         "{\"status\":\"fail\",\"errors\":1,\"warnings\":0}",
@@ -695,7 +879,16 @@ internal static class Program
                     7,
                     "evidence-7",
                     "fp-7",
-                    "RECIPE_ASSERTION_FAILED"))
+                    "RECIPE_ASSERTION_FAILED",
+                    "rw-diagnosis-7",
+                    [new RimErrorOperationCorrelation(
+                        "op-7",
+                        "rimworld/fixture",
+                        false,
+                        "RECIPE_ASSERTION_FAILED",
+                        "rw-diagnosis-7",
+                        7,
+                        "launch-7")]))
             .GetAwaiter()
             .GetResult();
 
@@ -1277,8 +1470,9 @@ internal static class Program
             .GetAwaiter()
             .GetResult();
 
-        AssertEqual("conservative", result.Status);
-        AssertEqual("INDEX_NOT_FOUND", result.ErrorCode);
+        AssertEqual("blocked", result.Status);
+        AssertEqual("CONTEXT_STALE", result.ErrorCode);
+        AssertEqual("rimctx index --json", result.NextAction);
         AssertEqual(0, result.Tests.Count);
         Assert(result.ReasonCount > 0, "Conservative selection needs a reason.");
     }
@@ -1359,8 +1553,84 @@ internal static class Program
         AssertEqual(RimContextImpactOutcome.Success, result.Status.Outcome);
         AssertEqual(3, result.Impacts.Count);
         AssertEqual("runtimeRisk", result.Impacts[2].Tier);
-        AssertEqual("affected", transport.Requests.Single().Arguments[0]);
-        Assert(transport.Requests.Single().Arguments.Contains("--depth"), "Depth was not forwarded.");
+        AssertEqual(2, transport.Requests.Count);
+        AssertEqual("index", transport.Requests[0].Arguments[0]);
+        AssertEqual("affected", transport.Requests[1].Arguments[0]);
+        Assert(transport.Requests[1].Arguments.Contains("--depth"), "Depth was not forwarded.");
+    }
+
+    private static void RimContextAdapterRefreshesBeforeAffected()
+    {
+        var transport = new FakeRimContextProcessTransport(
+            new RimContextProcessResult(
+                0,
+                """
+                {
+                  "schemaVersion":"rimctx/v1",
+                  "status":"ok",
+                  "command":"affected",
+                  "data":{"changed":["Source/Base.cs"],"direct":[],"dependent":[],"runtime_risk":[],"truncated":false},
+                  "meta":{"count":0,"truncated":false}
+                }
+                """,
+                string.Empty));
+        var adapter = new RimContextImpactAdapter(
+            transport,
+            new RimContextAdapterOptions
+            {
+                CommandPath = "rimctx.cmd",
+                RootPath = "Workspace",
+                Depth = 8,
+                Limit = 100,
+                Timeout = TimeSpan.FromSeconds(1)
+            });
+
+        RimContextImpactResult result = adapter.AffectedAsync(["Source/Base.cs"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(RimContextImpactOutcome.Success, result.Status.Outcome);
+        AssertEqual(2, transport.Requests.Count);
+        AssertEqual("index", transport.Requests[0].Arguments[0]);
+        AssertEqual("affected", transport.Requests[1].Arguments[0]);
+    }
+
+    private static void RimContextPartialRefreshIsConservative()
+    {
+        var transport = new FakeRimContextProcessTransport(
+            new RimContextProcessResult(
+                0,
+                "{}",
+                string.Empty),
+            new RimContextProcessResult(
+                0,
+                """
+                {
+                  "schemaVersion":"rimctx/v1",
+                  "status":"partial",
+                  "command":"index",
+                  "data":{"files":{"scanned":1}}
+                }
+                """,
+                string.Empty));
+        var adapter = new RimContextImpactAdapter(
+            transport,
+            new RimContextAdapterOptions
+            {
+                CommandPath = "rimctx.cmd",
+                RootPath = "Workspace",
+                Depth = 8,
+                Limit = 100,
+                Timeout = TimeSpan.FromSeconds(1)
+            });
+
+        RimContextImpactResult result = adapter.AffectedAsync(["Source/Base.cs"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(RimContextImpactOutcome.Unknown, result.Status.Outcome);
+        AssertEqual("RIMCONTEXT_INDEX_PARTIAL", result.Status.ErrorCode);
+        AssertEqual(1, transport.Requests.Count);
     }
 
     private static void AffectedCliEmitsCompactSelection()
@@ -1776,6 +2046,654 @@ internal static class Program
         }
     }
 
+    private static void DoctorHealthyOutputIsCompact()
+    {
+        CliResult result = RunDoctorFixture(contextAvailable: true);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("rimtest-doctor/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("ready", root.GetProperty("status").GetString());
+        AssertEqual("ok", root.GetProperty("catalog").GetString());
+        AssertEqual("ok", root.GetProperty("rimctx").GetString());
+        AssertEqual("ok", root.GetProperty("devbridge").GetString());
+        AssertEqual("ok", root.GetProperty("rimerror").GetString());
+        AssertEqual("configured", root.GetProperty("rimbridge").GetString());
+        AssertEqual("rimtest affected --run --json", root.GetProperty("nextAction").GetString());
+        Assert(!result.Stdout.Contains("findings", StringComparison.Ordinal),
+            "Doctor must not copy the DevBridge doctor transcript.");
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "Healthy doctor output should not write diagnostics.");
+    }
+
+    private static void DoctorReportsBlockedComponent()
+    {
+        CliResult result = RunDoctorFixture(contextAvailable: false);
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        AssertEqual(
+            "{\"schemaVersion\":\"rimtest-doctor/v1\",\"status\":\"blocked\",\"component\":\"rimctx\",\"code\":\"INDEX_MISSING\",\"nextAction\":\"rimctx index --json\"}",
+            result.Stdout.Trim());
+        Assert(result.Stderr.Contains("rimctx INDEX_MISSING", StringComparison.Ordinal),
+            "Blocked doctor diagnostics should identify the component and code.");
+    }
+
+    private static void DoctorReadsDevBridgeRimBridgeStatusShape()
+    {
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            usePascalRimBridgeFields: true);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("configured", document.RootElement.GetProperty("rimbridge").GetString());
+    }
+
+    private static void StackManifestDefaultsAreUsed()
+    {
+        CliResult result = RunDoctorFixture(contextAvailable: true);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("FixtureMod", document.RootElement.GetProperty("project").GetString());
+    }
+
+    private static void ExplicitCliOverridesBeatManifest()
+    {
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            useExplicitOverrides: true);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        Assert(!result.Stdout.Contains("override", StringComparison.Ordinal),
+            "Local alias configuration must not leak into doctor output.");
+    }
+
+    private static void MalformedStackSchemaIsBlocked()
+    {
+        CliResult result = RunManifestOnlyDoctor("{\"schemaVersion\":");
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        AssertEqual(
+            "{\"schemaVersion\":\"rimtest-doctor/v1\",\"status\":\"blocked\",\"component\":\"manifest\",\"code\":\"STACK_MANIFEST_JSON_INVALID\"}",
+            result.Stdout.Trim());
+    }
+
+    private static void UnknownStackSchemaIsBlocked()
+    {
+        CliResult result = RunManifestOnlyDoctor(
+            "{\"schemaVersion\":\"rimdev-stack/v99\",\"project\":\"Fixture\",\"catalog\":\"catalog.json\",\"rimBridge\":\"via-devbridge\"}");
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        AssertEqual(
+            "STACK_MANIFEST_SCHEMA_UNSUPPORTED",
+            JsonDocument.Parse(result.Stdout).RootElement.GetProperty("code").GetString());
+    }
+
+    private static void MissingStackManifestIsBlocked()
+    {
+        CliResult result = RunManifestOnlyDoctor(manifest: null);
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("STACK_MANIFEST_MISSING", document.RootElement.GetProperty("code").GetString());
+        AssertEqual("rimtest init --json", document.RootElement.GetProperty("nextAction").GetString());
+    }
+
+    private static void LocalConfigurationDoesNotLeak()
+    {
+        CliResult result = RunDoctorFixture(contextAvailable: true);
+
+        Assert(!result.Stdout.Contains("\"fixture\"", StringComparison.Ordinal),
+            "Doctor output must not expose the DevBridge alias.");
+        Assert(!result.Stdout.Contains(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase),
+            "Doctor output must not expose machine-local paths.");
+    }
+
+    private static void InitCreatesEmptyRepositoryHandoff()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            CliResult result = RunInitFixture(directory);
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            Assert(File.Exists(Path.Combine(directory, ".rimdev", "stack.json")),
+                $"init must create the stack manifest. stdout={result.Stdout} stderr={result.Stderr}");
+            Assert(File.Exists(Path.Combine(directory, "AGENTS.md")),
+                "init must create the canonical AGENTS template.");
+            using JsonDocument manifest = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(directory, ".rimdev", "stack.json")));
+            AssertEqual("rimdev-stack/v1", manifest.RootElement.GetProperty("schemaVersion").GetString());
+            AssertEqual("TestCatalog/rimtest.catalog.json", manifest.RootElement.GetProperty("catalog").GetString());
+            AssertEqual("via-devbridge", manifest.RootElement.GetProperty("rimBridge").GetString());
+            Assert(!manifest.RootElement.TryGetProperty("devBridgeProject", out _),
+                "init must not guess a DevBridge alias.");
+            Assert(!result.Stdout.Contains(directory, StringComparison.OrdinalIgnoreCase),
+                "init output must use repository-relative paths.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void InitPreservesExistingAgents()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string agentsPath = Path.Combine(directory, "AGENTS.md");
+            File.WriteAllText(agentsPath, "custom instructions\n");
+            CliResult result = RunInitFixture(directory);
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            AssertEqual("custom instructions\n", File.ReadAllText(agentsPath));
+            Assert(result.Stdout.Contains("AGENTS.md", StringComparison.Ordinal),
+                "init should report the existing AGENTS file.");
+            Assert(result.Stdout.Contains("existing", StringComparison.Ordinal),
+                "init should not overwrite an existing AGENTS file.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void InitPreservesExistingManifest()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string rimDevDirectory = Path.Combine(directory, ".rimdev");
+            Directory.CreateDirectory(rimDevDirectory);
+            string manifestPath = Path.Combine(rimDevDirectory, "stack.json");
+            string existing = "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Custom\",\"devBridgeProject\":\"custom\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"disabled\"}\n";
+            File.WriteAllText(manifestPath, existing);
+
+            CliResult result = RunInitFixture(directory);
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            AssertEqual(existing, File.ReadAllText(manifestPath));
+            Assert(result.Stdout.Contains("stack.json", StringComparison.Ordinal),
+                "init should report the existing manifest.");
+            Assert(result.Stdout.Contains("existing", StringComparison.Ordinal),
+                "init should not overwrite an existing manifest.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void AffectedDiscoversGitChangesWithoutPaths()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
+                new RimContextImpact(
+                    "direct",
+                    "def",
+                    "def-assembler",
+                    "CCM_Assembler",
+                    null,
+                    null,
+                    null,
+                    null)));
+            var git = new FakeGitChangeProvider(new GitChangeDiscoveryResult(
+                true,
+                ["Source/Staged.cs", "Source/New.cs"]));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    ["affected", "--base", "origin/main", "--json", "--catalog", catalogPath],
+                    stdout,
+                    stderr,
+                    impactAdapter: impactAdapter,
+                    gitChangeProvider: git)
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual(1, git.Calls.Count);
+            AssertEqual("origin/main", git.Calls[0].Base);
+            AssertSequence(
+                ["Source/Staged.cs", "Source/New.cs"],
+                impactAdapter.ChangedPaths);
+            Assert(stdout.ToString().Contains(
+                "\"status\":\"ok\"",
+                StringComparison.Ordinal),
+                "Automatic Git changes should feed RimContext selection.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void GitDiscoveryIncludesStagedAndUntrackedFiles()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            Directory.CreateDirectory(Path.Combine(directory, "bin"));
+            RunGit(directory, "init", "--quiet");
+            RunGit(directory, "config", "user.email", "rimtest@example.invalid");
+            RunGit(directory, "config", "user.name", "RimTest");
+            string tracked = Path.Combine(directory, "Source", "Tracked.cs");
+            File.WriteAllText(tracked, "class Tracked {}\n");
+            RunGit(directory, "add", "Source/Tracked.cs");
+            RunGit(directory, "commit", "--quiet", "-m", "initial");
+            File.WriteAllText(tracked, "class Tracked { int Value; }\n");
+            File.WriteAllText(Path.Combine(directory, "Source", "Staged.cs"), "class Staged {}\n");
+            RunGit(directory, "add", "Source/Staged.cs");
+            File.WriteAllText(Path.Combine(directory, "Source", "Untracked.cs"), "class Untracked {}\n");
+            File.WriteAllText(Path.Combine(directory, "bin", "Generated.cs"), "generated\n");
+
+            GitChangeDiscoveryResult result = new SystemGitChangeProvider()
+                .DiscoverAsync(directory)
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(result.Resolved, result.Error ?? "Git discovery should resolve.");
+            Assert(result.Paths.Contains("Source/Tracked.cs"), "Tracked modification was not discovered.");
+            Assert(result.Paths.Contains("Source/Staged.cs"), "Staged file was not discovered.");
+            Assert(result.Paths.Contains("Source/Untracked.cs"), "Untracked file was not discovered.");
+            Assert(!result.Paths.Any(path => path.StartsWith("bin/", StringComparison.Ordinal)),
+                "Generated build directories must be excluded.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void CleanAffectedRunIsExplicitAndDoesNotLaunch()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var adapter = new FakeRecipeAdapter();
+            var git = new FakeGitChangeProvider(new GitChangeDiscoveryResult(true, []));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    ["affected", "--run", "--json", "--catalog", catalogPath],
+                    stdout,
+                    stderr,
+                    adapter,
+                    gitChangeProvider: git)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual("ok", root.GetProperty("status").GetString());
+            AssertEqual(0, root.GetProperty("tests").GetArrayLength());
+            AssertEqual(0, adapter.RunCalls.Count);
+            Assert(string.IsNullOrEmpty(stderr.ToString()),
+                "A clean affected run should not write diagnostics.");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void ExplicitAffectedPathsTakePrecedence()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
+                new RimContextImpact(
+                    "direct",
+                    "def",
+                    "def-assembler",
+                    "CCM_Assembler",
+                    null,
+                    null,
+                    null,
+                    null)));
+            var git = new FakeGitChangeProvider(new GitChangeDiscoveryResult(
+                false,
+                [],
+                "GIT_DISCOVERY_FAILED"));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "affected",
+                        "Source/Foo.cs",
+                        "Defs/Foo.xml",
+                        "--json",
+                        "--catalog",
+                        catalogPath
+                    ],
+                    stdout,
+                    stderr,
+                    impactAdapter: impactAdapter,
+                    gitChangeProvider: git)
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual(0, git.Calls.Count);
+            AssertSequence(["Source/Foo.cs", "Defs/Foo.xml"], impactAdapter.ChangedPaths);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void GitDiscoveryFailureIsConservative()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var git = new FakeGitChangeProvider(new GitChangeDiscoveryResult(
+                false,
+                [],
+                "GIT_DISCOVERY_FAILED"));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    ["affected", "--run", "--json", "--catalog", catalogPath],
+                    stdout,
+                    stderr,
+                    gitChangeProvider: git)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.ConservativeSelection, exitCode);
+            AssertEqual("blocked", root.GetProperty("status").GetString());
+            AssertEqual("GIT_DISCOVERY_FAILED", root.GetProperty("errorCode").GetString());
+            AssertEqual("git status --short", root.GetProperty("nextAction").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void RimErrorDiagnosisProvidesNextAction()
+    {
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = FailedRun(
+            "assembler-fixture",
+            "fp-diagnosis",
+            "RECIPE_ASSERTION_FAILED");
+        CliResult result = RunCatalogCliWithAdapters(
+            CreateCatalog(),
+            adapter,
+            new FakeRimErrorDiagnosisAdapter(AvailableDiagnosis("d-81f72")),
+            "run",
+            "assembler-smoke");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("fail", root.GetProperty("status").GetString());
+        AssertEqual("d-81f72", root.GetProperty("diagnostic").GetProperty("id").GetString());
+        AssertEqual("rimerror show d-81f72", root.GetProperty("nextAction").GetString());
+    }
+
+    private static void DevBridgeFailureProvidesNextAction()
+    {
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = InfrastructureRun(
+            "assembler-fixture",
+            "DEVBRIDGE_REFUSAL");
+        CliResult result = RunCatalogCliWithAdapter(
+            CreateCatalog(),
+            adapter,
+            "run",
+            "assembler-smoke");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual("DEVBRIDGE_REFUSAL", root.GetProperty("errorCode").GetString());
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+    }
+
+    private static void RimContextStaleProvidesNextAction()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var impactAdapter = new FakeImpactAdapter(new RimContextImpactResult(
+                new RimContextAdapterStatus(
+                    RimContextImpactOutcome.Unavailable,
+                    "INDEX_NOT_FOUND"),
+                [],
+                [],
+                false));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "affected",
+                        "Source/Foo.cs",
+                        "--json",
+                        "--catalog",
+                        catalogPath
+                    ],
+                    stdout,
+                    stderr,
+                    impactAdapter: impactAdapter)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.ConservativeSelection, exitCode);
+            AssertEqual("blocked", root.GetProperty("status").GetString());
+            AssertEqual("CONTEXT_STALE", root.GetProperty("errorCode").GetString());
+            AssertEqual("rimctx index --json", root.GetProperty("nextAction").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static CliResult RunDoctorFixture(
+        bool contextAvailable,
+        bool useExplicitOverrides = false,
+        bool usePascalRimBridgeFields = false)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            string manifestCatalog = useExplicitOverrides ? "missing.json" : "catalog.json";
+            File.WriteAllText(
+                Path.Combine(directory, ".rimdev", "stack.json"),
+                $"{{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"FixtureMod\",\"devBridgeProject\":\"fixture\",\"catalog\":\"{manifestCatalog}\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"via-devbridge\"}}");
+            string overrideCatalogPath = Path.Combine(directory, "override.json");
+            if (useExplicitOverrides)
+            {
+                File.WriteAllText(overrideCatalogPath, Serialize(CreateCatalog()));
+            }
+            string rimContextPath = Path.Combine(directory, "rimctx.cmd");
+            string devBridgePath = Path.Combine(directory, "DevBridge.cmd");
+            string rimErrorPath = Path.Combine(directory, "rimerror.cmd");
+            string rimBridge = usePascalRimBridgeFields
+                ? "{\"ConfiguredMode\":\"required\",\"LifecycleState\":\"READY\"}"
+                : "{\"configuredMode\":\"optional\",\"lifecycleState\":\"READY\"}";
+            File.WriteAllText(rimContextPath, "fixture");
+            File.WriteAllText(devBridgePath, "fixture");
+            File.WriteAllText(rimErrorPath, "fixture");
+            var transport = new FakeTransport(
+                (request, _) => request.Arguments.Contains("summary")
+                    ? ProcessResult(contextAvailable
+                        ? "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"ok\",\"command\":\"summary\",\"data\":{}}"
+                        : "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"error\",\"command\":\"summary\",\"code\":\"INDEX_NOT_FOUND\",\"message\":\"missing\"}")
+                    : request.Arguments.Contains("project")
+                        ? ProcessResult($"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}")
+                    : ProcessResult(
+                        $"{{\"success\":true,\"healthy\":true,\"rimBridge\":{rimBridge}}}"));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var arguments = new List<string>
+            {
+                "doctor",
+                "--json",
+                "--rimcontext",
+                rimContextPath,
+                "--rimcontext-root",
+                directory,
+                "--devbridge",
+                devBridgePath,
+                "--devbridge-root",
+                directory,
+                "--rimerror",
+                rimErrorPath
+            };
+            if (useExplicitOverrides)
+            {
+                arguments.Add("--catalog");
+                arguments.Add(overrideCatalogPath);
+                arguments.Add("--devbridge-project");
+                arguments.Add("override");
+            }
+
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        arguments.ToArray(),
+                        stdout,
+                        stderr,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+            return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static CliResult RunManifestOnlyDoctor(string? manifest)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            if (manifest is not null)
+            {
+                Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+                File.WriteAllText(Path.Combine(directory, ".rimdev", "stack.json"), manifest);
+            }
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        ["doctor", "--json"],
+                        stdout,
+                        stderr)
+                    .GetAwaiter()
+                    .GetResult());
+            return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static CliResult RunInitFixture(string directory)
+    {
+        Directory.CreateDirectory(Path.Combine(directory, ".git"));
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        int exitCode = WithCurrentDirectory(
+            directory,
+            () => CliApplication.RunAsync(
+                    ["init", "--json"],
+                    stdout,
+                    stderr)
+                .GetAwaiter()
+                .GetResult());
+        return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static void RunGit(string directory, params string[] arguments)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = directory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        foreach (string argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = System.Diagnostics.Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Git did not start.");
+        process.WaitForExit();
+        AssertEqual(0, process.ExitCode);
+    }
+
+    private static T WithCurrentDirectory<T>(string directory, Func<T> action)
+    {
+        string previous = Environment.CurrentDirectory;
+        Environment.CurrentDirectory = directory;
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previous;
+        }
+    }
+
+    private static void DeleteDirectoryIncludingReadOnlyFiles(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        foreach (string file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+
+        Directory.Delete(directory, recursive: true);
+    }
+
     private static RimErrorDiagnosisResult AvailableDiagnosis(string id) =>
         new(
             RimErrorDiagnosisOutcome.Available,
@@ -2022,7 +2940,7 @@ internal static class Program
                 RootPath = "DevBridgeRoot",
                 ShowPlanTimeout = TimeSpan.FromSeconds(1),
                 RunTimeout = TimeSpan.FromSeconds(1)
-        });
+            });
     }
 
     private static RimErrorDiagnosisAdapter CreateRimErrorAdapter(
@@ -2156,10 +3074,14 @@ internal static class Program
     private sealed class FakeRimContextProcessTransport : IRimContextProcessTransport
     {
         private readonly RimContextProcessResult result;
+        private readonly RimContextProcessResult? indexResult;
 
-        public FakeRimContextProcessTransport(RimContextProcessResult result)
+        public FakeRimContextProcessTransport(
+            RimContextProcessResult result,
+            RimContextProcessResult? indexResult = null)
         {
             this.result = result;
+            this.indexResult = indexResult;
         }
 
         public List<RimContextProcessRequest> Requests { get; } = [];
@@ -2169,6 +3091,15 @@ internal static class Program
             CancellationToken cancellationToken)
         {
             Requests.Add(request);
+            if (request.Arguments.Count > 0 &&
+                string.Equals(request.Arguments[0], "index", StringComparison.Ordinal))
+            {
+                return Task.FromResult(indexResult ?? new RimContextProcessResult(
+                    0,
+                    "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"ok\",\"command\":\"index\",\"data\":{}}",
+                    string.Empty));
+            }
+
             return Task.FromResult(result);
         }
     }
@@ -2182,10 +3113,40 @@ internal static class Program
             this.result = result;
         }
 
+        public IReadOnlyList<string> ChangedPaths { get; private set; } = [];
+
         public Task<RimContextImpactResult> AffectedAsync(
             IReadOnlyList<string> changedPaths,
             CancellationToken cancellationToken = default) =>
-            Task.FromResult(result);
+            RecordAndReturn(changedPaths);
+
+        private Task<RimContextImpactResult> RecordAndReturn(
+            IReadOnlyList<string> changedPaths)
+        {
+            ChangedPaths = changedPaths.ToArray();
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class FakeGitChangeProvider : IGitChangeProvider
+    {
+        private readonly GitChangeDiscoveryResult result;
+
+        public FakeGitChangeProvider(GitChangeDiscoveryResult result)
+        {
+            this.result = result;
+        }
+
+        public List<(string Root, string? Base)> Calls { get; } = [];
+
+        public Task<GitChangeDiscoveryResult> DiscoverAsync(
+            string rootPath,
+            string? baseReference = null,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((rootPath, baseReference));
+            return Task.FromResult(result);
+        }
     }
 
     private sealed class FakeRimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter

@@ -152,7 +152,11 @@ public sealed record DevBridgeOperationSummary(
     string Tool,
     bool Success,
     string? ErrorCode,
-    IReadOnlyList<string> FailedAssertionPointers);
+    IReadOnlyList<string> FailedAssertionPointers,
+    string? OperationId = null,
+    string? WorkflowId = null,
+    int? Generation = null,
+    string? LaunchId = null);
 
 public sealed record DevBridgeRecipeRunResult(
     string RecipeId,
@@ -167,4 +171,5 @@ public sealed record DevBridgeRecipeRunResult(
     string? FinalNextAction,
     bool? RestartRequired,
     int? LaunchesConsumed,
-    IReadOnlyList<DevBridgeOperationSummary> Operations);
+    IReadOnlyList<DevBridgeOperationSummary> Operations,
+    string? WorkflowId = null);
