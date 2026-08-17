@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "rimtest-catalog/v1",
+  "tests": [
+    {
+      "id": "mod-development-smoke",
+      "recipe": "mod-development-smoke",
+      "cost": "medium",
+      "tags": ["smoke", "devbridge", "csharp"],
+      "covers": [
+        {"kind": "csharp_member", "name": "RimTest.CliParseException..ctor"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.Parse"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.ParseRecipeCommand"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.ReadOptionValue"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.ReadPositiveBoundedInt"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.ResolveDefaultCatalogPath"},
+        {"kind": "csharp_member", "name": "RimTest.CliParser.WriteHelp"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.AffectedGitRoot"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.CreateAdapter"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.CreateRimContextAdapter"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.CreateRimErrorAdapter"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.CreateTestExecutor"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.ExecuteCatalogCommandAsync"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.ExecuteDoctorCommandAsync"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.ExecuteRecipeCommandAsync"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.NeedsWorkflowCorrelation"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.RunAsync"},
+        {"kind": "csharp_member", "name": "RimTest.CliApplication.RunSuiteAsync"},
+        {"kind": "csharp_member", "name": "RimTest.Doctor.RimTestDoctorRunner.RunAsync"},
+        {"kind": "csharp_member", "name": "RimTest.Stack.StackInitializer.BuildManifest"},
+        {"kind": "csharp_member", "name": "RimTest.Stack.StackInitializer.Run"},
+        {"kind": "csharp_member", "name": "RimTest.Stack.StackInitializer.WriteManifest"},
+        {"kind": "csharp_type", "name": "RimTest.CliCommand"},
+        {"kind": "csharp_type", "name": "RimTest.CliParseException"},
+        {"kind": "csharp_type", "name": "RimTest.CliParser"},
+        {"kind": "csharp_type", "name": "RimTest.CliRequest"}
+      ]
+    },
+    {
+      "id": "quicktest-smoke",
+      "recipe": "quicktest-smoke",
+      "cost": "low",
+      "tags": ["smoke", "quicktest"]
+    }
+  ],
+  "suites": [
+    {
+      "id": "smoke",
+      "tests": ["mod-development-smoke", "quicktest-smoke"]
+    }
+  ]
+}

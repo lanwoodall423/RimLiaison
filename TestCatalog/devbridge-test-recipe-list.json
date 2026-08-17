@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "devbridge-test-recipe-list/v1",
+  "recipes": [
+    {
+      "id": "mod-development-smoke",
+      "description": "Confirm the declared development project is loaded and the quicktest map is ready."
+    },
+    {
+      "id": "quicktest-smoke",
+      "description": "Verify that the Dev Quicktest map is ready."
+    }
+  ]
+}

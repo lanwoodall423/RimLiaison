@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "rimdev-stack/v1",
+  "project": "RimTest",
+  "devBridgeProject": "frontier",
+  "catalog": "TestCatalog/rimtest.catalog.json",
+  "fallbackSuite": "smoke",
+  "rimBridge": "via-devbridge"
+}
