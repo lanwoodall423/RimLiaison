@@ -301,7 +301,7 @@ internal static class CliParser
         }
 
         if (command is not (CliCommand.Affected or CliCommand.Init) &&
-            (fallbackSuite is not null ||
+            (fallbackSuiteExplicit ||
              explain ||
              depthSpecified ||
              limitSpecified ||

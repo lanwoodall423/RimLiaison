@@ -486,7 +486,7 @@ public static class CliApplication
                             "TEST_NOT_FOUND",
                             started,
                             stdout,
-                            invalidExitCode: CliExitCodes.InvalidInput,
+                            invalidExitCode: CliExitCodes.NotFound,
                             workflowId: workflowId);
                     }
 
@@ -695,26 +695,52 @@ public static class CliApplication
         IReadOnlyList<string> args,
         out string testId)
     {
-        for (int index = 0; index + 1 < args.Count; index++)
+        var positionals = new List<string>();
+        for (int index = 0; index < args.Count; index++)
         {
-            if (!string.Equals(args[index], "run", StringComparison.OrdinalIgnoreCase) ||
-                args[index + 1].StartsWith("-", StringComparison.Ordinal))
+            string argument = args[index];
+            if (!argument.StartsWith("-", StringComparison.Ordinal))
             {
+                positionals.Add(argument);
                 continue;
             }
 
-            bool isRecipeRun = index > 0 &&
-                string.Equals(args[index - 1], "recipe", StringComparison.OrdinalIgnoreCase);
-            if (!isRecipeRun)
+            if (OptionTakesValue(argument) && index + 1 < args.Count)
             {
-                testId = args[index + 1];
-                return true;
+                index++;
             }
+        }
+
+        if (positionals.Count == 2 &&
+            string.Equals(positionals[0], "run", StringComparison.OrdinalIgnoreCase))
+        {
+            testId = positionals[1];
+            return true;
         }
 
         testId = string.Empty;
         return false;
     }
+
+    private static bool OptionTakesValue(string argument) => argument switch
+    {
+        "--catalog" or
+        "--recipes" or
+        "--devbridge" or
+        "--devbridge-root" or
+        "--devbridge-project" or
+        "--rimerror" or
+        "--rimerror-log" or
+        "--rimerror-store" or
+        "--rimcontext" or
+        "--rimcontext-root" or
+        "--rimcontext-store" or
+        "--fallback-suite" or
+        "--depth" or
+        "--limit" or
+        "--base" => true,
+        _ => false
+    };
 
     private static IDevBridgeRecipeAdapter CreateAdapter(
         CliRequest request,

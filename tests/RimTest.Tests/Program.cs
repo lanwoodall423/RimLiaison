@@ -22,7 +22,14 @@ internal static class Program
         ("missing recipes fail", MissingRecipesFail),
         ("recipe list loads", RecipeListLoads),
         ("list is minimal and sorted", ListIsMinimalAndSorted),
+        ("environment fallback leaves list usable", EnvironmentFallbackLeavesListUsable),
+        ("environment fallback leaves run usable", EnvironmentFallbackLeavesRunUsable),
+        ("environment fallback leaves doctor usable", EnvironmentFallbackLeavesDoctorUsable),
+        ("explicit fallback is rejected on unrelated command", ExplicitFallbackIsRejectedOnUnrelatedCommand),
         ("show exposes metadata", ShowExposesMetadata),
+        ("missing run uses not-found contract", MissingRunUsesNotFoundContract),
+        ("missing show and suite commands use not-found exit code", MissingShowAndSuiteCommandsUseNotFoundExitCode),
+        ("suite run parse errors are not single-test results", SuiteRunParseErrorsAreNotSingleTestResults),
         ("suite and validation commands work", SuiteAndValidationCommandsWork),
         ("invalid catalog fails before command output", InvalidCatalogFailsBeforeCommand),
         ("catalog test delegates recipe id", CatalogTestDelegatesRecipeId),
@@ -87,6 +94,7 @@ internal static class Program
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
         ("Git discovery includes staged and untracked files", GitDiscoveryIncludesStagedAndUntrackedFiles),
         ("explicit affected paths take precedence", ExplicitAffectedPathsTakePrecedence),
+        ("environment fallback drives affected fallback", EnvironmentFallbackDrivesAffectedFallback),
         ("Git discovery failure is conservative", GitDiscoveryFailureIsConservative),
         ("RimError diagnosis provides drill-down next action", RimErrorDiagnosisProvidesNextAction),
         ("DevBridge failure provides doctor next action", DevBridgeFailureProvidesNextAction),
@@ -223,6 +231,128 @@ internal static class Program
             result.Stdout.Trim());
         AssertEqual(CliExitCodes.Success, result.ExitCode);
         Assert(string.IsNullOrEmpty(result.Stderr), "List should not write diagnostics.");
+    }
+
+    private static void EnvironmentFallbackLeavesListUsable()
+    {
+        CliResult result = WithFallbackSuiteEnvironment(
+            "smoke",
+            () => RunCli(CreateCatalog(), "list"));
+
+        AssertEqual(
+            """{"tests":[{"id":"assembler-smoke","recipe":"assembler-fixture"},{"id":"settings-smoke","recipe":"settings-fixture"}]}""",
+            result.Stdout.Trim());
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "An environment fallback must not add list diagnostics.");
+    }
+
+    private static void EnvironmentFallbackLeavesRunUsable()
+    {
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+        CliResult result = WithFallbackSuiteEnvironment(
+            "settings",
+            () => RunCatalogCliWithAdapter(
+                CreateCatalog(),
+                adapter,
+                "run",
+                "assembler-smoke"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        AssertEqual("assembler-smoke", root.GetProperty("test").GetString());
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "An environment fallback must not add run diagnostics.");
+    }
+
+    private static void EnvironmentFallbackLeavesDoctorUsable()
+    {
+        CliResult result = WithFallbackSuiteEnvironment(
+            "settings",
+            () => RunDoctorFixture(contextAvailable: true));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("ready", document.RootElement.GetProperty("status").GetString());
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "An environment fallback must not add doctor diagnostics.");
+    }
+
+    private static void ExplicitFallbackIsRejectedOnUnrelatedCommand()
+    {
+        CliResult result = WithFallbackSuiteEnvironment(
+            null,
+            () => RunCli(CreateCatalog(), "list", "--fallback-suite", "smoke"));
+
+        AssertEqual(CliExitCodes.InvalidInput, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("error", document.RootElement.GetProperty("status").GetString());
+        AssertEqual("CLI_INVALID", document.RootElement.GetProperty("code").GetString());
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "An invalid fallback option must remain machine-readable.");
+    }
+
+    private static void MissingRunUsesNotFoundContract()
+    {
+        CliResult result = RunCli(CreateCatalog(), "run", "does-not-exist");
+
+        AssertEqual(CliExitCodes.NotFound, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("rimtest-result/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("invalid", root.GetProperty("status").GetString());
+        AssertEqual("does-not-exist", root.GetProperty("test").GetString());
+        AssertEqual("TEST_NOT_FOUND", root.GetProperty("errorCode").GetString());
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "A missing test must not write a human stderr transcript.");
+    }
+
+    private static void MissingShowAndSuiteCommandsUseNotFoundExitCode()
+    {
+        CliResult show = RunCli(CreateCatalog(), "show", "does-not-exist");
+        CliResult suiteShow = RunCli(CreateCatalog(), "suite", "show", "does-not-exist");
+        CliResult suiteRun = RunCli(CreateCatalog(), "suite", "run", "does-not-exist");
+
+        AssertEqual(CliExitCodes.NotFound, show.ExitCode);
+        AssertEqual(CliExitCodes.NotFound, suiteShow.ExitCode);
+        AssertEqual(CliExitCodes.NotFound, suiteRun.ExitCode);
+        AssertEqual(
+            "TEST_NOT_FOUND",
+            JsonDocument.Parse(show.Stdout).RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "SUITE_NOT_FOUND",
+            JsonDocument.Parse(suiteShow.Stdout).RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "SUITE_NOT_FOUND",
+            JsonDocument.Parse(suiteRun.Stdout).RootElement.GetProperty("code").GetString());
+        Assert(string.IsNullOrEmpty(show.Stderr) &&
+            string.IsNullOrEmpty(suiteShow.Stderr) &&
+            string.IsNullOrEmpty(suiteRun.Stderr),
+            "Not-found commands must not write human stderr transcripts.");
+    }
+
+    private static void SuiteRunParseErrorsAreNotSingleTestResults()
+    {
+        CliResult result = RunCli(
+            CreateCatalog(),
+            "suite",
+            "run",
+            "smoke",
+            "--fallback-suite",
+            "settings");
+
+        AssertEqual(CliExitCodes.InvalidInput, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("error", root.GetProperty("status").GetString());
+        AssertEqual("CLI_INVALID", root.GetProperty("code").GetString());
+        Assert(!root.TryGetProperty("schemaVersion", out _),
+            "A suite parse error must not use the single-test result schema.");
+        Assert(!result.Stdout.Contains("rimtest-result/v1", StringComparison.Ordinal),
+            "A suite parse error must not pretend the suite name is a test id.");
     }
 
     private static void ShowExposesMetadata()
@@ -1953,6 +2083,69 @@ internal static class Program
         AssertEqual("TEST_RECIPE_NOT_FOUND", result.Failures![0].ErrorCode);
     }
 
+    private static void EnvironmentFallbackDrivesAffectedFallback()
+    {
+        IReadOnlyList<string> runCalls = [];
+        CliResult result = WithFallbackSuiteEnvironment(
+            "smoke",
+            () =>
+            {
+                string directory = CreateTempDirectory();
+                try
+                {
+                    string catalogPath = Path.Combine(directory, "catalog.json");
+                    File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+                    var adapter = new FakeRecipeAdapter();
+                    adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+                    adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+                    var impactAdapter = new FakeImpactAdapter(new RimContextImpactResult(
+                        new RimContextAdapterStatus(
+                            RimContextImpactOutcome.Unknown,
+                            "RIMCONTEXT_RESULT_TRUNCATED"),
+                        [],
+                        [],
+                        true));
+                    var stdout = new StringWriter();
+                    var stderr = new StringWriter();
+                    int exitCode = CliApplication.RunAsync(
+                            [
+                                "affected",
+                                "Source/Unknown.cs",
+                                "--run",
+                                "--json",
+                                "--catalog",
+                                catalogPath
+                            ],
+                            stdout,
+                            stderr,
+                            adapter,
+                            cancellationToken: default,
+                            impactAdapter: impactAdapter)
+                        .GetAwaiter()
+                        .GetResult();
+
+                    runCalls = adapter.RunCalls.ToArray();
+                    return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+                }
+                finally
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+            });
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        AssertEqual("conservative", root.GetProperty("selectionStatus").GetString());
+        AssertEqual("smoke", root.GetProperty("fallbackSuite").GetString());
+        AssertSequence(
+            ["assembler-fixture", "settings-fixture"],
+            runCalls);
+        Assert(string.IsNullOrEmpty(result.Stderr),
+            "An environment fallback must not add affected diagnostics.");
+    }
+
     private static void AffectedRunUsesConservativeFallback()
     {
         string directory = CreateTempDirectory();
@@ -2641,6 +2834,22 @@ internal static class Program
                 .GetAwaiter()
                 .GetResult());
         return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static T WithFallbackSuiteEnvironment<T>(
+        string? value,
+        Func<T> action)
+    {
+        string? previous = Environment.GetEnvironmentVariable("RIMTEST_FALLBACK_SUITE");
+        try
+        {
+            Environment.SetEnvironmentVariable("RIMTEST_FALLBACK_SUITE", value);
+            return action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("RIMTEST_FALLBACK_SUITE", previous);
+        }
     }
 
     private static void RunGit(string directory, params string[] arguments)
