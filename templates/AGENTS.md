@@ -4,14 +4,16 @@ Use RimTest as the workflow entry point.
 
 Normal loop:
 
-1. `rimtest doctor --json` when environment readiness is unknown.
-2. If doctor is blocked, follow its JSON `nextAction`; use `rimtest init --json` with explicit
-   missing manifest values and repeat doctor until it reports `status: "ready"`.
-3. Use RimContext before broad source inspection.
-4. Make the smallest code change.
-5. `rimtest affected --run --json`.
-6. If a diagnostic ID is returned, use `rimerror show <id>`.
-7. Use owner tools directly only when deeper inspection is required.
+1. Edit the smallest necessary change.
+2. Run `rimtest affected --run --json`.
+3. Inspect the compact result, then edit again.
+
+Run `rimtest doctor --json` only when readiness is unknown. If it is blocked, follow its JSON
+`nextAction` and use `rimtest init --json` with explicit missing manifest values until it reports
+`status: "ready"`. Build-relevant affected runs automatically invoke DevBridge2's artifact
+transaction before selected recipes. When a recipe fails, RimTest obtains a bounded,
+current-generation, since-launch diagnostic source from DevBridge2 and passes it to RimError
+automatically. If a diagnostic ID is returned, use `rimerror show <id>`.
 
 When designing a new live-game test, validating UI behavior, or doing deeper in-game
 inspection, use `rimtest capabilities --json` for bounded discovery through RimTest. It is
@@ -38,3 +40,16 @@ Critical rules:
 - Never edit ModsConfig directly.
 - Prefer compact JSON interfaces.
 - Do not read Player.log directly during the normal workflow.
+- Do not configure or discover Player.log, generation log, or RimError store paths for ordinary
+  failures. Explicit RimError path options are fallback-only.
+- `diagnosticStatus: "unavailable"` means the test failed but diagnostics were unavailable;
+  it never means PASS. Infrastructure failures use `status: "infrastructure"`.
+- Never treat a source-change PASS as valid unless
+  `artifactFreshness.loadedArtifactFreshnessProven` is true.
+- Recipe state reuse is opt-in catalog metadata. Missing or untrusted isolation metadata is the
+  safe path; reuse is sequential and is invalidated by failures, reset/lease/readiness/generation
+  uncertainty, ownership change, or cleanup failure.
+
+For a real installed-game compatibility check, use the DevBridge2-owned
+`scripts\live-stack-smoke.ps1 -Json` gate on a labeled self-hosted Windows runner. Its plan must
+pass before the live command; hosted/offline validation must not claim RimWorld compatibility.

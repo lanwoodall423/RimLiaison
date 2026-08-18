@@ -13,7 +13,7 @@ public static class RimTestOutputBudgets
     public const int SingleTestFailureMaxBytes = 768;
     public const int SuitePassMaxBytes = 256;
     public const int AffectedSelectionMaxBytes = 384;
-    public const int AffectedSuitePassMaxBytes = 256;
+    public const int AffectedSuitePassMaxBytes = 2048;
 
     public static int Utf8Bytes(string json)
     {

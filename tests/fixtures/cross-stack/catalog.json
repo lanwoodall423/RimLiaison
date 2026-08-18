@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "rimtest-catalog/v1",
+  "tests": [
+    {
+      "id": "cross-stack-live-test",
+      "recipe": "cross-stack-fixture",
+      "cost": "low",
+      "tags": ["contract", "fake-devbridge"],
+      "covers": [
+        { "kind": "csharp_type", "name": "CrossStack.FixtureMarker" },
+        { "kind": "csharp_member", "name": "CrossStack.FixtureMarker.Contract" }
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "cross-stack",
+      "tests": ["cross-stack-live-test"]
+    }
+  ]
+}

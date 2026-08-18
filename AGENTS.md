@@ -1,35 +1,19 @@
-# RimWorld Development
+Project Type
 
-Use RimTest as the workflow entry point.
+This repository is a development tooling project. Apply the global development/tooling contract except where the tool itself is the system under test.
 
-Normal loop:
+Tooling-Specific Rules
 
-1. `rimtest doctor --json` when environment readiness is unknown.
-2. If doctor is blocked, follow its JSON `nextAction`; use `rimtest init --json` with explicit
-   missing manifest values and repeat doctor until it reports `status: "ready"`.
-3. Use RimContext before broad source inspection.
-4. Make the smallest code change.
-5. `rimtest affected --run --json`.
-6. If a diagnostic ID is returned, use `rimerror show <id>`.
-7. Use owner tools directly only when deeper inspection is required.
+Do not blindly apply consumer-project orchestration rules to the tool being developed.
 
-For UI/layout/visual changes, functional tests alone are insufficient. After the relevant
-RimTest suite passes, use `rimtest ui targets --json` and a targeted
-`rimtest ui screenshot --target <target-id> --json` capture to inspect the rendered result and
-iterate before reporting PASS.
+For the stack:
 
-Ownership:
+RimTest -> RimContext -> DevBridge2
 
-- RimContext = source/Def/Harmony/dependency knowledge
-- RimTest = test selection/orchestration/results
-- DevBridge2 = lifecycle/profiles/generations/leases
-- RimBridgeServer = live game
-- RimError = diagnostics
+When developing RimTest, use RimTest's declared bootstrap/self-test workflow rather than assuming an installed RimTest validates changed RimTest source.
+When developing RimContext or DevBridge2, direct execution of that component is allowed when required by its repository test workflow.
+Respect each layer's ownership; do not move responsibilities between layers merely to work around a failure.
+Treat structured schemas, statuses, error codes, nextAction, identifiers, and freshness semantics as integration contracts.
+Changes to cross-layer behavior should receive integration coverage with adjacent layers or representative consumers.
 
-Critical rules:
-
-- DevBridge2 is the sole RimWorld lifecycle owner; never launch, kill, or restart RimWorld manually or through GABS.
-- RimBridgeServer remains the live-game control surface, but do not persist ModsConfig/profile changes through it while DevBridge2 owns a generation.
-- Never edit ModsConfig directly.
-- Prefer compact JSON interfaces.
-- Do not read Player.log directly during the normal workflow.
+Use the repository's own bootstrap and validation instructions as authoritative for testing the tool itself.

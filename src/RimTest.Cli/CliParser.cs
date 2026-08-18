@@ -501,7 +501,7 @@ internal static class CliParser
         var help = new
         {
             progressiveDisclosure =
-                "Normal development starts with rimtest doctor --json when readiness is unknown and rimtest affected --run --json after changes; use rimtest capabilities --json when designing a live-game test or deeper in-game inspection, and use rimtest ui targets / ui screenshot to inspect rendered UI before reporting visual work as complete.",
+                "Canonical loop: edit, rimtest affected --run --json, inspect the result, edit again. Run rimtest doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimtest capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation.",
             commands = new[]
             {
                 "list",
@@ -529,8 +529,8 @@ internal static class CliParser
                 "--devbridge-root <DevBridge2-root>",
                 "--devbridge-project <alias>",
                 "--rimerror <rimerror command>",
-                "--rimerror-log <log path>",
-                "--rimerror-store <RimError store>",
+                "--rimerror-log <log path> (fallback only)",
+                "--rimerror-store <RimError store> (fallback only)",
                 "--rimcontext <rimctx command>",
                 "--rimcontext-root <workspace root>",
                 "--rimcontext-store <RimContext store>",

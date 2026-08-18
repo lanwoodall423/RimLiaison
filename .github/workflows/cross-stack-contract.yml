@@ -1,0 +1,134 @@
+name: Cross-stack contract gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-stack-contract:
+    name: Pinned no-RimWorld composition gate
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out RimTest at the workflow revision
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: RimTest
+
+      - name: Read external compatibility pins
+        id: pins
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content .\RimTest\contracts\cross-stack-compatibility.json -Raw | ConvertFrom-Json -Depth 20
+          if ([string]$manifest.schemaVersion -ne 'rimtest-cross-stack-compatibility/v1') {
+              throw 'Cross-stack compatibility manifest schema is unsupported.'
+          }
+          foreach ($name in @('rimContext', 'devBridge2', 'rimError')) {
+              $revision = [string]$manifest.repositories.$name.revision
+              if ($revision -notmatch '^[0-9a-fA-F]{40}$') {
+                  throw "Cross-stack pin for $name is not a full commit SHA."
+              }
+              "$name=$revision" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Check out pinned RimContext
+        uses: actions/checkout@v5
+        with:
+          repository: lanwoodall423/RimContext
+          ref: ${{ steps.pins.outputs.rimContext }}
+          path: RimContext
+          fetch-depth: 1
+
+      - name: Check out pinned DevBridge2
+        uses: actions/checkout@v5
+        with:
+          repository: lanwoodall423/DevBridge2
+          ref: ${{ steps.pins.outputs.devBridge2 }}
+          path: DevBridge2
+          fetch-depth: 1
+
+      - name: Check out pinned RimError
+        uses: actions/checkout@v5
+        with:
+          repository: lanwoodall423/RimError
+          ref: ${{ steps.pins.outputs.rimError }}
+          path: RimError
+          fetch-depth: 1
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: cross-stack-nuget-${{ runner.os }}-${{ hashFiles('RimTest/**/*.csproj', 'RimContext/**/*.csproj', 'DevBridge2/**/*.csproj', 'RimError/**/*.csproj', '**/global.json') }}
+          restore-keys: |
+            cross-stack-nuget-${{ runner.os }}-
+
+      - name: Build RimContext and run its offline suite
+        shell: pwsh
+        run: |
+          dotnet build .\RimContext\RimContext.sln --configuration Release --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'RimContext build failed.' }
+          dotnet run --project .\RimContext\tests\RimContext.Tests\RimContext.Tests.csproj --configuration Release --no-build --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'RimContext offline suite failed.' }
+
+      - name: Build RimError and run its offline suite
+        shell: pwsh
+        run: |
+          dotnet build .\RimError\RimError.sln --configuration Release --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'RimError build failed.' }
+          dotnet test .\RimError\RimError.sln --configuration Release --no-build --no-restore --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'RimError offline suite failed.' }
+
+      - name: Build DevBridge2 coordinator and fake process host
+        shell: pwsh
+        working-directory: DevBridge2
+        run: |
+          dotnet restore .\Source\Coordinator\DevBridge.Coordinator.csproj --locked-mode --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator restore failed.' }
+          dotnet build .\Source\Coordinator\DevBridge.Coordinator.csproj --configuration Release --no-restore --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator build failed.' }
+          dotnet build .\Source\FakeRimWorld\FakeRimWorld.csproj --configuration Release --no-restore --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 fake process host build failed.' }
+
+      - name: Build RimTest
+        shell: pwsh
+        working-directory: RimTest
+        run: |
+          dotnet build .\RimTest.sln --configuration Release --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'RimTest build failed.' }
+
+      - name: Run pinned cross-stack contract workflow
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportPath = Join-Path $env:GITHUB_WORKSPACE 'cross-stack-contract.json'
+          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File .\RimTest\scripts\cross-stack-contract.tests.ps1 `
+              -RimTestRoot (Join-Path $env:GITHUB_WORKSPACE 'RimTest') `
+              -RimContextRoot (Join-Path $env:GITHUB_WORKSPACE 'RimContext') `
+              -DevBridgeRoot (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2') `
+              -RimErrorRoot (Join-Path $env:GITHUB_WORKSPACE 'RimError') `
+              -Json
+          $exitCode = $LASTEXITCODE
+          $output | Set-Content -LiteralPath $reportPath -Encoding utf8
+          $output | Write-Output
+          if ($exitCode -ne 0) { throw "Cross-stack contract gate failed with exit code $exitCode." }
+
+      - name: Upload bounded cross-stack report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-stack-contract-report
+          path: ${{ github.workspace }}/cross-stack-contract.json
+          if-no-files-found: warn

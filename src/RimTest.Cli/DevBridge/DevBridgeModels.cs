@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace RimTest.DevBridge;
@@ -11,6 +13,35 @@ public static class DevBridgeRecipeSchemas
     public const string RecipeV2 = "devbridge-test-recipe/v2";
 }
 
+public static class DevBridgeDiagnosticSchemas
+{
+    public const string LogsQuery = "devbridge-logs-query/v1";
+    public const string ScopedSource = "rimtest-devbridge-diagnostic-source/v1";
+}
+
+public static class DevBridgeProcessEnvironment
+{
+    public static IReadOnlyDictionary<string, string> ForWorkflow(string? workflowId)
+    {
+        string? configured = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_AGENT");
+        string agent = !string.IsNullOrWhiteSpace(configured)
+            ? configured.Trim()
+            : string.IsNullOrWhiteSpace(workflowId)
+                ? "rimtest-process-" + Environment.ProcessId.ToString("X", System.Globalization.CultureInfo.InvariantCulture)
+                : "rimtest-workflow-" + StableSuffix(workflowId);
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DEVBRIDGE_AGENT"] = agent
+        };
+    }
+
+    private static string StableSuffix(string value)
+    {
+        byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(digest)[..24];
+    }
+}
+
 public enum DevBridgeOutcomeKind
 {
     Success,
@@ -21,6 +52,48 @@ public enum DevBridgeOutcomeKind
     Cancelled,
     MalformedResponse,
     IncompatibleSchema
+}
+
+public enum DevBridgeDiagnosticSourceOutcome
+{
+    Available,
+    Unavailable,
+    Timeout,
+    Cancelled,
+    MalformedResponse,
+    IncompatibleSchema
+}
+
+public sealed record DevBridgeDiagnosticSourceStatus(
+    DevBridgeDiagnosticSourceOutcome Outcome,
+    string? ErrorCode = null,
+    string? Error = null,
+    int? ProcessExitCode = null,
+    string? Stderr = null)
+{
+    public bool IsAvailable => Outcome == DevBridgeDiagnosticSourceOutcome.Available;
+}
+
+public sealed record DevBridgeScopedDiagnosticSource(
+    string SchemaVersion,
+    int Generation,
+    string Content,
+    int SourceBytes,
+    int RecordCount,
+    bool Truncated,
+    string Sha256,
+    string? LaunchId = null);
+
+public sealed record DevBridgeDiagnosticSourceResult(
+    DevBridgeDiagnosticSourceStatus Status,
+    DevBridgeScopedDiagnosticSource? Source);
+
+public interface IDevBridgeDiagnosticSourceAdapter
+{
+    Task<DevBridgeDiagnosticSourceResult> AcquireAsync(
+        string testId,
+        DevBridgeRecipeRunResult run,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record DevBridgeAdapterStatus(
@@ -40,7 +113,8 @@ public sealed record DevBridgeProcessRequest(
     IReadOnlyList<string> Arguments,
     TimeSpan Timeout,
     int MaxStdoutBytes,
-    int MaxStderrBytes);
+    int MaxStderrBytes,
+    IReadOnlyDictionary<string, string>? EnvironmentVariables = null);
 
 public sealed record DevBridgeProcessResult(
     int? ExitCode,
@@ -128,6 +202,73 @@ public sealed record DevBridgeRecipeShowResult(
     string RecipeId,
     DevBridgeAdapterStatus Status,
     JsonElement? Definition);
+
+public sealed record DevBridgeRecipeExecutionContext(
+    string? LeaseId = null);
+
+public sealed record DevBridgeLeaseResult(
+    DevBridgeAdapterStatus Status,
+    string? LeaseId,
+    int? Generation)
+{
+    public bool IsUsable => Status.IsSuccess &&
+        !string.IsNullOrWhiteSpace(LeaseId) &&
+        Generation is > 0;
+}
+
+public sealed record DevBridgeResetResult(
+    DevBridgeAdapterStatus Status,
+    int? Generation,
+    string? LeaseId)
+{
+    public bool IsUsable => Status.IsSuccess &&
+        Generation is > 0 &&
+        !string.IsNullOrWhiteSpace(LeaseId);
+}
+
+public sealed record DevBridgeFreshGenerationResult(
+    DevBridgeAdapterStatus Status,
+    int? Generation,
+    int LaunchesConsumed = 0)
+{
+    public bool IsUsable => Status.IsSuccess && Generation is > 0;
+}
+
+public interface IDevBridgeLeaseAdapter
+{
+    Task<DevBridgeLeaseResult> BeginLeaseAsync(
+        string? workflowId,
+        CancellationToken cancellationToken = default);
+
+    Task<DevBridgeLeaseResult> RenewLeaseAsync(
+        string leaseId,
+        string? workflowId,
+        CancellationToken cancellationToken = default);
+
+    Task<DevBridgeLeaseResult> EndLeaseAsync(
+        string leaseId,
+        string? workflowId,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IDevBridgeFixtureResetAdapter
+{
+    Task<DevBridgeResetResult> ResetAsync(
+        string resetRecipeId,
+        string leaseId,
+        int expectedGeneration,
+        string? workflowId,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IDevBridgeFreshGenerationAdapter
+{
+    Task<DevBridgeFreshGenerationResult> EnsureFreshGenerationAsync(
+        string recipeId,
+        int? previousGeneration,
+        string? workflowId,
+        CancellationToken cancellationToken = default);
+}
 
 public sealed record DevBridgeRecipePlanStep(
     string Action,
