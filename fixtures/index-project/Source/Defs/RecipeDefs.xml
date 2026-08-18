@@ -1,0 +1,8 @@
+<Defs>
+  <RecipeDef>
+    <defName>CCM_FancyWorkbenchRecipe</defName>
+    <recipeUsers>
+      <li>CCM_FancyWorkbench</li>
+    </recipeUsers>
+  </RecipeDef>
+</Defs>

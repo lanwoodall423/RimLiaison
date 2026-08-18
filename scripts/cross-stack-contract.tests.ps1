@@ -1,9 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$RimTestRoot,
-    [string]$RimContextRoot,
+    [string]$RimLiaisonRoot,
     [string]$DevBridgeRoot,
-    [string]$RimErrorRoot,
     [switch]$KeepWorkspace,
     [switch]$Json
 )
@@ -11,12 +9,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $scriptRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $parentRoot = (Get-Item -LiteralPath $scriptRoot).Parent.FullName
-$RimTestRoot = if ([string]::IsNullOrWhiteSpace($RimTestRoot)) { $scriptRoot } else { [IO.Path]::GetFullPath($RimTestRoot) }
-$RimContextRoot = if ([string]::IsNullOrWhiteSpace($RimContextRoot)) { Join-Path $parentRoot 'RimContext' } else { [IO.Path]::GetFullPath($RimContextRoot) }
+$RimLiaisonRoot = if ([string]::IsNullOrWhiteSpace($RimLiaisonRoot)) { $scriptRoot } else { [IO.Path]::GetFullPath($RimLiaisonRoot) }
 $DevBridgeRoot = if ([string]::IsNullOrWhiteSpace($DevBridgeRoot)) { Join-Path $parentRoot 'DevBridge2' } else { [IO.Path]::GetFullPath($DevBridgeRoot) }
-$RimErrorRoot = if ([string]::IsNullOrWhiteSpace($RimErrorRoot)) { Join-Path $parentRoot 'RimError' } else { [IO.Path]::GetFullPath($RimErrorRoot) }
 
-$manifestPath = Join-Path $RimTestRoot 'contracts\cross-stack-compatibility.json'
+$manifestPath = Join-Path $RimLiaisonRoot 'contracts\cross-stack-compatibility.json'
 $manifest = $null
 $workspaceRoot = $null
 $report = $null
@@ -180,7 +176,7 @@ function Invoke-JsonProcess {
 
 function Get-GitHead {
     param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Name)
-    # The local workspace may contain sibling checkouts owned by the desktop
+    # The local workspace may contain checkouts owned by the desktop
     # user while this harness runs under a sandbox account.  Scope the Git
     # safe-directory exception to this read-only probe; do not mutate global
     # Git configuration and still require an actual checkout and exact pin.
@@ -201,38 +197,32 @@ try {
     Require-Path $manifestPath 'cross-stack compatibility manifest'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30
     Assert-Equal $manifest.schemaVersion 'rimtest-cross-stack-compatibility/v1' 'compatibility manifest schema'
-    foreach ($repository in @('rimTest', 'rimContext', 'devBridge2', 'rimError')) {
-        $entry = $manifest.repositories.$repository
-        Assert-True ($null -ne $entry) "compatibility pin for $repository exists"
-        if ($repository -ne 'rimTest') {
-            Assert-True ([string]$entry.revision -match '^[0-9a-fA-F]{40}$') "$repository uses a full pinned SHA"
-        }
-    }
+    Assert-Equal $manifest.components.rimContext.source 'internal' 'RimContext is an internal component'
+    Assert-Equal $manifest.components.rimError.source 'internal' 'RimError is an internal component'
+    Assert-True ($null -ne $manifest.repositories.rimLiaison) 'RimLiaison repository metadata exists'
+    Assert-True ($null -ne $manifest.repositories.devBridge2) 'DevBridge2 compatibility pin exists'
+    Assert-True ([string]$manifest.repositories.devBridge2.revision -match '^[0-9a-fA-F]{40}$') 'DevBridge2 uses a full pinned SHA'
     $heads = [ordered]@{
-        rimTest = Get-GitHead $RimTestRoot 'RimTest'
-        rimContext = Get-GitHead $RimContextRoot 'RimContext'
+        rimLiaison = Get-GitHead $RimLiaisonRoot 'RimLiaison'
         devBridge2 = Get-GitHead $DevBridgeRoot 'DevBridge2'
-        rimError = Get-GitHead $RimErrorRoot 'RimError'
     }
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
-        Assert-Equal $heads.rimTest $env:GITHUB_SHA.ToLowerInvariant() 'RimTest checkout matches workflow SHA'
+        Assert-Equal $heads.rimLiaison $env:GITHUB_SHA.ToLowerInvariant() 'RimLiaison checkout matches workflow SHA'
     }
-    foreach ($repository in @('rimContext', 'devBridge2', 'rimError')) {
-        Assert-Equal $heads[$repository] ([string]$manifest.repositories.$repository.revision).ToLowerInvariant() "$repository checkout matches pinned SHA"
-    }
+    Assert-Equal $heads.devBridge2 ([string]$manifest.repositories.devBridge2.revision).ToLowerInvariant() 'DevBridge2 checkout matches pinned SHA'
 
-    $rimctxExe = Join-Path $RimContextRoot 'src\RimContext.Cli\bin\Release\net8.0\rimctx.exe'
-    $rimtestExe = Join-Path $RimTestRoot 'src\RimTest.Cli\bin\Release\net8.0\RimTest.Cli.exe'
-    $rimerrorExe = Join-Path $RimErrorRoot 'src\RimError.Cli\bin\Release\net8.0\rimerror.exe'
+    $rimctxExe = Join-Path $RimLiaisonRoot 'src\RimContext.Cli\bin\Release\net8.0\rimctx.exe'
+    $rimliaisonExe = Join-Path $RimLiaisonRoot 'src\RimLiaison.Cli\bin\Release\net8.0\rimliaison.exe'
+    $rimerrorExe = Join-Path $RimLiaisonRoot 'src\RimError.Cli\bin\Release\net8.0\rimerror.exe'
     Require-Path $rimctxExe 'RimContext Release CLI'
-    Require-Path $rimtestExe 'RimTest Release CLI'
+    Require-Path $rimliaisonExe 'RimLiaison Release CLI'
     Require-Path $rimerrorExe 'RimError Release CLI'
     Require-Path (Join-Path $DevBridgeRoot 'Source\Coordinator\bin\Release\net8.0\DevBridge.Coordinator.exe') 'DevBridge2 coordinator Release build'
     Require-Path (Join-Path $DevBridgeRoot 'Source\FakeRimWorld\bin\Release\net8.0\DevBridge.FakeRimWorld.exe') 'DevBridge2 fake process host Release build'
 
-    $fixtureSource = Join-Path $RimTestRoot 'tests\fixtures\cross-stack'
+    $fixtureSource = Join-Path $RimLiaisonRoot 'tests\fixtures\cross-stack'
     Require-Path $fixtureSource 'cross-stack fixture' -Directory
-    $workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimtest-cross-stack-' + [Guid]::NewGuid().ToString('N'))
+    $workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-cross-stack-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
     Copy-Item -Path (Join-Path $fixtureSource '*') -Destination $workspaceRoot -Recurse -Force
     $catalogPath = Join-Path $workspaceRoot 'catalog.json'
@@ -246,19 +236,36 @@ try {
         [Text.UTF8Encoding]::new($false))
 
     $rimctxStore = Join-Path $workspaceRoot '.rimctx\index.sqlite'
-    $index = Invoke-JsonProcess $rimctxExe @('index', '--root', $workspaceRoot, '--store', $rimctxStore, '--json') $RimContextRoot 'RimContext index'
+    $index = Invoke-JsonProcess $rimctxExe @('index', '--root', $workspaceRoot, '--store', $rimctxStore, '--json') $RimLiaisonRoot 'RimContext index'
     Assert-Equal $index.status 'ok' 'RimContext index status'
-    $affected = Invoke-JsonProcess $rimctxExe @('affected', $changedPath, '--root', $workspaceRoot, '--store', $rimctxStore, '--json', '--max-bytes', '4096') $RimContextRoot 'RimContext affected'
+    $affected = Invoke-JsonProcess $rimctxExe @('affected', $changedPath, '--root', $workspaceRoot, '--store', $rimctxStore, '--json', '--max-bytes', '4096') $RimLiaisonRoot 'RimContext affected'
     Assert-Contract $affected 'RimContext affected' $manifest.contracts.rimContextAffected
     Assert-Equal $affected.status 'ok' 'RimContext affected status'
     $directImpacts = @($affected.data.direct)
     Assert-True (@($directImpacts | Where-Object { [string]$_.kind -eq 'csharp_type' -and [string]$_.name -eq 'CrossStack.FixtureMarker' }).Count -gt 0) 'RimContext affected includes the changed fixture type'
 
+    $wrapperArguments = @(
+        'affected', $changedPath, '--json',
+        '--catalog', $catalogPath,
+        '--rimcontext', $rimctxExe,
+        '--rimcontext-root', $workspaceRoot,
+        '--rimcontext-store', $rimctxStore
+    )
+    $rimliaisonWrapper = Join-Path $RimLiaisonRoot 'rimliaison.cmd'
+    $rimtestWrapper = Join-Path $RimLiaisonRoot 'rimtest.cmd'
+    Require-Path $rimliaisonWrapper 'canonical rimliaison wrapper'
+    Require-Path $rimtestWrapper 'legacy rimtest wrapper'
+    $canonicalWrapper = Invoke-ProcessBounded $env:ComSpec (@('/d', '/c', $rimliaisonWrapper) + $wrapperArguments) $RimLiaisonRoot
+    $legacyWrapper = Invoke-ProcessBounded $env:ComSpec (@('/d', '/c', $rimtestWrapper) + $wrapperArguments) $RimLiaisonRoot
+    $canonicalSelection = Convert-ProcessJson $canonicalWrapper 'rimliaison affected wrapper'
+    $legacySelection = Convert-ProcessJson $legacyWrapper 'rimtest affected compatibility wrapper'
+    Assert-Equal ($canonicalSelection | ConvertTo-Json -Depth 40 -Compress) ($legacySelection | ConvertTo-Json -Depth 40 -Compress) 'canonical and legacy affected wrappers produce equivalent JSON'
+
     $fakeRoot = Join-Path $workspaceRoot '.fake-devbridge'
     New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'scripts'), (Join-Path $fakeRoot 'DevelopmentProjects') | Out-Null
-    Copy-Item -LiteralPath (Join-Path $RimTestRoot 'scripts\cross-stack-fake-mod-development.ps1') -Destination (Join-Path $fakeRoot 'scripts\mod-test.ps1') -Force
-    Copy-Item -LiteralPath (Join-Path $RimTestRoot 'scripts\cross-stack-fake-devbridge.ps1') -Destination (Join-Path $fakeRoot 'scripts\cross-stack-fake-devbridge.ps1') -Force
-    Copy-Item -LiteralPath (Join-Path $RimTestRoot 'scripts\cross-stack-fake-devbridge.cmd') -Destination (Join-Path $fakeRoot 'DevBridge.cmd') -Force
+    Copy-Item -LiteralPath (Join-Path $RimLiaisonRoot 'scripts\cross-stack-fake-mod-development.ps1') -Destination (Join-Path $fakeRoot 'scripts\mod-test.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $RimLiaisonRoot 'scripts\cross-stack-fake-devbridge.ps1') -Destination (Join-Path $fakeRoot 'scripts\cross-stack-fake-devbridge.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $RimLiaisonRoot 'scripts\cross-stack-fake-devbridge.cmd') -Destination (Join-Path $fakeRoot 'DevBridge.cmd') -Force
     $descriptor = [ordered]@{
         schemaVersion = 'devbridge-mod-development/v1'
         project = 'frontier'
@@ -285,7 +292,7 @@ try {
     Assert-True ([bool]$capabilityResult.success) 'DevBridge capability response succeeds'
     Assert-True (@($capabilityResult.result.tools).Count -eq 1) 'DevBridge capability response contains one fixture tool'
 
-    $rimtest = Invoke-ProcessBounded $rimtestExe @(
+    $rimliaison = Invoke-ProcessBounded $rimliaisonExe @(
         'affected', $changedPath, '--run', '--json',
         '--catalog', $catalogPath,
         '--rimcontext', $rimctxExe,
@@ -294,14 +301,14 @@ try {
         '--devbridge', (Join-Path $fakeRoot 'DevBridge.cmd'),
         '--devbridge-root', $fakeRoot,
         '--devbridge-project', 'frontier'
-    ) $RimTestRoot
-    $suite = Convert-ProcessJson $rimtest 'RimTest affected --run'
-    Assert-Contract $suite 'RimTest suite result' $manifest.contracts.rimTestSuite
-    Assert-Equal $suite.status 'pass' 'RimTest synthetic workflow status'
-    Assert-Equal $suite.suite 'affected' 'RimTest synthetic suite id'
-    Assert-Equal $suite.passed 1 'RimTest selected one affected test'
-    Assert-Equal $suite.failed 0 'RimTest reported no failed tests'
-    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$suite.workflowId)) 'workflow identity reaches RimTest result'
+    ) $RimLiaisonRoot
+    $suite = Convert-ProcessJson $rimliaison 'RimLiaison affected --run'
+    Assert-Contract $suite 'RimLiaison suite result' $manifest.contracts.rimTestSuite
+    Assert-Equal $suite.status 'pass' 'RimLiaison synthetic workflow status'
+    Assert-Equal $suite.suite 'affected' 'RimLiaison synthetic suite id'
+    Assert-Equal $suite.passed 1 'RimLiaison selected one affected test'
+    Assert-Equal $suite.failed 0 'RimLiaison reported no failed tests'
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$suite.workflowId)) 'workflow identity reaches RimLiaison result'
     $workflowId = [string]$suite.workflowId
     $freshness = $suite.artifactFreshness
     $operationId = [string](@($freshness.operationIds)[0])
@@ -322,7 +329,7 @@ try {
     Assert-Equal $recipeRun.runId $freshness.runId 'run identity reaches DevBridge recipe run'
     Assert-Equal $recipeRun.generation $freshness.generation 'generation identity reaches DevBridge recipe run'
     Assert-True (@($recipeRun.operations | Where-Object { [string]$_.operationId -eq [string]$operationId }).Count -gt 0) 'operation identity reaches DevBridge recipe run'
-    Assert-True ([bool]$freshness.loadedArtifactFreshnessProven) 'RimTest requires proven artifact freshness'
+    Assert-True ([bool]$freshness.loadedArtifactFreshnessProven) 'RimLiaison requires proven artifact freshness'
     Assert-True ([string]$freshness.builtArtifactSha256 -match '^[0-9a-fA-F]{64}$') 'built artifact SHA-256 is present'
     Assert-Equal $freshness.builtArtifactSha256 $freshness.deployedArtifactSha256 'built and deployed artifact hashes agree'
     Assert-True ([string]$freshness.deploymentDecision -in @('deployed', 'unchanged')) 'deployment decision is explicit'
@@ -344,23 +351,23 @@ try {
     Require-Path $capabilityFixturePath 'DevBridge capability response fixture'
     $capabilityFixture = Get-Content -LiteralPath $capabilityFixturePath -Raw | ConvertFrom-Json -Depth 40
     Assert-Contract $capabilityFixture 'DevBridge capability response fixture' $manifest.contracts.devBridgeCapabilities
-    $rimtestCapabilities = Invoke-JsonProcess $rimtestExe @(
+    $rimliaisonCapabilities = Invoke-JsonProcess $rimliaisonExe @(
         'capabilities', '--json',
         '--devbridge', (Join-Path $fakeRoot 'DevBridge.cmd'),
         '--devbridge-root', $fakeRoot,
         '--limit', '10'
-    ) $RimTestRoot 'RimTest capabilities'
-    Assert-Contract $rimtestCapabilities 'RimTest capability result' $manifest.contracts.rimTestCapabilities
-    Assert-Equal $rimtestCapabilities.status 'ok' 'RimTest capability status'
-    Assert-Equal $rimtestCapabilities.count 1 'RimTest capability count'
-    Assert-Equal $rimtestCapabilities.capabilities[0].id 'rimworld/inspect_fixture' 'RimTest capability id'
+    ) $RimLiaisonRoot 'RimLiaison capabilities'
+    Assert-Contract $rimliaisonCapabilities 'RimLiaison capability result' $manifest.contracts.rimTestCapabilities
+    Assert-Equal $rimliaisonCapabilities.status 'ok' 'RimLiaison capability status'
+    Assert-Equal $rimliaisonCapabilities.count 1 'RimLiaison capability count'
+    Assert-Equal $rimliaisonCapabilities.capabilities[0].id 'rimworld/inspect_fixture' 'RimLiaison capability id'
 
     $brokenSuite = ($suite | ConvertTo-Json -Depth 40 | ConvertFrom-Json -Depth 40)
     $brokenSuite.PSObject.Properties.Remove('artifactFreshness')
     $contractBreakDetected = $false
     $contractBreakMessage = $null
     try {
-        Assert-Contract $brokenSuite 'intentional RimTest contract break' $manifest.contracts.rimTestSuite
+        Assert-Contract $brokenSuite 'intentional RimLiaison contract break' $manifest.contracts.rimTestSuite
         throw 'intentional contract break was not detected'
     }
     catch {
@@ -421,16 +428,16 @@ try {
         '--operation', $operationId,
         '--operation-name', 'rimworld/inspect_fixture',
         '--json'
-    ) $RimErrorRoot
+    ) $RimLiaisonRoot
     $ingestReport = Convert-ProcessJson $ingest 'RimError ingest' 1
     Assert-Equal $ingestReport.status 'fail' 'RimError reports the controlled diagnostic'
-    $latestReport = Invoke-JsonProcess $rimerrorExe @('latest', '--json', '--all', '--store', $diagnosticStore) $RimErrorRoot 'RimError latest' 1
+    $latestReport = Invoke-JsonProcess $rimerrorExe @('latest', '--json', '--all', '--store', $diagnosticStore) $RimLiaisonRoot 'RimError latest' 1
     Assert-Equal $latestReport.status 'fail' 'RimError latest retains the controlled diagnostic'
     $rootCauses = @($latestReport.rootCauses)
     Assert-True ($rootCauses.Count -gt 0) 'RimError returns a root cause'
     $diagnosticId = [string]$rootCauses[0].id
     Assert-True (-not [string]::IsNullOrWhiteSpace($diagnosticId)) 'RimError returns a diagnostic id'
-    $showDiagnostic = Invoke-JsonProcess $rimerrorExe @('show', $diagnosticId, '--store', $diagnosticStore) $RimErrorRoot 'RimError show'
+    $showDiagnostic = Invoke-JsonProcess $rimerrorExe @('show', $diagnosticId, '--store', $diagnosticStore) $RimLiaisonRoot 'RimError show'
     $shownRun = Get-PathValue $showDiagnostic 'run'
     if ([string]::IsNullOrWhiteSpace([string]$shownRun)) { $shownRun = Get-PathValue $showDiagnostic 'runId' }
     $shownOperation = Get-PathValue $showDiagnostic 'operation'
@@ -475,10 +482,10 @@ try {
             devBridgeLogsQuery = [string]$manifest.contracts.devBridgeLogsQuery.schemaVersion
             rimErrorIntegration = [string]$integration.schemaVersion
             rimTestSuite = [string]$suite.schemaVersion
-            rimTestCapabilities = [string]$rimtestCapabilities.schemaVersion
+            rimTestCapabilities = [string]$rimliaisonCapabilities.schemaVersion
         }
         bounded = [ordered]@{
-            rimTestBytes = [Text.Encoding]::UTF8.GetByteCount(([string]$rimtest.Stdout).Trim())
+            rimTestBytes = [Text.Encoding]::UTF8.GetByteCount(([string]$rimliaison.Stdout).Trim())
             rimErrorShowBytes = $showBytes
             integrationBytes = $integrationBytes
             maxResultBytes = [int]$manifest.limits.maxResultBytes
@@ -500,10 +507,8 @@ catch {
         errorCode = $code
         error = Limit-Text $message
         repositories = [ordered]@{
-            rimTest = $RimTestRoot
-            rimContext = $RimContextRoot
+            rimLiaison = $RimLiaisonRoot
             devBridge2 = $DevBridgeRoot
-            rimError = $RimErrorRoot
         }
     }
 }

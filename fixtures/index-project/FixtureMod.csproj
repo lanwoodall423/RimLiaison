@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>FixtureMod</AssemblyName>
+    <RootNamespace>FixtureMod</RootNamespace>
+    <PackageId>com.example.fixturemod</PackageId>
+  </PropertyGroup>
+</Project>

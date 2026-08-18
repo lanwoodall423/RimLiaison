@@ -40,7 +40,7 @@ $workflow = if ([string]::IsNullOrWhiteSpace($WorkflowId)) {
 }
 $transactionId = 'tx-cross-stack-' + [Guid]::NewGuid().ToString('N')
 $statePath = Join-Path $coordinatorRoot '.cross-stack-state.json'
-$transactionRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimtest-cross-stack-build-' + $transactionId)
+$transactionRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-cross-stack-build-' + $transactionId)
 $stagingRoot = Join-Path $transactionRoot 'staging'
 $script:ResultPath = Join-Path $coordinatorRoot '.cross-stack-mod-development.json'
 

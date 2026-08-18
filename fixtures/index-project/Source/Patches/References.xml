@@ -1,0 +1,8 @@
+<Patch>
+  <operation Class="PatchOperationAddModExtension">
+    <defName>CCM_FancyWorkbench</defName>
+  </operation>
+  <operation>
+    <thingDef>CCM_MissingWorkbench</thingDef>
+  </operation>
+</Patch>

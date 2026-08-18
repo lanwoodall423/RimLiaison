@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>rimliaison</AssemblyName>
+    <RootNamespace>RimLiaison</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RimContext.Core\RimContext.Core.csproj" />
+    <ProjectReference Include="..\RimError.Core\RimError.Core.csproj" />
+    <EmbeddedResource Include="..\..\templates\AGENTS.md"
+                      LogicalName="RimLiaison.CanonicalAgents.md" />
+  </ItemGroup>
+</Project>

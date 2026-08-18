@@ -1,0 +1,3 @@
+[2026-08-17T12:00:00.000Z] WARN: Failed to load cached texture atlas; using fallback
+[2026-08-17T12:00:00.100Z] INFO: Def database loaded successfully
+[2026-08-17T12:00:00.200Z] WARNING Shader cache miss for "Custom/VanillaFallback"; using default

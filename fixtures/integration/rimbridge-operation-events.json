@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "rimbridge-operation/v1",
+  "provenance": {
+    "workflowId": "rw-stage8",
+    "launchId": "launch-stage8",
+    "generation": 17,
+    "profileFingerprint": "profile-stage8",
+    "processId": 4242,
+    "toolName": "mymod/create_assembler",
+    "invocationTimestampUtc": "2026-08-17T12:00:01Z"
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "eventId": "evt-create",
+      "eventType": "operation.completed",
+      "operationId": "op-create",
+      "capabilityId": "mymod/create_assembler",
+      "status": "Completed",
+      "success": true,
+      "timestampUtc": "2026-08-17T12:00:01Z",
+      "metadata": {
+        "runId": "run-stage8",
+        "sessionId": "epoch-stage8"
+      }
+    },
+    {
+      "sequence": 2,
+      "eventId": "evt-other",
+      "eventType": "operation.completed",
+      "operationId": "op-other",
+      "capabilityId": "mymod/other_action",
+      "status": "Completed",
+      "success": true,
+      "timestampUtc": "2026-08-17T12:00:02Z",
+      "metadata": {
+        "runId": "run-stage8",
+        "sessionId": "epoch-stage8"
+      }
+    }
+  ]
+}

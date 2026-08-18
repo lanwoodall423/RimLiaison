@@ -1,0 +1,10 @@
+<Defs>
+  <ThingDef>
+    <defName>CCM_FancyWorkbench</defName>
+    <label>fancy workbench</label>
+  </ThingDef>
+  <ThingDef>
+    <defName>Steel</defName>
+    <label>steel</label>
+  </ThingDef>
+</Defs>

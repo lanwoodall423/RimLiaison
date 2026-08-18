@@ -1,0 +1,41 @@
+System.NullReferenceException: Object reference not set to an instance of an object
+MissingMethodException: Method not found: 'Verse.Workbench.DoWork()'
+MissingFieldException: Field not found: 'Verse.Workbench.field'
+TypeLoadException: Could not load type 'Verse.MissingType' from assembly 'Verse'
+ReflectionTypeLoadException: Unable to load one or more types
+TypeInitializationException: The type initializer for 'Verse.StaticType' threw an exception
+System.InvalidOperationException: generic runtime failure
+   at Verse.Game.Tick()
+Exception ticking: Pawn tick failed
+Exception drawing: Window draw failed
+Exception in LongEventHandler: long event failed
+Static constructor for 'Verse.StaticType' failed
+Could not resolve cross-reference: No Verse.ThingDef named CCM_FancyWorkbench found
+Could not find ThingDef named Steel
+Duplicate defName ThingDef.Steel
+Config error: invalid value for setting
+XML error: Could not find parent node
+Malformed XML: unexpected end tag
+PatchOperation failed: xpath did not match
+Could not load XML file for ThingDef
+HarmonyException: Patching exception in method
+Harmony patch target not found: 'Verse.Target.Run'
+Exception in prefix patch for 'Verse.Target.Run'
+Harmony signature mismatch for 'Verse.Target.Run'
+Harmony transpiler failed for 'Verse.Target.Run'
+Harmony patch processing failed
+Could not load texture 'Textures/Workbench.png'
+Shader 'Custom/Workbench' not found
+Missing resource 'Sounds/Click.ogg'
+AssetBundle failed to load asset 'Things/Workbench.prefab'
+Could not load file or assembly 'Some.Dependency'
+Could not load dependency 'com.example.base'
+Package ID 'com.example.mod' is invalid
+Mod load order failure: Core must load before Addon
+Mods/MyMod/Thing.cs(12,4): error CS0246: The type or namespace name 'ThingDef' could not be found
+Mods/MyMod/Thing.cs(14,4): warning CS0168: The variable 'unused' is declared but never used
+error MSB3270: There was a mismatch between processor architectures
+error NU1101: Unable to find package Some.Package
+Info: Harmony support is enabled
+XML document loaded successfully
+Unrecognized diagnostic with no special marker

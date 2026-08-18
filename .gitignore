@@ -3,3 +3,7 @@
 .vs/
 .rimctx/
 .rimdev/*.local.json
+.rimerror/
+TestResults/
+*.user
+*.suo

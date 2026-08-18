@@ -1,0 +1,10 @@
+[2026-08-17T12:00:03.000Z] TypeInitializationException: The type initializer for 'CCM.CompAssembler' threw an exception
+   at CCM.CompAssembler..cctor() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 47
+   ---> System.InvalidOperationException: settings file was missing
+   at CCM.CompAssembler.LoadSettings() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 52
+[2026-08-17T12:00:04.000Z] System.NullReferenceException: component state was not initialized
+   at CCM.CompAssembler.Tick() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 128
+[2026-08-17T12:00:05.000Z] Exception ticking: CCM.CompAssembler
+   at CCM.CompAssembler.Tick() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 128
+[2026-08-17T12:00:06.000Z] Exception drawing: CCM.CompAssembler
+   at CCM.CompAssembler.Draw() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 141

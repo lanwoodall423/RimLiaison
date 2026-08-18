@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "available": true,
+  "schemaVersion": "devbridge-generation-context/v1",
+  "workflowId": "rw-stage8",
+  "launchId": "launch-stage8",
+  "generation": 17,
+  "profileFingerprint": "profile-stage8",
+  "baselineFingerprint": "baseline-stage8",
+  "profileMode": "projects",
+  "processId": 4242,
+  "processStartUtcTicks": 638909280000000000,
+  "devBridge2ModVersion": "1.0.0",
+  "rimBridgeIntegrationSchemaVersion": "rimbridge-integration/v1"
+}
