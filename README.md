@@ -2,11 +2,18 @@
 
 RimTest is the agent-facing frontend for the RimWorld development toolchain.
 
-The normal agent loop is:
+The canonical agent loop is:
 
-    rimtest doctor --json       # only when readiness is unknown
-    # make code changes
+    edit
     rimtest affected --run --json
+    inspect the result
+    edit again
+
+Run `rimtest doctor --json` once when readiness is unknown, and follow its bounded
+`nextAction` if onboarding or recovery is required. For build-relevant changes,
+`affected --run` automatically asks DevBridge2 to build into staging, hash, compare,
+deploy when needed, establish an owned generation, prove artifact freshness, and only
+then execute the selected recipes. An agent does not need a separate build or deploy step.
 
 When designing a new live-game test, validating UI behavior, or doing deeper in-game
 inspection, use `rimtest capabilities --json`. It returns a bounded, machine-readable
@@ -61,4 +68,41 @@ RimTest keeps catalog selection, orchestration, and compact result aggregation i
 - RimBridgeServer: live-game inspection and control.
 - RimError: diagnostic compression and root-cause reporting.
 
+For a source-changing affected run, the suite result includes `artifactFreshness` with the
+source fingerprint, built/deployed SHA-256 values, deployment decision, DevBridge generation,
+workflow/transaction/lease identities, and `loadedArtifactFreshnessProven`. RimTest reports a
+source-change PASS only when DevBridge2 proves the tested generation conservatively corresponds
+to the built/deployed artifact. Unknown or mismatched freshness is an infrastructure failure;
+it is never treated as a successful test.
+
+When a selected recipe fails, RimTest automatically requests DevBridge2's bounded
+`logs query --generation <generation> --since-launch --severity ERROR` projection and sends only
+that scoped semantic source, together with workflow/run/generation/operation identities, to
+RimError. The agent does not need to know a Player.log path, generation log path, or diagnostic
+store path. A result with `status: "fail"` and `diagnostic` includes the compact root cause;
+`status: "fail"` with `diagnosticStatus: "unavailable"` means the test failed but diagnostic
+infrastructure could not complete; `status: "infrastructure"` means the test infrastructure
+itself did not establish a trustworthy test result. `--rimerror-log` and `--rimerror-store`
+remain manual fallbacks for unusual environments.
+
+Compatible recipes can safely reuse one sequential DevBridge generation during a suite when their
+catalog entries explicitly declare compatible `isolation.mode` and `reuseKey` metadata. Unknown,
+fresh-state, or incompatible recipes remain isolated by default. Fixture-resettable recipes must
+name a deterministic `resetRecipe`, and reuse is invalidated on any failed reset, failure, timeout,
+ownership/readiness/generation uncertainty, or cleanup failure. The compact suite result reports
+`reuse.groupsPlanned`, `generationsUsed`, `fixtureResets`, `relaunches`, and any invalidation; it
+does not expose child transcripts or operations.
+
 Use the owner commands only when RimTest points to deeper inspection or the task specifically requires it. Catalog authoring and the detailed output contracts are documented in [TestCatalog/README.md](TestCatalog/README.md).
+
+## Cross-stack contract gate
+
+The pinned no-RimWorld composition gate is documented in
+[docs/cross-stack-contract.md](docs/cross-stack-contract.md). After building the four checked-out
+Release projects, run:
+
+    pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 -Json
+
+It fails on pinned-revision, schema, identity, artifact-freshness, correlation, or output-bound
+drift. The real RimWorld/RimBridgeServer compatibility claim remains separate and is made only by
+DevBridge2's configured self-hosted live smoke.

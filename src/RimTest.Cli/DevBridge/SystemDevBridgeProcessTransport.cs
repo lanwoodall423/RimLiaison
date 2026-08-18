@@ -130,6 +130,19 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
             startInfo.ArgumentList.Add(argument);
         }
 
+        if (request.EnvironmentVariables is not null)
+        {
+            foreach (KeyValuePair<string, string> variable in request.EnvironmentVariables)
+            {
+                if (string.IsNullOrWhiteSpace(variable.Key))
+                {
+                    continue;
+                }
+
+                startInfo.Environment[variable.Key] = variable.Value ?? string.Empty;
+            }
+        }
+
         return startInfo;
     }
 

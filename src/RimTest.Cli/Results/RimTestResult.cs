@@ -71,6 +71,10 @@ public sealed class RimTestResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Generation { get; init; }
 
+    [JsonPropertyName("operationIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? OperationIds { get; init; }
+
     [JsonPropertyName("failureFingerprint")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FailureFingerprint { get; init; }
@@ -124,7 +128,15 @@ public static class RimTestResultFactory
             WorkflowId = workflowId ?? run.WorkflowId,
             DurationMs = BoundDuration(durationMs),
             RunId = run.RunId,
-            Generation = includeFailureDetails ? run.Generation : null,
+            Generation = run.Generation,
+            OperationIds = run.Operations
+                .Select(static operation => operation.OperationId)
+                .Where(static operationId => !string.IsNullOrWhiteSpace(operationId))
+                .Select(static operationId => operationId!)
+                .Take(8)
+                .ToArray() is { Length: > 0 } operationIds
+                ? operationIds
+                : null,
             FailureFingerprint = includeFailureDetails
                 ? run.FailureFingerprint
                 : null,
@@ -186,6 +198,19 @@ public static class RimTestResultFactory
         };
     }
 
+    public static RimTestResult ArtifactFreshnessFailure(
+        string testId,
+        string errorCode,
+        string? workflowId = null) =>
+        new()
+        {
+            Status = "infrastructure",
+            Test = testId,
+            WorkflowId = workflowId,
+            ErrorCode = errorCode,
+            NextAction = "inspect-artifact-freshness"
+        };
+
     public static RimTestResult AttachDiagnosis(
         RimTestResult result,
         RimErrorDiagnosisResult diagnosis)
@@ -206,6 +231,7 @@ public static class RimTestResultFactory
             DurationMs = result.DurationMs,
             RunId = result.RunId,
             Generation = result.Generation,
+            OperationIds = result.OperationIds,
             FailureFingerprint = result.FailureFingerprint,
             EvidenceId = result.EvidenceId,
             ErrorCode = result.ErrorCode,
@@ -248,7 +274,9 @@ public static class RimTestResultFactory
         return errorCode.StartsWith("DEVBRIDGE_", StringComparison.Ordinal) ||
             errorCode.StartsWith("RIMBRIDGE_", StringComparison.Ordinal) ||
             errorCode.StartsWith("READINESS_", StringComparison.Ordinal) ||
-            errorCode.StartsWith("TEST_RECIPE_", StringComparison.Ordinal)
+            errorCode.StartsWith("TEST_RECIPE_", StringComparison.Ordinal) ||
+            errorCode.StartsWith("RIMTEST_ARTIFACT_", StringComparison.Ordinal) ||
+            errorCode.StartsWith("DEVELOPMENT_", StringComparison.Ordinal)
             ? "DevBridge.cmd doctor --json"
             : null;
     }

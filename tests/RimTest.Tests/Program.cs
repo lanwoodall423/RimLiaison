@@ -16,6 +16,7 @@ internal static class Program
     private static readonly (string Name, Action Test)[] Tests =
     [
         ("valid catalog", ValidCatalogLoads),
+        ("isolation metadata validates safe defaults", IsolationMetadataValidatesSafeDefaults),
         ("duplicate ids fail", DuplicateIdsFail),
         ("missing references fail", MissingReferencesFail),
         ("suite cycles fail", SuiteCyclesFail),
@@ -42,6 +43,12 @@ internal static class Program
         ("compact final output includes workflow id", CompactFinalOutputIncludesWorkflowId),
         ("agent output contracts are golden and bounded", AgentOutputContractsAreGoldenAndBounded),
         ("RimError diagnosis is normalized", RimErrorDiagnosisIsNormalized),
+        ("DevBridge diagnostic source is bounded and generation scoped", DevBridgeDiagnosticSourceIsBoundedAndGenerationScoped),
+        ("automatic diagnostics carry scoped identities", AutomaticDiagnosticsCarryScopedIdentities),
+        ("normal CLI failure acquires diagnostics automatically", NormalCliFailureAcquiresDiagnosticsAutomatically),
+        ("successful test skips diagnostic acquisition", SuccessfulTestSkipsDiagnosticAcquisition),
+        ("stale diagnostic source cannot produce trustworthy result", StaleDiagnosticSourceCannotProduceTrustworthyResult),
+        ("scoped RimError diagnosis filters nearby runs", ScopedRimErrorDiagnosisFiltersNearbyRuns),
         ("RimError unavailable degrades", RimErrorUnavailableDegrades),
         ("RimError timeout degrades", RimErrorTimeoutDegrades),
         ("RimError malformed response degrades", RimErrorMalformedResponseDegrades),
@@ -79,6 +86,17 @@ internal static class Program
         ("suite duplicate tests execute once", SuiteDuplicateTestsExecuteOnce),
         ("suite plan refusal blocks execution", SuitePlanRefusalBlocksExecution),
         ("suite child infrastructure failure is summarized", SuiteChildInfrastructureFailureIsSummarized),
+        ("unannotated recipes use the safe path", UnannotatedRecipesUseSafePath),
+        ("unsafe recipes never share state", UnsafeRecipesNeverShareState),
+        ("mutation recipes never share state", MutationRecipesNeverShareState),
+        ("compatible recipes reuse one generation", CompatibleRecipesReuseOneGeneration),
+        ("resettable recipes require successful reset", ResettableRecipesRequireSuccessfulReset),
+        ("failed reset invalidates reuse", FailedResetInvalidatesReuse),
+        ("test failure cannot contaminate later recipes", TestFailureCannotContaminateLaterRecipes),
+        ("generation and lease changes invalidate reuse", GenerationAndLeaseChangesInvalidateReuse),
+        ("reuse result remains bounded and identities stay distinct", ReuseResultIsBoundedAndIdentitiesStayDistinct),
+        ("lease adapter preserves owner and generation identity", LeaseAdapterPreservesOwnerAndGenerationIdentity),
+        ("fresh generation adapter proves readiness conservatively", FreshGenerationAdapterProvesReadinessConservatively),
         ("affected run uses conservative fallback", AffectedRunUsesConservativeFallback),
         ("suite run CLI is deterministic", SuiteRunCliIsDeterministic),
         ("capabilities discover the registered surface", CapabilitiesDiscoverRegisteredSurface),
@@ -121,6 +139,16 @@ internal static class Program
         ("doctor invalid catalog provides a handoff", DoctorInvalidCatalogProvidesHandoff),
         ("affected discovers Git changes without paths", AffectedDiscoversGitChangesWithoutPaths),
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
+        ("affected source run performs freshness transaction", AffectedSourceRunPerformsFreshnessTransaction),
+        ("affected identical artifact uses no-deploy proof", AffectedIdenticalArtifactUsesNoDeployProof),
+        ("affected build failure blocks pass", AffectedBuildFailureBlocksPass),
+        ("affected deployment failure blocks pass", AffectedDeploymentFailureBlocksPass),
+        ("affected readiness failure blocks pass", AffectedReadinessFailureBlocksPass),
+        ("affected generation mismatch blocks pass", AffectedGenerationMismatchBlocksPass),
+        ("affected unknown freshness blocks pass", AffectedUnknownFreshnessBlocksPass),
+        ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
+        ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
+        ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
         ("Git discovery includes staged and untracked files", GitDiscoveryIncludesStagedAndUntrackedFiles),
         ("Git discovery preserves deleted and renamed paths", GitDiscoveryPreservesDeletedAndRenamedPaths),
         ("explicit affected paths take precedence", ExplicitAffectedPathsTakePrecedence),
@@ -165,6 +193,47 @@ internal static class Program
         AssertSequence(
             ["smoke"],
             CatalogNavigator.ContainingSuiteIds(CreateCatalog(), "assembler-smoke"));
+    }
+
+    private static void IsolationMetadataValidatesSafeDefaults()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            new CatalogTest
+            {
+                Id = "missing-key",
+                Recipe = "recipe-a",
+                Isolation = new CatalogRecipeIsolation
+                {
+                    Mode = CatalogRecipeIsolationMode.SameGenerationSafe
+                }
+            },
+            new CatalogTest
+            {
+                Id = "missing-reset",
+                Recipe = "recipe-b",
+                Isolation = new CatalogRecipeIsolation
+                {
+                    Mode = CatalogRecipeIsolationMode.FixtureResettable,
+                    ReuseKey = "fixture"
+                }
+            },
+            new CatalogTest
+            {
+                Id = "unexpected-reset",
+                Recipe = "recipe-c",
+                Isolation = new CatalogRecipeIsolation
+                {
+                    Mode = CatalogRecipeIsolationMode.PureRead,
+                    ReuseKey = "fixture",
+                    ResetRecipe = "reset"
+                }
+            });
+
+        CatalogValidationResult result = CatalogValidator.Validate(catalog);
+
+        AssertHasCode(result.Errors, "ISOLATION_REUSE_KEY_REQUIRED");
+        AssertHasCode(result.Errors, "ISOLATION_RESET_RECIPE_REQUIRED");
+        AssertHasCode(result.Errors, "ISOLATION_RESET_RECIPE_UNEXPECTED");
     }
 
     private static void DuplicateIdsFail()
@@ -1106,6 +1175,425 @@ internal static class Program
             StringComparison.Ordinal), "Default output should not copy the full RimError summary.");
     }
 
+    private static void DevBridgeDiagnosticSourceIsBoundedAndGenerationScoped()
+    {
+        var transport = new FakeTransport(
+            (_, _) => ProcessResult(
+                """
+                {
+                  "schemaVersion": "devbridge-logs-query/v1",
+                  "contract": "devbridge-logs-query/v1",
+                  "success": true,
+                  "generation": 1,
+                  "sinceLaunch": true,
+                  "available": true,
+                  "rawBytes": 4096,
+                  "semanticBytes": 128,
+                  "truncated": false,
+                  "records": [
+                    {
+                      "sequence": 1,
+                      "generation": 1,
+                      "sinceLaunch": true,
+                      "severity": "ERROR",
+                      "component": "RimWorld",
+                      "message": "controlled fixture failure",
+                      "stackFrames": ["at Fixture.Test()"]
+                    }
+                  ]
+                }
+                """));
+        var adapter = new DevBridgeDiagnosticSourceAdapter(
+            transport,
+            new DevBridgeAdapterOptions
+            {
+                CommandPath = "DevBridge.cmd",
+                RootPath = "DevBridgeRoot",
+                ShowPlanTimeout = TimeSpan.FromSeconds(1)
+            });
+
+        DevBridgeDiagnosticSourceResult result = adapter.AcquireAsync(
+                "assembler-smoke",
+                FailedRun("assembler-fixture", "fp-source", "RECIPE_ASSERTION_FAILED"))
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(result.Status.IsAvailable, "The bounded source should be available.");
+        Assert(result.Source is not null, "The source payload is missing.");
+        AssertEqual(1, result.Source!.Generation);
+        Assert(result.Source.Content.Contains("controlled fixture failure", StringComparison.Ordinal),
+            "The semantic log message was not projected.");
+        Assert(result.Source.Content.Contains("at Fixture.Test()", StringComparison.Ordinal),
+            "The semantic stack frame was not projected.");
+        Assert(result.Source.SourceBytes <= 64 * 1024, "The source exceeded its bound.");
+        AssertEqual(64, result.Source.Sha256.Length);
+        Assert(transport.Requests[0].Arguments.Contains("--since-launch"),
+            "The query was not launch scoped.");
+        Assert(transport.Requests[0].Arguments.Contains("--generation") &&
+            transport.Requests[0].Arguments.Contains("1"),
+            "The query was not generation scoped.");
+
+        var staleTransport = new FakeTransport(
+            (_, _) => ProcessResult(
+                """
+                {
+                  "schemaVersion": "devbridge-logs-query/v1",
+                  "contract": "devbridge-logs-query/v1",
+                  "success": true,
+                  "generation": 2,
+                  "sinceLaunch": true,
+                  "available": true,
+                  "truncated": false,
+                  "records": []
+                }
+                """));
+        DevBridgeDiagnosticSourceResult stale = new DevBridgeDiagnosticSourceAdapter(
+                staleTransport,
+                new DevBridgeAdapterOptions
+                {
+                    CommandPath = "DevBridge.cmd",
+                    RootPath = "DevBridgeRoot",
+                    ShowPlanTimeout = TimeSpan.FromSeconds(1)
+                })
+            .AcquireAsync(
+                "assembler-smoke",
+                FailedRun("assembler-fixture", "fp-source", "RECIPE_ASSERTION_FAILED"))
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(
+            "DEVBRIDGE_DIAGNOSTIC_GENERATION_MISMATCH",
+            stale.Status.ErrorCode);
+        Assert(stale.Source is null, "A stale source must not be handed to RimError.");
+
+        var missingTransport = new FakeTransport(
+            (_, _) => ProcessResult(
+                """
+                {
+                  "schemaVersion": "devbridge-logs-query/v1",
+                  "contract": "devbridge-logs-query/v1",
+                  "success": true,
+                  "generation": 1,
+                  "sinceLaunch": true,
+                  "available": false,
+                  "truncated": false,
+                  "records": [],
+                  "errorCode": "PLAYER_LOG_UNAVAILABLE"
+                }
+                """));
+        DevBridgeDiagnosticSourceResult missing = new DevBridgeDiagnosticSourceAdapter(
+                missingTransport,
+                new DevBridgeAdapterOptions
+                {
+                    CommandPath = "DevBridge.cmd",
+                    RootPath = "DevBridgeRoot",
+                    ShowPlanTimeout = TimeSpan.FromSeconds(1)
+                })
+            .AcquireAsync(
+                "assembler-smoke",
+                FailedRun("assembler-fixture", "fp-source", "RECIPE_ASSERTION_FAILED"))
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual("PLAYER_LOG_UNAVAILABLE", missing.Status.ErrorCode);
+
+        string[] records = Enumerable.Range(1, 64)
+            .Select(index =>
+                $$"""{"sequence":{{index}},"generation":1,"sinceLaunch":true,"severity":"ERROR","component":"RimWorld","message":"{{new string('x', 2048)}}"}""")
+            .ToArray();
+        string oversizedJson =
+            $$"""{"schemaVersion":"devbridge-logs-query/v1","contract":"devbridge-logs-query/v1","success":true,"generation":1,"sinceLaunch":true,"available":true,"truncated":false,"records":[{{string.Join(',', records)}}]}""";
+        var oversizedTransport = new FakeTransport((_, _) => ProcessResult(oversizedJson));
+        DevBridgeDiagnosticSourceResult oversized = new DevBridgeDiagnosticSourceAdapter(
+                oversizedTransport,
+                new DevBridgeAdapterOptions
+                {
+                    CommandPath = "DevBridge.cmd",
+                    RootPath = "DevBridgeRoot",
+                    ShowPlanTimeout = TimeSpan.FromSeconds(1)
+                })
+            .AcquireAsync(
+                "assembler-smoke",
+                FailedRun("assembler-fixture", "fp-source", "RECIPE_ASSERTION_FAILED"))
+            .GetAwaiter()
+            .GetResult();
+        Assert(oversized.Source is not null, "The bounded source should remain usable.");
+        Assert(oversized.Source!.Truncated, "Oversized semantic evidence was not marked truncated.");
+        Assert(oversized.Source.SourceBytes <= 64 * 1024,
+            "Oversized semantic evidence exceeded the source bound.");
+    }
+
+    private static void AutomaticDiagnosticsCarryScopedIdentities()
+    {
+        const string workflowId = "workflow-diagnostic-1";
+        var recipe = new FakeRecipeAdapter();
+        recipe.Runs["assembler-fixture"] = FailedRun(
+            "assembler-fixture",
+            "fp-scoped",
+            "RECIPE_ASSERTION_FAILED",
+            generation: 7,
+            workflowId: workflowId,
+            operations: [new DevBridgeOperationSummary(
+                "rimworld/fixture",
+                false,
+                "RECIPE_ASSERTION_FAILED",
+                ["/value"],
+                "operation-diagnostic-1",
+                workflowId,
+                7,
+                "launch-diagnostic-1")]);
+        var diagnosis = new FakeRimErrorDiagnosisAdapter(AvailableDiagnosis("RE-scoped"));
+        var source = new FakeDiagnosticSourceAdapter(AvailableSource(7));
+        var service = new CatalogTestExecutionService(
+            recipe,
+            () => diagnosis,
+            () => source);
+
+        CatalogTestExecutionResult execution = service.RunAsync(
+                CreateCatalog(),
+                "assembler-smoke",
+                System.Diagnostics.Stopwatch.GetTimestamp(),
+                workflowId: workflowId)
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("fail", execution.Result.Status);
+        AssertEqual("RE-scoped", execution.Result.Diagnostic!.Id);
+        AssertEqual(1, source.Calls);
+        AssertEqual(1, diagnosis.Calls);
+        RimErrorDiagnosisRequest request = diagnosis.Request!;
+        AssertEqual("workflow-diagnostic-1", request.WorkflowId);
+        AssertEqual("run-assembler-fixture", request.RunId);
+        AssertEqual(7, request.Generation);
+        AssertEqual("operation-diagnostic-1", request.Operations![0].OperationId);
+        AssertEqual("rimtest-devbridge-diagnostic-source/v1", request.ScopedSource!.SchemaVersion);
+        AssertEqual(7, request.ScopedSource.Generation);
+    }
+
+    private static void NormalCliFailureAcquiresDiagnosticsAutomatically()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var recipe = new FakeRecipeAdapter();
+            recipe.Runs["assembler-fixture"] = FailedRun(
+                "assembler-fixture",
+                "fp-cli-auto",
+                "RECIPE_ASSERTION_FAILED");
+            var transport = new FakeTransport(
+                (request, _) => request.Arguments[0] switch
+                {
+                    "logs" => ProcessResult(
+                        """
+                        {
+                          "schemaVersion": "devbridge-logs-query/v1",
+                          "contract": "devbridge-logs-query/v1",
+                          "success": true,
+                          "generation": 1,
+                          "sinceLaunch": true,
+                          "available": true,
+                          "rawBytes": 64,
+                          "semanticBytes": 64,
+                          "truncated": false,
+                          "records": [
+                            {
+                              "sequence": 1,
+                              "generation": 1,
+                              "sinceLaunch": true,
+                              "severity": "ERROR",
+                              "component": "RimWorld",
+                              "message": "controlled CLI failure"
+                            }
+                          ]
+                        }
+                        """),
+                    "ingest" => ProcessResult(
+                        "{\"status\":\"fail\",\"errors\":1,\"warnings\":0}",
+                        exitCode: 1),
+                    "latest" => ProcessResult(
+                        """
+                        {
+                          "status": "fail",
+                          "errors": 1,
+                          "warnings": 0,
+                          "rootCauses": [
+                            {"id": "RE-cli-auto", "category": "runtime", "count": 1}
+                          ]
+                        }
+                        """),
+                    _ => throw new InvalidOperationException(
+                        "Unexpected process in automatic diagnostic test: " +
+                        request.Arguments[0])
+                });
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        [
+                            "run",
+                            "assembler-smoke",
+                            "--json",
+                            "--catalog",
+                            catalogPath
+                        ],
+                        stdout,
+                        stderr,
+                        recipe,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement result = document.RootElement;
+            AssertEqual(CliExitCodes.TestFailure, exitCode);
+            AssertEqual("fail", result.GetProperty("status").GetString());
+            AssertEqual("RE-cli-auto", result.GetProperty("diagnostic").GetProperty("id").GetString());
+            Assert(transport.Requests.Any(request => request.Arguments[0] == "logs"),
+                "The normal CLI did not acquire a DevBridge diagnostic source.");
+            DevBridgeProcessRequest latest = transport.Requests.Single(
+                request => request.Arguments[0] == "latest");
+            Assert(latest.Arguments.Contains("--run") &&
+                latest.Arguments.Contains("run-assembler-fixture"),
+                "The normal CLI did not scope RimError to the failed run.");
+            Assert(!stdout.ToString().Contains("Player.log", StringComparison.Ordinal),
+                "The normal failure result exposed a Player.log path.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void SuccessfulTestSkipsDiagnosticAcquisition()
+    {
+        var recipe = new FakeRecipeAdapter();
+        recipe.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+        var diagnosis = new FakeRimErrorDiagnosisAdapter(AvailableDiagnosis("unused"));
+        var source = new FakeDiagnosticSourceAdapter(AvailableSource(7));
+        var service = new CatalogTestExecutionService(
+            recipe,
+            () => diagnosis,
+            () => source);
+
+        CatalogTestExecutionResult execution = service.RunAsync(
+                CreateCatalog(),
+                "assembler-smoke",
+                System.Diagnostics.Stopwatch.GetTimestamp())
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", execution.Result.Status);
+        AssertEqual(0, source.Calls);
+        AssertEqual(0, diagnosis.Calls);
+    }
+
+    private static void StaleDiagnosticSourceCannotProduceTrustworthyResult()
+    {
+        var recipe = new FakeRecipeAdapter();
+        recipe.Runs["assembler-fixture"] = FailedRun(
+            "assembler-fixture",
+            "fp-stale",
+            "RECIPE_ASSERTION_FAILED");
+        var diagnosis = new FakeRimErrorDiagnosisAdapter(AvailableDiagnosis("must-not-use"));
+        var source = new FakeDiagnosticSourceAdapter(
+            new DevBridgeDiagnosticSourceResult(
+                new DevBridgeDiagnosticSourceStatus(
+                    DevBridgeDiagnosticSourceOutcome.Unavailable,
+                    "DEVBRIDGE_DIAGNOSTIC_GENERATION_MISMATCH"),
+                null));
+        var service = new CatalogTestExecutionService(
+            recipe,
+            () => diagnosis,
+            () => source);
+
+        CatalogTestExecutionResult execution = service.RunAsync(
+                CreateCatalog(),
+                "assembler-smoke",
+                System.Diagnostics.Stopwatch.GetTimestamp())
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("fail", execution.Result.Status);
+        AssertEqual("unavailable", execution.Result.DiagnosticStatus);
+        AssertEqual(
+            "DEVBRIDGE_DIAGNOSTIC_GENERATION_MISMATCH",
+            execution.Result.DiagnosticErrorCode);
+        AssertEqual(0, diagnosis.Calls);
+    }
+
+    private static void ScopedRimErrorDiagnosisFiltersNearbyRuns()
+    {
+        string sourceContent = "[RimWorld] controlled failure\n";
+        var transport = new FakeTransport(
+            (request, _) =>
+            {
+                if (request.Arguments[0] == "ingest")
+                {
+                    string sourcePath = request.Arguments[1];
+                    Assert(File.Exists(sourcePath), "Scoped source was not materialized for ingest.");
+                    AssertEqual(sourceContent, File.ReadAllText(sourcePath));
+                    return ProcessResult(
+                        "{\"status\":\"fail\",\"errors\":1,\"warnings\":0}",
+                        exitCode: 1);
+                }
+
+                AssertEqual("latest", request.Arguments[0]);
+                Assert(request.Arguments.Contains("--run") &&
+                    request.Arguments.Contains("run-current"),
+                    "RimError latest was not filtered to the current run.");
+                return ProcessResult(
+                    """
+                    {
+                      "status": "fail",
+                      "errors": 1,
+                      "warnings": 0,
+                      "rootCauses": [
+                        {"id": "RE-current", "category": "runtime", "count": 1}
+                      ]
+                    }
+                    """);
+            });
+        var adapter = new RimErrorDiagnosisAdapter(
+            transport,
+            new RimErrorAdapterOptions
+            {
+                CommandPath = "rimerror.exe",
+                WorkingDirectory = "RimErrorRoot",
+                IngestTimeout = TimeSpan.FromSeconds(1),
+                LatestTimeout = TimeSpan.FromSeconds(1)
+            });
+        var request = new RimErrorDiagnosisRequest(
+            "assembler-smoke",
+            "run-current",
+            7,
+            "evidence-current",
+            "fp-current",
+            "RECIPE_ASSERTION_FAILED",
+            "workflow-current",
+            [],
+            new RimErrorScopedDiagnosticSource(
+                RimErrorSchemas.ScopedDiagnosticSource,
+                7,
+                sourceContent,
+                System.Text.Encoding.UTF8.GetByteCount(sourceContent),
+                1,
+                false,
+                Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(sourceContent)))
+                    .ToLowerInvariant()));
+
+        RimErrorDiagnosisResult result = adapter.DiagnoseAsync(request)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RimErrorDiagnosisOutcome.Available, result.Outcome);
+        AssertEqual("RE-current", result.Diagnosis!.Id);
+        AssertEqual(2, transport.Requests.Count);
+        Assert(!File.Exists(transport.Requests[0].Arguments[1]),
+            "The temporary scoped source should be removed after diagnosis.");
+    }
+
     private static void RimErrorUnavailableDegrades()
     {
         var transport = new FakeTransport(
@@ -1929,6 +2417,7 @@ internal static class Program
             var adapter = new FakeRecipeAdapter();
             adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
             adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+            var developmentAdapter = new FakeModDevelopmentAdapter();
             var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
             var stdout = new StringWriter();
             var stderr = new StringWriter();
@@ -1947,7 +2436,8 @@ internal static class Program
                     stdout,
                     stderr,
                     adapter,
-                    impactAdapter: impactAdapter)
+                    impactAdapter: impactAdapter,
+                    developmentAdapter: developmentAdapter)
                 .GetAwaiter()
                 .GetResult();
 
@@ -2250,6 +2740,499 @@ internal static class Program
         AssertEqual("TEST_RECIPE_NOT_FOUND", result.Failures![0].ErrorCode);
     }
 
+    private static void UnannotatedRecipesUseSafePath()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            new CatalogTest { Id = "unknown-a", Recipe = "recipe-a" },
+            new CatalogTest { Id = "unknown-b", Recipe = "recipe-b" });
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithGeneration(recipe, 7) with { WorkflowId = workflow }
+        };
+        var lease = new FakeLeaseAdapter();
+        var fresh = new FakeFreshGenerationAdapter();
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            resetAdapter: null,
+            fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "unknown",
+                ["unknown-a", "unknown-b"],
+                workflowId: "workflow-unknown")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual(0, lease.BeginCalls);
+        AssertEqual(0, fresh.Calls.Count);
+        Assert(adapter.ExecutionContexts.All(static context => context is null),
+            "Unannotated recipes must not receive a reusable lease.");
+        Assert(execution.Reuse is null,
+            "An unannotated suite should not claim a reuse transaction.");
+    }
+
+    private static void UnsafeRecipesNeverShareState()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            new CatalogTest
+            {
+                Id = "fresh-a",
+                Recipe = "recipe-a",
+                Isolation = new CatalogRecipeIsolation
+                {
+                    Mode = CatalogRecipeIsolationMode.FreshGenerationRequired
+                }
+            },
+            new CatalogTest
+            {
+                Id = "fresh-b",
+                Recipe = "recipe-b",
+                Isolation = new CatalogRecipeIsolation
+                {
+                    Mode = CatalogRecipeIsolationMode.FreshGameRequired
+                }
+            });
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithGeneration(recipe, index + 10) with { WorkflowId = workflow }
+        };
+        var lease = new FakeLeaseAdapter();
+        var fresh = new FakeFreshGenerationAdapter(11, 12);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            resetAdapter: null,
+            fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "unsafe",
+                ["fresh-a", "fresh-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(2, fresh.Calls.Count);
+        AssertEqual(0, lease.BeginCalls);
+        Assert(adapter.ExecutionContexts.All(static context => context is null),
+            "Fresh-state recipes must never receive a shared lease.");
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+    }
+
+    private static void MutationRecipesNeverShareState()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("mutation-a", "recipe-a"),
+            ReusableTest("mutation-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithGeneration(recipe, 7) with { WorkflowId = workflow }
+        };
+        using (JsonDocument document = JsonDocument.Parse(
+                   "{\"allowInGameMutation\":true}"))
+        {
+            adapter.ShowDefinitions["recipe-a"] = document.RootElement.Clone();
+        }
+
+        var lease = new FakeLeaseAdapter();
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "mutation",
+                ["mutation-a", "mutation-b"],
+                workflowId: "workflow-mutation")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual(0, lease.BeginCalls);
+        Assert(adapter.ExecutionContexts.All(static context => context is null),
+            "A recipe that explicitly allows in-game mutation must not receive a shared lease.");
+        AssertEqual("RIMTEST_RECIPE_MUTATION_NOT_SHAREABLE", execution.Reuse!.FallbackReason);
+    }
+
+    private static void CompatibleRecipesReuseOneGeneration()
+    {
+        const string workflowId = "workflow-reuse";
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("read-a", "recipe-a"),
+            ReusableTest("read-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(
+                    recipe,
+                    7,
+                    context?.LeaseId,
+                    workflow,
+                    "run-reuse-" + index,
+                    "operation-reuse-" + index)
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter
+        {
+            BeginResult = SuccessLease("lease-reuse", 7)
+        };
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "reuse",
+                ["read-b", "read-a"],
+                workflowId: workflowId)
+            .GetAwaiter()
+            .GetResult();
+        CatalogSuiteReuseSummary reuse = execution.Reuse!;
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual(1, lease.BeginCalls);
+        AssertEqual(1, lease.EndCalls);
+        AssertEqual(1, reuse.GroupsUsed);
+        AssertEqual(1, reuse.GenerationsUsed);
+        AssertEqual(0, reuse.Relaunches);
+        AssertEqual("used", reuse.Status);
+        AssertEqual(2, adapter.ExecutionContexts.Count);
+        Assert(adapter.ExecutionContexts.All(
+                context => context?.LeaseId == "lease-reuse"),
+            "Compatible recipes must execute under the same lease.");
+        AssertSequence(
+            ["run-reuse-0", "run-reuse-1"],
+            adapter.RunResults.Select(static result => result.RunId!).ToArray());
+        AssertSequence(
+            ["operation-reuse-0", "operation-reuse-1"],
+            adapter.RunResults.SelectMany(static result => result.Operations)
+                .Select(static operation => operation.OperationId!)
+                .ToArray());
+        Assert(adapter.RunResults.All(result => result.WorkflowId == workflowId),
+            "Workflow identity must propagate to every shared-generation recipe.");
+    }
+
+    private static void ResettableRecipesRequireSuccessfulReset()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ResettableTest("reset-a", "recipe-a"),
+            ResettableTest("reset-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(recipe, 8, context?.LeaseId, workflow,
+                    "run-reset-" + index, "operation-reset-" + index)
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var reset = new FakeResetAdapter
+        {
+            Result = SuccessfulReset("lease-reset", 8)
+        };
+        var lease = new FakeLeaseAdapter { BeginResult = SuccessLease("lease-reset", 8) };
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            reset);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "reset",
+                ["reset-a", "reset-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(1, reset.Calls.Count);
+        AssertEqual("fixture-reset", reset.Calls[0].RecipeId);
+        AssertEqual(1, execution.Reuse!.FixtureResets);
+        AssertEqual("used", execution.Reuse.Status);
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+    }
+
+    private static void FailedResetInvalidatesReuse()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ResettableTest("reset-fail-a", "recipe-a"),
+            ResettableTest("reset-fail-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+            {
+                int generation = context?.LeaseId == "lease-reset-2" ? 9 : 8;
+                return PassRunWithLease(recipe, generation, context?.LeaseId, workflow,
+                    "run-reset-fail-" + index, "operation-reset-fail-" + index);
+            }
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var reset = new FakeResetAdapter
+        {
+            Result = new DevBridgeResetResult(
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.InfrastructureFailure,
+                    "RESET_NOT_VERIFIED"),
+                8,
+                "lease-reset-1")
+        };
+        var lease = new FakeLeaseAdapter();
+        lease.BeginResults.Enqueue(SuccessLease("lease-reset-1", 8));
+        lease.BeginResults.Enqueue(SuccessLease("lease-reset-2", 9));
+        lease.RenewResults.Enqueue(SuccessLease("lease-reset-1", 8));
+        var fresh = new FakeFreshGenerationAdapter(9);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            reset,
+            fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "reset-fail",
+                ["reset-fail-a", "reset-fail-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(1, reset.Calls.Count);
+        AssertEqual(1, fresh.Calls.Count);
+        AssertEqual(2, lease.BeginCalls);
+        AssertEqual("invalidated", execution.Reuse!.Status);
+        AssertEqual("reset-fail-b", execution.Reuse.ReuseInvalidatedAfter);
+        AssertEqual("RESET_NOT_VERIFIED", execution.Reuse.ReuseInvalidationReason);
+        AssertEqual("infrastructure", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual("lease-reset-2", adapter.ExecutionContexts[1]!.LeaseId);
+    }
+
+    private static void TestFailureCannotContaminateLaterRecipes()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("fail-a", "recipe-a"),
+            ReusableTest("fail-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) => index == 0
+                ? FailedRunWithLease(recipe, 7, context?.LeaseId, workflow,
+                    "failure-run", "failure-operation")
+                : PassRunWithLease(recipe, 8, context?.LeaseId, workflow,
+                    "recovered-run", "recovered-operation")
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter();
+        lease.BeginResults.Enqueue(SuccessLease("lease-failure-1", 7));
+        lease.BeginResults.Enqueue(SuccessLease("lease-failure-2", 8));
+        var fresh = new FakeFreshGenerationAdapter(8);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            freshGenerationAdapter: fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "failure-recovery",
+                ["fail-a", "fail-b"])
+            .GetAwaiter()
+            .GetResult();
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 10);
+
+        AssertEqual("fail", result.Status);
+        AssertEqual(1, fresh.Calls.Count);
+        AssertEqual(2, lease.BeginCalls);
+        AssertEqual("lease-failure-2", adapter.ExecutionContexts[1]!.LeaseId);
+        AssertEqual("failure-run", adapter.RunResults[0].RunId);
+    }
+
+    private static void GenerationAndLeaseChangesInvalidateReuse()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("mismatch-a", "recipe-a"),
+            ReusableTest("mismatch-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(recipe, 7, context?.LeaseId, workflow,
+                    "run-mismatch-" + index, "operation-mismatch-" + index)
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter
+        {
+            BeginResult = SuccessLease("lease-mismatch", 7)
+        };
+        lease.RenewResults.Enqueue(SuccessLease("lease-mismatch", 9));
+        var fresh = new FakeFreshGenerationAdapter(10);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            freshGenerationAdapter: fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "mismatch",
+                ["mismatch-a", "mismatch-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("invalidated", execution.Reuse!.Status);
+        AssertEqual("RIMTEST_REUSE_LEASE_INVALID", execution.Reuse.ReuseInvalidationReason);
+        AssertEqual(1, fresh.Calls.Count);
+        AssertEqual("infrastructure", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+    }
+
+    private static void ReuseResultIsBoundedAndIdentitiesStayDistinct()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("bounded-a", "recipe-a"),
+            ReusableTest("bounded-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(recipe, 7, context?.LeaseId, workflow,
+                    "bounded-run-" + index, "bounded-operation-" + index)
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            new FakeLeaseAdapter { BeginResult = SuccessLease("lease-bounded", 7) });
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "bounded",
+                ["bounded-a", "bounded-b"],
+                workflowId: "workflow-bounded")
+            .GetAwaiter()
+            .GetResult();
+        string json = CatalogJsonFacade.Serialize(
+            RimTestSuiteResultFactory.FromExecution(execution, 10));
+
+        Assert(RimTestOutputBudgets.Utf8Bytes(json) <= RimTestOutputBudgets.AffectedSuitePassMaxBytes,
+            "Reuse summary exceeded the bounded suite output budget.");
+        Assert(json.Contains("\"reuse\"", StringComparison.Ordinal),
+            "The bounded suite result must expose reuse planning information.");
+        Assert(!json.Contains("bounded-operation", StringComparison.Ordinal),
+            "Suite output must not expose child operation transcripts.");
+        AssertEqual(2, adapter.RunResults.Select(static result => result.RunId)
+            .Distinct(StringComparer.Ordinal).Count());
+        AssertEqual(2, adapter.RunResults.SelectMany(static result => result.Operations)
+            .Select(static operation => operation.OperationId)
+            .Distinct(StringComparer.Ordinal).Count());
+    }
+
+    private static void FreshGenerationAdapterProvesReadinessConservatively()
+    {
+        var recipe = new FakeRecipeAdapter();
+        using JsonDocument definition = JsonDocument.Parse(
+            "{\"id\":\"recipe-a\",\"projects\":[\"fixture\"],\"inputs\":{\"quicktest\":true}}");
+        recipe.ShowDefinitions["recipe-a"] = definition.RootElement.Clone();
+        int calls = 0;
+        var transport = new FakeTransport((request, _) =>
+        {
+            calls++;
+            Assert(request.Arguments.Contains("restart"),
+                "Fresh-generation preparation must use DevBridge restart.");
+            Assert(request.Arguments.Contains("--projects"),
+                "Recipe project intent must be supplied to DevBridge.");
+            Assert(request.Arguments.Contains("quicktest=true"),
+                "Recipe test inputs must be supplied to DevBridge.");
+            Assert(request.EnvironmentVariables is not null &&
+                request.EnvironmentVariables.ContainsKey("DEVBRIDGE_AGENT"),
+                "Lifecycle requests must carry a stable owner identity.");
+            return ProcessResult(calls == 1
+                ? "{\"success\":true,\"exitCode\":0,\"state\":\"READY\",\"generation\":8,\"restartPending\":false}"
+                : "{\"success\":true,\"exitCode\":0,\"state\":\"LOADING\",\"generation\":8,\"restartPending\":true}");
+        });
+        var adapter = new DevBridgeFreshGenerationAdapter(
+            recipe,
+            transport,
+            new DevBridgeAdapterOptions
+            {
+                CommandPath = "DevBridge.cmd",
+                RootPath = "DevBridgeRoot",
+                RunTimeout = TimeSpan.FromSeconds(1)
+            });
+
+        DevBridgeFreshGenerationResult ready = adapter.EnsureFreshGenerationAsync(
+                "recipe-a",
+                7,
+                "workflow-fresh")
+            .GetAwaiter()
+            .GetResult();
+        DevBridgeFreshGenerationResult unready = adapter.EnsureFreshGenerationAsync(
+                "recipe-a",
+                8,
+                "workflow-fresh")
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(ready.IsUsable, "A typed newer READY generation should be usable.");
+        AssertEqual(8, ready.Generation);
+        AssertEqual(1, ready.LaunchesConsumed);
+        AssertEqual("DEVBRIDGE_FRESH_GENERATION_NOT_READY", unready.Status.ErrorCode);
+    }
+
+    private static void LeaseAdapterPreservesOwnerAndGenerationIdentity()
+    {
+        var transport = new FakeTransport((request, _) =>
+        {
+            string operation = request.Arguments.Count > 1
+                ? request.Arguments[1]
+                : string.Empty;
+            string leaseId = operation == "begin"
+                ? "lease-adapter"
+                : request.Arguments.FirstOrDefault(value =>
+                    value.StartsWith("lease-", StringComparison.Ordinal)) ?? "lease-adapter";
+            return ProcessResult(
+                $"progress\n{{\"success\":true,\"exitCode\":0,\"generation\":12,\"leaseId\":\"{leaseId}\"}}");
+        });
+        var adapter = new DevBridgeLeaseAdapter(
+            transport,
+            new DevBridgeAdapterOptions
+            {
+                CommandPath = "DevBridge.cmd",
+                RootPath = "DevBridgeRoot",
+                ShowPlanTimeout = TimeSpan.FromSeconds(1)
+            });
+
+        DevBridgeLeaseResult begin = adapter.BeginLeaseAsync("workflow-lease")
+            .GetAwaiter()
+            .GetResult();
+        DevBridgeLeaseResult renew = adapter.RenewLeaseAsync(
+                "lease-adapter",
+                "workflow-lease")
+            .GetAwaiter()
+            .GetResult();
+        DevBridgeLeaseResult end = adapter.EndLeaseAsync(
+                "lease-adapter",
+                "workflow-lease")
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(begin.IsUsable && renew.IsUsable && end.Status.IsSuccess,
+            "Lifecycle JSON responses should remain usable across lease operations.");
+        AssertEqual("lease-adapter", begin.LeaseId);
+        AssertEqual(12, begin.Generation);
+        AssertEqual(3, transport.Requests.Count);
+        string? owner = transport.Requests[0].EnvironmentVariables!["DEVBRIDGE_AGENT"];
+        Assert(transport.Requests.All(request =>
+                request.EnvironmentVariables!["DEVBRIDGE_AGENT"] == owner),
+            "All workflow lease operations must use one stable DevBridge owner identity.");
+    }
+
     private static void EnvironmentFallbackDrivesAffectedFallback()
     {
         IReadOnlyList<string> runCalls = [];
@@ -2265,6 +3248,7 @@ internal static class Program
                     var adapter = new FakeRecipeAdapter();
                     adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
                     adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+                    var developmentAdapter = new FakeModDevelopmentAdapter();
                     var impactAdapter = new FakeImpactAdapter(new RimContextImpactResult(
                         new RimContextAdapterStatus(
                             RimContextImpactOutcome.Unknown,
@@ -2287,7 +3271,8 @@ internal static class Program
                             stderr,
                             adapter,
                             cancellationToken: default,
-                            impactAdapter: impactAdapter)
+                            impactAdapter: impactAdapter,
+                            developmentAdapter: developmentAdapter)
                         .GetAwaiter()
                         .GetResult();
 
@@ -2323,6 +3308,7 @@ internal static class Program
             var adapter = new FakeRecipeAdapter();
             adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
             adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+            var developmentAdapter = new FakeModDevelopmentAdapter();
             var impactAdapter = new FakeImpactAdapter(new RimContextImpactResult(
                 new RimContextAdapterStatus(
                     RimContextImpactOutcome.Unknown,
@@ -2347,7 +3333,8 @@ internal static class Program
                     stderr,
                     adapter,
                     cancellationToken: default,
-                    impactAdapter: impactAdapter)
+                    impactAdapter: impactAdapter,
+                    developmentAdapter: developmentAdapter)
                 .GetAwaiter()
                 .GetResult();
 
@@ -2380,6 +3367,7 @@ internal static class Program
             var adapter = new FakeRecipeAdapter();
             adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
             adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+            var developmentAdapter = new FakeModDevelopmentAdapter();
             var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
             var git = new FakeGitChangeProvider(
                 new GitChangeDiscoveryResult(true, ["Source/Deleted.cs"])
@@ -2406,7 +3394,8 @@ internal static class Program
                     stderr,
                     adapter,
                     impactAdapter: impactAdapter,
-                    gitChangeProvider: git)
+                    gitChangeProvider: git,
+                    developmentAdapter: developmentAdapter)
                 .GetAwaiter()
                 .GetResult();
 
@@ -3553,6 +4542,7 @@ internal static class Program
             string catalogPath = Path.Combine(directory, "catalog.json");
             File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
             var adapter = new FakeRecipeAdapter();
+            var developmentAdapter = new FakeModDevelopmentAdapter();
             var git = new FakeGitChangeProvider(new GitChangeDiscoveryResult(true, []));
             var stdout = new StringWriter();
             var stderr = new StringWriter();
@@ -3562,7 +4552,8 @@ internal static class Program
                     stdout,
                     stderr,
                     adapter,
-                    gitChangeProvider: git)
+                    gitChangeProvider: git,
+                    developmentAdapter: developmentAdapter)
                 .GetAwaiter()
                 .GetResult();
 
@@ -3572,6 +4563,7 @@ internal static class Program
             AssertEqual("ok", root.GetProperty("status").GetString());
             AssertEqual(0, root.GetProperty("tests").GetArrayLength());
             AssertEqual(0, adapter.RunCalls.Count);
+            AssertEqual(0, developmentAdapter.Calls.Count);
             Assert(string.IsNullOrEmpty(stderr.ToString()),
                 "A clean affected run should not write diagnostics.");
         }
@@ -3579,6 +4571,284 @@ internal static class Program
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    private static void AffectedSourceRunPerformsFreshnessTransaction()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        JsonElement freshness = root.GetProperty("artifactFreshness");
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        AssertEqual(1, root.GetProperty("passed").GetInt32());
+        AssertEqual("deployed", freshness.GetProperty("deploymentDecision").GetString());
+        AssertEqual(
+            new string('b', 64),
+            freshness.GetProperty("builtArtifactSha256").GetString());
+        AssertEqual(
+            new string('b', 64),
+            freshness.GetProperty("deployedArtifactSha256").GetString());
+        Assert(freshness.GetProperty("loadedArtifactFreshnessProven").GetBoolean(),
+            "A deployed source-change pass must carry a freshness proof.");
+        AssertEqual(7, freshness.GetProperty("generation").GetInt32());
+        AssertEqual(1, result.DevelopmentCalls.Count);
+        AssertEqual(1, result.RecipeCalls.Count);
+        Assert(RimTestOutputBudgets.Utf8Bytes(result.Stdout) <=
+            RimTestOutputBudgets.AffectedSuitePassMaxBytes,
+            "Freshness success output must remain bounded.");
+        Assert(!string.IsNullOrWhiteSpace(root.GetProperty("workflowId").GetString()),
+            "Affected runs must create a workflow correlation id.");
+        AssertEqual(
+            root.GetProperty("workflowId").GetString(),
+            result.DevelopmentCalls[0].WorkflowId);
+    }
+
+    private static void AffectedIdenticalArtifactUsesNoDeployProof()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "unchanged"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement freshness = document.RootElement.GetProperty("artifactFreshness");
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", document.RootElement.GetProperty("status").GetString());
+        AssertEqual("unchanged", freshness.GetProperty("deploymentDecision").GetString());
+        AssertEqual(
+            "identical-deployment-hash-plus-owned-generation-state",
+            freshness.GetProperty("proof").GetString());
+        Assert(freshness.GetProperty("loadedArtifactFreshnessProven").GetBoolean(),
+            "An identical artifact fast path still needs owned generation evidence.");
+        AssertEqual(1, result.RecipeCalls.Count);
+    }
+
+    private static void AffectedBuildFailureBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (_, workflowId) => FailedDevelopmentResult(
+                workflowId,
+                "DEVELOPMENT_BUILD_FAILED"));
+
+        AssertArtifactTransactionFailure(result, "DEVELOPMENT_BUILD_FAILED");
+    }
+
+    private static void AffectedDeploymentFailureBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (_, workflowId) => FailedDevelopmentResult(
+                workflowId,
+                "DEVELOPMENT_DEPLOYMENT_FAILED"));
+
+        AssertArtifactTransactionFailure(result, "DEVELOPMENT_DEPLOYMENT_FAILED");
+    }
+
+    private static void AffectedReadinessFailureBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (_, workflowId) => FailedDevelopmentResult(
+                workflowId,
+                "READINESS_TIMEOUT"));
+
+        AssertArtifactTransactionFailure(result, "READINESS_TIMEOUT");
+    }
+
+    private static void AffectedGenerationMismatchBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed"),
+            PassRunWithGeneration("assembler-fixture", 8));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        JsonElement freshness = root.GetProperty("artifactFreshness");
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual("RIMTEST_ARTIFACT_GENERATION_MISMATCH",
+            root.GetProperty("failures")[0].GetProperty("errorCode").GetString());
+        AssertEqual("RIMTEST_ARTIFACT_GENERATION_MISMATCH", freshness.GetProperty("errorCode").GetString());
+        Assert(!freshness.GetProperty("loadedArtifactFreshnessProven").GetBoolean(),
+            "A mismatched generation must invalidate the freshness proof.");
+        AssertEqual(1, result.RecipeCalls.Count);
+    }
+
+    private static void AffectedUnknownFreshnessBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed",
+                loadedArtifactFreshnessProven: false,
+                errorCode: "DEVELOPMENT_ARTIFACT_FRESHNESS_UNKNOWN"));
+
+        AssertArtifactTransactionFailure(
+            result,
+            "DEVELOPMENT_ARTIFACT_FRESHNESS_UNKNOWN");
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        Assert(!document.RootElement.GetProperty("artifactFreshness")
+            .GetProperty("loadedArtifactFreshnessProven")
+            .GetBoolean(),
+            "Unknown owner freshness must remain an explicit failure.");
+    }
+
+    private static void AffectedIncompleteFreshnessMetadataBlocksPass()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) =>
+            {
+                DevBridgeModDevelopmentResult complete = SuccessfulDevelopmentResult(
+                    sourceFingerprint,
+                    workflowId,
+                    "deployed");
+                return complete with
+                {
+                    Freshness = complete.Freshness! with
+                    {
+                        BuiltArtifactSha256 = null
+                    }
+                };
+            });
+
+        AssertArtifactTransactionFailure(result, "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN");
+    }
+
+    private static void AffectedPropagatesTransactionIdentities()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed"),
+            PassRunWithIdentity("assembler-fixture", 7, "op-assembler-1"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        JsonElement freshness = root.GetProperty("artifactFreshness");
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual(
+            root.GetProperty("workflowId").GetString(),
+            freshness.GetProperty("workflowId").GetString());
+        AssertEqual("run-assembler-fixture", freshness.GetProperty("runId").GetString());
+        AssertEqual(
+            "op-assembler-1",
+            freshness.GetProperty("operationIds")[0].GetString());
+        AssertEqual(7, freshness.GetProperty("generation").GetInt32());
+        Assert(!string.IsNullOrWhiteSpace(freshness.GetProperty("transactionId").GetString()),
+            "The DevBridge transaction identity must reach the result.");
+        Assert(!string.IsNullOrWhiteSpace(freshness.GetProperty("leaseId").GetString()),
+            "The DevBridge lease identity must reach the result.");
+    }
+
+    private static void ModDevelopmentAdapterParsesBoundedFreshnessResponse()
+    {
+        const string workflowId = "wf-mod-1";
+        const string sourceFingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        string response = JsonSerializer.Serialize(new
+        {
+            schemaVersion = DevBridgeModDevelopmentSchemas.Current,
+            project = "fixture",
+            success = true,
+            transactionId = "tx-1",
+            workflowId,
+            generation = 7,
+            leaseId = "lease-00000000000000000000000000000001",
+            artifactFreshness = new
+            {
+                sourceFingerprint,
+                builtArtifactSha256 = new string('b', 64),
+                deployedArtifactSha256 = new string('b', 64),
+                deploymentDecision = "deployed",
+                generationBefore = 6,
+                generationAfter = 7,
+                generation = 7,
+                transactionId = "tx-1",
+                workflowId,
+                leaseId = "lease-00000000000000000000000000000001",
+                loadedArtifactFreshnessProven = true,
+                proof = "deployment-hash-plus-new-owned-generation"
+            }
+        });
+        var transport = new FakeTransport((_, _) => ProcessResult(response));
+        var adapter = new DevBridgeModDevelopmentAdapter(
+            transport,
+            new DevBridgeModDevelopmentAdapterOptions
+            {
+                RootPath = "DevBridgeRoot",
+                DescriptorPath = "DevBridgeRoot/fixture.json",
+                DeploymentRoot = "DeploymentRoot",
+                PowerShellPath = "pwsh",
+                Timeout = TimeSpan.FromSeconds(1),
+                MaxStdoutBytes = 4096,
+                MaxStderrBytes = 1024
+            });
+
+        DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                "fixture",
+                "RepositoryRoot",
+                sourceFingerprint,
+                workflowId)
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(result.Status.IsSuccess, "A valid owner response should parse as success.");
+        AssertEqual(7, result.Freshness!.Generation);
+        Assert(result.Freshness.LoadedArtifactFreshnessProven,
+            "The adapter must preserve the owner freshness proof.");
+        AssertEqual(1, transport.Requests.Count);
+        Assert(transport.Requests[0].Arguments.Contains("-SkipRecipe"),
+            "RimTest must ask the owner for the transaction without running its broad recipe.");
+        Assert(transport.Requests[0].Arguments.Contains("-SourceFingerprint") &&
+            transport.Requests[0].Arguments.Contains(sourceFingerprint),
+            "The source identity must cross the owner boundary.");
+        Assert(transport.Requests[0].Arguments.Contains("-WorkflowId") &&
+            transport.Requests[0].Arguments.Contains(workflowId),
+            "The workflow identity must cross the owner boundary.");
+        Assert(
+            transport.Requests[0].Arguments.Count(argument =>
+                string.Equals(argument, "-DevelopmentRoot", StringComparison.Ordinal)) == 1,
+            "The owner must receive exactly one primary development root.");
+        Assert(
+            transport.Requests[0].Arguments.Count(argument =>
+                string.Equals(argument, "-AdditionalDevelopmentRoot", StringComparison.Ordinal)) == 1,
+            "The owner must receive the coordinator root as a distinct additional development root.");
+        string[] requestArguments = transport.Requests[0].Arguments.ToArray();
+        int developmentRootIndex = Array.IndexOf(requestArguments, "-DevelopmentRoot");
+        int additionalRootIndex = Array.IndexOf(requestArguments, "-AdditionalDevelopmentRoot");
+        AssertEqual(
+            Path.GetFullPath("RepositoryRoot"),
+            transport.Requests[0].Arguments[developmentRootIndex + 1]);
+        AssertEqual("DevBridgeRoot", transport.Requests[0].Arguments[additionalRootIndex + 1]);
+        AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
+    }
+
+    private static void AssertArtifactTransactionFailure(
+        AffectedScenarioResult result,
+        string errorCode)
+    {
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual(0, root.GetProperty("passed").GetInt32());
+        AssertEqual(1, root.GetProperty("failed").GetInt32());
+        AssertEqual(
+            errorCode,
+            root.GetProperty("failures")[0].GetProperty("errorCode").GetString());
+        Assert(!root.GetProperty("artifactFreshness")
+            .GetProperty("loadedArtifactFreshnessProven")
+            .GetBoolean(), "A failed transaction cannot prove freshness.");
+        AssertEqual(0, result.RecipeCalls.Count);
     }
 
     private static void ExplicitAffectedPathsTakePrecedence()
@@ -4237,13 +5507,29 @@ internal static class Program
             },
             "fail");
 
+    private static DevBridgeDiagnosticSourceResult AvailableSource(int generation) =>
+        new(
+            new DevBridgeDiagnosticSourceStatus(
+                DevBridgeDiagnosticSourceOutcome.Available),
+            new DevBridgeScopedDiagnosticSource(
+                DevBridgeDiagnosticSchemas.ScopedSource,
+                generation,
+                "[RimWorld] controlled failure\n",
+                System.Text.Encoding.UTF8.GetByteCount("[RimWorld] controlled failure\n"),
+                1,
+                false,
+                Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes("[RimWorld] controlled failure\n")))
+                    .ToLowerInvariant()));
+
     private static DevBridgeRecipeRunResult PassRun(string recipeId) =>
         new(
             recipeId,
             new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
             true,
-            null,
-            null,
+            "run-" + recipeId,
+            7,
             null,
             null,
             null,
@@ -4253,10 +5539,181 @@ internal static class Program
             null,
             []);
 
+    private static DevBridgeRecipeRunResult PassRunWithGeneration(
+        string recipeId,
+        int generation) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            true,
+            "run-" + recipeId,
+            generation,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            []);
+
+    private static DevBridgeRecipeRunResult PassRunWithIdentity(
+        string recipeId,
+        int generation,
+        string operationId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            true,
+            "run-" + recipeId,
+            generation,
+            "lease-00000000000000000000000000000001",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            [new DevBridgeOperationSummary(
+                "rimworld/test",
+                true,
+                null,
+                [],
+                operationId,
+                null,
+                generation,
+                "launch-1")]);
+
+    private static DevBridgeModDevelopmentResult SuccessfulDevelopmentResult(
+        string sourceFingerprint,
+        string? workflowId,
+        string deploymentDecision,
+        int generation = 7,
+        bool loadedArtifactFreshnessProven = true,
+        string? errorCode = null)
+    {
+        int generationBefore = deploymentDecision == "unchanged"
+            ? generation
+            : Math.Max(0, generation - 1);
+        return new DevBridgeModDevelopmentResult(
+            "fixture",
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.Success,
+                errorCode),
+            true,
+            "tx-1",
+            workflowId,
+            generation,
+            "lease-00000000000000000000000000000001",
+            new DevBridgeArtifactFreshness(
+                sourceFingerprint,
+                new string('b', 64),
+                new string('b', 64),
+                deploymentDecision,
+                generationBefore,
+                generation,
+                generation,
+                loadedArtifactFreshnessProven,
+                deploymentDecision == "unchanged"
+                    ? "identical-deployment-hash-plus-owned-generation-state"
+                    : "deployment-hash-plus-new-owned-generation",
+                "tx-1",
+                workflowId,
+                "lease-00000000000000000000000000000001",
+                errorCode));
+    }
+
+    private static DevBridgeModDevelopmentResult FailedDevelopmentResult(
+        string? workflowId,
+        string errorCode) =>
+        new(
+            "fixture",
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                errorCode,
+                "simulated owner failure"),
+            false,
+            "tx-failed",
+            workflowId,
+            null,
+            null,
+            null);
+
+    private static AffectedScenarioResult RunAffectedSourceScenario(
+        Func<string, string?, DevBridgeModDevelopmentResult>? resultFactory = null,
+        DevBridgeRecipeRunResult? recipeRun = null)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            File.WriteAllText(
+                Path.Combine(directory, "Source", "Changed.cs"),
+                "class Changed { int Value = 1; }\n");
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+
+            var recipeAdapter = new FakeRecipeAdapter();
+            recipeAdapter.Runs["assembler-fixture"] =
+                recipeRun ?? PassRun("assembler-fixture");
+            var developmentAdapter = new FakeModDevelopmentAdapter
+            {
+                Factory = resultFactory
+            };
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
+                new RimContextImpact(
+                    "direct",
+                    "def",
+                    "def-assembler",
+                    "CCM_Assembler",
+                    null,
+                    null,
+                    null,
+                    null)));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        [
+                            "affected",
+                            "Source/Changed.cs",
+                            "--run",
+                            "--json",
+                            "--devbridge-project",
+                            "fixture",
+                            "--catalog",
+                            catalogPath
+                        ],
+                        stdout,
+                        stderr,
+                        recipeAdapter,
+                        impactAdapter: impactAdapter,
+                        developmentAdapter: developmentAdapter)
+                    .GetAwaiter()
+                    .GetResult());
+
+            return new AffectedScenarioResult(
+                exitCode,
+                stdout.ToString(),
+                stderr.ToString(),
+                developmentAdapter.Calls.ToArray(),
+                recipeAdapter.RunCalls.ToArray());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static DevBridgeRecipeRunResult FailedRun(
         string recipeId,
         string fingerprint,
-        string errorCode) =>
+        string errorCode,
+        int generation = 1,
+        string? workflowId = null,
+        IReadOnlyList<DevBridgeOperationSummary>? operations = null) =>
         new(
             recipeId,
             new DevBridgeAdapterStatus(
@@ -4264,7 +5721,7 @@ internal static class Program
                 errorCode),
             false,
             "run-" + recipeId,
-            1,
+            generation,
             null,
             null,
             "evidence-" + recipeId,
@@ -4272,7 +5729,8 @@ internal static class Program
             null,
             null,
             null,
-            []);
+            operations ?? [],
+            workflowId);
 
     private static DevBridgeRecipeRunResult InfrastructureRun(
         string recipeId,
@@ -4323,6 +5781,127 @@ internal static class Program
                 [],
                 null,
                 []));
+
+    private static DevBridgeRecipePlanResult SatisfiedPlan(string recipeId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            new DevBridgeRecipePlan(
+                recipeId,
+                true,
+                0,
+                [],
+                "none",
+                []));
+
+    private static CatalogTest ReusableTest(string id, string recipeId) =>
+        new()
+        {
+            Id = id,
+            Recipe = recipeId,
+            Isolation = new CatalogRecipeIsolation
+            {
+                Mode = CatalogRecipeIsolationMode.PureRead,
+                ReuseKey = "fixture-ready"
+            }
+        };
+
+    private static CatalogTest ResettableTest(string id, string recipeId) =>
+        new()
+        {
+            Id = id,
+            Recipe = recipeId,
+            Isolation = new CatalogRecipeIsolation
+            {
+                Mode = CatalogRecipeIsolationMode.FixtureResettable,
+                ReuseKey = "fixture-resettable",
+                ResetRecipe = "fixture-reset"
+            }
+        };
+
+    private static CatalogDocument CreateIsolationCatalog(params CatalogTest[] tests) =>
+        new()
+        {
+            SchemaVersion = CatalogSchema.Current,
+            Tests = tests.ToList(),
+            Suites = []
+        };
+
+    private static DevBridgeLeaseResult SuccessLease(string leaseId, int generation) =>
+        new(
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            leaseId,
+            generation);
+
+    private static DevBridgeResetResult SuccessfulReset(string leaseId, int generation) =>
+        new(
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            generation,
+            leaseId);
+
+    private static DevBridgeRecipeRunResult PassRunWithLease(
+        string recipeId,
+        int generation,
+        string? leaseId,
+        string? workflowId,
+        string runId,
+        string operationId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            true,
+            runId,
+            generation,
+            leaseId,
+            null,
+            null,
+            null,
+            null,
+            false,
+            0,
+            [new DevBridgeOperationSummary(
+                "rimworld/test",
+                true,
+                null,
+                [],
+                operationId,
+                workflowId,
+                generation,
+                "launch-" + runId)],
+            workflowId);
+
+    private static DevBridgeRecipeRunResult FailedRunWithLease(
+        string recipeId,
+        int generation,
+        string? leaseId,
+        string? workflowId,
+        string runId,
+        string operationId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.TestFailure,
+                "RECIPE_ASSERTION_FAILED"),
+            false,
+            runId,
+            generation,
+            leaseId,
+            null,
+            "evidence-" + runId,
+            "failure-" + runId,
+            null,
+            false,
+            0,
+            [new DevBridgeOperationSummary(
+                "rimworld/test",
+                false,
+                "RECIPE_ASSERTION_FAILED",
+                [],
+                operationId,
+                workflowId,
+                generation,
+                "launch-" + runId)],
+            workflowId);
 
     private static CatalogDocument CreateCatalog()
     {
@@ -4572,13 +6151,31 @@ internal static class Program
 
         public List<string> RunCalls { get; } = [];
 
+        public List<DevBridgeRecipeExecutionContext?> ExecutionContexts { get; } = [];
+
+        public List<DevBridgeRecipeRunResult> RunResults { get; } = [];
+
+        public Dictionary<string, JsonElement> ShowDefinitions { get; } =
+            new(StringComparer.Ordinal);
+
+        public Func<
+            string,
+            string?,
+            DevBridgeRecipeExecutionContext?,
+            int,
+            DevBridgeRecipeRunResult>? RunFactory { get; init; }
+
         public Task<DevBridgeRecipeShowResult> ShowAsync(
             string recipeId,
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(new DevBridgeRecipeShowResult(
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new DevBridgeRecipeShowResult(
                 recipeId,
                 new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
-                null));
+                ShowDefinitions.TryGetValue(recipeId, out JsonElement definition)
+                    ? definition.Clone()
+                    : null));
+        }
 
         public Task<DevBridgeRecipePlanResult> PlanAsync(
             string recipeId,
@@ -4595,13 +6192,198 @@ internal static class Program
             string recipeId,
             CancellationToken cancellationToken = default)
         {
+            return RunAsync(recipeId, null, null, cancellationToken);
+        }
+
+        public Task<DevBridgeRecipeRunResult> RunAsync(
+            string recipeId,
+            string? workflowId,
+            DevBridgeRecipeExecutionContext? executionContext,
+            CancellationToken cancellationToken = default)
+        {
             RunCalls.Add(recipeId);
-            return Task.FromResult(
-                Runs.TryGetValue(recipeId, out DevBridgeRecipeRunResult? run)
-                    ? run
-                    : InfrastructureRun(recipeId, "FAKE_RECIPE_NOT_CONFIGURED"));
+            ExecutionContexts.Add(executionContext);
+            int index = RunResults.Count;
+            DevBridgeRecipeRunResult result = RunFactory is not null
+                ? RunFactory(recipeId, workflowId, executionContext, index)
+                : Runs.TryGetValue(recipeId, out DevBridgeRecipeRunResult? configured)
+                    ? configured
+                    : InfrastructureRun(recipeId, "FAKE_RECIPE_NOT_CONFIGURED");
+            RunResults.Add(result);
+            return Task.FromResult(result);
         }
     }
+
+    private sealed class FakeLeaseAdapter : IDevBridgeLeaseAdapter
+    {
+        public Queue<DevBridgeLeaseResult> BeginResults { get; } = [];
+
+        public Queue<DevBridgeLeaseResult> RenewResults { get; } = [];
+
+        public DevBridgeLeaseResult BeginResult { get; init; } = SuccessLease("lease-default", 7);
+
+        public int BeginCalls { get; private set; }
+
+        public int RenewCalls { get; private set; }
+
+        public int EndCalls { get; private set; }
+
+        private int CurrentGeneration { get; set; } = 7;
+
+        public Task<DevBridgeLeaseResult> BeginLeaseAsync(
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            BeginCalls++;
+            DevBridgeLeaseResult result = BeginResults.Count > 0
+                ? BeginResults.Dequeue()
+                : BeginResult;
+            if (result.Generation is > 0)
+            {
+                CurrentGeneration = result.Generation.Value;
+            }
+
+            return Task.FromResult(result);
+        }
+
+        public Task<DevBridgeLeaseResult> RenewLeaseAsync(
+            string leaseId,
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            RenewCalls++;
+            return Task.FromResult(
+                RenewResults.Count > 0
+                    ? RenewResults.Dequeue()
+                    : SuccessLease(leaseId, CurrentGeneration));
+        }
+
+        public Task<DevBridgeLeaseResult> EndLeaseAsync(
+            string leaseId,
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            EndCalls++;
+            return Task.FromResult(SuccessLease(leaseId, CurrentGeneration));
+        }
+    }
+
+    private sealed record ResetCall(
+        string RecipeId,
+        string LeaseId,
+        int Generation,
+        string? WorkflowId);
+
+    private sealed class FakeResetAdapter : IDevBridgeFixtureResetAdapter
+    {
+        public List<ResetCall> Calls { get; } = [];
+
+        public DevBridgeResetResult Result { get; init; } =
+            SuccessfulReset("lease-default", 7);
+
+        public Task<DevBridgeResetResult> ResetAsync(
+            string resetRecipeId,
+            string leaseId,
+            int expectedGeneration,
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add(new ResetCall(resetRecipeId, leaseId, expectedGeneration, workflowId));
+            return Task.FromResult(Result);
+        }
+    }
+
+    private sealed class FakeFreshGenerationAdapter : IDevBridgeFreshGenerationAdapter
+    {
+        private readonly Queue<int> generations;
+
+        public FakeFreshGenerationAdapter(params int[] generations)
+        {
+            this.generations = new Queue<int>(generations);
+        }
+
+        public List<(string RecipeId, int? PreviousGeneration, string? WorkflowId)> Calls { get; } = [];
+
+        public Task<DevBridgeFreshGenerationResult> EnsureFreshGenerationAsync(
+            string recipeId,
+            int? previousGeneration,
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((recipeId, previousGeneration, workflowId));
+            if (generations.Count == 0)
+            {
+                return Task.FromResult(new DevBridgeFreshGenerationResult(
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "FAKE_FRESH_GENERATION_EXHAUSTED"),
+                    null));
+            }
+
+            return Task.FromResult(new DevBridgeFreshGenerationResult(
+                new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+                generations.Dequeue(),
+                1));
+        }
+    }
+
+    private sealed class FakeModDevelopmentAdapter : IDevBridgeModDevelopmentAdapter
+    {
+        public List<(string Project, string SourceFingerprint, string? WorkflowId)> Calls { get; } = [];
+
+        public DevBridgeModDevelopmentResult? Result { get; set; }
+
+        public Func<string, string?, DevBridgeModDevelopmentResult>? Factory { get; set; }
+
+        public Task<DevBridgeModDevelopmentResult> RunAsync(
+            string project,
+            string repositoryRoot,
+            string sourceFingerprint,
+            string? workflowId,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((project, sourceFingerprint, workflowId));
+            if (Factory is not null)
+            {
+                return Task.FromResult(Factory(sourceFingerprint, workflowId));
+            }
+
+            if (Result is not null)
+            {
+                return Task.FromResult(Result);
+            }
+
+            return Task.FromResult(
+                new DevBridgeModDevelopmentResult(
+                    project,
+                    new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+                    true,
+                    "tx-1",
+                    workflowId,
+                    7,
+                    "lease-00000000000000000000000000000001",
+                    new DevBridgeArtifactFreshness(
+                        sourceFingerprint,
+                        new string('a', 64),
+                        new string('a', 64),
+                        "unchanged",
+                        7,
+                        7,
+                        7,
+                        true,
+                        "test-proof",
+                        "tx-1",
+                        workflowId,
+                        "lease-00000000000000000000000000000001")));
+        }
+    }
+
+    private sealed record AffectedScenarioResult(
+        int ExitCode,
+        string Stdout,
+        string Stderr,
+        IReadOnlyList<(string Project, string SourceFingerprint, string? WorkflowId)> DevelopmentCalls,
+        IReadOnlyList<string> RecipeCalls);
 
     private sealed class FakeRimContextProcessTransport : IRimContextProcessTransport
     {
@@ -4702,6 +6484,33 @@ internal static class Program
         {
             Calls++;
             Request = request;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class FakeDiagnosticSourceAdapter : IDevBridgeDiagnosticSourceAdapter
+    {
+        private readonly DevBridgeDiagnosticSourceResult result;
+
+        public FakeDiagnosticSourceAdapter(DevBridgeDiagnosticSourceResult result)
+        {
+            this.result = result;
+        }
+
+        public int Calls { get; private set; }
+
+        public string? TestId { get; private set; }
+
+        public string? RunId { get; private set; }
+
+        public Task<DevBridgeDiagnosticSourceResult> AcquireAsync(
+            string testId,
+            DevBridgeRecipeRunResult run,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            TestId = testId;
+            RunId = run.RunId;
             return Task.FromResult(result);
         }
     }

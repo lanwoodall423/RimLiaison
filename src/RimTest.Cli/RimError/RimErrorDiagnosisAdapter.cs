@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text;
+using System.Security.Cryptography;
 using RimTest.DevBridge;
 
 namespace RimTest.RimError;
@@ -44,11 +46,11 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!options.IsConfigured)
+        if (!options.IsConfigured && request.ScopedSource is null)
         {
             return Unavailable(
                 "RIMERROR_NOT_CONFIGURED",
-                "RimError log or store configuration was not supplied.");
+                "RimError diagnostic configuration was not supplied and no scoped DevBridge source was available.");
         }
 
         if (string.IsNullOrWhiteSpace(request.TestId))
@@ -59,11 +61,36 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
         }
 
         string? integrationPath = null;
+        string? scopedSourcePath = null;
         try
         {
-            if (options.LogPath is not null)
+            string? storePath = options.StorePath;
+            if (request.ScopedSource is not null)
             {
-                if (options.StorePath is null)
+                if (!IsValidScopedSource(request.ScopedSource))
+                {
+                    return Unavailable(
+                        "RIMERROR_SCOPED_SOURCE_INVALID",
+                        "The bounded DevBridge diagnostic source did not match its contract.");
+                }
+
+                storePath ??= DefaultAutomaticStorePath();
+                scopedSourcePath = Path.Combine(
+                    Path.GetTempPath(),
+                    "rimtest-devbridge-diagnostic-" + Guid.NewGuid().ToString("N") + ".log");
+                await File.WriteAllTextAsync(
+                    scopedSourcePath,
+                    request.ScopedSource.Content,
+                    Encoding.UTF8,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            string? ingestPath = request.ScopedSource is not null
+                ? scopedSourcePath
+                : options.LogPath;
+            if (ingestPath is not null)
+            {
+                if (storePath is null)
                 {
                     return Unavailable(
                         "RIMERROR_STORE_NOT_CONFIGURED",
@@ -81,9 +108,9 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
                 DevBridgeProcessResult ingest = await ExecuteAsync(
                     [
                         "ingest",
-                        options.LogPath,
+                        ingestPath,
                         "--store",
-                        options.StorePath,
+                        storePath,
                         "--integration",
                         integrationPath,
                         "--test",
@@ -109,7 +136,7 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
                 }
             }
 
-            if (options.StorePath is null)
+            if (storePath is null)
             {
                 return Unavailable(
                     "RIMERROR_STORE_NOT_CONFIGURED",
@@ -121,7 +148,8 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
                     "latest",
                     "--json",
                     "--store",
-                    options.StorePath
+                    storePath,
+                    .. RunOption(request.RunId)
                 ],
                 options.LatestTimeout,
                 cancellationToken).ConfigureAwait(false);
@@ -142,6 +170,11 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
             if (integrationPath is not null)
             {
                 TryDelete(integrationPath);
+            }
+
+            if (scopedSourcePath is not null)
+            {
+                TryDelete(scopedSourcePath);
             }
         }
     }
@@ -397,6 +430,40 @@ public sealed class RimErrorDiagnosisAdapter : IRimErrorDiagnosisAdapter
                     : null
             },
             IntegrationJsonOptions);
+    }
+
+    private static bool IsValidScopedSource(RimErrorScopedDiagnosticSource source)
+    {
+        if (!string.Equals(
+                source.SchemaVersion,
+                RimErrorSchemas.ScopedDiagnosticSource,
+                StringComparison.Ordinal) ||
+            source.Generation <= 0 ||
+            source.SourceBytes < 0 ||
+            source.SourceBytes > 64 * 1024 ||
+            source.RecordCount < 0 ||
+            source.Content is null ||
+            Encoding.UTF8.GetByteCount(source.Content) != source.SourceBytes ||
+            string.IsNullOrWhiteSpace(source.Sha256) ||
+            source.Sha256.Length != 64 ||
+            !source.Sha256.All(static value =>
+                value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F'))
+        {
+            return false;
+        }
+
+        byte[] expected = Convert.FromHexString(source.Sha256);
+        byte[] actual = SHA256.HashData(Encoding.UTF8.GetBytes(source.Content));
+        return CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+
+    private static string DefaultAutomaticStorePath()
+    {
+        string? configured = Environment.GetEnvironmentVariable("RIMERROR_STATE_PATH");
+        return Path.GetFullPath(
+            string.IsNullOrWhiteSpace(configured)
+                ? Path.Combine(Environment.CurrentDirectory, ".rimerror", "latest.json")
+                : configured);
     }
 
     private static IEnumerable<string> RunOption(string? runId)

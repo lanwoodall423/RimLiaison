@@ -5,6 +5,7 @@ namespace RimTest.RimError;
 public static class RimErrorSchemas
 {
     public const string Integration = "rimerror-integration/v1";
+    public const string ScopedDiagnosticSource = "rimtest-devbridge-diagnostic-source/v1";
 }
 
 public enum RimErrorDiagnosisOutcome
@@ -45,7 +46,18 @@ public sealed record RimErrorDiagnosisRequest(
     string? FailureFingerprint,
     string? FailureCode,
     string? WorkflowId = null,
-    IReadOnlyList<RimErrorOperationCorrelation>? Operations = null);
+    IReadOnlyList<RimErrorOperationCorrelation>? Operations = null,
+    RimErrorScopedDiagnosticSource? ScopedSource = null);
+
+public sealed record RimErrorScopedDiagnosticSource(
+    string SchemaVersion,
+    int Generation,
+    string Content,
+    int SourceBytes,
+    int RecordCount,
+    bool Truncated,
+    string Sha256,
+    string? LaunchId = null);
 
 public sealed record RimErrorOperationCorrelation(
     string? OperationId,

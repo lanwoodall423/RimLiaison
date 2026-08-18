@@ -80,7 +80,9 @@ public static class CliApplication
         IDevBridgeProcessTransport? processTransport = null,
         IGitChangeProvider? gitChangeProvider = null,
         IDevBridgeCapabilityAdapter? capabilityAdapter = null,
-        IDevBridgeUiAdapter? uiAdapter = null)
+        IDevBridgeUiAdapter? uiAdapter = null,
+        IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
+        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter = null)
     {
         long started = Stopwatch.GetTimestamp();
         string? workflowId = null;
@@ -155,11 +157,14 @@ public static class CliApplication
                 stderr,
                 recipeAdapter,
                 diagnosisAdapter,
+                diagnosticSourceAdapter,
                 impactAdapter,
                 gitChangeProvider,
+                processTransport,
                 cancellationToken,
                 started,
-                workflowId).ConfigureAwait(false);
+                workflowId,
+                developmentAdapter).ConfigureAwait(false);
         }
         catch (CliParseException exception)
         {
@@ -305,11 +310,14 @@ public static class CliApplication
         TextWriter stderr,
         IDevBridgeRecipeAdapter? recipeAdapter,
         IRimErrorDiagnosisAdapter? diagnosisAdapter,
+        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter,
         IRimContextImpactAdapter? impactAdapter,
         IGitChangeProvider? gitChangeProvider,
+        IDevBridgeProcessTransport? processTransport,
         CancellationToken cancellationToken,
         long started,
-        string? workflowId)
+        string? workflowId,
+        IDevBridgeModDevelopmentAdapter? developmentAdapter)
     {
         CatalogLoadResult loaded = CatalogLoader.Load(request.CatalogPath);
         if (loaded.Catalog is null)
@@ -404,6 +412,8 @@ public static class CliApplication
                             stdout,
                             recipeAdapter,
                             diagnosisAdapter,
+                            diagnosticSourceAdapter,
+                            processTransport,
                             started,
                             cancellationToken,
                             workflowId: workflowId)
@@ -508,6 +518,11 @@ public static class CliApplication
                     if (request.RunSelected &&
                         selection.Status is "ok" or "conservative")
                     {
+                        ArtifactFreshnessTransactionRequest? freshnessRequest =
+                            CreateArtifactFreshnessRequest(
+                                request,
+                                changedPaths,
+                                workflowId);
                         return await RunSuiteAsync(
                                 loaded.Catalog,
                                 "affected",
@@ -516,12 +531,16 @@ public static class CliApplication
                                 stdout,
                                 recipeAdapter,
                                 diagnosisAdapter,
+                                diagnosticSourceAdapter,
+                                processTransport,
                                 started,
                                 cancellationToken,
                                 selection.Status,
                                 selection.ErrorCode,
                                 selection.FallbackSuite,
-                                workflowId)
+                                workflowId,
+                                developmentAdapter,
+                                freshnessRequest)
                             .ConfigureAwait(false);
                     }
 
@@ -542,8 +561,16 @@ public static class CliApplication
                             workflowId: workflowId);
                     }
 
-                    IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
-                    var executor = CreateTestExecutor(request, adapter, diagnosisAdapter);
+                    IDevBridgeRecipeAdapter adapter = CreateAdapter(
+                        request,
+                        recipeAdapter,
+                        processTransport);
+                    var executor = CreateTestExecutor(
+                        request,
+                        adapter,
+                        diagnosisAdapter,
+                        diagnosticSourceAdapter,
+                        processTransport);
                     CatalogTestExecutionResult execution = await executor.RunAsync(
                             loaded.Catalog,
                             test.Id,
@@ -1161,7 +1188,8 @@ public static class CliApplication
 
     private static IDevBridgeRecipeAdapter CreateAdapter(
         CliRequest request,
-        IDevBridgeRecipeAdapter? recipeAdapter)
+        IDevBridgeRecipeAdapter? recipeAdapter,
+        IDevBridgeProcessTransport? processTransport = null)
     {
         if (recipeAdapter is not null)
         {
@@ -1172,13 +1200,14 @@ public static class CliApplication
             request.DevBridgePath,
             request.DevBridgeRootPath);
         return new DevBridgeRecipeAdapter(
-            new SystemDevBridgeProcessTransport(),
+            processTransport ?? new SystemDevBridgeProcessTransport(),
             options);
     }
 
     private static IRimErrorDiagnosisAdapter CreateRimErrorAdapter(
         CliRequest request,
-        IRimErrorDiagnosisAdapter? diagnosisAdapter)
+        IRimErrorDiagnosisAdapter? diagnosisAdapter,
+        IDevBridgeProcessTransport? processTransport)
     {
         if (diagnosisAdapter is not null)
         {
@@ -1190,7 +1219,7 @@ public static class CliApplication
             request.RimErrorLogPath,
             request.RimErrorStorePath);
         return new RimErrorDiagnosisAdapter(
-            new SystemDevBridgeProcessTransport(),
+            processTransport ?? new SystemDevBridgeProcessTransport(),
             options);
     }
 
@@ -1211,11 +1240,32 @@ public static class CliApplication
     private static CatalogTestExecutionService CreateTestExecutor(
         CliRequest request,
         IDevBridgeRecipeAdapter recipeAdapter,
-        IRimErrorDiagnosisAdapter? diagnosisAdapter)
+        IRimErrorDiagnosisAdapter? diagnosisAdapter,
+        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter,
+        IDevBridgeProcessTransport? processTransport)
     {
+        IDevBridgeDiagnosticSourceAdapter? selectedSource = diagnosticSourceAdapter;
+        if (selectedSource is null && diagnosisAdapter is null)
+        {
+            RimErrorAdapterOptions rimErrorOptions = RimErrorAdapterOptions.Discover(
+                request.RimErrorPath,
+                request.RimErrorLogPath,
+                request.RimErrorStorePath);
+            if (!rimErrorOptions.IsConfigured)
+            {
+                DevBridgeAdapterOptions devBridgeOptions = DevBridgeAdapterOptions.Discover(
+                    request.DevBridgePath,
+                    request.DevBridgeRootPath);
+                selectedSource = new DevBridgeDiagnosticSourceAdapter(
+                    processTransport ?? new SystemDevBridgeProcessTransport(),
+                    devBridgeOptions);
+            }
+        }
+
         return new CatalogTestExecutionService(
             recipeAdapter,
-            () => CreateRimErrorAdapter(request, diagnosisAdapter));
+            () => CreateRimErrorAdapter(request, diagnosisAdapter, processTransport),
+            selectedSource is null ? null : () => selectedSource);
     }
 
     private static async Task<int> RunSuiteAsync(
@@ -1226,33 +1276,244 @@ public static class CliApplication
         TextWriter stdout,
         IDevBridgeRecipeAdapter? recipeAdapter,
         IRimErrorDiagnosisAdapter? diagnosisAdapter,
+        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter,
+        IDevBridgeProcessTransport? processTransport,
         long started,
         CancellationToken cancellationToken,
         string? selectionStatus = null,
         string? selectionErrorCode = null,
         string? fallbackSuite = null,
-        string? workflowId = null)
+        string? workflowId = null,
+        IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
+        ArtifactFreshnessTransactionRequest? freshnessRequest = null)
     {
-        IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
-        var executor = CreateTestExecutor(request, adapter, diagnosisAdapter);
-        var runner = new CatalogSuiteRunner(adapter, executor);
-        CatalogSuiteExecutionResult execution = await runner.RunAsync(
-                catalog,
-                suiteId,
-                testIds,
-                cancellationToken,
-                workflowId)
-            .ConfigureAwait(false);
+        bool ownsRecipeAdapter = recipeAdapter is null;
+        DevBridgeAdapterOptions? bridgeOptions = ownsRecipeAdapter
+            ? DevBridgeAdapterOptions.Discover(
+                request.DevBridgePath,
+                request.DevBridgeRootPath)
+            : null;
+        IDevBridgeProcessTransport? bridgeTransport = ownsRecipeAdapter
+            ? processTransport ?? new SystemDevBridgeProcessTransport()
+            : null;
+        IDevBridgeRecipeAdapter adapter = CreateAdapter(
+            request,
+            recipeAdapter,
+            bridgeTransport);
+        var executor = CreateTestExecutor(
+            request,
+            adapter,
+            diagnosisAdapter,
+            diagnosticSourceAdapter,
+            processTransport);
+        IDevBridgeLeaseAdapter? leaseAdapter = ownsRecipeAdapter &&
+            bridgeOptions is not null && bridgeTransport is not null
+            ? new DevBridgeLeaseAdapter(bridgeTransport, bridgeOptions)
+            : null;
+        IDevBridgeFixtureResetAdapter? resetAdapter = adapter as IDevBridgeFixtureResetAdapter;
+        IDevBridgeFreshGenerationAdapter? freshGenerationAdapter = ownsRecipeAdapter &&
+            bridgeOptions is not null && bridgeTransport is not null
+            ? new DevBridgeFreshGenerationAdapter(adapter, bridgeTransport, bridgeOptions)
+            : null;
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            executor,
+            leaseAdapter,
+            resetAdapter,
+            freshGenerationAdapter);
+        ArtifactFreshnessTransactionResult? freshnessTransaction = null;
+        CatalogSuiteExecutionResult execution;
+        if (freshnessRequest is not null)
+        {
+            IDevBridgeModDevelopmentAdapter owner = developmentAdapter ??
+                CreateDevelopmentAdapter(request);
+            freshnessTransaction = await new ArtifactFreshnessTransaction(owner)
+                    .PrepareAsync(freshnessRequest, cancellationToken)
+                .ConfigureAwait(false);
+            execution = freshnessTransaction.Success
+                ? await runner.RunAsync(
+                        catalog,
+                        suiteId,
+                        testIds,
+                        cancellationToken,
+                        workflowId)
+                    .ConfigureAwait(false)
+                : ArtifactFailureExecution(
+                    suiteId,
+                    testIds,
+                    freshnessTransaction.Status,
+                    workflowId);
+        }
+        else
+        {
+            execution = await runner.RunAsync(
+                    catalog,
+                    suiteId,
+                    testIds,
+                    cancellationToken,
+                    workflowId)
+                .ConfigureAwait(false);
+        }
+
+        RimTestArtifactFreshness? artifactFreshness = freshnessTransaction?.Freshness;
+        if (freshnessTransaction?.Success == true &&
+            artifactFreshness is not null)
+        {
+            (execution, artifactFreshness) = EnforceArtifactGeneration(
+                execution,
+                artifactFreshness,
+                workflowId);
+        }
+
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
             execution,
             ElapsedMilliseconds(started),
             selectionStatus,
             selectionErrorCode,
             fallbackSuite,
-            workflowId);
+            workflowId,
+            artifactFreshness);
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
     }
+
+    private static ArtifactFreshnessTransactionRequest? CreateArtifactFreshnessRequest(
+        CliRequest request,
+        IReadOnlyList<string> changedPaths,
+        string? workflowId)
+    {
+        if (!SourceChangeClassifier.IsBuildRelevant(changedPaths))
+        {
+            return null;
+        }
+
+        string sourceFingerprint = string.Empty;
+        WorktreeFingerprint.TryCompute(
+            AffectedGitRoot(request),
+            changedPaths,
+            out sourceFingerprint,
+            out _);
+        return new ArtifactFreshnessTransactionRequest(
+            request.DevBridgeProject ?? string.Empty,
+            AffectedGitRoot(request),
+            changedPaths,
+            sourceFingerprint,
+            workflowId);
+    }
+
+    private static IDevBridgeModDevelopmentAdapter CreateDevelopmentAdapter(
+        CliRequest request)
+    {
+        DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
+            request.DevBridgePath,
+            request.DevBridgeRootPath);
+        return new DevBridgeModDevelopmentAdapter(
+            new SystemDevBridgeProcessTransport(),
+            DevBridgeModDevelopmentAdapterOptions.Discover(bridgeOptions.RootPath));
+    }
+
+    private static CatalogSuiteExecutionResult ArtifactFailureExecution(
+        string suiteId,
+        IReadOnlyList<string> testIds,
+        DevBridgeAdapterStatus status,
+        string? workflowId)
+    {
+        string[] ordered = testIds
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static id => id, StringComparer.Ordinal)
+            .ToArray();
+        if (status.Outcome == DevBridgeOutcomeKind.Cancelled)
+        {
+            return new CatalogSuiteExecutionResult(
+                suiteId,
+                ordered.Length == 0
+                    ? []
+                    : [RimTestResultFactory.Cancelled(ordered[0], workflowId: workflowId)],
+                Math.Max(0, ordered.Length - 1),
+                Cancelled: true);
+        }
+
+        string errorCode = status.ErrorCode ?? "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN";
+        return new CatalogSuiteExecutionResult(
+            suiteId,
+            ordered
+                .Select(testId => RimTestResultFactory.ArtifactFreshnessFailure(
+                    testId,
+                    errorCode,
+                    workflowId))
+                .ToArray(),
+            0,
+            Cancelled: false);
+    }
+
+    private static (
+        CatalogSuiteExecutionResult Execution,
+        RimTestArtifactFreshness Freshness) EnforceArtifactGeneration(
+        CatalogSuiteExecutionResult execution,
+        RimTestArtifactFreshness freshness,
+        string? workflowId)
+    {
+        if (!freshness.Generation.HasValue)
+        {
+            string[] ids = execution.Tests
+                .Where(static test => test.Status == "pass")
+                .Select(static test => test.Test)
+                .ToArray();
+            return (
+                ReplacePassingTestsWithFreshnessFailures(
+                    execution,
+                    ids,
+                    "RIMTEST_ARTIFACT_GENERATION_UNKNOWN",
+                    workflowId),
+                freshness with
+                {
+                    LoadedArtifactFreshnessProven = false,
+                    ErrorCode = "RIMTEST_ARTIFACT_GENERATION_UNKNOWN"
+                });
+        }
+
+        string[] mismatched = execution.Tests
+            .Where(test => test.Status == "pass" &&
+                (!test.Generation.HasValue ||
+                 test.Generation.Value != freshness.Generation.Value))
+            .Select(static test => test.Test)
+            .ToArray();
+        if (mismatched.Length == 0)
+        {
+            return (execution, freshness);
+        }
+
+        return (
+            ReplacePassingTestsWithFreshnessFailures(
+                execution,
+                mismatched,
+                "RIMTEST_ARTIFACT_GENERATION_MISMATCH",
+                workflowId),
+            freshness with
+            {
+                LoadedArtifactFreshnessProven = false,
+                ErrorCode = "RIMTEST_ARTIFACT_GENERATION_MISMATCH"
+            });
+    }
+
+    private static CatalogSuiteExecutionResult ReplacePassingTestsWithFreshnessFailures(
+        CatalogSuiteExecutionResult execution,
+        IReadOnlyCollection<string> testIds,
+        string errorCode,
+        string? workflowId) =>
+        new(
+            execution.SuiteId,
+            execution.Tests
+                .Select(test => test.Status == "pass" && testIds.Contains(test.Test)
+                    ? RimTestResultFactory.ArtifactFreshnessFailure(
+                        test.Test,
+                        errorCode,
+                        workflowId)
+                    : test)
+                .ToArray(),
+            execution.Skipped,
+            execution.Cancelled);
 
     private static int SelectionExitCode(RimTestSelectionResult selection)
     {

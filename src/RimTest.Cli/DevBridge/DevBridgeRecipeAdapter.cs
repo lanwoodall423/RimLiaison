@@ -21,9 +21,18 @@ public interface IDevBridgeRecipeAdapter
         string? workflowId,
         CancellationToken cancellationToken = default) =>
         RunAsync(recipeId, cancellationToken);
+
+    Task<DevBridgeRecipeRunResult> RunAsync(
+        string recipeId,
+        string? workflowId,
+        DevBridgeRecipeExecutionContext? executionContext,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(recipeId, workflowId, cancellationToken);
 }
 
-public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
+public sealed class DevBridgeRecipeAdapter :
+    IDevBridgeRecipeAdapter,
+    IDevBridgeFixtureResetAdapter
 {
     private readonly IDevBridgeProcessTransport transport;
     private readonly DevBridgeAdapterOptions options;
@@ -166,9 +175,24 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
         string? workflowId,
         CancellationToken cancellationToken = default)
     {
+        return await RunAsync(
+                recipeId,
+                workflowId,
+                executionContext: null,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeRecipeRunResult> RunAsync(
+        string recipeId,
+        string? workflowId,
+        DevBridgeRecipeExecutionContext? executionContext,
+        CancellationToken cancellationToken = default)
+    {
         DevBridgeProcessResult process = await InvokeRecipeRunAsync(
             recipeId,
             workflowId,
+            executionContext,
             cancellationToken).ConfigureAwait(false);
         using ParsedEnvelope? envelope = ParseEnvelope(
             process,
@@ -278,7 +302,9 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
         string recipeId,
         TimeSpan timeout,
         CancellationToken cancellationToken,
-        string? workflowId = null)
+        string? workflowId = null,
+        string? leaseId = null,
+        string? environmentWorkflowId = null)
     {
         if (string.IsNullOrWhiteSpace(recipeId))
         {
@@ -304,6 +330,11 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             arguments.Add("--workflow-id");
             arguments.Add(workflowId);
         }
+        if (!string.IsNullOrWhiteSpace(leaseId))
+        {
+            arguments.Add("--lease");
+            arguments.Add(leaseId);
+        }
 
         var request = new DevBridgeProcessRequest(
             options.CommandPath,
@@ -311,7 +342,8 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             arguments,
             timeout,
             options.MaxStdoutBytes,
-            options.MaxStderrBytes);
+            options.MaxStderrBytes,
+            DevBridgeProcessEnvironment.ForWorkflow(environmentWorkflowId ?? workflowId));
 
         try
         {
@@ -339,6 +371,7 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
     private async Task<DevBridgeProcessResult> InvokeRecipeRunAsync(
         string recipeId,
         string? workflowId,
+        DevBridgeRecipeExecutionContext? executionContext,
         CancellationToken cancellationToken)
     {
         DevBridgeProcessResult process = await InvokeAsync(
@@ -346,7 +379,8 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             recipeId,
             options.RunTimeout,
             cancellationToken,
-            workflowId).ConfigureAwait(false);
+            workflowId,
+            executionContext?.LeaseId).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(workflowId) ||
             !IsWorkflowOptionRejected(process))
         {
@@ -360,7 +394,64 @@ public sealed class DevBridgeRecipeAdapter : IDevBridgeRecipeAdapter
             "run",
             recipeId,
             options.RunTimeout,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            leaseId: executionContext?.LeaseId,
+            environmentWorkflowId: workflowId).ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeResetResult> ResetAsync(
+        string resetRecipeId,
+        string leaseId,
+        int expectedGeneration,
+        string? workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(resetRecipeId) ||
+            string.IsNullOrWhiteSpace(leaseId) || expectedGeneration <= 0)
+        {
+            return new DevBridgeResetResult(
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.InfrastructureFailure,
+                    "RIMTEST_RESET_REQUEST_INVALID"),
+                null,
+                leaseId);
+        }
+
+        DevBridgeRecipeRunResult result = await RunAsync(
+                resetRecipeId,
+                workflowId,
+                new DevBridgeRecipeExecutionContext(leaseId),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (result.Status.Outcome != DevBridgeOutcomeKind.Success ||
+            result.Passed != true ||
+            result.Generation != expectedGeneration ||
+            !string.Equals(result.LeaseId, leaseId, StringComparison.Ordinal) ||
+            result.RestartRequired == true ||
+            (result.LaunchesConsumed ?? 0) != 0)
+        {
+            return new DevBridgeResetResult(
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.InfrastructureFailure,
+                    result.Status.ErrorCode ?? "DEVBRIDGE_RESET_NOT_VERIFIED",
+                    "The deterministic reset recipe did not prove same-generation reset success.",
+                    result.Status.ProcessExitCode,
+                    result.Status.Stderr,
+                    result.Status.ResponseSchema),
+                result.Generation,
+                result.LeaseId ?? leaseId);
+        }
+
+        return new DevBridgeResetResult(
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.Success,
+                null,
+                null,
+                result.Status.ProcessExitCode,
+                result.Status.Stderr,
+                result.Status.ResponseSchema),
+            result.Generation,
+            result.LeaseId);
     }
 
     private static bool IsWorkflowOptionRejected(DevBridgeProcessResult process)

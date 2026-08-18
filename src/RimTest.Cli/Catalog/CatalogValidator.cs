@@ -8,6 +8,8 @@ public static class CatalogValidator
     private const int MaxTagLength = 64;
     private const int MaxCoverageKindLength = 64;
     private const int MaxCoverageNameLength = 256;
+    private const int MaxReuseKeyLength = 128;
+    private const int MaxResetRecipeLength = 128;
 
     public static CatalogValidationResult Validate(
         CatalogDocument catalog,
@@ -80,6 +82,7 @@ public static class CatalogValidator
             ValidateDescription(test.Description, $"{path}.description", errors);
             ValidateTags(test.Tags, $"{path}.tags", errors);
             ValidateCoverage(test.Covers, $"{path}.covers", errors);
+            ValidateIsolation(test.Isolation, $"{path}.isolation", errors);
 
             if (knownRecipeIds is not null &&
                 !string.IsNullOrWhiteSpace(recipe) &&
@@ -337,6 +340,69 @@ public static class CatalogValidator
                     $"Coverage {kind}:{name} is duplicated.",
                     coverPath));
             }
+        }
+    }
+
+    private static void ValidateIsolation(
+        CatalogRecipeIsolation? isolation,
+        string path,
+        ICollection<CatalogIssue> errors)
+    {
+        if (isolation is null)
+        {
+            return;
+        }
+
+        string? reuseKey = isolation.ReuseKey;
+        if (reuseKey is not null &&
+            (string.IsNullOrWhiteSpace(reuseKey) || reuseKey.Length > MaxReuseKeyLength))
+        {
+            errors.Add(new CatalogIssue(
+                "ISOLATION_REUSE_KEY_INVALID",
+                $"Isolation reuseKey must be non-empty and at most {MaxReuseKeyLength} characters.",
+                $"{path}.reuseKey"));
+        }
+
+        string? resetRecipe = isolation.ResetRecipe;
+        if (resetRecipe is not null &&
+            (string.IsNullOrWhiteSpace(resetRecipe) || resetRecipe.Length > MaxResetRecipeLength))
+        {
+            errors.Add(new CatalogIssue(
+                "ISOLATION_RESET_RECIPE_INVALID",
+                $"Isolation resetRecipe must be non-empty and at most {MaxResetRecipeLength} characters.",
+                $"{path}.resetRecipe"));
+        }
+
+        if (isolation.Mode == CatalogRecipeIsolationMode.Unknown)
+        {
+            return;
+        }
+
+        if (CatalogRecipeIsolationPolicy.CanShareGeneration(isolation) &&
+            string.IsNullOrWhiteSpace(reuseKey))
+        {
+            errors.Add(new CatalogIssue(
+                "ISOLATION_REUSE_KEY_REQUIRED",
+                "Reusable recipes must declare a non-empty isolation reuseKey.",
+                $"{path}.reuseKey"));
+        }
+
+        if (CatalogRecipeIsolationPolicy.RequiresResetBetweenRecipes(isolation) &&
+            string.IsNullOrWhiteSpace(resetRecipe))
+        {
+            errors.Add(new CatalogIssue(
+                "ISOLATION_RESET_RECIPE_REQUIRED",
+                "fixture-resettable recipes must declare a deterministic resetRecipe.",
+                $"{path}.resetRecipe"));
+        }
+
+        if (!CatalogRecipeIsolationPolicy.RequiresResetBetweenRecipes(isolation) &&
+            !string.IsNullOrWhiteSpace(resetRecipe))
+        {
+            errors.Add(new CatalogIssue(
+                "ISOLATION_RESET_RECIPE_UNEXPECTED",
+                "resetRecipe is only valid for fixture-resettable recipes.",
+                $"{path}.resetRecipe"));
         }
     }
 

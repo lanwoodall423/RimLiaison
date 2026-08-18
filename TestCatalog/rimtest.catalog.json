@@ -5,6 +5,10 @@
       "id": "mod-development-smoke",
       "recipe": "mod-development-smoke",
       "cost": "medium",
+      "isolation": {
+        "mode": "pureRead",
+        "reuseKey": "quicktest-ready"
+      },
       "tags": ["smoke", "devbridge", "csharp"],
       "covers": [
         {"kind": "csharp_member", "name": "RimTest.CliParseException..ctor"},
@@ -39,6 +43,10 @@
       "id": "quicktest-smoke",
       "recipe": "quicktest-smoke",
       "cost": "low",
+      "isolation": {
+        "mode": "pureRead",
+        "reuseKey": "quicktest-ready"
+      },
       "tags": ["smoke", "quicktest"]
     }
   ],

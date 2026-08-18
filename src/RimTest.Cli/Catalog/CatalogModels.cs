@@ -16,6 +16,30 @@ public enum CatalogCost
     High
 }
 
+public enum CatalogRecipeIsolationMode
+{
+    Unknown,
+    PureRead,
+    SameGenerationSafe,
+    FixtureResettable,
+    FreshGameRequired,
+    FreshGenerationRequired
+}
+
+public sealed class CatalogRecipeIsolation
+{
+    [JsonPropertyName("mode")]
+    public CatalogRecipeIsolationMode Mode { get; init; } = CatalogRecipeIsolationMode.Unknown;
+
+    [JsonPropertyName("reuseKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReuseKey { get; init; }
+
+    [JsonPropertyName("resetRecipe")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ResetRecipe { get; init; }
+}
+
 public sealed class CatalogDocument
 {
     [JsonPropertyName("schemaVersion")]
@@ -50,6 +74,10 @@ public sealed class CatalogTest
 
     [JsonPropertyName("cost")]
     public CatalogCost Cost { get; init; } = CatalogCost.Unknown;
+
+    [JsonPropertyName("isolation")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CatalogRecipeIsolation? Isolation { get; init; }
 }
 
 public sealed class CatalogCoverage

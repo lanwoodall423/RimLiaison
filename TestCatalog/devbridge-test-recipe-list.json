@@ -3,7 +3,7 @@
   "recipes": [
     {
       "id": "mod-development-smoke",
-      "description": "Confirm the declared development project is loaded and the quicktest map is ready."
+      "description": "Confirm the declared development project and Quicktest map are ready; this recipe alone is not proof that current source was built and loaded."
     },
     {
       "id": "quicktest-smoke",

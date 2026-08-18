@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "rimtest-cross-stack-compatibility/v1",
+  "repositories": {
+    "rimTest": {
+      "repository": "lanwoodall423/RimTest",
+      "revisionPolicy": "workflow-sha"
+    },
+    "rimContext": {
+      "repository": "lanwoodall423/RimContext",
+      "revision": "53e7628d5efe0548bba190523d84920127c4f6ae"
+    },
+    "devBridge2": {
+      "repository": "lanwoodall423/DevBridge2",
+      "revision": "3643c7159e918e9932ee306a9f337308f02cd6fe"
+    },
+    "rimError": {
+      "repository": "lanwoodall423/RimError",
+      "revision": "650d597be7503ae70eecdeffd3956eced5fd4f8c"
+    }
+  },
+  "contracts": {
+    "rimContextAffected": {
+      "schemaVersion": "rimctx/v1",
+      "required": ["status", "command", "data", "meta"]
+    },
+    "devBridgeModDevelopment": {
+      "schemaVersion": "devbridge-mod-development/v1",
+      "required": [
+        "success",
+        "project",
+        "transactionId",
+        "workflowId",
+        "artifactFreshness.sourceFingerprint",
+        "artifactFreshness.builtArtifactSha256",
+        "artifactFreshness.deployedArtifactSha256",
+        "artifactFreshness.deploymentDecision",
+        "artifactFreshness.generation",
+        "artifactFreshness.loadedArtifactFreshnessProven"
+      ]
+    },
+    "devBridgeRecipeRun": {
+      "schemaVersion": "devbridge-test-recipe-run/v1",
+      "required": [
+        "success",
+        "recipe",
+        "runId",
+        "workflowId",
+        "generation",
+        "leaseId",
+        "operations"
+      ]
+    },
+    "devBridgeCapabilities": {
+      "schemaVersion": "rimbridge-tools/v1",
+      "required": ["success", "result.tools"]
+    },
+    "devBridgeLogsQuery": {
+      "schemaVersion": "devbridge-logs-query/v1",
+      "required": ["contract", "success", "generation", "available", "truncated", "records"]
+    },
+    "rimErrorIntegration": {
+      "schemaVersion": "rimerror-integration/v1",
+      "required": ["devBridge.schemaVersion", "devBridge.workflowId", "devBridge.runId", "devBridge.generation", "rimBridge.operations"]
+    },
+    "rimTestSuite": {
+      "schemaVersion": "rimtest-suite-result/v1",
+      "required": ["status", "suite", "passed", "failed", "artifactFreshness.loadedArtifactFreshnessProven"]
+    },
+    "rimTestCapabilities": {
+      "schemaVersion": "rimtest-capabilities/v1",
+      "required": ["status", "count", "capabilities"]
+    }
+  },
+  "limits": {
+    "maxResultBytes": 8192,
+    "maxDiagnosticBytes": 8192,
+    "maxIntegrationBytes": 8192
+  },
+  "update": "Change only the external revision fields in a deliberate compatibility update, run scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
+  "scope": {
+    "offline": "This gate proves the no-RimWorld composition and wire contracts using a deterministic DevBridge-compatible fake host.",
+    "live": "Real RimWorld/RimBridgeServer compatibility remains covered only by DevBridge2/scripts/live-stack-smoke.ps1 on the configured self-hosted runner."
+  }
+}

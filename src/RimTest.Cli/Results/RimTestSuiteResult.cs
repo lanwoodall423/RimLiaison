@@ -23,6 +23,14 @@ public sealed class RimTestSuiteResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? WorkflowId { get; init; }
 
+    [JsonPropertyName("artifactFreshness")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimTestArtifactFreshness? ArtifactFreshness { get; init; }
+
+    [JsonPropertyName("reuse")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CatalogSuiteReuseSummary? Reuse { get; init; }
+
     [JsonPropertyName("passed")]
     public int Passed { get; init; }
 
@@ -95,7 +103,8 @@ public static class RimTestSuiteResultFactory
         string? selectionStatus = null,
         string? selectionErrorCode = null,
         string? fallbackSuite = null,
-        string? workflowId = null)
+        string? workflowId = null,
+        RimTestArtifactFreshness? artifactFreshness = null)
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
@@ -116,6 +125,8 @@ public static class RimTestSuiteResultFactory
                     ? "infrastructure"
                     : failed > 0
                         ? "fail"
+                        : execution.Reuse?.Status == "invalidated"
+                            ? "infrastructure"
                         : "pass";
 
         RimTestSuiteFailure[] failures = children
@@ -132,6 +143,25 @@ public static class RimTestSuiteResultFactory
             })
             .ToArray();
 
+        RimTestArtifactFreshness? projectedFreshness = artifactFreshness;
+        if (projectedFreshness is not null)
+        {
+            string? runId = children
+                .Select(static child => child.RunId)
+                .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+            string[] operationIds = children
+                .SelectMany(static child => child.OperationIds ?? [])
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .Take(8)
+                .ToArray();
+            projectedFreshness = projectedFreshness with
+            {
+                RunId = runId,
+                OperationIds = operationIds.Length == 0 ? null : operationIds
+            };
+        }
+
         return new RimTestSuiteResult
         {
             Status = status,
@@ -142,6 +172,8 @@ public static class RimTestSuiteResultFactory
             Passed = passed,
             Failed = failed,
             DurationMs = Math.Max(0, durationMs),
+            ArtifactFreshness = projectedFreshness,
+            Reuse = execution.Reuse,
             Failures = failures.Length == 0 ? null : failures,
             Skipped = execution.Skipped > 0 ? execution.Skipped : null,
             Cancelled = cancelled > 0 ? cancelled : null,
