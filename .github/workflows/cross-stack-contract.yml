@@ -2,6 +2,8 @@ name: Cross-stack contract gate
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -97,6 +99,8 @@ jobs:
         run: |
           dotnet restore .\Source\Coordinator\DevBridge.Coordinator.csproj --locked-mode --nologo
           if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator restore failed.' }
+          dotnet restore .\Source\FakeRimWorld\FakeRimWorld.csproj --locked-mode --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 fake process host restore failed.' }
           dotnet build .\Source\Coordinator\DevBridge.Coordinator.csproj --configuration Release --no-restore --nologo
           if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator build failed.' }
           dotnet build .\Source\FakeRimWorld\FakeRimWorld.csproj --configuration Release --no-restore --nologo
