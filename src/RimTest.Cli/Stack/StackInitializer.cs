@@ -1,3 +1,5 @@
+using RimTest.Catalog;
+
 namespace RimTest.Stack;
 
 internal sealed record StackInitResult(
@@ -16,6 +18,7 @@ internal static class StackInitializer
         bool conflict = false;
 
         string rimDevPath = Path.Combine(root, ".rimdev");
+        string manifestPath = Path.Combine(rimDevPath, "stack.json");
         if (File.Exists(rimDevPath))
         {
             files.Add(FileStatus(ManifestRelativePath, "conflicting"));
@@ -23,17 +26,29 @@ internal static class StackInitializer
         }
         else
         {
-            Directory.CreateDirectory(rimDevPath);
-            string manifestPath = Path.Combine(rimDevPath, "stack.json");
-            string status = WriteManifest(request, manifestPath, root);
+            string status;
+            try
+            {
+                Directory.CreateDirectory(rimDevPath);
+                status = WriteManifest(request, manifestPath, root);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                NotSupportedException)
+            {
+                status = "conflicting";
+            }
+
             files.Add(FileStatus(ManifestRelativePath, status));
             conflict |= status == "conflicting";
         }
 
-        string agentsPath = Path.Combine(root, "AGENTS.md");
-        string agentsStatus = WriteAgents(agentsPath, request.InitForce);
-        files.Add(FileStatus(AgentsRelativePath, agentsStatus));
-        conflict |= agentsStatus == "conflicting";
+        if (!request.InitManifestOnly)
+        {
+            string agentsPath = Path.Combine(root, "AGENTS.md");
+            string agentsStatus = WriteAgents(agentsPath, request.InitForce);
+            files.Add(FileStatus(AgentsRelativePath, agentsStatus));
+            conflict |= agentsStatus == "conflicting";
+        }
 
         var output = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -43,6 +58,14 @@ internal static class StackInitializer
         if (!conflict)
         {
             output["nextAction"] = "rimtest doctor --json";
+        }
+        else
+        {
+            output["errorCode"] = request.StackManifest.ErrorCode ?? "STACK_INIT_CONFLICT";
+            output["nextAction"] = request.StackManifest.Manifest is null &&
+                request.StackManifest.Found
+                ? "rimtest init --json --manifest-only --force"
+                : "rimtest doctor --json";
         }
 
         return new(
@@ -55,18 +78,27 @@ internal static class StackInitializer
         string path,
         string root)
     {
-        if (File.Exists(path) && !request.InitForce)
+        bool exists = File.Exists(path);
+        if (exists && !request.InitForce && request.StackManifest.Manifest is null)
         {
-            return request.StackManifest.ErrorCode is null ? "existing" : "conflicting";
+            return "conflicting";
         }
 
         try
         {
             RimDevStackManifest manifest = BuildManifest(request, root);
-            WriteText(path, StackManifestResolver.Serialize(manifest), request.InitForce);
-            return request.InitForce && request.StackManifest.ManifestPath is not null
-                ? "updated"
-                : "created";
+            if (exists && !request.InitForce &&
+                request.StackManifest.Manifest is not null &&
+                ManifestEquals(request.StackManifest.Manifest, manifest))
+            {
+                return "existing";
+            }
+
+            WriteText(
+                path,
+                StackManifestResolver.Serialize(manifest),
+                exists || request.InitForce);
+            return exists ? "updated" : "created";
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
@@ -74,7 +106,7 @@ internal static class StackInitializer
         }
         catch (IOException)
         {
-            return File.Exists(path) ? "existing" : "conflicting";
+            return "conflicting";
         }
         catch (UnauthorizedAccessException)
         {
@@ -107,25 +139,106 @@ internal static class StackInitializer
     private static RimDevStackManifest BuildManifest(CliRequest request, string root)
     {
         RimDevStackManifest? existing = request.StackManifest.Manifest;
+        bool mergeExisting = existing is not null && !request.InitForce;
         string catalog = existing?.Catalog ?? "TestCatalog/rimtest.catalog.json";
-        if (request.CatalogExplicit)
+        if (!mergeExisting && request.CatalogExplicit)
         {
             catalog = RelativeCatalogPath(request.CatalogPath, root);
         }
 
+        string? devBridgeProject = mergeExisting
+            ? existing!.DevBridgeProject ?? request.DevBridgeProject
+            : request.DevBridgeProjectExplicit
+                ? request.DevBridgeProject
+                : existing?.DevBridgeProject ?? request.DevBridgeProject;
+        string? fallbackSuite = mergeExisting
+            ? existing!.FallbackSuite ?? request.FallbackSuite
+            : request.FallbackSuiteExplicit
+                ? request.FallbackSuite
+                : existing?.FallbackSuite ?? request.FallbackSuite;
+        CatalogDocument? existingCatalog = null;
+        if (mergeExisting && !string.IsNullOrWhiteSpace(existing!.FallbackSuite))
+        {
+            existingCatalog = LoadValidCatalog(Path.Combine(root, catalog));
+        }
+
+        if (mergeExisting &&
+            !string.IsNullOrWhiteSpace(existing!.FallbackSuite) &&
+            existingCatalog is not null &&
+            !IsUsableFallbackSuite(existingCatalog, existing.FallbackSuite))
+        {
+            string? replacement = request.FallbackSuiteExplicit ||
+                !string.Equals(request.FallbackSuite, existing.FallbackSuite, StringComparison.Ordinal)
+                ? request.FallbackSuite
+                : DiscoverFallbackSuite(Path.Combine(root, catalog));
+            fallbackSuite = replacement ?? existing.FallbackSuite;
+        }
+
+        fallbackSuite ??= DiscoverFallbackSuite(Path.Combine(root, catalog));
+
         return new RimDevStackManifest
         {
             Project = existing?.Project ?? ProjectName(root),
-            DevBridgeProject = request.DevBridgeProjectExplicit
-                ? request.DevBridgeProject
-                : existing?.DevBridgeProject,
+            DevBridgeProject = devBridgeProject,
             Catalog = catalog,
-            FallbackSuite = request.FallbackSuiteExplicit
-                ? request.FallbackSuite
-                : existing?.FallbackSuite,
+            FallbackSuite = fallbackSuite,
             RimBridge = existing?.RimBridge ?? "via-devbridge"
         };
     }
+
+    private static string? DiscoverFallbackSuite(string path)
+    {
+        CatalogDocument? catalog = LoadValidCatalog(path);
+        if (catalog is null)
+        {
+            return null;
+        }
+
+        CatalogSuite? smoke = (catalog.Suites ?? [])
+            .FirstOrDefault(suite => suite is not null &&
+                string.Equals(suite.Id, "smoke", StringComparison.Ordinal) &&
+                CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count > 0);
+        if (smoke is not null)
+        {
+            return smoke.Id;
+        }
+
+        return (catalog.Suites ?? [])
+            .Where(suite => suite is not null)
+            .OrderBy(suite => suite.Id, StringComparer.Ordinal)
+            .FirstOrDefault(suite =>
+                CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count > 0)
+            ?.Id;
+    }
+
+    private static bool IsUsableFallbackSuite(CatalogDocument catalog, string suiteId)
+    {
+        return CatalogNavigator.FindSuite(catalog, suiteId) is CatalogSuite suite &&
+            CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count > 0;
+    }
+
+    private static CatalogDocument? LoadValidCatalog(string path)
+    {
+        CatalogLoadResult loaded = CatalogLoader.Load(path);
+        if (loaded.Catalog is null)
+        {
+            return null;
+        }
+
+        return CatalogValidator.Validate(loaded.Catalog).IsValid
+            ? loaded.Catalog
+            : null;
+    }
+
+    private static bool ManifestEquals(
+        RimDevStackManifest left,
+        RimDevStackManifest right) =>
+        string.Equals(left.SchemaVersion, right.SchemaVersion, StringComparison.Ordinal) &&
+        string.Equals(left.Project, right.Project, StringComparison.Ordinal) &&
+        string.Equals(left.DevBridgeProject, right.DevBridgeProject, StringComparison.Ordinal) &&
+        string.Equals(left.Catalog, right.Catalog, StringComparison.Ordinal) &&
+        string.Equals(left.FallbackSuite, right.FallbackSuite, StringComparison.Ordinal) &&
+        string.Equals(left.RimBridge, right.RimBridge, StringComparison.Ordinal);
 
     private static string RelativeCatalogPath(string path, string root)
     {

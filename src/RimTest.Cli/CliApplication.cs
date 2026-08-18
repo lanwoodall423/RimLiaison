@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Diagnostics;
 using RimTest.Catalog;
 using RimTest.DevBridge;
@@ -77,7 +78,9 @@ public static class CliApplication
         IRimErrorDiagnosisAdapter? diagnosisAdapter = null,
         IRimContextImpactAdapter? impactAdapter = null,
         IDevBridgeProcessTransport? processTransport = null,
-        IGitChangeProvider? gitChangeProvider = null)
+        IGitChangeProvider? gitChangeProvider = null,
+        IDevBridgeCapabilityAdapter? capabilityAdapter = null,
+        IDevBridgeUiAdapter? uiAdapter = null)
     {
         long started = Stopwatch.GetTimestamp();
         string? workflowId = null;
@@ -113,6 +116,28 @@ public static class CliApplication
                         stdout,
                         stderr,
                         processTransport,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (request.Command == CliCommand.Capabilities)
+            {
+                return await ExecuteCapabilitiesCommandAsync(
+                        request,
+                        stdout,
+                        processTransport,
+                        capabilityAdapter,
+                    cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (request.Command is CliCommand.UiTargets or CliCommand.UiScreenshot)
+            {
+                return await ExecuteUiCommandAsync(
+                        request,
+                        stdout,
+                        processTransport,
+                        uiAdapter,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -387,6 +412,7 @@ public static class CliApplication
             case CliCommand.Affected:
                 {
                     IReadOnlyList<string> changedPaths = request.ChangedPaths;
+                    IReadOnlyList<GitChangedPath>? gitChanges = null;
                     if (changedPaths.Count == 0)
                     {
                         IGitChangeProvider git = gitChangeProvider ?? new SystemGitChangeProvider();
@@ -423,7 +449,8 @@ public static class CliApplication
                         }
 
                         changedPaths = discovered.Paths;
-                        if (changedPaths.Count == 0)
+                        gitChanges = discovered.Changes;
+                        if (changedPaths.Count == 0 && gitChanges.Count == 0)
                         {
                             var clean = new RimTestSelectionResult
                             {
@@ -434,6 +461,19 @@ public static class CliApplication
                             WriteJson(stdout, clean);
                             return CliExitCodes.Success;
                         }
+
+                        if (changedPaths.Count == 0)
+                        {
+                            var blocked = new RimTestSelectionResult
+                            {
+                                Status = "blocked",
+                                ReasonCount = 1,
+                                ErrorCode = "GIT_CHANGED_PATHS_MISSING",
+                                NextAction = "git status --short"
+                            };
+                            WriteJson(stdout, blocked);
+                            return SelectionExitCode(blocked);
+                        }
                     }
 
                     IRimContextImpactAdapter adapter = impactAdapter ?? CreateRimContextAdapter(request);
@@ -443,11 +483,23 @@ public static class CliApplication
                             changedPaths,
                             request.FallbackSuite,
                             request.Explain,
-                            cancellationToken)
+                            cancellationToken,
+                            gitChanges)
                         .ConfigureAwait(false);
-                    if (request.RunSelected &&
-                        selection.Status == "conservative" &&
-                        selection.Tests.Count == 0)
+
+                    if (selection.Status == "ok" && selection.Tests.Count == 0)
+                    {
+                        selection = new RimTestSelectionResult
+                        {
+                            Status = "blocked",
+                            ReasonCount = Math.Max(1, selection.ReasonCount),
+                            ErrorCode = "AFFECTED_NO_TESTS",
+                            NextAction = "rimtest affected --run --fallback-suite <suite>",
+                            Reasons = selection.Reasons
+                        };
+                    }
+
+                    if (request.RunSelected && selection.Tests.Count == 0)
                     {
                         WriteJson(stdout, selection);
                         return SelectionExitCode(selection);
@@ -528,6 +580,328 @@ public static class CliApplication
             .ConfigureAwait(false);
         WriteJson(stdout, result.Output);
         return result.ExitCode;
+    }
+
+    private static async Task<int> ExecuteCapabilitiesCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeCapabilityAdapter? capabilityAdapter,
+        CancellationToken cancellationToken)
+    {
+        IDevBridgeCapabilityAdapter adapter = CreateCapabilityAdapter(
+            request,
+            processTransport,
+            capabilityAdapter);
+        var query = new DevBridgeCapabilityQuery(
+            request.CapabilityQuery,
+            request.CapabilityCategory,
+            request.CapabilityProvider,
+            request.CapabilitySource,
+            request.CapabilityLimit);
+        DevBridgeCapabilityDiscoveryResult result = await adapter.DiscoverAsync(
+                query,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Status.IsSuccess)
+        {
+            var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["schemaVersion"] = DevBridgeCapabilitySchemas.Output,
+                ["status"] = "ok",
+                ["source"] = "RimBridgeServer",
+                ["count"] = result.Capabilities.Count,
+                ["totalMatches"] = result.TotalMatches,
+                ["truncated"] = result.Truncated,
+                ["limit"] = query.Limit,
+                ["capabilities"] = result.Capabilities
+                    .Select(ToCapabilityOutput)
+                    .ToArray()
+            };
+            AddCapabilityFilter(output, "query", query.Text);
+            AddCapabilityFilter(output, "category", query.Category);
+            AddCapabilityFilter(output, "providerId", query.ProviderId);
+            AddCapabilityFilter(output, "source", query.Source);
+            WriteJson(stdout, output);
+            return CliExitCodes.Success;
+        }
+
+        var failure = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = DevBridgeCapabilitySchemas.Output,
+            ["status"] = result.Status.Outcome == DevBridgeCapabilityOutcome.Unavailable
+                ? "blocked"
+                : "error",
+            ["component"] = "rimbridge",
+            ["outcome"] = CapabilityOutcomeName(result.Status.Outcome),
+            ["code"] = result.Status.ErrorCode ?? "RIMBRIDGE_CAPABILITIES_FAILED",
+            ["error"] = result.Status.Error ??
+                "RimTest could not discover the RimBridgeServer capability registry."
+        };
+        if (result.Status.NextAction is not null)
+        {
+            failure["nextAction"] = result.Status.NextAction;
+        }
+
+        if (result.Status.ResponseSchema is not null)
+        {
+            failure["responseSchema"] = result.Status.ResponseSchema;
+        }
+
+        if (result.Status.ProcessExitCode.HasValue)
+        {
+            failure["processExitCode"] = result.Status.ProcessExitCode.Value;
+        }
+
+        WriteJson(stdout, failure);
+        return CapabilityExitCodeFor(result.Status.Outcome);
+    }
+
+    private static async Task<int> ExecuteUiCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeUiAdapter? uiAdapter,
+        CancellationToken cancellationToken)
+    {
+        IDevBridgeUiAdapter adapter = CreateUiAdapter(
+            request,
+            processTransport,
+            uiAdapter);
+
+        if (request.Command == CliCommand.UiTargets)
+        {
+            DevBridgeUiTargetsResult result = await adapter.GetTargetsAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!result.Status.IsSuccess)
+            {
+                WriteUiFailure(stdout, DevBridgeUiSchemas.Targets, result.Status);
+                return UiExitCodeFor(result.Status.Outcome);
+            }
+
+            var targets = result.Targets
+                .Select(ToUiTargetOutput)
+                .ToArray();
+            var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["schemaVersion"] = DevBridgeUiSchemas.Targets,
+                ["status"] = "ok",
+                ["count"] = targets.Length,
+                ["targets"] = targets
+            };
+            AddUiCorrelation(output, result.Status);
+            WriteJson(stdout, output);
+            return CliExitCodes.Success;
+        }
+
+        DevBridgeUiCellRect? cellRect = null;
+        DevBridgeUiCellRect parsedCellRect = default!;
+        if (request.UiCellRect is not null &&
+            !DevBridgeUiAdapter.TryParseCellRect(
+                request.UiCellRect,
+                out parsedCellRect,
+                out string cellRectError))
+        {
+            WriteUiFailure(
+                stdout,
+                DevBridgeUiSchemas.Screenshot,
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.InvalidRequest,
+                    "RIMTEST_UI_CELL_RECT_INVALID",
+                    cellRectError,
+                    NextAction: null));
+            return CliExitCodes.InvalidInput;
+        }
+        else if (request.UiCellRect is not null)
+        {
+            cellRect = parsedCellRect;
+        }
+
+        var screenshotRequest = new DevBridgeUiScreenshotRequest(
+            request.UiTarget,
+            cellRect);
+        DevBridgeUiScreenshotResult screenshot = await adapter.CaptureAsync(
+                screenshotRequest,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!screenshot.Status.IsSuccess || screenshot.Evidence is null)
+        {
+            WriteUiFailure(stdout, DevBridgeUiSchemas.Screenshot, screenshot.Status);
+            return UiExitCodeFor(screenshot.Status.Outcome);
+        }
+
+        var evidence = screenshot.Evidence;
+        var screenshotOutput = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = DevBridgeUiSchemas.Screenshot,
+            ["status"] = "ok",
+            ["captureStatus"] = evidence.CaptureStatus,
+            ["path"] = evidence.Path
+        };
+        AddUiField(screenshotOutput, "targetId", evidence.TargetId);
+        AddUiField(screenshotOutput, "targetKind", evidence.TargetKind);
+        AddUiField(screenshotOutput, "targetLabel", evidence.TargetLabel);
+        AddUiElement(screenshotOutput, "clipRect", evidence.ClipRect);
+        AddUiElement(screenshotOutput, "requestedRect", evidence.RequestedRect);
+        AddUiElement(screenshotOutput, "paddedRect", evidence.PaddedRect);
+        if (evidence.CameraRestored.HasValue)
+        {
+            screenshotOutput["cameraRestored"] = evidence.CameraRestored.Value;
+        }
+
+        AddUiField(screenshotOutput, "capturedAtUtc", evidence.CapturedAtUtc);
+        AddUiField(screenshotOutput, "operationId", evidence.OperationId);
+        AddUiField(screenshotOutput, "workflowId", evidence.WorkflowId);
+        AddUiField(screenshotOutput, "evidenceId", evidence.EvidenceId);
+        WriteJson(stdout, screenshotOutput);
+        return CliExitCodes.Success;
+    }
+
+    private static Dictionary<string, object?> ToUiTargetOutput(
+        DevBridgeUiTarget target)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = target.Id
+        };
+        AddUiField(output, "kind", target.Kind);
+        AddUiField(output, "label", target.Label);
+        AddUiElement(output, "rect", target.Rect);
+        return output;
+    }
+
+    private static void WriteUiFailure(
+        TextWriter stdout,
+        string schema,
+        DevBridgeUiStatus status)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = schema,
+            ["status"] = status.Outcome is
+                DevBridgeUiOutcome.Unavailable or
+                DevBridgeUiOutcome.VisualReadinessFailure
+                ? "blocked"
+                : "error",
+            ["component"] = "rimbridge",
+            ["outcome"] = UiOutcomeName(status.Outcome),
+            ["code"] = status.ErrorCode ?? "RIMTEST_UI_FAILED",
+            ["error"] = status.Error ?? "RimTest could not complete the UI request."
+        };
+        AddUiField(output, "nextAction", status.NextAction);
+        if (status.ProcessExitCode.HasValue)
+        {
+            output["processExitCode"] = status.ProcessExitCode.Value;
+        }
+
+        AddUiField(output, "operationId", status.OperationId);
+        AddUiField(output, "workflowId", status.WorkflowId);
+        AddUiField(output, "evidenceId", status.EvidenceId);
+        WriteJson(stdout, output);
+    }
+
+    private static void AddUiCorrelation(
+        IDictionary<string, object?> output,
+        DevBridgeUiStatus status)
+    {
+        AddUiField(output, "operationId", status.OperationId);
+        AddUiField(output, "workflowId", status.WorkflowId);
+        AddUiField(output, "evidenceId", status.EvidenceId);
+    }
+
+    private static void AddUiField(
+        IDictionary<string, object?> output,
+        string name,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            output[name] = value;
+        }
+    }
+
+    private static void AddUiElement(
+        IDictionary<string, object?> output,
+        string name,
+        JsonElement? value)
+    {
+        if (value.HasValue)
+        {
+            output[name] = value.Value;
+        }
+    }
+
+    private static Dictionary<string, object?> ToCapabilityOutput(
+        DevBridgeCapability capability)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = capability.Id,
+            ["title"] = capability.Title,
+            ["parameters"] = capability.Parameters
+                .Select(ToCapabilityParameterOutput)
+                .ToArray()
+        };
+        if (capability.Aliases.Count > 0)
+        {
+            output["aliases"] = capability.Aliases;
+        }
+
+        AddCapabilityField(output, "summary", capability.Summary);
+        AddCapabilityField(output, "category", capability.Category);
+        AddCapabilityField(output, "providerId", capability.ProviderId);
+        AddCapabilityField(output, "source", capability.Source);
+        if (capability.ReadOnly.HasValue)
+        {
+            output["readOnly"] = capability.ReadOnly.Value;
+        }
+
+        return output;
+    }
+
+    private static Dictionary<string, object?> ToCapabilityParameterOutput(
+        DevBridgeCapabilityParameter parameter)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["name"] = parameter.Name
+        };
+        AddCapabilityField(output, "type", parameter.Type);
+        AddCapabilityField(output, "description", parameter.Description);
+        if (parameter.Required.HasValue)
+        {
+            output["required"] = parameter.Required.Value;
+        }
+
+        if (parameter.DefaultValue.HasValue)
+        {
+            output["default"] = parameter.DefaultValue.Value;
+        }
+
+        return output;
+    }
+
+    private static void AddCapabilityFilter(
+        IDictionary<string, object?> output,
+        string name,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            output[name] = value;
+        }
+    }
+
+    private static void AddCapabilityField(
+        IDictionary<string, object?> output,
+        string name,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            output[name] = value;
+        }
     }
 
     private static int WriteTestList(CatalogDocument catalog, TextWriter stdout)
@@ -738,9 +1112,52 @@ public static class CliApplication
         "--fallback-suite" or
         "--depth" or
         "--limit" or
+        "--query" or
+        "--category" or
+        "--provider" or
+        "--provider-id" or
+        "--source" or
+        "--target" or
+        "--cell-rect" or
         "--base" => true,
         _ => false
     };
+
+    private static IDevBridgeCapabilityAdapter CreateCapabilityAdapter(
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeCapabilityAdapter? capabilityAdapter)
+    {
+        if (capabilityAdapter is not null)
+        {
+            return capabilityAdapter;
+        }
+
+        DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
+            request.DevBridgePath,
+            request.DevBridgeRootPath);
+        return new DevBridgeCapabilityAdapter(
+            processTransport ?? new SystemDevBridgeProcessTransport(),
+            options);
+    }
+
+    private static IDevBridgeUiAdapter CreateUiAdapter(
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeUiAdapter? uiAdapter)
+    {
+        if (uiAdapter is not null)
+        {
+            return uiAdapter;
+        }
+
+        DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
+            request.DevBridgePath,
+            request.DevBridgeRootPath);
+        return new DevBridgeUiAdapter(
+            processTransport ?? new SystemDevBridgeProcessTransport(),
+            options);
+    }
 
     private static IDevBridgeRecipeAdapter CreateAdapter(
         CliRequest request,
@@ -1017,6 +1434,51 @@ public static class CliApplication
             _ => CliExitCodes.InternalError
         };
     }
+
+    private static string CapabilityOutcomeName(DevBridgeCapabilityOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeCapabilityOutcome.Unavailable => "unavailable",
+            DevBridgeCapabilityOutcome.InfrastructureFailure => "infrastructureFailure",
+            DevBridgeCapabilityOutcome.Timeout => "timeout",
+            DevBridgeCapabilityOutcome.Cancelled => "cancelled",
+            DevBridgeCapabilityOutcome.MalformedResponse => "malformedResponse",
+            DevBridgeCapabilityOutcome.IncompatibleSchema => "incompatibleSchema",
+            _ => "success"
+        };
+
+    private static int CapabilityExitCodeFor(DevBridgeCapabilityOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeCapabilityOutcome.Timeout => CliExitCodes.Timeout,
+            DevBridgeCapabilityOutcome.Cancelled => CliExitCodes.Cancelled,
+            _ => CliExitCodes.InternalError
+        };
+
+    private static string UiOutcomeName(DevBridgeUiOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeUiOutcome.Unavailable => "unavailable",
+            DevBridgeUiOutcome.TargetNotFound => "targetNotFound",
+            DevBridgeUiOutcome.VisualReadinessFailure => "visualReadinessFailure",
+            DevBridgeUiOutcome.InvalidRequest => "invalidRequest",
+            DevBridgeUiOutcome.InfrastructureFailure => "infrastructureFailure",
+            DevBridgeUiOutcome.Timeout => "timeout",
+            DevBridgeUiOutcome.Cancelled => "cancelled",
+            DevBridgeUiOutcome.MalformedResponse => "malformedResponse",
+            DevBridgeUiOutcome.IncompatibleSchema => "incompatibleSchema",
+            _ => "success"
+        };
+
+    private static int UiExitCodeFor(DevBridgeUiOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeUiOutcome.InvalidRequest => CliExitCodes.InvalidInput,
+            DevBridgeUiOutcome.TargetNotFound => CliExitCodes.NotFound,
+            DevBridgeUiOutcome.Timeout => CliExitCodes.Timeout,
+            DevBridgeUiOutcome.Cancelled => CliExitCodes.Cancelled,
+            _ => CliExitCodes.InternalError
+        };
 
     private static int RimTestExitCodeFor(DevBridgeOutcomeKind outcome)
     {

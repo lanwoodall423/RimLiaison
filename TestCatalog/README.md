@@ -39,7 +39,8 @@ Example:
 The command output is compact JSON. list and suites intentionally return only ids and recipe mappings; show commands return detailed metadata. Run results may include the optional workflow-level workflowId; this is a correlation reference, not a replacement for DevBridge's runId, generation, lease, launch, or operation identifiers. The complete cross-stack contract is in docs/correlation-contract.md.
 
 `doctor --json` uses the versioned `rimtest-doctor/v1` envelope. Its `nextAction` values are
-canonical owner commands; the response never includes installation paths, credentials, or owner
+canonical RimTest onboarding/validation commands, or owner commands only when RimTest cannot
+resolve the dependency; the response never includes installation paths, credentials, or owner
 transcripts.
 
 Catalog exit codes are 0 for success, 2 for invalid input or catalog data, 3 for an unresolved conservative selection without a fallback suite, 4 when a requested test or suite is absent, and 10 for an unexpected internal error. `run <test>` additionally uses 1 for a recipe test failure, 10 for DevBridge refusal or other infrastructure failure, 124 for a bounded client timeout, and 130 for cancellation. Direct adapter commands retain their operation-specific refusal/not-found code; malformed or incompatible DevBridge responses are infrastructure errors (10).
@@ -53,6 +54,41 @@ The adapter invokes DevBridge.cmd with --json and accepts only the versioned Dev
 DevBridge command discovery uses --devbridge, then RIMTEST_DEVBRIDGE_CMD or DEVBRIDGE_CMD, then a sibling DevBridge2/DevBridge.cmd near the current directory or application directory. The root uses --devbridge-root, RIMTEST_DEVBRIDGE_ROOT, or the command's directory.
 
 Ctrl+C cancels RimTest's client wait. If DevBridge already accepted a long-running recipe operation, cancellation does not claim that coordinator operation was rolled back; DevBridge remains the owner.
+
+## Live-game capability discovery
+
+When authoring a new live-game test, validating UI behavior, or planning deeper in-game
+inspection, use `rimtest capabilities --json`. RimTest returns a bounded projection of the
+registered RimBridgeServer capabilities, including ids/aliases, summaries, category/provider
+source metadata, and authoring parameters. Narrow it with `--query <text>`, `--category`,
+`--provider`, `--source`, or `--limit` (default 20). The command is discovery-only and does
+not start or restart RimWorld, change profiles or ModsConfig, acquire a lease, or expose a
+generic RimBridge execution command. An unavailable or incompatible bridge response is
+reported as compact JSON with a DevBridge owner handoff in `nextAction`; do not probe the
+bridge directly. If DevBridge requires a current owner-managed test session/lease, RimTest
+reports that requirement without creating one.
+
+## Visual UI validation
+
+For UI/layout changes, functional tests alone are insufficient. Use `tags: ["ui"]` as the
+catalog convention for tests that establish or validate a live UI state; the tag is
+machine-readable metadata and does not turn a functional pass into a visual-pass failure.
+After the functional suite passes, use RimTest's UI workflow to enumerate visible targets,
+capture the smallest relevant target, inspect the screenshot, iterate, and make a final
+targeted capture. The compact loop is:
+
+    edit UI
+    → rimtest affected --run --json
+    → reach the required live UI state through the supported test/companion workflow
+    → rimtest ui targets --json
+    → rimtest ui screenshot --target <target-id> --json
+    → inspect and iterate
+    → final targeted capture
+    → report functional + visual validation
+
+Cell/map-region captures may use `rimtest ui screenshot --cell-rect <x,z,width,height> --json`
+when that live capability is registered. If the bridge or visual readiness is unavailable,
+follow the compact `nextAction`; do not probe RimBridgeServer directly.
 
 ## Catalog test results
 
@@ -82,7 +118,7 @@ Normal output is a compact `rimtest-selection/v1` object, for example:
 
     {"schemaVersion":"rimtest-selection/v1","status":"ok","tests":["assembler-smoke"],"reasonCount":1}
 
-`--explain` adds bounded impact-to-test reasons. Tests are sorted by ordinal id and duplicate matches are removed. A complete empty RimContext impact result is `status: "ok"` with no tests. A truncated, unavailable, malformed, incompatible, or uncovered result is `status: "conservative"`; it never means that no tests are needed. Use `--fallback-suite <suite>` (or `RIMTEST_FALLBACK_SUITE`) to select a broader configured suite. Without a usable fallback suite, the command returns exit code 3 so an agent must handle the uncertainty explicitly. A fallback suite selected successfully still returns exit code 0 and retains `status: "conservative"`.
+`--explain` adds bounded impact-to-test reasons. Tests are sorted by ordinal id and duplicate matches are removed. For changed paths, a complete zero-impact RimContext result is `status: "conservative"` with error code `RIMCONTEXT_NO_TESTS`; it uses a valid non-empty fallback suite when configured and otherwise returns exit code 3 with an actionable next action. A truncated, unavailable, malformed, incompatible, uncovered, deleted-path, or renamed-path result is also `status: "conservative"`; it never means that no tests are needed. Use `--fallback-suite <suite>` (or `RIMTEST_FALLBACK_SUITE`) to select a broader configured suite. Without a usable fallback suite, the command returns exit code 3 so an agent must handle the uncertainty explicitly. A fallback suite selected successfully still returns exit code 0 and retains `status: "conservative"`.
 
 When automatic Git discovery finds no changes, RimTest returns `status: "ok"` with an empty test list and does not invoke DevBridge, including when `--run` is present. This is the explicit clean-worktree result; a Git discovery failure is `status: "blocked"` and never means that no tests are needed.
 
@@ -94,4 +130,4 @@ RimContext command discovery uses `--rimcontext`, then `RIMTEST_RIMCONTEXT_CMD`/
 
 The MVP policy is continue after ordinary test or infrastructure failures so the result identifies all failures; Ctrl+C or a DevBridge cancellation stops launching new children. There is no parallel or distributed execution. This leaves lifecycle, readiness, leases, profiles, recovery, and any safe state reuse entirely with DevBridge2.
 
-Suite output uses `rimtest-suite-result/v1` and summarizes successful children numerically. Failure output contains only failure-scaled references: test id, optional diagnostic id, failure fingerprint, evidence id, and error code. Optional `skipped`, `cancelled`, and conservative `selectionStatus` fields explain fallback or cancellation without embedding child DevBridge responses, logs, operations, or evidence. A known-safe affected run omits redundant `selectionStatus: "ok"`; an affected fallback run retains `selectionStatus: "conservative"` and `fallbackSuite` even when all fallback tests pass.
+Suite output uses `rimtest-suite-result/v1` and summarizes successful children numerically. An empty execution is `status: "conservative"` with `RIMTEST_EMPTY_EXECUTION`, never a normal pass. Failure output contains only failure-scaled references: test id, optional diagnostic id, failure fingerprint, evidence id, and error code. Optional `skipped`, `cancelled`, and conservative `selectionStatus` fields explain fallback or cancellation without embedding child DevBridge responses, logs, operations, or evidence. A known-safe affected run omits redundant `selectionStatus: "ok"`; an affected fallback run retains `selectionStatus: "conservative"` and `fallbackSuite` even when all fallback tests pass.

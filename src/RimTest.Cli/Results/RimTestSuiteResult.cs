@@ -99,6 +99,7 @@ public static class RimTestSuiteResultFactory
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
+        bool emptyExecution = children.Length == 0;
         int passed = children.Count(static child => child.Status == "pass");
         int failed = children.Count(static child =>
             child.Status is "fail" or "infrastructure" or "invalid");
@@ -109,11 +110,13 @@ public static class RimTestSuiteResultFactory
 
         string status = execution.Cancelled || cancelled > 0
             ? "cancelled"
-            : children.Any(static child => child.Status is "infrastructure" or "invalid")
-                ? "infrastructure"
-                : failed > 0
-                    ? "fail"
-                    : "pass";
+            : emptyExecution
+                ? "conservative"
+                : children.Any(static child => child.Status is "infrastructure" or "invalid")
+                    ? "infrastructure"
+                    : failed > 0
+                        ? "fail"
+                        : "pass";
 
         RimTestSuiteFailure[] failures = children
             .Where(static child => child.Status is "fail" or "infrastructure" or "invalid")
@@ -145,23 +148,29 @@ public static class RimTestSuiteResultFactory
             // A normal affected run has no extra selection state to report;
             // retain only conservative selection context needed to understand
             // why a broader fallback suite ran.
-            SelectionStatus = string.Equals(
+            SelectionStatus = emptyExecution
+                ? "conservative"
+                : string.Equals(
                     selectionStatus,
                     "ok",
                     StringComparison.Ordinal)
                 ? null
                 : selectionStatus,
-            SelectionErrorCode = string.Equals(
+            SelectionErrorCode = emptyExecution
+                ? "RIMTEST_EMPTY_EXECUTION"
+                : string.Equals(
                     selectionStatus,
                     "conservative",
                     StringComparison.Ordinal)
                 ? selectionErrorCode
                 : null,
             FallbackSuite = fallbackSuite,
-            NextAction = children
-                .OrderBy(static child => child.Test, StringComparer.Ordinal)
-                .Select(static child => child.NextAction)
-                .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action))
+            NextAction = emptyExecution
+                ? "rimtest suites"
+                : children
+                    .OrderBy(static child => child.Test, StringComparer.Ordinal)
+                    .Select(static child => child.NextAction)
+                    .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action))
         };
     }
 }

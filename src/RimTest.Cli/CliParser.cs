@@ -15,6 +15,9 @@ internal enum CliCommand
     RecipeRun,
     Affected,
     SuiteRun,
+    Capabilities,
+    UiTargets,
+    UiScreenshot,
     Doctor,
     Init
 }
@@ -36,11 +39,19 @@ internal sealed record CliRequest(
     string? FallbackSuite,
     int RimContextDepth,
     int RimContextLimit,
+    string? CapabilityQuery,
+    string? CapabilityCategory,
+    string? CapabilityProvider,
+    string? CapabilitySource,
+    int CapabilityLimit,
+    string? UiTarget,
+    string? UiCellRect,
     bool Explain,
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
     bool RunSelected,
     bool InitForce,
+    bool InitManifestOnly,
     bool CatalogExplicit,
     bool FallbackSuiteExplicit,
     bool DevBridgeProjectExplicit,
@@ -81,12 +92,20 @@ internal static class CliParser
         bool fallbackSuiteExplicit = false;
         int rimContextDepth = 8;
         int rimContextLimit = 100;
+        string? capabilityQuery = null;
+        string? capabilityCategory = null;
+        string? capabilityProvider = null;
+        string? capabilitySource = null;
+        int capabilityLimit = 20;
+        string? uiTarget = null;
+        string? uiCellRect = null;
         bool explain = false;
         string? affectedBase = null;
         bool depthSpecified = false;
         bool limitSpecified = false;
         bool runSelected = false;
         bool initForce = false;
+        bool initManifestOnly = false;
         bool helpRequested = false;
         var positionals = new List<string>();
 
@@ -151,6 +170,26 @@ internal static class CliParser
                         argument,
                         1,
                         100);
+                    capabilityLimit = rimContextLimit;
+                    break;
+                case "--query":
+                    capabilityQuery = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--category":
+                    capabilityCategory = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--provider":
+                case "--provider-id":
+                    capabilityProvider = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--source":
+                    capabilitySource = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--target":
+                    uiTarget = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--cell-rect":
+                    uiCellRect = ReadOptionValue(args, ref index, argument);
                     break;
                 case "--explain":
                     explain = true;
@@ -169,6 +208,9 @@ internal static class CliParser
                 case "--force":
                 case "--update":
                     initForce = true;
+                    break;
+                case "--manifest-only":
+                    initManifestOnly = true;
                     break;
                 case "--json":
                     // RimTest's machine-readable contract is the default;
@@ -213,11 +255,19 @@ internal static class CliParser
                 fallbackSuite,
                 rimContextDepth,
                 rimContextLimit,
+                capabilityQuery,
+                capabilityCategory,
+                capabilityProvider,
+                capabilitySource,
+                capabilityLimit,
+                uiTarget,
+                uiCellRect,
                 explain,
                 null,
                 [],
                 false,
                 initForce,
+                initManifestOnly,
                 catalogExplicit,
                 fallbackSuiteExplicit,
                 devBridgeProjectExplicit,
@@ -257,6 +307,17 @@ internal static class CliParser
             case "doctor" when positionals.Count == 1:
                 command = CliCommand.Doctor;
                 break;
+            case "capabilities" when positionals.Count == 1:
+                command = CliCommand.Capabilities;
+                break;
+            case "ui" when positionals.Count == 2 &&
+                string.Equals(positionals[1], "targets", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.UiTargets;
+                break;
+            case "ui" when positionals.Count == 2 &&
+                string.Equals(positionals[1], "screenshot", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.UiScreenshot;
+                break;
             case "init" when positionals.Count == 1:
                 command = CliCommand.Init;
                 break;
@@ -289,18 +350,21 @@ internal static class CliParser
             case "test":
             case "affected":
             case "doctor":
+            case "capabilities":
+            case "ui":
             case "init":
                 throw new CliParseException("The command arguments are invalid.");
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
         }
 
-        if (fallbackSuite is null && command is CliCommand.Affected or CliCommand.Init)
+        if (fallbackSuite is null &&
+            command is (CliCommand.Affected or CliCommand.Doctor or CliCommand.Init))
         {
             fallbackSuite = stackManifest.Manifest?.FallbackSuite;
         }
 
-        if (command is not (CliCommand.Affected or CliCommand.Init) &&
+        if (command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Capabilities or CliCommand.Init) &&
             (fallbackSuiteExplicit ||
              explain ||
              depthSpecified ||
@@ -312,9 +376,56 @@ internal static class CliParser
                 "RimContext selection options are only valid for affected.");
         }
 
+        if (command != CliCommand.Capabilities &&
+            (capabilityQuery is not null ||
+             capabilityCategory is not null ||
+             capabilityProvider is not null ||
+             capabilitySource is not null))
+        {
+            throw new CliParseException(
+                "Capability discovery filters are only valid for capabilities.");
+        }
+
+        if (command == CliCommand.Capabilities &&
+            (fallbackSuiteExplicit ||
+             explain ||
+             depthSpecified ||
+             affectedBase is not null ||
+             runSelected))
+        {
+            throw new CliParseException(
+                "RimContext selection options are not valid for capabilities.");
+        }
+
+        if (command is not (CliCommand.UiTargets or CliCommand.UiScreenshot) &&
+            (uiTarget is not null || uiCellRect is not null))
+        {
+            throw new CliParseException(
+                "UI target options are only valid for ui screenshot.");
+        }
+
+        if (command == CliCommand.UiTargets &&
+            (uiTarget is not null || uiCellRect is not null))
+        {
+            throw new CliParseException(
+                "ui targets does not accept a target or cell rectangle.");
+        }
+
+        if (command == CliCommand.UiScreenshot &&
+            ((uiTarget is null) == (uiCellRect is null)))
+        {
+            throw new CliParseException(
+                "ui screenshot requires exactly one of --target or --cell-rect.");
+        }
+
         if (initForce && command != CliCommand.Init)
         {
             throw new CliParseException("--force/--update is only valid for init.");
+        }
+
+        if (initManifestOnly && command != CliCommand.Init)
+        {
+            throw new CliParseException("--manifest-only is only valid for init.");
         }
 
         if (command is not (CliCommand.Affected or CliCommand.Doctor) &&
@@ -363,6 +474,13 @@ internal static class CliParser
             fallbackSuite,
             rimContextDepth,
             rimContextLimit,
+            capabilityQuery,
+            capabilityCategory,
+            capabilityProvider,
+            capabilitySource,
+            capabilityLimit,
+            uiTarget,
+            uiCellRect,
             explain,
             affectedBase,
             positionals
@@ -370,6 +488,7 @@ internal static class CliParser
                 .ToArray(),
             runSelected,
             initForce,
+            initManifestOnly,
             catalogExplicit,
             fallbackSuiteExplicit,
             devBridgeProjectExplicit,
@@ -381,6 +500,8 @@ internal static class CliParser
     {
         var help = new
         {
+            progressiveDisclosure =
+                "Normal development starts with rimtest doctor --json when readiness is unknown and rimtest affected --run --json after changes; use rimtest capabilities --json when designing a live-game test or deeper in-game inspection, and use rimtest ui targets / ui screenshot to inspect rendered UI before reporting visual work as complete.",
             commands = new[]
             {
                 "list",
@@ -391,6 +512,9 @@ internal static class CliParser
                 "validate",
                 "run <test>",
                 "affected [<changed-path> ...]",
+                "capabilities",
+                "ui targets",
+                "ui screenshot",
                 "doctor",
                 "init",
                 "recipe show <recipe>",
@@ -413,11 +537,18 @@ internal static class CliParser
                 "--fallback-suite <suite>",
                 "--depth <1..8>",
                 "--limit <1..100>",
+                "--query <text> (with capabilities)",
+                "--category <category> (with capabilities)",
+                "--provider <provider> (with capabilities)",
+                "--source <source> (with capabilities)",
+                "--target <target-id> (with ui screenshot)",
+                "--cell-rect <x,z,width,height> (with ui screenshot)",
                 "--explain",
                 "--base <git-ref> (with affected)",
                 "--json (default output)",
                 "--run (with affected)",
-                "--force/--update (with init)"
+                "--force/--update (with init)",
+                "--manifest-only (with init)"
             }
         };
 

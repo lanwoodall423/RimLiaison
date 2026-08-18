@@ -1,4 +1,5 @@
 using RimTest.Catalog;
+using RimTest.Git;
 
 namespace RimTest.RimContext;
 
@@ -17,7 +18,8 @@ public sealed class RimContextTestSelector
         IReadOnlyList<string> changedPaths,
         string? fallbackSuite,
         bool explain,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<GitChangedPath>? gitChanges = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(changedPaths);
@@ -86,14 +88,15 @@ public sealed class RimContextTestSelector
                 context.Status.Error);
         }
 
-        return SelectKnown(catalog, context, fallbackSuite, explain);
+        return SelectKnown(catalog, context, fallbackSuite, explain, gitChanges);
     }
 
     private static RimTestSelectionResult SelectKnown(
         CatalogDocument catalog,
         RimContextImpactResult context,
         string? fallbackSuite,
-        bool explain)
+        bool explain,
+        IReadOnlyList<GitChangedPath>? gitChanges)
     {
         RimContextImpact[] impacts = context.Impacts
             .OrderBy(ImpactTierOrder)
@@ -112,14 +115,26 @@ public sealed class RimContextTestSelector
                 "RimContext did not prove that the affected result was complete.");
         }
 
+        if (gitChanges?.Any(static change =>
+                change.IsDeleted || change.IsRenamed) == true)
+        {
+            return Conservative(
+                catalog,
+                fallbackSuite,
+                explain,
+                "RIMCONTEXT_CHANGE_UNPROVEN",
+                "Git reported a deleted or renamed path that RimContext cannot safely prove.",
+                impacts);
+        }
+
         if (impacts.Length == 0)
         {
-            return new RimTestSelectionResult
-            {
-                Status = "ok",
-                ReasonCount = 0,
-                Tests = []
-            };
+            return Conservative(
+                catalog,
+                fallbackSuite,
+                explain,
+                "RIMCONTEXT_NO_TESTS",
+                "RimContext returned no affected tests for changed paths.");
         }
 
         var testsByCoverage = new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -178,6 +193,17 @@ public sealed class RimContextTestSelector
             mapped.Add(new MappedImpact(impact, sortedTests));
         }
 
+        if (selectedTests.Count == 0)
+        {
+            return Conservative(
+                catalog,
+                fallbackSuite,
+                explain,
+                "RIMCONTEXT_NO_TESTS",
+                "RimContext returned no affected tests for changed paths.",
+                impacts);
+        }
+
         var reasons = mapped
             .GroupBy(
                 item => ImpactKey(item.Impact),
@@ -228,11 +254,29 @@ public sealed class RimContextTestSelector
             {
                 fallbackTests = CatalogNavigator
                     .ResolvedTestIds(catalog, fallbackSuite)
+                    .Where(testId =>
+                        CatalogNavigator.FindTest(catalog, testId) is not null)
                     .Distinct(StringComparer.Ordinal)
                     .OrderBy(static id => id, StringComparer.Ordinal)
                     .ToArray();
-                selectedFallback = fallbackSuite;
+                if (fallbackTests.Count > 0)
+                {
+                    selectedFallback = fallbackSuite;
+                }
+                else
+                {
+                    finalErrorCode = "FALLBACK_SUITE_EMPTY";
+                }
             }
+        }
+
+        string? finalNextAction = nextAction;
+        if (fallbackTests.Count == 0 &&
+            string.IsNullOrWhiteSpace(finalNextAction))
+        {
+            finalNextAction = NextActionForUnavailableFallback(
+                fallbackSuite,
+                finalErrorCode);
         }
 
         var reasons = new List<RimTestSelectionReason>();
@@ -272,7 +316,7 @@ public sealed class RimContextTestSelector
             Tests = fallbackTests,
             ReasonCount = Math.Max(1, impacts?.Count ?? 0),
             ErrorCode = finalErrorCode,
-            NextAction = nextAction,
+            NextAction = finalNextAction,
             FallbackSuite = selectedFallback,
             Reasons = explain ? reasons : null,
             ReasonsTruncated = explain && impacts is not null && impacts.Count > MaximumExplanationReasons
@@ -280,6 +324,16 @@ public sealed class RimContextTestSelector
                 : null
         };
     }
+
+    private static string NextActionForUnavailableFallback(
+        string? fallbackSuite,
+        string errorCode) => errorCode switch
+        {
+            "FALLBACK_SUITE_NOT_FOUND" => "rimtest suites",
+            "FALLBACK_SUITE_EMPTY" when !string.IsNullOrWhiteSpace(fallbackSuite) =>
+                $"rimtest suite show {fallbackSuite}",
+            _ => "rimtest affected --run --fallback-suite <suite>"
+        };
 
     private static RimTestSelectionReason CreateStatusReason(
         string errorCode,

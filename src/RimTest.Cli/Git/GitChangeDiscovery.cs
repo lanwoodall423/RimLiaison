@@ -11,11 +11,26 @@ public interface IGitChangeProvider
         CancellationToken cancellationToken = default);
 }
 
+public sealed record GitChangedPath(
+    string Path,
+    string Status,
+    string? OriginalPath = null)
+{
+    public bool IsDeleted => Status.IndexOf('D') >= 0;
+
+    public bool IsRenamed =>
+        Status.IndexOf('R') >= 0 ||
+        OriginalPath is not null;
+}
+
 public sealed record GitChangeDiscoveryResult(
     bool Resolved,
     IReadOnlyList<string> Paths,
     string? ErrorCode = null,
-    string? Error = null);
+    string? Error = null)
+{
+    public IReadOnlyList<GitChangedPath> Changes { get; init; } = [];
+}
 
 public sealed class SystemGitChangeProvider : IGitChangeProvider
 {
@@ -79,7 +94,13 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
         }
 
         var paths = new List<string>();
-        if (!TryParseStatus(status.Stdout, fullRoot, paths, out string? parseError))
+        var changes = new List<GitChangedPath>();
+        if (!TryParseStatus(
+                status.Stdout,
+                fullRoot,
+                paths,
+                changes,
+                out string? parseError))
         {
             return Failure("GIT_STATUS_INVALID", parseError!);
         }
@@ -87,17 +108,17 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
         if (!string.IsNullOrWhiteSpace(baseReference))
         {
             GitProcessResult diff = await RunGitAsync(
-                    fullRoot,
-                    [
-                        "--no-optional-locks",
-                        "diff",
-                        "--name-only",
-                        "-z",
-                        "--diff-filter=ACDMRTUXB",
-                        baseReference!,
-                        "--"
-                    ],
-                    cancellationToken)
+                fullRoot,
+                [
+                    "--no-optional-locks",
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    "--diff-filter=ACDMRTUXB",
+                    baseReference!,
+                    "--"
+                ],
+                cancellationToken)
                 .ConfigureAwait(false);
             if (!diff.Succeeded)
             {
@@ -106,7 +127,12 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
                     diff.Error ?? "The requested Git base could not be resolved.");
             }
 
-            if (!TryParseNameOnly(diff.Stdout, fullRoot, paths, out parseError))
+            if (!TryParseNameStatus(
+                    diff.Stdout,
+                    fullRoot,
+                    paths,
+                    changes,
+                    out parseError))
             {
                 return Failure("GIT_STATUS_INVALID", parseError!);
             }
@@ -117,13 +143,22 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
             paths
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(static path => path, StringComparer.Ordinal)
-                .ToArray());
+                .ToArray())
+        {
+            Changes = changes
+                .Distinct()
+                .OrderBy(static change => change.Path, StringComparer.Ordinal)
+                .ThenBy(static change => change.OriginalPath ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(static change => change.Status, StringComparer.Ordinal)
+                .ToArray()
+        };
     }
 
     private static bool TryParseStatus(
         string output,
         string rootPath,
         ICollection<string> paths,
+        ICollection<GitChangedPath> changes,
         out string? error)
     {
         error = null;
@@ -143,49 +178,149 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
                 continue;
             }
 
-            if (!TryAddPath(record[3..], rootPath, paths, out error))
+            if (!TryNormalizePath(
+                    record[3..],
+                    rootPath,
+                    out string? path,
+                    out error))
             {
                 return false;
             }
 
+            string? originalPath = null;
             if (status.IndexOf('R') >= 0 || status.IndexOf('C') >= 0)
             {
                 if (index + 1 >= records.Length ||
-                    !TryAddPath(records[++index], rootPath, paths, out error))
+                    !TryNormalizePath(
+                        records[++index],
+                        rootPath,
+                        out originalPath,
+                        out error))
                 {
                     error ??= "Git returned an incomplete rename status record.";
                     return false;
                 }
             }
+
+            AddChange(path, originalPath, status, paths, changes, originalPath);
         }
 
         return true;
     }
 
-    private static bool TryParseNameOnly(
+    private static bool TryParseNameStatus(
         string output,
         string rootPath,
         ICollection<string> paths,
+        ICollection<GitChangedPath> changes,
         out string? error)
     {
         error = null;
-        foreach (string record in output.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        string[] records = output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        for (int index = 0; index < records.Length; index++)
         {
-            if (!TryAddPath(record, rootPath, paths, out error))
+            string record = records[index];
+            if (record.Length == 0)
+            {
+                error = "Git returned a malformed name-status record.";
+                return false;
+            }
+
+            int separator = record.IndexOf('\t');
+            string status = separator >= 0
+                ? record[..separator]
+                : record;
+            string? firstValue = separator >= 0
+                ? record[(separator + 1)..]
+                : null;
+            bool renameOrCopy = status.IndexOf('R') >= 0 ||
+                status.IndexOf('C') >= 0;
+
+            if (string.IsNullOrEmpty(firstValue))
+            {
+                if (index + 1 >= records.Length)
+                {
+                    error = "Git returned an incomplete name-status record.";
+                    return false;
+                }
+
+                firstValue = records[++index];
+            }
+
+            if (!TryNormalizePath(
+                    firstValue,
+                    rootPath,
+                    out string? firstPath,
+                    out error))
             {
                 return false;
             }
+
+            string? secondPath = null;
+            if (renameOrCopy)
+            {
+                if (index + 1 >= records.Length ||
+                    !TryNormalizePath(
+                        records[++index],
+                        rootPath,
+                        out secondPath,
+                        out error))
+                {
+                    error ??= "Git returned an incomplete rename name-status record.";
+                    return false;
+                }
+            }
+
+            // `git diff --name-status` presents rename/copy paths as
+            // original followed by destination. Keep both in the path set
+            // and retain their relationship for conservative selection.
+            AddChange(
+                renameOrCopy ? secondPath ?? firstPath : firstPath,
+                renameOrCopy ? firstPath : null,
+                status,
+                paths,
+                changes,
+                secondPath);
         }
 
         return true;
     }
 
-    private static bool TryAddPath(
+    private static void AddChange(
+        string? path,
+        string? originalPath,
+        string status,
+        ICollection<string> paths,
+        ICollection<GitChangedPath> changes,
+        string? additionalPath = null)
+    {
+        if (path is not null)
+        {
+            paths.Add(path);
+        }
+
+        if (additionalPath is not null &&
+            !string.Equals(path, additionalPath, StringComparison.Ordinal))
+        {
+            paths.Add(additionalPath);
+        }
+
+        if (path is not null || originalPath is not null)
+        {
+            changes.Add(new GitChangedPath(
+                path ?? originalPath!,
+                status,
+                originalPath));
+        }
+    }
+
+    private static bool TryNormalizePath(
         string value,
         string rootPath,
-        ICollection<string> paths,
+        out string? normalizedPath,
         out string? error)
     {
+        normalizedPath = null;
         error = null;
         string path = value.TrimEnd('\r', '\n');
         if (path.Length == 0)
@@ -225,7 +360,7 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
             return false;
         }
 
-        paths.Add(path.TrimStart('/'));
+        normalizedPath = path.TrimStart('/');
         return true;
     }
 

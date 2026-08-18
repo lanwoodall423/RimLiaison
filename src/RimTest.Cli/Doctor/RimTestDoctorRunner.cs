@@ -14,6 +14,8 @@ public static class RimTestDoctorSchema
 internal sealed class RimTestDoctorRunner
 {
     private const string AffectedNextAction = "rimtest affected --run --json";
+    private const string ManifestRepairNextAction =
+        "rimtest init --json --manifest-only --force";
     private const string RimContextIndexNextAction = "rimctx index --json";
     private const string DevBridgeDoctorNextAction = "DevBridge.cmd doctor --json";
     private const int MaximumProbeStdoutBytes = 512 * 1024;
@@ -46,20 +48,26 @@ internal sealed class RimTestDoctorRunner
         {
             return Blocked(
                 "manifest",
-                request.StackManifest.ErrorCode ?? "STACK_MANIFEST_INVALID");
+                request.StackManifest.ErrorCode ?? "STACK_MANIFEST_INVALID",
+                ManifestRepairNextAction);
         }
 
         if (string.IsNullOrWhiteSpace(request.DevBridgeProject))
         {
-            return Blocked("manifest", "STACK_MANIFEST_DEVBRIDGE_PROJECT_MISSING");
+            return Blocked(
+                "manifest",
+                "STACK_MANIFEST_DEVBRIDGE_PROJECT_MISSING",
+                MissingManifestConfigurationNextAction(request));
         }
 
         CatalogLoadResult catalog = CatalogLoader.Load(request.CatalogPath);
         if (catalog.Catalog is null)
         {
+            string code = FirstErrorCode(catalog.Errors, "CATALOG_INVALID");
             return Blocked(
                 "catalog",
-                FirstErrorCode(catalog.Errors, "CATALOG_INVALID"));
+                code,
+                CatalogNextAction(request, code));
         }
 
         IReadOnlySet<string>? recipeIds = null;
@@ -68,9 +76,11 @@ internal sealed class RimTestDoctorRunner
             RecipeListLoadResult recipeList = RecipeListLoader.Load(request.RecipeListPath);
             if (recipeList.RecipeIds is null)
             {
+                string code = FirstErrorCode(recipeList.Errors, "RECIPE_LIST_INVALID");
                 return Blocked(
                     "catalog",
-                    FirstErrorCode(recipeList.Errors, "RECIPE_LIST_INVALID"));
+                    code,
+                    RecipeListNextAction(request));
             }
 
             recipeIds = recipeList.RecipeIds;
@@ -81,9 +91,19 @@ internal sealed class RimTestDoctorRunner
             recipeIds);
         if (!validation.IsValid)
         {
+            string code = FirstErrorCode(validation.Errors, "CATALOG_INVALID");
             return Blocked(
                 "catalog",
-                FirstErrorCode(validation.Errors, "CATALOG_INVALID"));
+                code,
+                CatalogValidationNextAction(request));
+        }
+
+        DoctorRunResult? fallbackFailure = ValidateFallback(
+            request,
+            catalog.Catalog);
+        if (fallbackFailure is not null)
+        {
+            return fallbackFailure;
         }
 
         RimContextAdapterOptions rimContext;
@@ -679,6 +699,137 @@ internal sealed class RimTestDoctorRunner
     private static string FirstErrorCode(
         IReadOnlyList<CatalogIssue> errors,
         string fallback) => errors.FirstOrDefault()?.Code ?? fallback;
+
+    private static DoctorRunResult? ValidateFallback(
+        CliRequest request,
+        CatalogDocument catalog)
+    {
+        if (string.IsNullOrWhiteSpace(request.FallbackSuite))
+        {
+            return Blocked(
+                "manifest",
+                "STACK_MANIFEST_FALLBACK_SUITE_MISSING",
+                FallbackNextAction(catalog));
+        }
+
+        CatalogSuite? suite = CatalogNavigator.FindSuite(
+            catalog,
+            request.FallbackSuite);
+        if (suite is null)
+        {
+            return Blocked(
+                "manifest",
+                "STACK_MANIFEST_FALLBACK_SUITE_NOT_FOUND",
+                FallbackNextAction(catalog));
+        }
+
+        if (CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count == 0)
+        {
+            return Blocked(
+                "manifest",
+                "STACK_MANIFEST_FALLBACK_SUITE_EMPTY",
+                FallbackNextAction(catalog));
+        }
+
+        return null;
+    }
+
+    private static string MissingManifestConfigurationNextAction(CliRequest request)
+    {
+        var arguments = new List<string>
+        {
+            "rimtest",
+            "init",
+            "--json"
+        };
+        if (string.IsNullOrWhiteSpace(request.DevBridgeProject))
+        {
+            arguments.Add("--devbridge-project");
+            arguments.Add("<project>");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.FallbackSuite))
+        {
+            arguments.Add("--fallback-suite");
+            arguments.Add("<suite>");
+        }
+
+        return string.Join(' ', arguments);
+    }
+
+    private static string FallbackNextAction(CatalogDocument catalog)
+    {
+        string? suite = SelectFallbackSuite(catalog);
+        return suite is null
+            ? "rimtest suites --json"
+            : $"rimtest init --json --fallback-suite {suite}";
+    }
+
+    private static string? SelectFallbackSuite(CatalogDocument catalog)
+    {
+        CatalogSuite? smoke = (catalog.Suites ?? [])
+            .FirstOrDefault(suite => suite is not null &&
+                string.Equals(suite.Id, "smoke", StringComparison.Ordinal) &&
+                CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count > 0);
+        if (smoke is not null)
+        {
+            return smoke.Id;
+        }
+
+        return (catalog.Suites ?? [])
+            .Where(suite => suite is not null)
+            .OrderBy(suite => suite.Id, StringComparer.Ordinal)
+            .FirstOrDefault(suite =>
+                CatalogNavigator.ResolvedTestIds(catalog, suite.Id).Count > 0)
+            ?.Id;
+    }
+
+    private static string CatalogNextAction(CliRequest request, string code) =>
+        code is "CATALOG_NOT_FOUND" or "CATALOG_PATH_INVALID"
+            ? $"rimtest init --json --manifest-only --force --catalog {CatalogArgument(request)}"
+            : CatalogValidationNextAction(request);
+
+    private static string CatalogValidationNextAction(CliRequest request) =>
+        $"rimtest validate --json --catalog {CatalogArgument(request)}";
+
+    private static string RecipeListNextAction(CliRequest request) =>
+        request.RecipeListPath is null
+            ? "rimtest validate --json"
+            : $"rimtest validate --json --recipes {RepositoryArgument(
+                request.RecipeListPath,
+                request.StackManifest.RepositoryRoot,
+                "<recipes>")}";
+
+    private static string CatalogArgument(CliRequest request) =>
+        RepositoryArgument(
+            request.CatalogPath,
+            request.StackManifest.RepositoryRoot,
+            "<catalog>");
+
+    private static string RepositoryArgument(
+        string path,
+        string root,
+        string placeholder)
+    {
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            string relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
+            if (!Path.IsPathRooted(relative) &&
+                relative is not ("." or "") &&
+                !relative.Equals("..", StringComparison.Ordinal) &&
+                !relative.StartsWith("../", StringComparison.Ordinal))
+            {
+                return relative;
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            NotSupportedException)
+        {
+        }
+
+        return placeholder;
+    }
 
     private static bool TryGetString(
         JsonElement parent,

@@ -60,7 +60,7 @@ internal static class Program
         ("RimContext direct coverage selects a test", RimContextDirectCoverageSelectsTest),
         ("RimContext transitive coverage selects a test", RimContextTransitiveCoverageSelectsTest),
         ("RimContext shared coverage is deduplicated", RimContextSharedCoverageIsDeduplicated),
-        ("RimContext no impact selects no tests", RimContextNoImpactSelectsNoTests),
+        ("RimContext no impact is conservative", RimContextNoImpactSelectsNoTests),
         ("RimContext unknown impact uses fallback", RimContextUnknownImpactUsesFallback),
         ("RimContext unavailable is conservative", RimContextUnavailableIsConservative),
         ("RimContext selection ordering is deterministic", RimContextSelectionOrderingIsDeterministic),
@@ -69,7 +69,10 @@ internal static class Program
         ("RimContext partial refresh is conservative", RimContextPartialRefreshIsConservative),
         ("affected CLI emits compact selection", AffectedCliEmitsCompactSelection),
         ("affected run pass is compact", AffectedRunPassIsCompact),
+        ("affected zero impact uses fallback", AffectedZeroImpactUsesFallback),
+        ("affected changed path without fallback blocks", AffectedChangedPathWithoutFallbackBlocks),
         ("suite all-pass aggregation is compact", SuiteAllPassAggregationIsCompact),
+        ("empty suite execution is conservative", EmptySuiteExecutionIsConservative),
         ("suite one failure is summarized", SuiteOneFailureIsSummarized),
         ("suite multiple failures are deterministic", SuiteMultipleFailuresAreDeterministic),
         ("suite cancellation stops new children", SuiteCancellationStopsNewChildren),
@@ -78,6 +81,23 @@ internal static class Program
         ("suite child infrastructure failure is summarized", SuiteChildInfrastructureFailureIsSummarized),
         ("affected run uses conservative fallback", AffectedRunUsesConservativeFallback),
         ("suite run CLI is deterministic", SuiteRunCliIsDeterministic),
+        ("capabilities discover the registered surface", CapabilitiesDiscoverRegisteredSurface),
+        ("capabilities query filters the registry", CapabilitiesQueryFiltersRegistry),
+        ("capabilities bound output", CapabilitiesBoundOutput),
+        ("capabilities preserve parameter metadata", CapabilitiesPreserveParameterMetadata),
+        ("capabilities report unavailable bridge", CapabilitiesReportUnavailableBridge),
+        ("capabilities reject malformed response", CapabilitiesRejectMalformedResponse),
+        ("capabilities reject incompatible response", CapabilitiesRejectIncompatibleResponse),
+        ("capability discovery does not mutate lifecycle", CapabilityDiscoveryDoesNotMutateLifecycle),
+        ("ui target enumeration", UiTargetEnumeration),
+        ("ui targeted screenshot uses clipping", UiTargetedScreenshotUsesClipping),
+        ("ui missing target fails before capture", UiMissingTargetFailsBeforeCapture),
+        ("ui reports unavailable bridge", UiReportsUnavailableBridge),
+        ("ui reports visual readiness failure", UiReportsVisualReadinessFailure),
+        ("ui cell capture preserves camera", UiCellCapturePreservesCamera),
+        ("ui requests do not mutate lifecycle", UiRequestsDoNotMutateLifecycle),
+        ("ui output is compact", UiOutputIsCompact),
+        ("canonical UI guidance is generated", CanonicalUiGuidanceIsGenerated),
         ("doctor healthy output is compact", DoctorHealthyOutputIsCompact),
         ("doctor reads DevBridge RimBridge status shape", DoctorReadsDevBridgeRimBridgeStatusShape),
         ("doctor reports blocked component", DoctorReportsBlockedComponent),
@@ -88,13 +108,25 @@ internal static class Program
         ("missing stack manifest is blocked", MissingStackManifestIsBlocked),
         ("local configuration does not leak", LocalConfigurationDoesNotLeak),
         ("init creates an empty repository handoff", InitCreatesEmptyRepositoryHandoff),
+        ("init fills a missing manifest field safely", InitFillsMissingManifestFieldSafely),
+        ("init merges explicit configuration safely", InitMergesExplicitConfigurationSafely),
         ("init preserves existing AGENTS", InitPreservesExistingAgents),
         ("init preserves existing manifest", InitPreservesExistingManifest),
+        ("init is idempotent", InitIsIdempotent),
+        ("init force behavior is intentional", InitForceBehaviorIsIntentional),
+        ("manifest-only repair preserves AGENTS", ManifestOnlyRepairPreservesAgents),
+        ("doctor missing project provides a handoff", DoctorMissingProjectProvidesHandoff),
+        ("doctor missing fallback provides a handoff", DoctorMissingFallbackProvidesHandoff),
+        ("doctor missing catalog provides a handoff", DoctorMissingCatalogProvidesHandoff),
+        ("doctor invalid catalog provides a handoff", DoctorInvalidCatalogProvidesHandoff),
         ("affected discovers Git changes without paths", AffectedDiscoversGitChangesWithoutPaths),
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
         ("Git discovery includes staged and untracked files", GitDiscoveryIncludesStagedAndUntrackedFiles),
+        ("Git discovery preserves deleted and renamed paths", GitDiscoveryPreservesDeletedAndRenamedPaths),
         ("explicit affected paths take precedence", ExplicitAffectedPathsTakePrecedence),
         ("environment fallback drives affected fallback", EnvironmentFallbackDrivesAffectedFallback),
+        ("affected deleted path uses conservative fallback", AffectedDeletedPathUsesConservativeFallback),
+        ("affected rename without fallback blocks", AffectedRenameWithoutFallbackBlocks),
         ("Git discovery failure is conservative", GitDiscoveryFailureIsConservative),
         ("RimError diagnosis provides drill-down next action", RimErrorDiagnosisProvidesNextAction),
         ("DevBridge failure provides doctor next action", DevBridgeFailureProvidesNextAction),
@@ -1552,9 +1584,11 @@ internal static class Program
             .GetAwaiter()
             .GetResult();
 
-        AssertEqual("ok", result.Status);
+        AssertEqual("conservative", result.Status);
         AssertEqual(0, result.Tests.Count);
-        AssertEqual(0, result.ReasonCount);
+        AssertEqual("RIMCONTEXT_NO_TESTS", result.ErrorCode);
+        AssertEqual("rimtest affected --run --fallback-suite <suite>", result.NextAction);
+        AssertEqual(1, result.ReasonCount);
     }
 
     private static void RimContextUnknownImpactUsesFallback()
@@ -1881,6 +1915,122 @@ internal static class Program
         }
     }
 
+    private static void AffectedZeroImpactUsesFallback()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            File.WriteAllText(
+                Path.Combine(directory, "Source", "Isolated.cs"),
+                "class Isolated {}\n");
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var adapter = new FakeRecipeAdapter();
+            adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+            adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "affected",
+                        "Source/Isolated.cs",
+                        "--run",
+                        "--json",
+                        "--fallback-suite",
+                        "smoke",
+                        "--catalog",
+                        catalogPath
+                    ],
+                    stdout,
+                    stderr,
+                    adapter,
+                    impactAdapter: impactAdapter)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual("pass", root.GetProperty("status").GetString());
+            AssertEqual("conservative", root.GetProperty("selectionStatus").GetString());
+            AssertEqual("RIMCONTEXT_NO_TESTS", root.GetProperty("selectionErrorCode").GetString());
+            AssertEqual("smoke", root.GetProperty("fallbackSuite").GetString());
+            AssertEqual(2, root.GetProperty("passed").GetInt32());
+            AssertEqual(0, root.GetProperty("failed").GetInt32());
+            AssertSequence(
+                ["assembler-fixture", "settings-fixture"],
+                adapter.RunCalls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void AffectedChangedPathWithoutFallbackBlocks()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            File.WriteAllText(
+                Path.Combine(directory, "Source", "Isolated.cs"),
+                "class Isolated {}\n");
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var adapter = new FakeRecipeAdapter();
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
+
+            CliResult result = WithFallbackSuiteEnvironment(
+                null,
+                () => WithCurrentDirectory(
+                    directory,
+                    () =>
+                    {
+                        var stdout = new StringWriter();
+                        var stderr = new StringWriter();
+                        int exitCode = CliApplication.RunAsync(
+                                [
+                                    "affected",
+                                    "Source/Isolated.cs",
+                                    "--run",
+                                    "--json",
+                                    "--catalog",
+                                    catalogPath
+                                ],
+                                stdout,
+                                stderr,
+                                adapter,
+                                impactAdapter: impactAdapter)
+                            .GetAwaiter()
+                            .GetResult();
+                        return new CliResult(
+                            exitCode,
+                            stdout.ToString(),
+                            stderr.ToString());
+                    }));
+
+            using JsonDocument document = JsonDocument.Parse(result.Stdout);
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+            AssertEqual("conservative", root.GetProperty("status").GetString());
+            AssertEqual("RIMCONTEXT_NO_TESTS", root.GetProperty("errorCode").GetString());
+            AssertEqual(
+                "rimtest affected --run --fallback-suite <suite>",
+                root.GetProperty("nextAction").GetString());
+            Assert(!root.TryGetProperty("suite", out _),
+                "An affected run without fallback must not execute an empty suite.");
+            AssertEqual(0, adapter.RunCalls.Count);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static void SuiteAllPassAggregationIsCompact()
     {
         var adapter = new FakeRecipeAdapter();
@@ -1909,6 +2059,23 @@ internal static class Program
             "Successful suite must omit failures.");
         AssertSequence(["assembler-fixture", "settings-fixture"], adapter.PlanCalls);
         AssertSequence(["assembler-fixture", "settings-fixture"], adapter.RunCalls);
+    }
+
+    private static void EmptySuiteExecutionIsConservative()
+    {
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
+            new CatalogSuiteExecutionResult("empty", [], 0, false),
+            100,
+            selectionStatus: "ok");
+
+        AssertEqual("conservative", result.Status);
+        AssertEqual(0, result.Passed);
+        AssertEqual(0, result.Failed);
+        AssertEqual("conservative", result.SelectionStatus);
+        AssertEqual("RIMTEST_EMPTY_EXECUTION", result.SelectionErrorCode);
+        AssertEqual("rimtest suites", result.NextAction);
+        Assert(!string.Equals(result.Status, "pass", StringComparison.Ordinal),
+            "An empty suite execution must never be a normal pass.");
     }
 
     private static void SuiteOneFailureIsSummarized()
@@ -2203,6 +2370,134 @@ internal static class Program
         }
     }
 
+    private static void AffectedDeletedPathUsesConservativeFallback()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var adapter = new FakeRecipeAdapter();
+            adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+            adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
+            var git = new FakeGitChangeProvider(
+                new GitChangeDiscoveryResult(true, ["Source/Deleted.cs"])
+                {
+                    Changes =
+                    [
+                        new GitChangedPath("Source/Deleted.cs", "D ")
+                    ]
+                });
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "affected",
+                        "--run",
+                        "--json",
+                        "--fallback-suite",
+                        "smoke",
+                        "--catalog",
+                        catalogPath
+                    ],
+                    stdout,
+                    stderr,
+                    adapter,
+                    impactAdapter: impactAdapter,
+                    gitChangeProvider: git)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual("pass", root.GetProperty("status").GetString());
+            AssertEqual("conservative", root.GetProperty("selectionStatus").GetString());
+            AssertEqual("RIMCONTEXT_CHANGE_UNPROVEN", root.GetProperty("selectionErrorCode").GetString());
+            AssertEqual("smoke", root.GetProperty("fallbackSuite").GetString());
+            AssertEqual(2, root.GetProperty("passed").GetInt32());
+            AssertSequence(
+                ["assembler-fixture", "settings-fixture"],
+                adapter.RunCalls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void AffectedRenameWithoutFallbackBlocks()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var adapter = new FakeRecipeAdapter();
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact());
+            var git = new FakeGitChangeProvider(
+                new GitChangeDiscoveryResult(
+                    true,
+                    ["Source/Old.cs", "Source/New.cs"])
+                {
+                    Changes =
+                    [
+                        new GitChangedPath(
+                            "Source/New.cs",
+                            "R100",
+                            "Source/Old.cs")
+                    ]
+                });
+
+            CliResult result = WithFallbackSuiteEnvironment(
+                null,
+                () => WithCurrentDirectory(
+                    directory,
+                    () =>
+                    {
+                        var stdout = new StringWriter();
+                        var stderr = new StringWriter();
+                        int exitCode = CliApplication.RunAsync(
+                                [
+                                    "affected",
+                                    "--run",
+                                    "--json",
+                                    "--catalog",
+                                    catalogPath
+                                ],
+                                stdout,
+                                stderr,
+                                adapter,
+                                impactAdapter: impactAdapter,
+                                gitChangeProvider: git)
+                            .GetAwaiter()
+                            .GetResult();
+                        return new CliResult(
+                            exitCode,
+                            stdout.ToString(),
+                            stderr.ToString());
+                    }));
+
+            using JsonDocument document = JsonDocument.Parse(result.Stdout);
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+            AssertEqual("conservative", root.GetProperty("status").GetString());
+            AssertEqual("RIMCONTEXT_CHANGE_UNPROVEN", root.GetProperty("errorCode").GetString());
+            AssertEqual(
+                "rimtest affected --run --fallback-suite <suite>",
+                root.GetProperty("nextAction").GetString());
+            Assert(!root.TryGetProperty("suite", out _),
+                "A rename without fallback must never become an empty-suite pass.");
+            AssertEqual(0, adapter.RunCalls.Count);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static void SuiteRunCliIsDeterministic()
     {
         string directory = CreateTempDirectory();
@@ -2236,6 +2531,464 @@ internal static class Program
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void CapabilitiesDiscoverRegisteredSurface()
+    {
+        (CliResult result, FakeTransport transport) = RunCapabilitiesFixture(
+            """
+            {
+              "success": true,
+              "rimBridgeRoute": {
+                "success": true,
+                "result": {
+                  "tools": [
+                    { "id": "rimworld/get_screenshot", "aliases": ["screenshot"], "title": "Screenshot", "summary": "Capture a screenshot", "category": "screenshots", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/get_screen_targets", "title": "Screen targets", "summary": "Inspect visible UI targets", "category": "ui", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/set_camera", "title": "Camera view", "summary": "Control the camera view", "category": "camera", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/get_game_state", "title": "Runtime state", "summary": "Inspect live game state", "category": "inspection", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/click", "title": "Live interaction", "summary": "Interact with a live-game target", "category": "interaction", "providerId": "rimworld", "source": "Core", "mutating": true },
+                    { "id": "rimtest/invoke_companion", "title": "Companion test", "summary": "Invoke a registered companion test", "category": "companion", "providerId": "rimtest", "source": "Optional" },
+                    { "id": "rimworld/run_lua", "title": "Lua script", "summary": "Run a Lua inspection script", "category": "scripts", "providerId": "rimworld", "source": "Optional" }
+                  ]
+                }
+              }
+            }
+            """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("rimtest-capabilities/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("ok", root.GetProperty("status").GetString());
+        AssertEqual("RimBridgeServer", root.GetProperty("source").GetString());
+        AssertEqual(7, root.GetProperty("count").GetInt32());
+        Assert(!root.GetProperty("truncated").GetBoolean(),
+            "A small capability registry should not be truncated.");
+        string[] ids = root.GetProperty("capabilities")
+            .EnumerateArray()
+            .Select(capability => capability.GetProperty("id").GetString()!)
+            .ToArray();
+        Assert(ids.Contains("rimworld/get_screenshot"), "Screenshot capability was not discoverable.");
+        Assert(ids.Contains("rimworld/get_screen_targets"), "UI target capability was not discoverable.");
+        Assert(ids.Contains("rimworld/set_camera"), "Camera capability was not discoverable.");
+        Assert(ids.Contains("rimworld/get_game_state"), "Runtime state capability was not discoverable.");
+        Assert(ids.Contains("rimworld/click"), "Live interaction capability was not discoverable.");
+        Assert(ids.Contains("rimtest/invoke_companion"), "Companion capability was not discoverable.");
+        Assert(ids.Contains("rimworld/run_lua"), "Lua capability was not discoverable.");
+        AssertEqual(1, transport.Requests.Count);
+    }
+
+    private static void CapabilitiesQueryFiltersRegistry()
+    {
+        (CliResult result, _) = RunCapabilitiesFixture(
+            """
+            {
+              "success": true,
+              "rimBridgeRoute": {
+                "success": true,
+                "result": {
+                  "tools": [
+                    { "id": "rimworld/get_screenshot", "title": "Screenshot", "summary": "Capture the game screen", "category": "screenshots", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/set_camera", "title": "Camera view", "summary": "Control the camera", "category": "view", "providerId": "rimworld", "source": "Core" },
+                    { "id": "rimworld/get_game_state", "title": "Runtime state", "summary": "Inspect state", "category": "inspection", "providerId": "rimworld", "source": "Core" }
+                  ]
+                }
+              }
+            }
+            """,
+            "--query",
+            "camera",
+            "--category",
+            "view",
+            "--provider",
+            "rimworld",
+            "--source",
+            "Core");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("camera", root.GetProperty("query").GetString());
+        AssertEqual("view", root.GetProperty("category").GetString());
+        AssertEqual("rimworld", root.GetProperty("providerId").GetString());
+        AssertEqual("Core", root.GetProperty("source").GetString());
+        AssertEqual(1, root.GetProperty("totalMatches").GetInt32());
+        AssertEqual(
+            "rimworld/set_camera",
+            root.GetProperty("capabilities")[0].GetProperty("id").GetString());
+    }
+
+    private static void CapabilitiesBoundOutput()
+    {
+        var tools = Enumerable.Range(1, 25)
+            .Select(index => new
+            {
+                id = $"rimworld/tool_{index:00}",
+                title = $"Tool {index}",
+                summary = "Registered capability",
+                category = "inspection",
+                providerId = "rimworld",
+                source = "Core"
+            })
+            .ToArray();
+        string response = JsonSerializer.Serialize(new
+        {
+            success = true,
+            rimBridgeRoute = new
+            {
+                success = true,
+                result = new { tools }
+            }
+        });
+
+        (CliResult result, _) = RunCapabilitiesFixture(response, "--limit", "3");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual(3, root.GetProperty("count").GetInt32());
+        AssertEqual(25, root.GetProperty("totalMatches").GetInt32());
+        Assert(root.GetProperty("truncated").GetBoolean(),
+            "Capability discovery must report bounded output.");
+        AssertEqual(3, root.GetProperty("capabilities").GetArrayLength());
+    }
+
+    private static void CapabilitiesPreserveParameterMetadata()
+    {
+        (CliResult result, _) = RunCapabilitiesFixture(
+            """
+            {
+              "success": true,
+              "rimBridgeRoute": {
+                "success": true,
+                "result": {
+                  "tools": [
+                    {
+                      "id": "rimworld/get_game_state",
+                      "title": "Runtime state",
+                      "summary": "Inspect live game state",
+                      "parameters": [
+                        { "name": "includeColonists", "parameterType": "boolean", "description": "Include colonists", "required": true, "defaultValue": false },
+                        { "name": "mapId", "parameterType": "string", "description": "Map identifier", "required": false }
+                      ]
+                    },
+                    {
+                      "name": "legacy/get_state",
+                      "description": "Legacy state inspection",
+                      "inputSchema": {
+                        "type": "object",
+                        "properties": { "target": { "type": "string", "description": "State target" } },
+                        "required": ["target"]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        JsonElement state = root.GetProperty("capabilities")
+            .EnumerateArray()
+            .Single(capability => capability.GetProperty("id").GetString() == "rimworld/get_game_state");
+        JsonElement includeColonists = state.GetProperty("parameters")
+            .EnumerateArray()
+            .Single(parameter => parameter.GetProperty("name").GetString() == "includeColonists");
+        AssertEqual("boolean", includeColonists.GetProperty("type").GetString());
+        AssertEqual("Include colonists", includeColonists.GetProperty("description").GetString());
+        Assert(includeColonists.GetProperty("required").GetBoolean(),
+            "Required capability parameters must be marked required.");
+        Assert(!includeColonists.GetProperty("default").GetBoolean(),
+            "Capability parameter defaults must be preserved.");
+
+        JsonElement legacy = root.GetProperty("capabilities")
+            .EnumerateArray()
+            .Single(capability => capability.GetProperty("id").GetString() == "legacy/get_state");
+        Assert(legacy.GetProperty("parameters")[0].GetProperty("required").GetBoolean(),
+            "Legacy inputSchema required parameters must remain authorable.");
+    }
+
+    private static void CapabilitiesReportUnavailableBridge()
+    {
+        (CliResult result, _) = RunCapabilitiesFixture(
+            """
+            { "success": false, "errorCode": "RIMBRIDGE_NOT_READY", "error": "No ready live-game route" }
+            """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("blocked", root.GetProperty("status").GetString());
+        AssertEqual("rimbridge", root.GetProperty("component").GetString());
+        AssertEqual("RIMBRIDGE_NOT_READY", root.GetProperty("code").GetString());
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+        Assert(!result.Stdout.Contains("bridge tools", StringComparison.Ordinal),
+            "Unavailable discovery must not hand agents a manual bridge probe.");
+    }
+
+    private static void CapabilitiesRejectMalformedResponse()
+    {
+        (CliResult result, _) = RunCapabilitiesFixture("{\"success\":true");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("error", root.GetProperty("status").GetString());
+        AssertEqual("RIMBRIDGE_CAPABILITIES_JSON_INVALID", root.GetProperty("code").GetString());
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+    }
+
+    private static void CapabilitiesRejectIncompatibleResponse()
+    {
+        (CliResult result, _) = RunCapabilitiesFixture(
+            """
+            {
+              "schemaVersion": "rimbridge-tools/v2",
+              "success": true,
+              "rimBridgeRoute": { "success": true, "result": { "tools": [] } }
+            }
+            """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("incompatibleSchema", root.GetProperty("outcome").GetString());
+        AssertEqual("RIMBRIDGE_CAPABILITIES_SCHEMA_UNSUPPORTED", root.GetProperty("code").GetString());
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+    }
+
+    private static void CapabilityDiscoveryDoesNotMutateLifecycle()
+    {
+        (CliResult result, FakeTransport transport) = RunCapabilitiesFixture(
+            """
+            {
+              "success": true,
+              "rimBridgeRoute": { "success": true, "result": { "tools": [] } }
+            }
+            """);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual(1, transport.Requests.Count);
+        DevBridgeProcessRequest request = transport.Requests[0];
+        AssertSequence(
+            ["--root", request.Arguments[1], "bridge", "tools", "--json"],
+            request.Arguments);
+        Assert(!request.Arguments.Contains("call", StringComparer.OrdinalIgnoreCase),
+            "Capability discovery must not expose a generic bridge call.");
+        Assert(!request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase),
+            "Capability discovery must not begin a lifecycle session.");
+    }
+
+    private static void UiTargetEnumeration()
+    {
+        (CliResult result, FakeTransport transport) = RunUiFixture("targets");
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("rimtest-ui-targets/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("ok", root.GetProperty("status").GetString());
+        AssertEqual(2, root.GetProperty("count").GetInt32());
+        JsonElement target = root.GetProperty("targets")
+            .EnumerateArray()
+            .Single(value => value.GetProperty("id").GetString() == "window:main");
+        AssertEqual("window", target.GetProperty("kind").GetString());
+        AssertEqual("Main window", target.GetProperty("label").GetString());
+        AssertEqual(2, target.GetProperty("rect").GetProperty("width").GetInt32());
+        AssertEqual(2, transport.Requests.Count);
+        Assert(transport.Requests[0].Arguments.Contains("tools", StringComparer.OrdinalIgnoreCase),
+            "Target enumeration must discover registered tools.");
+        Assert(transport.Requests[1].Arguments.Any(argument =>
+                argument.Contains("get_screen_targets", StringComparison.OrdinalIgnoreCase)),
+            "Target enumeration must call the registered screen-target capability.");
+    }
+
+    private static void UiTargetedScreenshotUsesClipping()
+    {
+        (CliResult result, FakeTransport transport) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:main"]);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("rimtest-ui-screenshot/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("ok", root.GetProperty("status").GetString());
+        AssertEqual("captured", root.GetProperty("captureStatus").GetString());
+        AssertEqual("window:main", root.GetProperty("targetId").GetString());
+        AssertEqual("window", root.GetProperty("targetKind").GetString());
+        AssertEqual("Main window", root.GetProperty("targetLabel").GetString());
+        AssertEqual("/evidence/main.png", root.GetProperty("path").GetString());
+        AssertEqual("op-target-shot", root.GetProperty("operationId").GetString());
+        AssertEqual(4, transport.Requests.Count);
+        DevBridgeProcessRequest screenshotRequest = transport.Requests
+            .Single(request => request.Arguments.Contains(
+                "rimworld/take_screenshot",
+                StringComparer.OrdinalIgnoreCase));
+        using JsonDocument arguments = JsonDocument.Parse(screenshotRequest.Arguments[5]);
+        JsonElement screenshotArguments = arguments.RootElement;
+        AssertEqual("window:main", screenshotArguments.GetProperty("targetId").GetString());
+        Assert(screenshotArguments.GetProperty("waitForVisualReady").GetBoolean(),
+            "Targeted captures must wait for visual readiness.");
+        Assert(!screenshotArguments.GetProperty("doNotResetCamera").GetBoolean(),
+            "Targeted captures must preserve camera restoration policy.");
+        Assert(screenshotArguments.GetProperty("includeScreenTargets").GetBoolean(),
+            "Targeted captures must use RimBridge target clipping.");
+        Assert(!screenshotRequest.Arguments.Contains(
+            "rimworld/get_screenshot",
+            StringComparer.OrdinalIgnoreCase),
+            "RimTest must not substitute an unrestricted full-screen capture.");
+    }
+
+    private static void UiMissingTargetFailsBeforeCapture()
+    {
+        (CliResult result, FakeTransport transport) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:missing"]);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.NotFound, result.ExitCode);
+        AssertEqual("error", root.GetProperty("status").GetString());
+        AssertEqual("targetNotFound", root.GetProperty("outcome").GetString());
+        AssertEqual("RIMTEST_UI_TARGET_NOT_FOUND", root.GetProperty("code").GetString());
+        Assert(!transport.Requests.Any(request => request.Arguments.Contains(
+            "rimworld/take_screenshot",
+            StringComparer.OrdinalIgnoreCase)),
+            "A missing target must fail before the screenshot operation.");
+    }
+
+    private static void UiReportsUnavailableBridge()
+    {
+        (CliResult result, _) = RunUiFixture(
+            "targets",
+            toolsResponse: """
+                { "success": false, "errorCode": "RIMBRIDGE_NOT_READY", "error": "No live route" }
+                """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("blocked", root.GetProperty("status").GetString());
+        AssertEqual("unavailable", root.GetProperty("outcome").GetString());
+        AssertEqual("RIMBRIDGE_NOT_READY", root.GetProperty("code").GetString());
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+        Assert(!result.Stdout.Contains("bridge tools", StringComparison.OrdinalIgnoreCase),
+            "Unavailable UI discovery must return the RimTest owner handoff.");
+    }
+
+    private static void UiReportsVisualReadinessFailure()
+    {
+        (CliResult result, _) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:main"],
+            targetScreenshotResponse: RouteResponse(
+                """
+                { "success": false, "errorCode": "RIMBRIDGE_VISUAL_NOT_READY", "error": "Renderer is not ready" }
+                """,
+                "op-not-ready"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("blocked", root.GetProperty("status").GetString());
+        AssertEqual("visualReadinessFailure", root.GetProperty("outcome").GetString());
+        AssertEqual("RIMBRIDGE_VISUAL_NOT_READY", root.GetProperty("code").GetString());
+        AssertEqual("op-not-ready", root.GetProperty("operationId").GetString());
+    }
+
+    private static void UiCellCapturePreservesCamera()
+    {
+        (CliResult result, FakeTransport transport) = RunUiFixture(
+            "screenshot",
+            ["--cell-rect", "10,20,3,4"]);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("ok", root.GetProperty("status").GetString());
+        AssertEqual("/evidence/cell.png", root.GetProperty("path").GetString());
+        Assert(root.GetProperty("cameraRestored").GetBoolean(),
+            "Cell capture must preserve RimBridgeServer camera restoration.");
+        AssertEqual(10, root.GetProperty("requestedRect").GetProperty("x").GetInt32());
+        AssertEqual(4, root.GetProperty("requestedRect").GetProperty("height").GetInt32());
+        DevBridgeProcessRequest cellRequest = transport.Requests
+            .Single(request => request.Arguments.Contains(
+                "rimworld/screenshot_cell_rect",
+                StringComparer.OrdinalIgnoreCase));
+        using JsonDocument arguments = JsonDocument.Parse(cellRequest.Arguments[5]);
+        JsonElement captureArguments = arguments.RootElement;
+        AssertEqual(10, captureArguments.GetProperty("x").GetInt32());
+        AssertEqual(20, captureArguments.GetProperty("z").GetInt32());
+        AssertEqual(3, captureArguments.GetProperty("width").GetInt32());
+        AssertEqual(4, captureArguments.GetProperty("height").GetInt32());
+        Assert(!captureArguments.GetProperty("doNotResetCamera").GetBoolean(),
+            "Cell capture must request camera restoration.");
+    }
+
+    private static void UiRequestsDoNotMutateLifecycle()
+    {
+        (CliResult result, FakeTransport transport) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:main"]);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        string[] lifecycleTerms =
+        [
+            "begin",
+            "start",
+            "restart",
+            "kill",
+            "lease",
+            "lifecycle",
+            "generation"
+        ];
+        Assert(!transport.Requests
+            .SelectMany(request => request.Arguments)
+            .Any(argument => lifecycleTerms.Any(term =>
+                argument.Contains(term, StringComparison.OrdinalIgnoreCase))),
+            "UI discovery/capture must not acquire leases or mutate lifecycle state.");
+    }
+
+    private static void UiOutputIsCompact()
+    {
+        (CliResult result, _) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:main"]);
+
+        Assert(result.Stdout.Length < 1200,
+            "UI screenshot output should remain compact evidence metadata.");
+        Assert(!result.Stdout.Contains("cameraBefore", StringComparison.OrdinalIgnoreCase),
+            "RimTest must not dump camera diagnostics into compact output.");
+        Assert(!result.Stdout.Contains("cameraDuringCapture", StringComparison.OrdinalIgnoreCase),
+            "RimTest must not dump the full bridge payload.");
+        Assert(!result.Stdout.Contains("sourcePath", StringComparison.OrdinalIgnoreCase),
+            "UI output should expose the selected screenshot path once.");
+    }
+
+    private static void CanonicalUiGuidanceIsGenerated()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            CliResult result = RunInitFixture(directory);
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            string agents = File.ReadAllText(Path.Combine(directory, "AGENTS.md"));
+            Assert(agents.Contains(
+                "functional tests alone are insufficient",
+                StringComparison.OrdinalIgnoreCase),
+                "Canonical AGENTS guidance must require visual inspection for UI work.");
+            Assert(agents.Contains("rimtest ui targets", StringComparison.OrdinalIgnoreCase),
+                "Canonical AGENTS guidance must point agents to target discovery.");
+            Assert(agents.Contains("rimtest ui screenshot", StringComparison.OrdinalIgnoreCase),
+                "Canonical AGENTS guidance must point agents to selective screenshots.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }
 
@@ -2307,7 +3060,7 @@ internal static class Program
 
         AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
         AssertEqual(
-            "{\"schemaVersion\":\"rimtest-doctor/v1\",\"status\":\"blocked\",\"component\":\"manifest\",\"code\":\"STACK_MANIFEST_JSON_INVALID\"}",
+            "{\"schemaVersion\":\"rimtest-doctor/v1\",\"status\":\"blocked\",\"component\":\"manifest\",\"code\":\"STACK_MANIFEST_JSON_INVALID\",\"nextAction\":\"rimtest init --json --manifest-only --force\"}",
             result.Stdout.Trim());
     }
 
@@ -2370,6 +3123,76 @@ internal static class Program
         }
     }
 
+    private static void InitFillsMissingManifestFieldSafely()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            File.WriteAllText(
+                Path.Combine(directory, "catalog.json"),
+                Serialize(CreateCatalog()));
+            string manifestPath = Path.Combine(directory, ".rimdev", "stack.json");
+            File.WriteAllText(
+                manifestPath,
+                "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Custom\",\"devBridgeProject\":\"custom\",\"catalog\":\"catalog.json\",\"rimBridge\":\"disabled\"}");
+
+            CliResult result = RunInitFixture(directory);
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            AssertEqual("smoke", document.RootElement.GetProperty("fallbackSuite").GetString());
+            AssertEqual("Custom", document.RootElement.GetProperty("project").GetString());
+            AssertEqual("custom", document.RootElement.GetProperty("devBridgeProject").GetString());
+            AssertEqual("catalog.json", document.RootElement.GetProperty("catalog").GetString());
+            AssertEqual("disabled", document.RootElement.GetProperty("rimBridge").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void InitMergesExplicitConfigurationSafely()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            File.WriteAllText(
+                Path.Combine(directory, "catalog.json"),
+                Serialize(CreateCatalog()));
+            string agentsPath = Path.Combine(directory, "AGENTS.md");
+            File.WriteAllText(agentsPath, "target-specific instructions\n");
+            string manifestPath = Path.Combine(directory, ".rimdev", "stack.json");
+            File.WriteAllText(
+                manifestPath,
+                "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Custom\",\"catalog\":\"catalog.json\",\"rimBridge\":\"disabled\"}");
+
+            CliResult result = RunInitFixture(
+                directory,
+                "--devbridge-project",
+                "custom-project",
+                "--fallback-suite",
+                "smoke");
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            AssertEqual("target-specific instructions\n", File.ReadAllText(agentsPath));
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            AssertEqual("custom-project", document.RootElement.GetProperty("devBridgeProject").GetString());
+            AssertEqual("smoke", document.RootElement.GetProperty("fallbackSuite").GetString());
+            AssertEqual("Custom", document.RootElement.GetProperty("project").GetString());
+            AssertEqual("catalog.json", document.RootElement.GetProperty("catalog").GetString());
+            AssertEqual("disabled", document.RootElement.GetProperty("rimBridge").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static void InitPreservesExistingAgents()
     {
         string directory = CreateTempDirectory();
@@ -2403,7 +3226,12 @@ internal static class Program
             string existing = "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Custom\",\"devBridgeProject\":\"custom\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"disabled\"}\n";
             File.WriteAllText(manifestPath, existing);
 
-            CliResult result = RunInitFixture(directory);
+            CliResult result = RunInitFixture(
+                directory,
+                "--devbridge-project",
+                "new-project",
+                "--fallback-suite",
+                "new-suite");
 
             AssertEqual(CliExitCodes.Success, result.ExitCode);
             AssertEqual(existing, File.ReadAllText(manifestPath));
@@ -2416,6 +3244,160 @@ internal static class Program
         {
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
+    }
+
+    private static void InitIsIdempotent()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "TestCatalog"));
+            File.WriteAllText(
+                Path.Combine(directory, "TestCatalog", "rimtest.catalog.json"),
+                Serialize(CreateCatalog()));
+
+            CliResult first = RunInitFixture(directory);
+            string manifest = File.ReadAllText(Path.Combine(directory, ".rimdev", "stack.json"));
+            string agents = File.ReadAllText(Path.Combine(directory, "AGENTS.md"));
+            CliResult second = RunInitFixture(directory);
+
+            AssertEqual(CliExitCodes.Success, first.ExitCode);
+            AssertEqual(CliExitCodes.Success, second.ExitCode);
+            AssertEqual(manifest, File.ReadAllText(Path.Combine(directory, ".rimdev", "stack.json")));
+            AssertEqual(agents, File.ReadAllText(Path.Combine(directory, "AGENTS.md")));
+            Assert(second.Stdout.Contains("\"status\":\"existing\"", StringComparison.Ordinal),
+                "Repeated init should report existing files without rewriting them.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void InitForceBehaviorIsIntentional()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            File.WriteAllText(Path.Combine(directory, "AGENTS.md"), "replace me\n");
+            File.WriteAllText(
+                Path.Combine(directory, ".rimdev", "stack.json"),
+                "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Custom\",\"devBridgeProject\":\"old-project\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"disabled\"}");
+
+            CliResult result = RunInitFixture(
+                directory,
+                "--force",
+                "--devbridge-project",
+                "new-project",
+                "--fallback-suite",
+                "settings");
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            Assert(!string.Equals(
+                    "replace me\n",
+                    File.ReadAllText(Path.Combine(directory, "AGENTS.md")),
+                    StringComparison.Ordinal),
+                "--force must retain its intentional AGENTS overwrite behavior.");
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(directory, ".rimdev", "stack.json")));
+            AssertEqual("new-project", document.RootElement.GetProperty("devBridgeProject").GetString());
+            AssertEqual("settings", document.RootElement.GetProperty("fallbackSuite").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void ManifestOnlyRepairPreservesAgents()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            string agentsPath = Path.Combine(directory, "AGENTS.md");
+            File.WriteAllText(agentsPath, "keep this handoff\n");
+            File.WriteAllText(
+                Path.Combine(directory, ".rimdev", "stack.json"),
+                "{\"schemaVersion\":");
+
+            CliResult result = RunInitFixture(
+                directory,
+                "--manifest-only",
+                "--force");
+
+            AssertEqual(CliExitCodes.Success, result.ExitCode);
+            AssertEqual("keep this handoff\n", File.ReadAllText(agentsPath));
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(directory, ".rimdev", "stack.json")));
+            AssertEqual("rimdev-stack/v1", document.RootElement.GetProperty("schemaVersion").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void DoctorMissingProjectProvidesHandoff()
+    {
+        CliResult result = RunManifestOnlyDoctorWithCatalog(
+            "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Fixture\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"via-devbridge\"}",
+            Serialize(CreateCatalog()));
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual(
+            "STACK_MANIFEST_DEVBRIDGE_PROJECT_MISSING",
+            document.RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "rimtest init --json --devbridge-project <project>",
+            document.RootElement.GetProperty("nextAction").GetString());
+    }
+
+    private static void DoctorMissingFallbackProvidesHandoff()
+    {
+        CliResult result = RunManifestOnlyDoctorWithCatalog(
+            "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Fixture\",\"devBridgeProject\":\"fixture\",\"catalog\":\"catalog.json\",\"rimBridge\":\"via-devbridge\"}",
+            Serialize(CreateCatalog()));
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual(
+            "STACK_MANIFEST_FALLBACK_SUITE_MISSING",
+            document.RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "rimtest init --json --fallback-suite smoke",
+            document.RootElement.GetProperty("nextAction").GetString());
+    }
+
+    private static void DoctorMissingCatalogProvidesHandoff()
+    {
+        CliResult result = RunManifestOnlyDoctor(
+            "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Fixture\",\"devBridgeProject\":\"fixture\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"via-devbridge\"}");
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("CATALOG_NOT_FOUND", document.RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "rimtest init --json --manifest-only --force --catalog catalog.json",
+            document.RootElement.GetProperty("nextAction").GetString());
+    }
+
+    private static void DoctorInvalidCatalogProvidesHandoff()
+    {
+        CliResult result = RunManifestOnlyDoctorWithCatalog(
+            "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"Fixture\",\"devBridgeProject\":\"fixture\",\"catalog\":\"catalog.json\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"via-devbridge\"}",
+            "{\"schemaVersion\":");
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual("CATALOG_JSON_INVALID", document.RootElement.GetProperty("code").GetString());
+        AssertEqual(
+            "rimtest validate --json --catalog catalog.json",
+            document.RootElement.GetProperty("nextAction").GetString());
     }
 
     private static void AffectedDiscoversGitChangesWithoutPaths()
@@ -2498,6 +3480,64 @@ internal static class Program
             Assert(result.Paths.Contains("Source/Untracked.cs"), "Untracked file was not discovered.");
             Assert(!result.Paths.Any(path => path.StartsWith("bin/", StringComparison.Ordinal)),
                 "Generated build directories must be excluded.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void GitDiscoveryPreservesDeletedAndRenamedPaths()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            RunGit(directory, "init", "--quiet");
+            RunGit(directory, "config", "user.email", "rimtest@example.invalid");
+            RunGit(directory, "config", "user.name", "RimTest");
+            File.WriteAllText(Path.Combine(directory, "Source", "Old.cs"), "old\n");
+            File.WriteAllText(Path.Combine(directory, "Source", "Deleted.cs"), "deleted\n");
+            RunGit(directory, "add", "Source/Old.cs", "Source/Deleted.cs");
+            RunGit(directory, "commit", "--quiet", "-m", "initial");
+            RunGit(directory, "mv", "Source/Old.cs", "Source/New.cs");
+            RunGit(directory, "rm", "Source/Deleted.cs");
+
+            GitChangeDiscoveryResult result = new SystemGitChangeProvider()
+                .DiscoverAsync(directory)
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(result.Resolved, result.Error ?? "Git discovery should resolve.");
+            Assert(result.Paths.Contains("Source/Old.cs"),
+                "The rename source must remain in the changed path set.");
+            Assert(result.Paths.Contains("Source/New.cs"),
+                "The rename destination must remain in the changed path set.");
+            Assert(result.Paths.Contains("Source/Deleted.cs"),
+                "Deleted paths must remain in the changed path set.");
+            GitChangedPath rename = result.Changes.Single(change => change.IsRenamed);
+            AssertEqual("Source/New.cs", rename.Path);
+            AssertEqual("Source/Old.cs", rename.OriginalPath);
+            Assert(result.Changes.Any(change =>
+                    change.IsDeleted && change.Path == "Source/Deleted.cs"),
+                "Git discovery must retain deletion status.");
+
+            GitChangeDiscoveryResult baseResult = new SystemGitChangeProvider()
+                .DiscoverAsync(directory, "HEAD")
+                .GetAwaiter()
+                .GetResult();
+            Assert(baseResult.Resolved, baseResult.Error ?? "Git base discovery should resolve.");
+            Assert(baseResult.Paths.Contains("Source/Old.cs"),
+                "Base diff discovery must retain the rename source.");
+            Assert(baseResult.Paths.Contains("Source/New.cs"),
+                "Base diff discovery must retain the rename destination.");
+            Assert(baseResult.Paths.Contains("Source/Deleted.cs"),
+                "Base diff discovery must retain deleted paths.");
+            Assert(baseResult.Changes.Any(change =>
+                    change.IsRenamed &&
+                    change.Path == "Source/New.cs" &&
+                    change.OriginalPath == "Source/Old.cs"),
+                "Base diff discovery must preserve rename source/destination.");
         }
         finally
         {
@@ -2688,6 +3728,8 @@ internal static class Program
                         "affected",
                         "Source/Foo.cs",
                         "--json",
+                        "--fallback-suite",
+                        "missing",
                         "--catalog",
                         catalogPath
                     ],
@@ -2708,6 +3750,254 @@ internal static class Program
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    private static (CliResult Result, FakeTransport Transport) RunCapabilitiesFixture(
+        string response,
+        params string[] options)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            var transport = new FakeTransport((_, _) => ProcessResult(response));
+            var arguments = new List<string>
+            {
+                "capabilities",
+                "--json",
+                "--devbridge",
+                "DevBridge.cmd",
+                "--devbridge-root",
+                directory
+            };
+            arguments.AddRange(options);
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        arguments.ToArray(),
+                        stdout,
+                        stderr,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+            return (
+                new CliResult(exitCode, stdout.ToString(), stderr.ToString()),
+                transport);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static (CliResult Result, FakeTransport Transport) RunUiFixture(
+        string operation,
+        IReadOnlyList<string>? options = null,
+        string? toolsResponse = null,
+        string? targetResponse = null,
+        string? targetScreenshotResponse = null,
+        string? cellScreenshotResponse = null)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            var transport = new FakeTransport(
+                (request, _) =>
+                {
+                    if (request.Arguments.Contains("tools", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(toolsResponse ?? UiToolsResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/get_screen_targets",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(targetResponse ?? UiTargetsCallResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/take_screenshot",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(
+                            targetScreenshotResponse ?? UiTargetScreenshotCallResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/screenshot_cell_rect",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(
+                            cellScreenshotResponse ?? UiCellScreenshotCallResponse());
+                    }
+
+                    throw new InvalidOperationException(
+                        "Unexpected DevBridge UI request: " +
+                        string.Join(" ", request.Arguments));
+                });
+            var arguments = new List<string>
+            {
+                "ui",
+                operation,
+                "--json",
+                "--devbridge",
+                "DevBridge.cmd",
+                "--devbridge-root",
+                directory
+            };
+            if (options is not null)
+            {
+                arguments.AddRange(options);
+            }
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        arguments.ToArray(),
+                        stdout,
+                        stderr,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+            return (
+                new CliResult(exitCode, stdout.ToString(), stderr.ToString()),
+                transport);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static string UiToolsResponse() =>
+        """
+        {
+          "success": true,
+          "rimBridgeRoute": {
+            "success": true,
+            "result": {
+              "tools": [
+                {
+                  "id": "rimworld/get_screen_targets",
+                  "title": "Visible screen targets",
+                  "summary": "Inspect visible screen and UI targets",
+                  "category": "ui",
+                  "providerId": "rimworld",
+                  "source": "Core",
+                  "parameters": [
+                    { "name": "waitForVisualReady", "type": "boolean" }
+                  ]
+                },
+                {
+                  "id": "rimworld/take_screenshot",
+                  "title": "Targeted screenshot",
+                  "summary": "Capture a screenshot clipped to a visible UI target",
+                  "category": "ui",
+                  "providerId": "rimworld",
+                  "source": "Core",
+                  "parameters": [
+                    { "name": "targetId", "type": "string", "required": true },
+                    { "name": "clipPadding", "type": "integer" },
+                    { "name": "includeScreenTargets", "type": "boolean" },
+                    { "name": "suppressMessage", "type": "boolean" },
+                    { "name": "waitForVisualReady", "type": "boolean" },
+                    { "name": "doNotResetCamera", "type": "boolean" }
+                  ]
+                },
+                {
+                  "id": "rimworld/screenshot_cell_rect",
+                  "title": "Cell-region screenshot",
+                  "summary": "Capture a screenshot of a map cell rectangle",
+                  "category": "ui",
+                  "providerId": "rimworld",
+                  "source": "Core",
+                  "parameters": [
+                    { "name": "x", "type": "integer", "required": true },
+                    { "name": "z", "type": "integer", "required": true },
+                    { "name": "width", "type": "integer", "required": true },
+                    { "name": "height", "type": "integer", "required": true },
+                    { "name": "paddingCells", "type": "integer" },
+                    { "name": "waitForVisualReady", "type": "boolean" },
+                    { "name": "doNotResetCamera", "type": "boolean" }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """;
+
+    private static string UiTargetsCallResponse() =>
+        RouteResponse(
+            """
+            {
+              "success": true,
+              "targets": [
+                {
+                  "id": "window:main",
+                  "kind": "window",
+                  "label": "Main window",
+                  "rect": { "x": 10, "y": 20, "width": 2, "height": 2 }
+                },
+                {
+                  "id": "menu:context",
+                  "kind": "context-menu",
+                  "label": "Context menu",
+                  "rect": { "x": 30, "y": 40, "width": 3, "height": 3 }
+                }
+              ]
+            }
+            """,
+            "op-targets");
+
+    private static string UiTargetScreenshotCallResponse() =>
+        RouteResponse(
+            """
+            {
+              "success": true,
+              "path": "/evidence/main.png",
+              "clipTargetId": "window:main",
+              "clipTargetKind": "window",
+              "clipTargetLabel": "Main window",
+              "clipRect": { "x": 10, "y": 20, "width": 2, "height": 2 },
+              "cameraRestored": true,
+              "capturedAtUtc": "2026-08-17T00:00:00Z"
+            }
+            """,
+            "op-target-shot",
+            "evidence-target-shot");
+
+    private static string UiCellScreenshotCallResponse() =>
+        RouteResponse(
+            """
+            {
+              "success": true,
+              "path": "/evidence/cell.png",
+              "requestedRect": { "x": 10, "z": 20, "width": 3, "height": 4 },
+              "paddedRect": { "x": 9, "z": 19, "width": 5, "height": 6 },
+              "cameraRestored": true,
+              "capturedAtUtc": "2026-08-17T00:00:00Z"
+            }
+            """,
+            "op-cell-shot",
+            "evidence-cell-shot");
+
+    private static string RouteResponse(
+        string result,
+        string? operationId = null,
+        string? evidenceId = null)
+    {
+        string operation = operationId is null
+            ? string.Empty
+            : $"\"operationId\":{JsonSerializer.Serialize(operationId)},";
+        string evidence = evidenceId is null
+            ? string.Empty
+            : $"\"evidenceId\":{JsonSerializer.Serialize(evidenceId)},";
+        return $"{{\"success\":true,\"rimBridgeRoute\":{{\"success\":true,{operation}{evidence}\"result\":{result}}}}}";
     }
 
     private static CliResult RunDoctorFixture(
@@ -2820,15 +4110,48 @@ internal static class Program
         }
     }
 
-    private static CliResult RunInitFixture(string directory)
+    private static CliResult RunManifestOnlyDoctorWithCatalog(
+        string manifest,
+        string catalog)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            File.WriteAllText(Path.Combine(directory, ".rimdev", "stack.json"), manifest);
+            File.WriteAllText(Path.Combine(directory, "catalog.json"), catalog);
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        ["doctor", "--json"],
+                        stdout,
+                        stderr)
+                    .GetAwaiter()
+                    .GetResult());
+            return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static CliResult RunInitFixture(
+        string directory,
+        params string[] options)
     {
         Directory.CreateDirectory(Path.Combine(directory, ".git"));
         var stdout = new StringWriter();
         var stderr = new StringWriter();
+        string[] arguments = ["init", "--json", .. options];
         int exitCode = WithCurrentDirectory(
             directory,
             () => CliApplication.RunAsync(
-                    ["init", "--json"],
+                    arguments,
                     stdout,
                     stderr)
                 .GetAwaiter()
