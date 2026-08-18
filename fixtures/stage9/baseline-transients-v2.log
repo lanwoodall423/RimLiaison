@@ -1,0 +1,2 @@
+[2026-08-17T12:30:10.000Z] ERROR System.NullReferenceException: Thing_98765 at 0x123456 request 66666666-7777-8888-9999-AAAAAAAAAAAA
+   at CCM.CompAssembler.Tick() in D:\Build\Mods\CompAssembler.cs:line 991

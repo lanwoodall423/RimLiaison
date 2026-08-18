@@ -1,21 +1,31 @@
 {
   "schemaVersion": "rimtest-cross-stack-compatibility/v1",
   "repositories": {
-    "rimTest": {
-      "repository": "lanwoodall423/RimTest",
+    "rimLiaison": {
+      "repository": "lanwoodall423/RimLiaison",
       "revisionPolicy": "workflow-sha"
-    },
-    "rimContext": {
-      "repository": "lanwoodall423/RimContext",
-      "revision": "53e7628d5efe0548bba190523d84920127c4f6ae"
     },
     "devBridge2": {
       "repository": "lanwoodall423/DevBridge2",
       "revision": "3643c7159e918e9932ee306a9f337308f02cd6fe"
+    }
+  },
+  "components": {
+    "rimContext": {
+      "source": "internal",
+      "projects": [
+        "src/RimContext.Core/RimContext.Core.csproj",
+        "src/RimContext.Cli/RimContext.Cli.csproj",
+        "tests/RimContext.Tests/RimContext.Tests.csproj"
+      ]
     },
     "rimError": {
-      "repository": "lanwoodall423/RimError",
-      "revision": "650d597be7503ae70eecdeffd3956eced5fd4f8c"
+      "source": "internal",
+      "projects": [
+        "src/RimError.Core/RimError.Core.csproj",
+        "src/RimError.Cli/RimError.Cli.csproj",
+        "tests/RimError.Core.Tests/RimError.Core.Tests.csproj"
+      ]
     }
   },
   "contracts": {
@@ -76,7 +86,7 @@
     "maxDiagnosticBytes": 8192,
     "maxIntegrationBytes": 8192
   },
-  "update": "Change only the external revision fields in a deliberate compatibility update, run scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
+  "update": "Change only the external DevBridge2 revision in a deliberate compatibility update, run scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
   "scope": {
     "offline": "This gate proves the no-RimWorld composition and wire contracts using a deterministic DevBridge-compatible fake host.",
     "live": "Real RimWorld/RimBridgeServer compatibility remains covered only by DevBridge2/scripts/live-stack-smoke.ps1 on the configured self-hosted runner."

@@ -1,0 +1,10 @@
+[2026-01-01T00:00:00Z] TypeInitializationException: The type initializer for 'WorldComponent' threw an exception
+   at WorldComponent.Initialize()
+[2026-01-01T00:00:01Z] System.NullReferenceException: component state was not initialized
+   at WorldComponent.Tick()
+[2026-01-01T00:00:02Z] Exception ticking: WorldComponent
+   at WorldComponent.Tick()
+[2026-01-01T00:00:03Z] Exception drawing: WorldComponent
+   at WorldComponent.Draw()
+[2026-01-01T00:00:04Z] System.InvalidOperationException: unrelated save failure
+   at SaveSystem.Load()

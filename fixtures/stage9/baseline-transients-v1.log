@@ -1,0 +1,2 @@
+[2026-08-17T12:00:10.000Z] ERROR System.NullReferenceException: Thing_12345 at 0xABCDEF request 11111111-2222-3333-4444-555555555555
+   at CCM.CompAssembler.Tick() in C:\Users\Alice\Mods\CompAssembler.cs:line 128

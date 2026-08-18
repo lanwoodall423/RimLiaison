@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors Condition="'$(MSBuildProjectName)' == 'RimContext.Core' Or '$(MSBuildProjectName)' == 'RimContext.Cli' Or '$(MSBuildProjectName)' == 'RimContext.Tests'">true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

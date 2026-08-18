@@ -1,0 +1,6 @@
+[2026-08-17T12:01:00.000Z] System.NullReferenceException: cache state missing
+   at CCM.Cache.Tick()
+[2026-08-17T12:01:00.010Z] ERROR Could not resolve cross-reference: No Verse.ThingDef named CCM_FancyWorkbench found
+[2026-08-17T12:01:00.020Z] ERROR Could not load texture 'Textures/Workbench.png'
+[2026-08-17T12:01:00.030Z] System.InvalidOperationException: save archive is corrupt
+   at Verse.Game.LoadSave()

@@ -1,0 +1,2 @@
+[2026-08-17T12:00:02.000Z] System.NullReferenceException: component state was not initialized for Thing_12345 at 0xABCDEF
+   at CCM.CompAssembler.Tick() in C:\Agent\Mods\Example\Source\Comps\CompAssembler.cs:line 128

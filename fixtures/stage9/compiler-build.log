@@ -1,0 +1,4 @@
+C:\Build\Mods\Example\Source\Thing.cs(42,17): error CS0246: The type or namespace name 'ThingDef' could not be found
+C:\Build\Mods\Example\Source\Thing.cs(44,9): warning CS0168: The variable 'unused' is declared but never used
+error MSB3270: There was a mismatch between the processor architectures
+error NU1101: Unable to find package Some.Package

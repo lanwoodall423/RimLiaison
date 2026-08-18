@@ -1,19 +1,47 @@
-Project Type
+# RimLiaison agent handoff
 
-This repository is a development tooling project. Apply the global development/tooling contract except where the tool itself is the system under test.
+Use `rimliaison` as the canonical agent-facing entrypoint:
 
-Tooling-Specific Rules
+```text
+edit -> rimliaison affected --run --json -> inspect the bounded result -> edit again
+```
 
-Do not blindly apply consumer-project orchestration rules to the tool being developed.
+Use `rimliaison doctor --json` when readiness is unknown and follow its bounded `nextAction`.
+Use `rimliaison capabilities --json` for live capability discovery. For UI evidence, enumerate
+semantic targets with `rimliaison ui targets --json` and capture only the smallest relevant target
+with `rimliaison ui screenshot --target <target-id> --json`.
 
-For the stack:
+`rimtest.cmd` is retained as a silent compatibility alias and forwards to the same implementation.
+It is not a second orchestration frontend. `rimctx` and `rimerror` are direct drill-down/debugging
+tools only; begin with RimLiaison and use their `nextAction` when directed.
 
-RimTest -> RimContext -> DevBridge2
+Ownership:
 
-When developing RimTest, use RimTest's declared bootstrap/self-test workflow rather than assuming an installed RimTest validates changed RimTest source.
-When developing RimContext or DevBridge2, direct execution of that component is allowed when required by its repository test workflow.
-Respect each layer's ownership; do not move responsibilities between layers merely to work around a failure.
-Treat structured schemas, statuses, error codes, nextAction, identifiers, and freshness semantics as integration contracts.
-Changes to cross-layer behavior should receive integration coverage with adjacent layers or representative consumers.
+```text
+RimLiaison
+  ├─ RimContext: static source/dependency/affected knowledge
+  ├─ orchestration: test selection, execution, bounded results
+  ├─ RimError: bounded diagnostic/root-cause analysis
+  └─ DevBridge client
+       ↓
+     DevBridge2: lifecycle/deploy/generations/leases
+       ↓
+     RimBridgeServer: live in-game control/inspection
+```
 
-Use the repository's own bootstrap and validation instructions as authoritative for testing the tool itself.
+DevBridge2 owns RimWorld lifecycle, profiles, generations, readiness, leases, deployment, and
+recovery. Do not launch RimWorld manually, edit ModsConfig, read Player.log directly, or bypass
+the owner workflow.
+
+Preserve stable `rimtest-*` schemas, `RIMTEST_*` identifiers, `.rimdev` conventions, catalog
+fields, bounded-output rules, and DevBridge contracts.
+
+For this tooling repository, use the canonical solution and authoritative validation:
+
+```text
+dotnet build RimLiaison.sln --configuration Release
+dotnet run --project tests/RimContext.Tests/RimContext.Tests.csproj --configuration Release --no-build --no-restore
+dotnet test tests/RimError.Core.Tests/RimError.Core.Tests.csproj --configuration Release --no-build --no-restore
+dotnet run --project tests/RimLiaison.Tests/RimLiaison.Tests.csproj --configuration Release --no-build --no-restore
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 -Json
+```

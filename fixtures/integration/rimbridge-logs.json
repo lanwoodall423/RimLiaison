@@ -1,0 +1,17 @@
+{
+  "logs": [
+    {
+      "sequence": 8,
+      "entryId": "log-create",
+      "level": "error",
+      "message": "NullReferenceException in mymod/create_assembler",
+      "stackTrace": "at CCM.CompAssembler.PostSpawnSetup()",
+      "source": "unity",
+      "operationId": "op-create",
+      "capabilityId": "mymod/create_assembler",
+      "firstSeenAtUtc": "2026-08-17T12:00:03Z",
+      "timestampUtc": "2026-08-17T12:00:03Z",
+      "repeatCount": 1
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+[2026-01-01 10:00:00.000Z] System.NullReferenceException: first failure
+   at RimError.Loader.Load() in C:\Users\Alice\Mods\Example\Loader.cs:line 12
+   at RimError.Runner.Start() in C:\Users\Alice\Mods\Example\Runner.cs:line 20
+[Ref 1001]
+[2026-01-01 10:00:01.000Z] System.InvalidOperationException: second failure
+   at RimError.Saver.Save() in D:\Build\Example\Saver.cs:line 88

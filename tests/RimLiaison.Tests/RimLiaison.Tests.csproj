@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>RimLiaison.Tests</AssemblyName>
+    <RootNamespace>RimLiaison.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RimContext.Core\RimContext.Core.csproj" />
+    <ProjectReference Include="..\..\src\RimError.Core\RimError.Core.csproj" />
+    <ProjectReference Include="..\..\src\RimLiaison.Cli\RimLiaison.Cli.csproj" />
+  </ItemGroup>
+</Project>

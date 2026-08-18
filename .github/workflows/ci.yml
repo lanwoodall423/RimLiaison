@@ -1,4 +1,4 @@
-name: RimTest CI
+name: RimLiaison CI
 
 on:
   push:
@@ -13,8 +13,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
-      - name: Build
-        run: dotnet build RimTest.sln -c Release
-      - name: Test
-        run: dotnet run --project tests\RimTest.Tests\RimTest.Tests.csproj -c Release
+          dotnet-version: 8.0.424
+      - name: Build all internal projects
+        run: dotnet build RimLiaison.sln -c Release --nologo
+      - name: Run RimContext deterministic suite
+        run: dotnet run --project tests\RimContext.Tests\RimContext.Tests.csproj -c Release --no-build --no-restore
+      - name: Run RimError deterministic suite
+        run: dotnet test tests\RimError.Core.Tests\RimError.Core.Tests.csproj -c Release --no-build --no-restore --nologo
+      - name: Run RimLiaison deterministic suite
+        run: dotnet run --project tests\RimLiaison.Tests\RimLiaison.Tests.csproj -c Release --no-build --no-restore
+      - name: Verify formatting
+        run: dotnet format RimLiaison.sln --verify-no-changes --no-restore
+      - name: Check committed diff whitespace
+        shell: pwsh
+        run: git diff --check
