@@ -65,6 +65,13 @@ public interface IDevBridgeCapabilityAdapter
     Task<DevBridgeCapabilityDiscoveryResult> DiscoverAsync(
         DevBridgeCapabilityQuery query,
         CancellationToken cancellationToken = default);
+
+    Task<DevBridgeCapabilityDiscoveryResult> DiscoverAsync(
+        DevBridgeCapabilityQuery query,
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default) =>
+        DiscoverAsync(query, cancellationToken);
 }
 
 /// <summary>
@@ -89,6 +96,16 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
         DevBridgeCapabilityQuery query,
         CancellationToken cancellationToken = default)
     {
+        return await DiscoverAsync(query, null, null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeCapabilityDiscoveryResult> DiscoverAsync(
+        DevBridgeCapabilityQuery query,
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default)
+    {
         if (query.Limit is < 1 or > 100)
         {
             return Failure(
@@ -97,21 +114,41 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
                 "Capability result limit must be from 1 through 100.");
         }
 
-        DevBridgeProcessResult process = await InvokeAsync(cancellationToken)
+        DevBridgeProcessResult process = await InvokeAsync(
+                workflowId,
+                leaseId,
+                cancellationToken)
             .ConfigureAwait(false);
         return Parse(process, query);
     }
 
     private async Task<DevBridgeProcessResult> InvokeAsync(
+        string? workflowId,
+        string? leaseId,
         CancellationToken cancellationToken)
     {
+        var arguments = new List<string>
+        {
+            "--root",
+            options.RootPath,
+            "bridge",
+            "tools"
+        };
+        if (!string.IsNullOrWhiteSpace(leaseId))
+        {
+            arguments.Add("--lease");
+            arguments.Add(leaseId);
+        }
+
+        arguments.Add("--json");
         var request = new DevBridgeProcessRequest(
             options.CommandPath,
             options.RootPath,
-            ["--root", options.RootPath, "bridge", "tools", "--json"],
+            arguments,
             options.ShowPlanTimeout,
             options.MaxStdoutBytes,
-            options.MaxStderrBytes);
+            options.MaxStderrBytes,
+            DevBridgeProcessEnvironment.ForWorkflow(workflowId));
 
         try
         {

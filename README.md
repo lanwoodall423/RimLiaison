@@ -50,7 +50,19 @@ Detailed catalog behavior is documented in [TestCatalog/README.md](TestCatalog/R
 maintained target-repository handoff is [templates/AGENTS.md](templates/AGENTS.md), and stack
 manifest onboarding is documented in [docs/stack-manifest.md](docs/stack-manifest.md).
 
+Repository CI is change-aware. The planner in [docs/ci-validation.md](docs/ci-validation.md)
+calculates the smallest safe validation set from the Git diff, while escalating uncertain or
+boundary changes conservatively. Agents should use that selector rather than manually stacking
+all internal suites.
+
 ## Offline validation
+
+For repository changes, calculate the change-aware plan first and run only the selected components;
+see [docs/ci-validation.md](docs/ci-validation.md). The proof-aware executor reuses only complete
+successful deterministic validation when its content fingerprint is unchanged; see
+[docs/validation-proofs.md](docs/validation-proofs.md). Use `-NoProofReuse` when diagnosing the
+executor. The complete command sequence below is the conservative fallback for shared, unknown,
+renamed, deleted, or otherwise high-risk changes, not a default requirement for every edit.
 
 ```text
 dotnet build RimLiaison.sln --configuration Release

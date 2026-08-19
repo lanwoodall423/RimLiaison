@@ -19,8 +19,11 @@ jobs:
     name: Plan composition gate
     runs-on: windows-latest
     outputs:
+      plan_json: ${{ steps.plan.outputs.plan_json }}
       plan_category: ${{ steps.plan.outputs.plan_category }}
       plan_reason: ${{ steps.plan.outputs.plan_reason }}
+      plan_selected: ${{ steps.plan.outputs.plan_selected }}
+      plan_skipped: ${{ steps.plan.outputs.plan_skipped }}
       run_cross_stack: ${{ steps.plan.outputs.run_cross_stack }}
     steps:
       - name: Check out workflow revision
@@ -37,13 +40,35 @@ jobs:
           CI_HEAD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $plannerArguments = @{
-            EventName = $env:CI_EVENT_NAME
-            BaseRevision = $env:CI_BASE_REVISION
-            HeadRevision = $env:CI_HEAD_REVISION
-            GitHubOutputPath = $env:GITHUB_OUTPUT
+          & .\scripts\ci-plan.ps1 `
+              -EventName $env:CI_EVENT_NAME `
+              -BaseRevision $env:CI_BASE_REVISION `
+              -HeadRevision $env:CI_HEAD_REVISION `
+              -GitHubOutputPath $env:GITHUB_OUTPUT `
+              -Json
+
+      - name: Summarize composition decision
+        shell: pwsh
+        env:
+          PLAN_JSON: ${{ steps.plan.outputs.plan_json }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plan = $env:PLAN_JSON | ConvertFrom-Json -Depth 20
+          $selected = (@($plan.selectedValidation) -join ', ')
+          $skipped = if (@($plan.skippedValidation).Count -gt 0) { @($plan.skippedValidation) -join ', ' } else { 'none' }
+          $summary = "Composition decision: category=$($plan.category); changedPaths=$($plan.changedPathCount); selected=$selected; skipped=$skipped"
+          Write-Host $summary
+          if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
           }
-          & .\scripts\ci-plan.ps1 @plannerArguments -Json
+
+      - name: Test CI planner
+        shell: pwsh
+        run: .\scripts\ci-plan.tests.ps1
+
+      - name: Test validation proof storage and invalidation
+        shell: pwsh
+        run: .\scripts\validation-proofs.tests.ps1
 
   cross-stack-contract:
     name: No-RimWorld composition gate
@@ -94,47 +119,26 @@ jobs:
           restore-keys: |
             cross-stack-nuget-${{ runner.os }}-
 
-      - name: Build DevBridge2 coordinator and fake process host
-        shell: pwsh
-        working-directory: DevBridge2
-        run: |
-          dotnet restore .\Source\Coordinator\DevBridge.Coordinator.csproj --locked-mode --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator restore failed.' }
-          dotnet restore .\Source\FakeRimWorld\FakeRimWorld.csproj --locked-mode --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 fake process host restore failed.' }
-          dotnet build .\Source\Coordinator\DevBridge.Coordinator.csproj --configuration Release --no-restore --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 coordinator build failed.' }
-          dotnet build .\Source\FakeRimWorld\FakeRimWorld.csproj --configuration Release --no-restore --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 fake process host build failed.' }
+      - name: Restore bounded validation proofs
+        uses: actions/cache@v4
+        with:
+          path: .rimdev/validation-proofs
+          key: rimliaison-validation-proofs-${{ runner.os }}-${{ github.repository }}
+          restore-keys: |
+            rimliaison-validation-proofs-${{ runner.os }}-${{ github.repository }}
 
-      - name: Build required RimLiaison command-line tools
-        shell: pwsh
-        run: |
-          $projects = @(
-              '.\src\RimContext.Cli\RimContext.Cli.csproj',
-              '.\src\RimError.Cli\RimError.Cli.csproj',
-              '.\src\RimLiaison.Cli\RimLiaison.Cli.csproj'
-          )
-          foreach ($project in $projects) {
-              dotnet build $project --configuration Release --nologo
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Required RimLiaison tool build failed: $project"
-              }
-          }
-
-      - name: Run merged no-RimWorld cross-stack contract workflow
+      - name: Run merged no-RimWorld cross-stack validation with proof reuse
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $reportPath = Join-Path $env:GITHUB_WORKSPACE 'cross-stack-contract.json'
-          $contractArguments = @(
-              '-RimLiaisonRoot', $env:GITHUB_WORKSPACE,
-              '-DevBridgeRoot', (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2'),
-              '-Json'
-          )
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 @contractArguments
+          $output = & .\scripts\ci-validate.ps1 `
+              -Stage cross-stack `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -DevBridgeRoot (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2') `
+              -StageReportPath $reportPath `
+              -Json
           $exitCode = $LASTEXITCODE
-          $output | Set-Content -LiteralPath $reportPath -Encoding utf8
           $output | Write-Output
           if ($exitCode -ne 0) { throw "Cross-stack contract gate failed with exit code $exitCode." }
 

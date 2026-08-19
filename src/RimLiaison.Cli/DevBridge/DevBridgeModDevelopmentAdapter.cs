@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
 
@@ -16,11 +17,26 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         ValidateOptions(options);
     }
 
+    public Task<DevBridgeModDevelopmentResult> RunAsync(
+        string project,
+        string repositoryRoot,
+        string sourceFingerprint,
+        string? workflowId,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(
+            project,
+            repositoryRoot,
+            sourceFingerprint,
+            workflowId,
+            executionContext: null,
+            cancellationToken);
+
     public async Task<DevBridgeModDevelopmentResult> RunAsync(
         string project,
         string repositoryRoot,
         string sourceFingerprint,
         string? workflowId,
+        DevBridgeModDevelopmentExecutionContext? executionContext,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(project) ||
@@ -54,6 +70,42 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         }
 
         string descriptorPath = ResolveDescriptorPath(project);
+        PrerequisiteRecoveryState descriptorRecoveryState =
+            PrerequisiteRecoveryState.Ready;
+        int descriptorRecoveryAttempts = 0;
+        string? descriptorRecoveryAction = null;
+        if (options.EnableDescriptorRecovery)
+        {
+            DevBridgeDescriptorReconciliationResult reconciliation =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    project,
+                    fullRepositoryRoot,
+                    descriptorPath,
+                    options);
+            if (!reconciliation.CanProceed &&
+                reconciliation.State != PrerequisiteRecoveryState.Ready)
+            {
+                return Failed(
+                    project,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        reconciliation.ErrorCode ?? "DEVBRIDGE_DESCRIPTOR_RECONCILIATION_FAILED",
+                        reconciliation.Error ?? "The DevBridge development descriptor could not be reconciled.",
+                        RecoveryState: reconciliation.State,
+                        RecoveryAttempts: reconciliation.Attempts,
+                        RecoveryAction: reconciliation.Action),
+                    workflowId);
+            }
+
+            // A recovered descriptor is now the input to the authoritative
+            // DevBridge2 transaction.  ResolveDeploymentRoot reads the
+            // reconciled file, preserving the existing deployment ownership.
+            descriptorPath = reconciliation.DescriptorPath;
+            descriptorRecoveryState = reconciliation.State;
+            descriptorRecoveryAttempts = reconciliation.Attempts;
+            descriptorRecoveryAction = reconciliation.Action;
+        }
+
         string deploymentRoot = ResolveDeploymentRoot(
             descriptorPath,
             fullRepositoryRoot);
@@ -82,6 +134,11 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             "-SkipRecipe",
             "-Json"
         };
+        if (!string.IsNullOrWhiteSpace(executionContext?.LeaseId))
+        {
+            arguments.Insert(arguments.Count - 2, "-LeaseId");
+            arguments.Insert(arguments.Count - 2, executionContext.LeaseId!);
+        }
         if (!string.IsNullOrWhiteSpace(workflowId))
         {
             arguments.Insert(arguments.Count - 2, "-WorkflowId");
@@ -98,7 +155,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         arguments,
                         options.Timeout,
                         options.MaxStdoutBytes,
-                        options.MaxStderrBytes),
+                        options.MaxStderrBytes,
+                        DevBridgeProcessEnvironment.ForWorkflow(workflowId)),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -318,7 +376,10 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         ReadFailureMessage(root),
                         process.ExitCode,
                         Bound(process.Stderr),
-                        schema),
+                        schema,
+                        descriptorRecoveryState,
+                        descriptorRecoveryAttempts,
+                        descriptorRecoveryAction),
                     false,
                     transactionId,
                     responseWorkflowId ?? workflowId,
@@ -335,7 +396,10 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     null,
                     process.ExitCode,
                     Bound(process.Stderr),
-                    schema),
+                    schema,
+                    descriptorRecoveryState,
+                    descriptorRecoveryAttempts,
+                    descriptorRecoveryAction),
                 true,
                 transactionId,
                 responseWorkflowId ?? workflowId,

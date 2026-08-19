@@ -70,14 +70,59 @@ public sealed record DevBridgeUiScreenshotResult(
     DevBridgeUiStatus Status,
     DevBridgeUiScreenshotEvidence? Evidence);
 
+public sealed record DevBridgeUiInputCheckResult(
+    DevBridgeUiStatus Status,
+    JsonElement? Evidence);
+
+public interface IDevBridgeUiInspectionAdapter
+{
+    Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        string? workflowId,
+        CancellationToken cancellationToken = default) =>
+        CheckInputAsync(cancellationToken);
+
+    Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default) =>
+        CheckInputAsync(workflowId, cancellationToken);
+}
+
 public interface IDevBridgeUiAdapter
 {
     Task<DevBridgeUiTargetsResult> GetTargetsAsync(
         CancellationToken cancellationToken = default);
 
+    Task<DevBridgeUiTargetsResult> GetTargetsAsync(
+        string? workflowId,
+        CancellationToken cancellationToken = default) =>
+        GetTargetsAsync(cancellationToken);
+
+    Task<DevBridgeUiTargetsResult> GetTargetsAsync(
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default) =>
+        GetTargetsAsync(workflowId, cancellationToken);
+
     Task<DevBridgeUiScreenshotResult> CaptureAsync(
         DevBridgeUiScreenshotRequest request,
         CancellationToken cancellationToken = default);
+
+    Task<DevBridgeUiScreenshotResult> CaptureAsync(
+        DevBridgeUiScreenshotRequest request,
+        string? workflowId,
+        CancellationToken cancellationToken = default) =>
+        CaptureAsync(request, cancellationToken);
+
+    Task<DevBridgeUiScreenshotResult> CaptureAsync(
+        DevBridgeUiScreenshotRequest request,
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default) =>
+        CaptureAsync(request, workflowId, cancellationToken);
 }
 
 /// <summary>
@@ -85,7 +130,7 @@ public interface IDevBridgeUiAdapter
 /// tool ids and parameter names from RimBridgeServer before making typed calls.
 /// It intentionally has no lifecycle, lease, identity, or generic execution API.
 /// </summary>
-public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
+public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter, IDevBridgeUiInspectionAdapter
 {
     private const int CapabilityLimit = 100;
     private const int MaxMessageLength = 512;
@@ -103,10 +148,29 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
     }
 
     public async Task<DevBridgeUiTargetsResult> GetTargetsAsync(
+        CancellationToken cancellationToken = default) =>
+        await GetTargetsAsync(null, null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<DevBridgeUiTargetsResult> GetTargetsAsync(
+        string? workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        return await GetTargetsAsync(workflowId, null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeUiTargetsResult> GetTargetsAsync(
+        string? workflowId,
+        string? leaseId,
         CancellationToken cancellationToken = default)
     {
         (DevBridgeCapability? capability, DevBridgeUiStatus? discoveryFailure) =
-            await FindCapabilityAsync("screen targets", IsScreenTargetsCapability, cancellationToken)
+            await FindCapabilityAsync(
+                    "screen targets",
+                    IsScreenTargetsCapability,
+                    workflowId,
+                    leaseId,
+                    cancellationToken)
                 .ConfigureAwait(false);
         if (discoveryFailure is not null)
         {
@@ -118,6 +182,8 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         ToolCallResult call = await InvokeToolAsync(
                 capability!.Id,
                 arguments,
+                workflowId,
+                leaseId,
                 cancellationToken)
             .ConfigureAwait(false);
         if (!call.Status.IsSuccess)
@@ -139,13 +205,13 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
                 []);
         }
 
-        if (!TryGetArray(call.Result, out JsonElement targetArray, "targets"))
+        if (!TryGetTargetArray(call.Result, out JsonElement targetArray))
         {
             return new DevBridgeUiTargetsResult(
                 Failure(
                     DevBridgeUiOutcome.IncompatibleSchema,
                     "RIMTEST_UI_TARGETS_SCHEMA_UNSUPPORTED",
-                    "RimBridgeServer did not return a targets array.",
+                    "RimBridgeServer did not return a supported targets collection.",
                     call.Status),
                 []);
         }
@@ -153,7 +219,7 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         var targets = new List<DevBridgeUiTarget>();
         foreach (JsonElement value in targetArray.EnumerateArray())
         {
-            if (!TryGetString(value, out string? id, "id", "targetId") ||
+            if (!TryGetString(value, out string? id, "windowTargetId", "targetId", "id") ||
                 string.IsNullOrWhiteSpace(id))
             {
                 return new DevBridgeUiTargetsResult(
@@ -178,8 +244,97 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
             targets);
     }
 
+    public async Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        CancellationToken cancellationToken = default) =>
+        await CheckInputAsync(null, null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        string? workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        return await CheckInputAsync(workflowId, null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeUiInputCheckResult> CheckInputAsync(
+        string? workflowId,
+        string? leaseId,
+        CancellationToken cancellationToken = default)
+    {
+        (DevBridgeCapability? capability, DevBridgeUiStatus? discoveryFailure) =
+            await FindCapabilityAsync(
+                    "UI input state",
+                    IsUiStateCapability,
+                    workflowId,
+                    leaseId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (discoveryFailure is not null)
+        {
+            return new DevBridgeUiInputCheckResult(discoveryFailure, null);
+        }
+
+        var arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
+        AddIfSupported(capability!, arguments, "waitForVisualReady", true);
+        ToolCallResult call = await InvokeToolAsync(
+                capability!.Id,
+                arguments,
+                workflowId,
+                leaseId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!call.Status.IsSuccess)
+        {
+            return new DevBridgeUiInputCheckResult(call.Status, null);
+        }
+
+        if (!TryGetOptionalBoolean(call.Result, out bool? success, "success") ||
+            success == false)
+        {
+            return new DevBridgeUiInputCheckResult(
+                Failure(
+                    MapToolFailureOutcome(call.Result),
+                    GetString(call.Result, "errorCode", "code") ?? "RIMTEST_UI_INPUT_CHECK_FAILED",
+                    GetString(call.Result, "error", "message") ??
+                    "RimBridgeServer could not inspect live UI input state.",
+                    call.Status),
+                null);
+        }
+
+        bool? focused = GetOptionalBoolean(call.Result,
+            "focused", "windowFocused", "inputReady");
+        if (focused == false)
+        {
+            return new DevBridgeUiInputCheckResult(
+                Failure(
+                    DevBridgeUiOutcome.VisualReadinessFailure,
+                    "RIMTEST_UI_INPUT_NOT_READY",
+                    "The live RimWorld UI did not report a ready/focused input surface.",
+                    call.Status),
+                call.Result);
+        }
+
+        return new DevBridgeUiInputCheckResult(Success(call.Status), call.Result);
+    }
+
     public async Task<DevBridgeUiScreenshotResult> CaptureAsync(
         DevBridgeUiScreenshotRequest request,
+        CancellationToken cancellationToken = default) =>
+        await CaptureAsync(request, null, null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<DevBridgeUiScreenshotResult> CaptureAsync(
+        DevBridgeUiScreenshotRequest request,
+        string? workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        return await CaptureAsync(request, workflowId, null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<DevBridgeUiScreenshotResult> CaptureAsync(
+        DevBridgeUiScreenshotRequest request,
+        string? workflowId,
+        string? leaseId,
         CancellationToken cancellationToken = default)
     {
         if ((request.TargetId is null) == (request.CellRect is null))
@@ -204,7 +359,10 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         DevBridgeUiTarget? target = null;
         if (request.TargetId is not null)
         {
-            DevBridgeUiTargetsResult targets = await GetTargetsAsync(cancellationToken)
+            DevBridgeUiTargetsResult targets = await GetTargetsAsync(
+                    workflowId,
+                    leaseId,
+                    cancellationToken)
                 .ConfigureAwait(false);
             if (!targets.Status.IsSuccess)
             {
@@ -229,6 +387,8 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
                     request.TargetId is not null
                         ? IsTargetScreenshotCapability
                         : IsCellScreenshotCapability,
+                    workflowId,
+                    leaseId,
                     cancellationToken)
                 .ConfigureAwait(false);
         if (discoveryFailure is not null)
@@ -239,16 +399,18 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         var arguments = new Dictionary<string, object?>(StringComparer.Ordinal);
         if (request.TargetId is not null)
         {
-            if (!AddRequiredArgument(capability!, arguments, "targetId", request.TargetId))
+            if (!AddRequiredArgument(capability!, arguments, "targetId", request.TargetId) &&
+                !AddRequiredArgument(capability!, arguments, "clipTargetId", request.TargetId))
             {
                 return FailureResult(
                     DevBridgeUiOutcome.IncompatibleSchema,
                     "RIMTEST_UI_CAPABILITY_SCHEMA_UNSUPPORTED",
-                    "The registered screenshot capability does not accept targetId.");
+                    "The registered screenshot capability does not accept targetId or clipTargetId.");
             }
 
             AddIfSupported(capability!, arguments, "clipPadding", 0);
             AddIfSupported(capability!, arguments, "includeScreenTargets", true);
+            AddIfSupported(capability!, arguments, "includeTargets", true);
             AddIfSupported(capability!, arguments, "suppressMessage", true);
         }
         else
@@ -275,6 +437,8 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         ToolCallResult call = await InvokeToolAsync(
                 capability!.Id,
                 arguments,
+                workflowId,
+                leaseId,
                 cancellationToken)
             .ConfigureAwait(false);
         if (!call.Status.IsSuccess)
@@ -365,10 +529,14 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
     private async Task<(DevBridgeCapability? Capability, DevBridgeUiStatus? Failure)> FindCapabilityAsync(
         string query,
         Func<DevBridgeCapability, bool> predicate,
+        string? workflowId,
+        string? leaseId,
         CancellationToken cancellationToken)
     {
         DevBridgeCapabilityDiscoveryResult discovery = await capabilityAdapter.DiscoverAsync(
                 new DevBridgeCapabilityQuery(query, Limit: CapabilityLimit),
+                workflowId,
+                leaseId,
                 cancellationToken)
             .ConfigureAwait(false);
         if (!discovery.Status.IsSuccess)
@@ -388,24 +556,35 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
     private async Task<ToolCallResult> InvokeToolAsync(
         string toolId,
         IReadOnlyDictionary<string, object?> arguments,
+        string? workflowId,
+        string? leaseId,
         CancellationToken cancellationToken)
     {
         string serializedArguments = JsonSerializer.Serialize(arguments);
+        var bridgeArguments = new List<string>
+        {
+            "--root",
+            options.RootPath,
+            "bridge",
+            "call",
+            toolId,
+            serializedArguments
+        };
+        if (!string.IsNullOrWhiteSpace(leaseId))
+        {
+            bridgeArguments.Add("--lease");
+            bridgeArguments.Add(leaseId);
+        }
+
+        bridgeArguments.Add("--json");
         var request = new DevBridgeProcessRequest(
             options.CommandPath,
             options.RootPath,
-            [
-                "--root",
-                options.RootPath,
-                "bridge",
-                "call",
-                toolId,
-                serializedArguments,
-                "--json"
-            ],
+            bridgeArguments,
             options.ShowPlanTimeout,
             options.MaxStdoutBytes,
-            options.MaxStderrBytes);
+            options.MaxStderrBytes,
+            DevBridgeProcessEnvironment.ForWorkflow(workflowId));
 
         DevBridgeProcessResult process;
         try
@@ -515,7 +694,7 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
             }
 
             string? operationId = GetString(envelope, "operationId");
-            string? workflowId = GetString(envelope, "workflowId");
+            string? routedWorkflowId = GetString(envelope, "workflowId");
             string? evidenceId = GetString(envelope, "evidenceId");
             if (routeSuccess == false)
             {
@@ -531,7 +710,7 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
                         Limit(error),
                         process.ExitCode,
                         operationId,
-                        workflowId,
+                        routedWorkflowId,
                         evidenceId),
                     null);
             }
@@ -551,7 +730,7 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
                         "DevBridge returned UI data with a non-success process result.",
                         process.ExitCode,
                         operationId,
-                        workflowId,
+                        routedWorkflowId,
                         evidenceId),
                     null);
             }
@@ -561,7 +740,7 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
                     DevBridgeUiOutcome.Success,
                     ProcessExitCode: process.ExitCode,
                     OperationId: operationId,
-                    WorkflowId: workflowId,
+                    WorkflowId: routedWorkflowId,
                     EvidenceId: evidenceId,
                     NextAction: null),
                 result.Clone());
@@ -592,6 +771,10 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
     private static bool IsScreenTargetsCapability(DevBridgeCapability capability) =>
         HasId(capability, "/get_screen_targets") ||
         HasId(capability, "get_screen_targets");
+
+    private static bool IsUiStateCapability(DevBridgeCapability capability) =>
+        HasId(capability, "/get_ui_state") ||
+        HasId(capability, "get_ui_state");
 
     private static bool IsTargetScreenshotCapability(DevBridgeCapability capability) =>
         HasId(capability, "/take_screenshot") ||
@@ -796,6 +979,26 @@ public sealed class DevBridgeUiAdapter : IDevBridgeUiAdapter
         return value.HasValue &&
             TryGetProperty(value.Value, out result, names) &&
             result.ValueKind == JsonValueKind.Array;
+    }
+
+    private static bool TryGetTargetArray(
+        JsonElement? value,
+        out JsonElement result)
+    {
+        if (TryGetArray(value, out result, "targets"))
+        {
+            return true;
+        }
+
+        if (!value.HasValue ||
+            !TryGetProperty(value.Value, out JsonElement targets, "targets") ||
+            targets.ValueKind != JsonValueKind.Object)
+        {
+            result = default;
+            return false;
+        }
+
+        return TryGetArray(targets, out result, "windows");
     }
 
     private static JsonElement? GetElement(JsonElement? value, params string[] names) =>

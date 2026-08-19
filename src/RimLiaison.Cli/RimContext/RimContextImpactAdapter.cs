@@ -1,6 +1,7 @@
 using RimContext.Core;
 using RimContext.Core.Contracts;
 using RimContext.Core.Semantics;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.RimContext;
 
@@ -12,13 +13,20 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
 {
     private readonly RimContextService service;
     private readonly RimContextAdapterOptions options;
+    private readonly Func<RimContextAffectedRequest, CancellationToken, RimContextAffectedAnalysis>
+        refreshAndAffected;
 
     public RimContextImpactAdapter(
         RimContextAdapterOptions options,
-        RimContextService? service = null)
+        RimContextService? service = null,
+        Func<RimContextAffectedRequest, CancellationToken, RimContextAffectedAnalysis>? refreshAndAffected = null)
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.service = service ?? new RimContextService();
+        this.refreshAndAffected = refreshAndAffected ??
+            ((request, cancellationToken) => this.service.RefreshAndAffected(
+                request,
+                cancellationToken));
         options.Validate();
     }
 
@@ -37,26 +45,89 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
 
         try
         {
-            var analysis = service.RefreshAndAffected(
-                new RimContextAffectedRequest(
-                    changedPaths,
-                    options.RootPath,
-                    options.StorePath,
-                    Depth: options.Depth,
-                    Limit: options.Limit),
+            RimContextAffectedRequest request = new(
+                changedPaths,
+                options.RootPath,
+                options.StorePath,
+                Depth: options.Depth,
+                Limit: options.Limit);
+            RimContextAffectedAnalysis analysis = refreshAndAffected(
+                request,
                 cancellationToken);
+            PrerequisiteRecoveryState recoveryState = PrerequisiteRecoveryState.Ready;
+            int recoveryAttempts = 0;
+            string? recoveryAction = null;
 
             if (analysis.Result is null)
             {
-                return Task.FromResult(new RimContextImpactResult(
-                    new RimContextAdapterStatus(
+                // A partial build is explicitly recoverable by the canonical
+                // service. Force exactly one rebuild; do not loop on a
+                // malformed source or hide its diagnostics.
+                recoveryAttempts = 1;
+                recoveryAction = "rimcontext-index-force-rebuild";
+                RimContextAffectedAnalysis rebuilt;
+                try
+                {
+                    rebuilt = refreshAndAffected(
+                        request with { Force = true },
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return Task.FromResult(Failure(
+                        RimContextImpactOutcome.Cancelled,
+                        "RIMTEST_CANCELLED",
+                        "The RimContext recovery request was cancelled.",
+                        RimContextSchemas.Envelope,
+                        PrerequisiteRecoveryState.RecoveryFailed,
+                        recoveryAttempts,
+                        recoveryAction));
+                }
+                catch (RimContextException exception)
+                {
+                    return Task.FromResult(Failure(
                         RimContextImpactOutcome.Unknown,
-                        "RIMCONTEXT_INDEX_PARTIAL",
-                        "RimContext indexing completed with diagnostics; affected selection is conservative.",
-                        ResponseSchema: RimContextSchemas.Envelope),
-                    [],
-                    [],
-                    true));
+                        "RIMCONTEXT_INDEX_RECOVERY_FAILED",
+                        BoundDiagnostic(
+                            "The RimContext index remained partial after the bounded rebuild.",
+                            analysis,
+                            exception.Error.Message),
+                        RimContextSchemas.Envelope,
+                        PrerequisiteRecoveryState.RecoveryFailed,
+                        recoveryAttempts,
+                        recoveryAction));
+                }
+                catch (Exception exception)
+                {
+                    return Task.FromResult(Failure(
+                        RimContextImpactOutcome.Unknown,
+                        "RIMCONTEXT_INDEX_RECOVERY_FAILED",
+                        BoundDiagnostic(
+                            "The RimContext index remained partial after the bounded rebuild.",
+                            analysis,
+                            exception.Message),
+                        RimContextSchemas.Envelope,
+                        PrerequisiteRecoveryState.RecoveryFailed,
+                        recoveryAttempts,
+                        recoveryAction));
+                }
+
+                analysis = rebuilt;
+                recoveryState = PrerequisiteRecoveryState.Recovered;
+            }
+
+            if (analysis.Result is null)
+            {
+                return Task.FromResult(Failure(
+                    RimContextImpactOutcome.Unknown,
+                    "RIMCONTEXT_INDEX_RECOVERY_FAILED",
+                    BoundDiagnostic(
+                        "RimContext indexing completed with diagnostics after the bounded rebuild.",
+                        analysis),
+                    RimContextSchemas.Envelope,
+                    PrerequisiteRecoveryState.RecoveryFailed,
+                    recoveryAttempts,
+                    recoveryAction));
             }
 
             var result = analysis.Result;
@@ -72,7 +143,10 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
                         RimContextImpactOutcome.Unknown,
                         "RIMCONTEXT_RESULT_TRUNCATED",
                         "RimContext did not prove that the affected result was complete.",
-                        ResponseSchema: RimContextSchemas.Envelope),
+                        ResponseSchema: RimContextSchemas.Envelope,
+                        RecoveryState: recoveryState,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: recoveryAction),
                     result.Changed,
                     impacts,
                     true));
@@ -81,7 +155,10 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
             return Task.FromResult(new RimContextImpactResult(
                 new RimContextAdapterStatus(
                     RimContextImpactOutcome.Success,
-                    ResponseSchema: RimContextSchemas.Envelope),
+                    ResponseSchema: RimContextSchemas.Envelope,
+                    RecoveryState: recoveryState,
+                    RecoveryAttempts: recoveryAttempts,
+                    RecoveryAction: recoveryAction),
                 result.Changed,
                 impacts,
                 false));
@@ -135,12 +212,40 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
         RimContextImpactOutcome outcome,
         string code,
         string error,
-        string? responseSchema = null) =>
+        string? responseSchema = null,
+        PrerequisiteRecoveryState recoveryState = PrerequisiteRecoveryState.Ready,
+        int recoveryAttempts = 0,
+        string? recoveryAction = null) =>
         new(
-            new RimContextAdapterStatus(outcome, code, error, ResponseSchema: responseSchema),
+            new RimContextAdapterStatus(
+                outcome,
+                code,
+                error,
+                ResponseSchema: responseSchema,
+                RecoveryState: recoveryState,
+                RecoveryAttempts: recoveryAttempts,
+                RecoveryAction: recoveryAction),
             [],
             [],
             outcome is RimContextImpactOutcome.Unknown or RimContextImpactOutcome.Cancelled);
+
+    private static string BoundDiagnostic(
+        string prefix,
+        RimContextAffectedAnalysis analysis,
+        string? extra = null)
+    {
+        string diagnostics = string.Join(
+            "; ",
+            (analysis.Index.Diagnostics ?? [])
+                .Take(4)
+                .Select(diagnostic =>
+                    $"{diagnostic.Code}:{diagnostic.Path}:{diagnostic.Message}"));
+        string combined = string.Join(
+            " ",
+            new[] { prefix, diagnostics, extra }
+                .Where(static value => !string.IsNullOrWhiteSpace(value)));
+        return BoundError(combined);
+    }
 
     private static string BoundError(string? value)
     {
@@ -149,6 +254,6 @@ public sealed class RimContextImpactAdapter : IRimContextImpactAdapter
             return "RimContext did not provide an error message.";
         }
 
-        return value.Length <= 512 ? value : value[..512];
+        return value.Length <= 1024 ? value : value[..1024];
     }
 }

@@ -46,6 +46,11 @@ internal sealed record CliRequest(
     int CapabilityLimit,
     string? UiTarget,
     string? UiCellRect,
+    string? UiViewport,
+    int? UiViewportWidth,
+    int? UiViewportHeight,
+    string? UiLeaseId,
+    bool UiInputCheck,
     bool Explain,
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
@@ -100,6 +105,11 @@ internal static class CliParser
         int capabilityLimit = 20;
         string? uiTarget = null;
         string? uiCellRect = null;
+        string? uiViewport = null;
+        int? uiViewportWidth = null;
+        int? uiViewportHeight = null;
+        string? uiLeaseId = null;
+        bool uiInputCheck = false;
         bool explain = false;
         string? affectedBase = null;
         bool depthSpecified = false;
@@ -193,6 +203,23 @@ internal static class CliParser
                 case "--cell-rect":
                     uiCellRect = ReadOptionValue(args, ref index, argument);
                     break;
+                case "--viewport":
+                    uiViewport = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--viewport-width":
+                    uiViewportWidth = ReadPositiveBoundedInt(
+                        args, ref index, argument, 320, 7680);
+                    break;
+                case "--viewport-height":
+                    uiViewportHeight = ReadPositiveBoundedInt(
+                        args, ref index, argument, 240, 4320);
+                    break;
+                case "--lease":
+                    uiLeaseId = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--check-input":
+                    uiInputCheck = true;
+                    break;
                 case "--explain":
                     explain = true;
                     break;
@@ -267,6 +294,11 @@ internal static class CliParser
                 capabilityLimit,
                 uiTarget,
                 uiCellRect,
+                uiViewport,
+                uiViewportWidth,
+                uiViewportHeight,
+                uiLeaseId,
+                uiInputCheck,
                 explain,
                 null,
                 [],
@@ -404,6 +436,14 @@ internal static class CliParser
                 "Capability discovery filters are only valid for capabilities.");
         }
 
+        if (command != CliCommand.UiScreenshot &&
+            (uiViewport is not null || uiViewportWidth.HasValue || uiViewportHeight.HasValue ||
+             uiLeaseId is not null || uiInputCheck))
+        {
+            throw new CliParseException(
+                "Viewport and lease options are only valid for ui screenshot.");
+        }
+
         if (command == CliCommand.Capabilities &&
             (fallbackSuiteExplicit ||
              explain ||
@@ -423,10 +463,36 @@ internal static class CliParser
         }
 
         if (command == CliCommand.UiTargets &&
-            (uiTarget is not null || uiCellRect is not null))
+            (uiTarget is not null || uiCellRect is not null || uiViewport is not null ||
+             uiViewportWidth.HasValue || uiViewportHeight.HasValue || uiLeaseId is not null ||
+             uiInputCheck))
         {
             throw new CliParseException(
                 "ui targets does not accept a target or cell rectangle.");
+        }
+
+        if (command == CliCommand.UiScreenshot && uiViewport is null &&
+            (uiViewportWidth.HasValue || uiViewportHeight.HasValue || uiLeaseId is not null))
+        {
+            throw new CliParseException(
+                "--viewport-width, --viewport-height, and --lease require --viewport.");
+        }
+
+        if (command == CliCommand.UiScreenshot && uiViewport is not null)
+        {
+            string viewportKind = uiViewport.Trim().ToLowerInvariant();
+            bool explicitViewport = string.Equals(viewportKind, "explicit", StringComparison.Ordinal);
+            if (!explicitViewport && (uiViewportWidth.HasValue || uiViewportHeight.HasValue))
+            {
+                throw new CliParseException(
+                    "Custom dimensions are only valid with --viewport explicit.");
+            }
+
+            if (explicitViewport && (!uiViewportWidth.HasValue || !uiViewportHeight.HasValue))
+            {
+                throw new CliParseException(
+                    "--viewport explicit requires --viewport-width and --viewport-height.");
+            }
         }
 
         if (command == CliCommand.UiScreenshot &&
@@ -499,6 +565,11 @@ internal static class CliParser
             capabilityLimit,
             uiTarget,
             uiCellRect,
+            uiViewport,
+            uiViewportWidth,
+            uiViewportHeight,
+            uiLeaseId,
+            uiInputCheck,
             explain,
             affectedBase,
             positionals
@@ -520,7 +591,7 @@ internal static class CliParser
         var help = new
         {
             progressiveDisclosure =
-                "Canonical loop: edit, rimliaison affected --run --fail-fast --json, inspect the result, fix immediately on failure, and repeat; once stable, run rimliaison affected --run --json for complete validation. Run rimliaison doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimliaison capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation.",
+                "Canonical loop: edit, rimliaison affected --run --fail-fast --json, inspect the result, fix immediately on failure, and repeat; once stable, run rimliaison affected --run --json for complete validation. Run rimliaison doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimliaison capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation; add ui screenshot --viewport narrow|wide|current for transactional, lease-bound live viewport evidence.",
             commands = new[]
             {
                 "list",
@@ -562,6 +633,11 @@ internal static class CliParser
                 "--source <source> (with capabilities)",
                 "--target <target-id> (with ui screenshot)",
                 "--cell-rect <x,z,width,height> (with ui screenshot)",
+                "--viewport <current|wide|narrow|explicit> (with ui screenshot)",
+                "--viewport-width <320..7680> (with --viewport explicit)",
+                "--viewport-height <240..4320> (with --viewport explicit)",
+                "--lease <lease-id> (with transactional ui screenshot; omit to acquire one)",
+                "--check-input (with ui screenshot; uses semantic live input state when registered)",
                 "--explain",
                 "--base <git-ref> (with affected)",
                 "--json (default output)",

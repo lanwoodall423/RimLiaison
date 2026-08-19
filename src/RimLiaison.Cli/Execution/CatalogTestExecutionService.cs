@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
+using RimLiaison.Profiling;
 using RimLiaison.RimError;
 using RimLiaison.Results;
 
@@ -45,12 +46,35 @@ public sealed class CatalogTestExecutionService
         string? workflowId = null,
         DevBridgeRecipeExecutionContext? executionContext = null)
     {
-        CatalogTestRunResult run = await recipeRunner.RunAsync(
-                catalog,
-                testId,
-                cancellationToken,
-                workflowId,
-                executionContext)
+        CatalogTestRunResult run = await ProfilerActivity.ObserveAsync(
+                "test-execution",
+                "testing",
+                () => recipeRunner.RunAsync(
+                    catalog,
+                    testId,
+                    cancellationToken,
+                    workflowId,
+                    executionContext),
+                (activity, value) =>
+                {
+                    DevBridgeRecipeRunResult result = value.RecipeResult;
+                    ProfilerActivity.SetOutcome(
+                        activity,
+                        result.Status.Outcome switch
+                        {
+                            DevBridgeOutcomeKind.Success => "success",
+                            DevBridgeOutcomeKind.Cancelled => "cancelled",
+                            DevBridgeOutcomeKind.TestFailure => "test-failure",
+                            _ => "failure"
+                        },
+                        result.Status.ErrorCode);
+                    ProfilerActivity.SetLogicalTarget(activity, value.TestId);
+                    ProfilerActivity.SetGeneration(activity, result.Generation);
+                    ProfilerActivity.SetCounts(activity, items: 1);
+                },
+                phase: "test",
+                target: testId,
+                scope: "test")
             .ConfigureAwait(false);
         RimTestResult normalized = RimTestResultFactory.FromRun(
             run.TestId,
@@ -76,10 +100,34 @@ public sealed class CatalogTestExecutionService
                 else
                 {
                     DevBridgeDiagnosticSourceResult source =
-                        await sourceAdapter.AcquireAsync(
-                                run.TestId,
-                                run.RecipeResult,
-                                cancellationToken)
+                        await ProfilerActivity.ObserveAsync(
+                                "diagnostic-source",
+                                "diagnosis",
+                                () => sourceAdapter.AcquireAsync(
+                                    run.TestId,
+                                    run.RecipeResult,
+                                    cancellationToken),
+                                (activity, value) =>
+                                {
+                                    ProfilerActivity.SetOutcome(
+                                        activity,
+                                        value.Status.Outcome switch
+                                        {
+                                            DevBridgeDiagnosticSourceOutcome.Available => "success",
+                                            DevBridgeDiagnosticSourceOutcome.Cancelled => "cancelled",
+                                            _ => "failure"
+                                        },
+                                        value.Status.ErrorCode);
+                                    ProfilerActivity.SetGeneration(
+                                        activity,
+                                        value.Source?.Generation ?? run.RecipeResult.Generation);
+                                    ProfilerActivity.SetCounts(
+                                        activity,
+                                        items: value.Source?.RecordCount);
+                                },
+                                phase: "diagnostic-source",
+                                target: run.TestId,
+                                scope: "devbridge")
                             .ConfigureAwait(false);
                     if (!source.Status.IsAvailable || source.Source is null)
                     {
@@ -162,9 +210,31 @@ public sealed class CatalogTestExecutionService
             scopedSource);
         try
         {
-            RimErrorDiagnosisResult? diagnosis = await adapter.DiagnoseAsync(
-                    request,
-                    cancellationToken)
+            RimErrorDiagnosisResult? diagnosis = await ProfilerActivity.ObserveAsync(
+                    "rimerror.diagnosis",
+                    "diagnosis",
+                    () => adapter.DiagnoseAsync(
+                        request,
+                        cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Outcome switch
+                            {
+                                RimErrorDiagnosisOutcome.Available or
+                                RimErrorDiagnosisOutcome.Empty => "success",
+                                RimErrorDiagnosisOutcome.Cancelled => "cancelled",
+                                _ => "failure"
+                            },
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, run.Generation);
+                        ProfilerActivity.SetLogicalTarget(activity, result.TestId);
+                        ProfilerActivity.SetCounts(activity, items: run.Operations.Count);
+                    },
+                    phase: "diagnosis",
+                    target: result.TestId,
+                    scope: "rimerror")
                 .ConfigureAwait(false);
             return diagnosis ?? UnavailableDiagnosis("RIMERROR_EMPTY_RESPONSE");
         }

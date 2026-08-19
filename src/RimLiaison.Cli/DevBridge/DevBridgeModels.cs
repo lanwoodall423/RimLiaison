@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
 
@@ -102,7 +103,10 @@ public sealed record DevBridgeAdapterStatus(
     string? Error = null,
     int? ProcessExitCode = null,
     string? Stderr = null,
-    string? ResponseSchema = null)
+    string? ResponseSchema = null,
+    PrerequisiteRecoveryState RecoveryState = PrerequisiteRecoveryState.Ready,
+    int RecoveryAttempts = 0,
+    string? RecoveryAction = null)
 {
     public bool IsSuccess => Outcome == DevBridgeOutcomeKind.Success;
 }

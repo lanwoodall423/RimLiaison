@@ -4,6 +4,7 @@
     {
       "id": "mod-development-smoke",
       "recipe": "mod-development-smoke",
+      "artifactFreshnessAnchor": true,
       "cost": "medium",
       "isolation": {
         "mode": "pureRead",

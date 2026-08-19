@@ -107,14 +107,18 @@ function Test-DocumentationPath {
         [string]$Path
     )
 
+    $fileName = [IO.Path]::GetFileName($Path)
+
     if ((Test-PathPrefix $Path '.github/workflows') -or
         (Test-PathPrefix $Path 'contracts') -or
         ((Test-PathPrefix $Path 'scripts') -and $Path -match '\.(ps1|psm1|cmd|bat)$') -or
-        (Test-PathPrefix $Path 'fixtures') -or
         (Test-PathPrefix $Path 'tests/fixtures') -or
-        (Test-PathPrefix $Path 'TestCatalog') -or
         (Test-PathPrefix $Path 'templates') -or
-        [string]::Equals($Path, 'templates/AGENTS.md', [StringComparison]::OrdinalIgnoreCase)) {
+        [string]::Equals($Path, 'templates/AGENTS.md', [StringComparison]::OrdinalIgnoreCase) -or
+        ((Test-PathPrefix $Path 'fixtures') -and
+            $fileName -notmatch '^(README|CHANGELOG|CONTRIBUTING|SECURITY|LICENSE)(\.|$)') -or
+        ((Test-PathPrefix $Path 'TestCatalog') -and
+            $fileName -notmatch '^(README|CHANGELOG|CONTRIBUTING|SECURITY|LICENSE)(\.|$)')) {
         return $false
     }
 
@@ -122,12 +126,11 @@ function Test-DocumentationPath {
         return $true
     }
 
-    $fileName = [IO.Path]::GetFileName($Path)
     if ($fileName -match '^(README|CHANGELOG|CONTRIBUTING|SECURITY|LICENSE)(\.|$)') {
         return $true
     }
 
-    return [IO.Path]::GetExtension($Path).ToLowerInvariant() -in @('.md', '.markdown', '.rst')
+    return [IO.Path]::GetExtension($Path).ToLowerInvariant() -in @('.adoc', '.md', '.markdown', '.rst', '.txt')
 }
 
 function Test-SharedBuildPath {
@@ -171,14 +174,29 @@ function Get-SourceClassification {
         return [pscustomobject]@{ Kind = 'shared-infrastructure'; AllInternal = $true; CrossStack = $true }
     }
 
+    if ($Path -match '^(rimliaison|rimtest|rimctx|rimerror)\.(cmd|bat|ps1)$') {
+        return [pscustomobject]@{ Kind = 'command-surface'; AllInternal = $true; CrossStack = $true }
+    }
+
     if ((Test-PathPrefix $Path 'contracts') -or
-        (Test-PathPrefix $Path 'TestCatalog') -or
         (Test-PathPrefix $Path 'tests/fixtures/cross-stack') -or
         (Test-PathPrefix $Path 'fixtures/cross-stack')) {
         return [pscustomobject]@{ Kind = 'composition-contract'; AllInternal = $false; CrossStack = $true }
     }
 
-    if (Test-PathPrefix $Path 'scripts/cross-stack') {
+    if (Test-PathPrefix $Path 'TestCatalog') {
+        if ([IO.Path]::GetExtension($Path).ToLowerInvariant() -eq '.json') {
+            return [pscustomobject]@{ Kind = 'test-catalog'; AllInternal = $false; CrossStack = $false; RimLiaison = $true }
+        }
+
+        return [pscustomobject]@{ Kind = 'ambiguous-catalog'; AllInternal = $true; CrossStack = $true }
+    }
+
+    if (Test-PathPrefix $Path 'fixtures') {
+        return [pscustomobject]@{ Kind = 'rimerror-fixture'; AllInternal = $false; CrossStack = $false; RimError = $true }
+    }
+
+    if ($Path -match '^scripts/cross-stack(?:[/\-]|$)') {
         return [pscustomobject]@{ Kind = 'composition-script'; AllInternal = $false; CrossStack = $true }
     }
 
@@ -200,8 +218,7 @@ function Get-SourceClassification {
         return [pscustomobject]@{ Kind = 'rimcontext-tests'; AllInternal = $false; CrossStack = $false; RimContext = $true }
     }
 
-    if ((Test-PathPrefix $Path 'tests/RimError.Core.Tests') -or
-        (Test-PathPrefix $Path 'fixtures')) {
+    if (Test-PathPrefix $Path 'tests/RimError.Core.Tests') {
         return [pscustomobject]@{ Kind = 'rimerror-tests'; AllInternal = $false; CrossStack = $false; RimError = $true }
     }
 
@@ -258,7 +275,7 @@ function Get-GitChangedPaths {
         $Base -match '^[0]+$' -or $Head -match '^[0]+$' -or
         $Base.StartsWith('-', [StringComparison]::Ordinal) -or
         $Head.StartsWith('-', [StringComparison]::Ordinal)) {
-        return [pscustomobject]@{ Success = $false; Paths = [string[]]@(); Reason = 'base-or-head-revision-unavailable' }
+        return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'base-or-head-revision-unavailable' }
     }
 
     try {
@@ -266,22 +283,60 @@ function Get-GitChangedPaths {
         $headSpec = $Head + '^{commit}'
         $null = & git -C $Root rev-parse --verify $baseSpec 2>$null
         if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Success = $false; Paths = [string[]]@(); Reason = 'base-revision-unavailable' }
+            return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'base-revision-unavailable' }
         }
         $null = & git -C $Root rev-parse --verify $headSpec 2>$null
         if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Success = $false; Paths = [string[]]@(); Reason = 'head-revision-unavailable' }
+            return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'head-revision-unavailable' }
         }
 
-        $rawPaths = @(& git -C $Root diff --name-only --diff-filter=ACDMRTUXB $Base $Head -- 2>$null)
+        $rawChanges = @(& git -C $Root diff --name-status --find-renames --no-ext-diff --no-textconv --diff-filter=ACDMRTUXB $Base $Head -- 2>$null)
         if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Success = $false; Paths = [string[]]@(); Reason = 'git-diff-unavailable' }
+            return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'git-diff-unavailable' }
         }
 
-        return [pscustomobject]@{ Success = $true; Paths = [string[]]$rawPaths; Reason = 'git-diff' }
+        $changes = [Collections.Generic.List[object]]::new()
+        foreach ($rawChange in $rawChanges) {
+            $line = [string]$rawChange
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+
+            $fields = $line -split "`t", 3
+            if ($fields.Count -lt 2 -or [string]::IsNullOrWhiteSpace($fields[0])) {
+                return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'git-diff-status-unparseable' }
+            }
+
+            $statusToken = $fields[0].Trim()
+            $status = $statusToken.Substring(0, 1).ToUpperInvariant()
+            if ($status -in @('R', 'C')) {
+                if ($fields.Count -ne 3) {
+                    return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'git-diff-rename-unparseable' }
+                }
+
+                [void]$changes.Add([pscustomobject]@{
+                        Status = $status
+                        Path = $fields[2]
+                        PreviousPath = $fields[1]
+                    })
+                continue
+            }
+
+            if ($fields.Count -ne 2) {
+                return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'git-diff-status-unparseable' }
+            }
+
+            [void]$changes.Add([pscustomobject]@{
+                    Status = $status
+                    Path = $fields[1]
+                    PreviousPath = $null
+                })
+        }
+
+        return [pscustomobject]@{ Success = $true; Changes = $changes.ToArray(); Reason = 'git-diff' }
     }
     catch {
-        return [pscustomobject]@{ Success = $false; Paths = [string[]]@(); Reason = 'git-diff-error' }
+        return [pscustomobject]@{ Success = $false; Changes = [object[]]@(); Reason = 'git-diff-error' }
     }
 }
 
@@ -301,9 +356,18 @@ function Get-PathInput {
     )
 
     if ($ExplicitPaths) {
+        $changes = [Collections.Generic.List[object]]::new()
+        foreach ($path in @($Paths)) {
+            [void]$changes.Add([pscustomobject]@{
+                    Status = 'M'
+                    Path = $path
+                    PreviousPath = $null
+                })
+        }
+
         return [pscustomobject]@{
             Source = 'explicit'
-            RawPaths = if ($null -eq $Paths) { [string[]]@() } else { [string[]]$Paths }
+            Changes = $changes.ToArray()
             Certain = $true
             Reason = 'explicit-changed-paths'
         }
@@ -313,7 +377,7 @@ function Get-PathInput {
         $gitResult = Get-GitChangedPaths $Root $Base $Head
         return [pscustomobject]@{
             Source = 'git'
-            RawPaths = $gitResult.Paths
+            Changes = $gitResult.Changes
             Certain = [bool]$gitResult.Success
             Reason = [string]$gitResult.Reason
         }
@@ -321,7 +385,7 @@ function Get-PathInput {
 
     return [pscustomobject]@{
         Source = 'unavailable'
-        RawPaths = [string[]]@()
+        Changes = [object[]]@()
         Certain = $false
         Reason = 'changed-paths-unavailable'
     }
@@ -338,13 +402,59 @@ $input = Get-PathInput $ChangedPath $explicitPaths $BaseRevision $HeadRevision $
 $normalizedPaths = [Collections.Generic.List[string]]::new()
 $inputUncertain = -not [bool]$input.Certain
 $uncertaintyReasons = [Collections.Generic.List[string]]::new()
+$statusCounts = [ordered]@{
+    added = 0
+    copied = 0
+    deleted = 0
+    modified = 0
+    renamed = 0
+    typeChanged = 0
+    unmerged = 0
+    unknown = 0
+}
 
 if ($inputUncertain) {
     Add-UniqueString $uncertaintyReasons ([string]$input.Reason)
 }
 
-foreach ($rawPath in @($input.RawPaths)) {
-    $normalized = Normalize-ChangedPath ([string]$rawPath)
+foreach ($change in $input.Changes) {
+    $status = [string]$change.Status
+    switch ($status) {
+        'A' { $statusCounts['added']++ }
+        'C' {
+            $statusCounts['copied']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'copy-change'
+        }
+        'D' {
+            $statusCounts['deleted']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'deletion-change'
+        }
+        'M' { $statusCounts['modified']++ }
+        'R' {
+            $statusCounts['renamed']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'rename-change'
+        }
+        'T' {
+            $statusCounts['typeChanged']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'type-change'
+        }
+        'U' {
+            $statusCounts['unmerged']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'unmerged-change'
+        }
+        default {
+            $statusCounts['unknown']++
+            $inputUncertain = $true
+            Add-UniqueString $uncertaintyReasons 'unknown-git-change-status'
+        }
+    }
+
+    $normalized = Normalize-ChangedPath ([string]$change.Path)
     if (-not $normalized.Valid) {
         $inputUncertain = $true
         Add-UniqueString $uncertaintyReasons ([string]$normalized.Reason)
@@ -370,6 +480,7 @@ $runCrossStack = $false
 $documentationCount = 0
 $nonDocumentationCount = 0
 $kindCodes = [Collections.Generic.List[string]]::new()
+$formatRequired = $false
 
 foreach ($path in $orderedPaths) {
     if (Test-DocumentationPath $path) {
@@ -380,6 +491,19 @@ foreach ($path in $orderedPaths) {
     $nonDocumentationCount++
     $classification = Get-SourceClassification $path
     Add-UniqueString $kindCodes ([string]$classification.Kind)
+    if ([string]$classification.Kind -in @(
+            'command-surface',
+            'rimcontext-implementation',
+            'rimcontext-tests',
+            'rimerror-implementation',
+            'rimerror-tests',
+            'rimliaison-implementation',
+            'rimliaison-integration',
+            'rimliaison-tests',
+            'shared-infrastructure') -or
+        [string]$classification.Kind -like 'ambiguous-*') {
+        $formatRequired = $true
+    }
     if ([string]$classification.Kind -like 'ambiguous-*') {
         $inputUncertain = $true
         Add-UniqueString $uncertaintyReasons ([string]$classification.Kind)
@@ -413,7 +537,7 @@ if ($runAllInternal) {
 }
 
 $hasChanges = $orderedPaths.Count -gt 0
-$runFormat = $runAllInternal -or $runRimContext -or $runRimError -or $runRimLiaison
+$runFormat = $runAllInternal -or $formatRequired
 
 $category = 'no-change'
 if ($inputUncertain) {
@@ -479,8 +603,23 @@ $plan = [ordered]@{
     runRimLiaison = $runRimLiaison
     runFormat = $runFormat
     runCrossStack = $runCrossStack
+    runDiffCheck = $true
     runPlannerTests = $true
 }
+
+$selectedValidation = [Collections.Generic.List[string]]::new()
+if ($plan.runRimContext) { [void]$selectedValidation.Add('rimcontext') }
+if ($plan.runRimError) { [void]$selectedValidation.Add('rimerror') }
+if ($plan.runRimLiaison) { [void]$selectedValidation.Add('rimliaison') }
+if ($plan.runFormat) { [void]$selectedValidation.Add('format') }
+if ($plan.runCrossStack) { [void]$selectedValidation.Add('cross-stack') }
+[void]$selectedValidation.Add('diff-check')
+[void]$selectedValidation.Add('planner-tests')
+$allValidation = @('rimcontext', 'rimerror', 'rimliaison', 'format', 'cross-stack', 'diff-check', 'planner-tests')
+$skippedValidation = @($allValidation | Where-Object { -not $selectedValidation.Contains($_) })
+$plan.selectedValidation = [string[]]$selectedValidation
+$plan.skippedValidation = [string[]]$skippedValidation
+$plan.changeStatusCounts = [pscustomobject]$statusCounts
 
 $planJson = ConvertTo-Json -InputObject ([pscustomobject]$plan) -Depth 10 -Compress
 
@@ -498,6 +637,9 @@ if (-not [string]::IsNullOrWhiteSpace($GitHubOutputPath)) {
         run_rimliaison = Convert-ToOutputBoolean ([bool]$plan.runRimLiaison)
         run_format = Convert-ToOutputBoolean ([bool]$plan.runFormat)
         run_cross_stack = Convert-ToOutputBoolean ([bool]$plan.runCrossStack)
+        run_diff_check = 'true'
+        plan_selected = ($plan.selectedValidation -join ',')
+        plan_skipped = ($plan.skippedValidation -join ',')
         run_planner_tests = 'true'
     }
 

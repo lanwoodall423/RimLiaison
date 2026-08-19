@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
 
+using RimLiaison.Recovery;
+
 namespace RimLiaison.RimContext;
 
 public static class RimContextSchemas
@@ -25,7 +27,10 @@ public sealed record RimContextAdapterStatus(
     string? ErrorCode = null,
     string? Error = null,
     int? ProcessExitCode = null,
-    string? ResponseSchema = null)
+    string? ResponseSchema = null,
+    PrerequisiteRecoveryState RecoveryState = PrerequisiteRecoveryState.Ready,
+    int RecoveryAttempts = 0,
+    string? RecoveryAction = null)
 {
     public bool IsSuccess => Outcome == RimContextImpactOutcome.Success;
 }
@@ -195,6 +200,18 @@ public sealed class RimTestSelectionResult
     [JsonPropertyName("nextAction")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NextAction { get; init; }
+
+    [JsonPropertyName("recoveryState")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RecoveryState { get; init; }
+
+    [JsonPropertyName("recoveryAttempts")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? RecoveryAttempts { get; init; }
+
+    [JsonPropertyName("recoveryAction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RecoveryAction { get; init; }
 
     [JsonPropertyName("fallbackSuite")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

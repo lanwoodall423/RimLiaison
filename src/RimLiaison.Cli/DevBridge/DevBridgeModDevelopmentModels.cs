@@ -30,6 +30,9 @@ public sealed record DevBridgeModDevelopmentResult(
     string? LeaseId,
     DevBridgeArtifactFreshness? Freshness);
 
+public sealed record DevBridgeModDevelopmentExecutionContext(
+    string? LeaseId = null);
+
 public interface IDevBridgeModDevelopmentAdapter
 {
     Task<DevBridgeModDevelopmentResult> RunAsync(
@@ -38,6 +41,20 @@ public interface IDevBridgeModDevelopmentAdapter
         string sourceFingerprint,
         string? workflowId,
         CancellationToken cancellationToken = default);
+
+    Task<DevBridgeModDevelopmentResult> RunAsync(
+        string project,
+        string repositoryRoot,
+        string sourceFingerprint,
+        string? workflowId,
+        DevBridgeModDevelopmentExecutionContext? executionContext,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(
+            project,
+            repositoryRoot,
+            sourceFingerprint,
+            workflowId,
+            cancellationToken);
 }
 
 public sealed record DevBridgeModDevelopmentAdapterOptions
@@ -45,6 +62,12 @@ public sealed record DevBridgeModDevelopmentAdapterOptions
     public required string RootPath { get; init; }
     public string? DescriptorPath { get; init; }
     public string? DeploymentRoot { get; init; }
+    public IReadOnlyList<string>? ChangedPaths { get; init; }
+    public string? TestRecipe { get; init; }
+    public string? Configuration { get; init; }
+    public string? DeploymentTarget { get; init; }
+    public bool EnableDescriptorRecovery { get; init; } = true;
+    public bool PreserveDescriptorBackup { get; init; } = true;
     public string PowerShellPath { get; init; } = "pwsh";
     public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(20);
     public int MaxStdoutBytes { get; init; } = 1024 * 1024;

@@ -20,6 +20,15 @@ in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff f
 path. DevBridge2 remains the external lifecycle/deployment boundary and RimBridgeServer remains the
 external live-game control boundary.
 
+For an affected run, Tooling also owns routine prerequisite recovery: safe descriptor reconciliation,
+one partial-index rebuild/retry, bounded readiness recovery, routine lease acquisition/release, and
+transactional viewport restoration. Inspect `orchestration` in the JSON result for separate
+source/build, static/test, deployment/artifact, runtime, and infrastructure dimensions. In
+particular, `artifactFreshness.evaluationStatus=NOT_EVALUATED` means the transaction never reached
+freshness evaluation; it is not evidence of a stale deployed artifact. Only ambiguity, active
+contention, unsafe or unwritable state, owner refusal, or another result explicitly marked as
+requiring intervention should stop for manual repair.
+
 Without `--fail-fast`, ordinary test failures continue to aggregate as before. With `--fail-fast`,
 the same selection, freshness, generation, lease, and ownership checks occur; after the first
 trustworthy ordinary test failure, tests not yet started are left unlaunched. A PASS still requires
@@ -55,4 +64,6 @@ explicit limit deliberately; do not request unrestricted source, logs, or screen
 
 For visual work, enumerate semantic targets with `rimliaison ui targets --json`, then capture only
 the smallest relevant target with `rimliaison ui screenshot --target <target-id> --json`. Prefer
-targeted evidence over whole-screen image capture.
+targeted evidence over whole-screen image capture. For responsive checks, add `--viewport wide`,
+`--viewport narrow`, or `--viewport current` to request a temporary lease-bound viewport and
+receive effective-dimension plus restoration evidence.

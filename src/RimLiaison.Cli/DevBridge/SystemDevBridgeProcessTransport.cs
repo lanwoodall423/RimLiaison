@@ -1,12 +1,45 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using RimLiaison.Profiling;
 
 namespace RimLiaison.DevBridge;
 
 public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
 {
-    public async Task<DevBridgeProcessResult> ExecuteAsync(
+    public Task<DevBridgeProcessResult> ExecuteAsync(
+        DevBridgeProcessRequest request,
+        CancellationToken cancellationToken)
+    {
+        string operation = ProfilerActivity.DevBridgeOperation(request.Arguments);
+        return ProfilerActivity.ObserveAsync(
+            operation,
+            "devbridge",
+            () => ExecuteCoreAsync(request, cancellationToken),
+            (activity, result) =>
+            {
+                ProfilerActivity.SetOutcome(
+                    activity,
+                    result.Cancelled
+                        ? "cancelled"
+                        : result.TimedOut
+                            ? "timeout"
+                            : result.ExitCode is 0 && result.StartError is null
+                                ? "success"
+                                : "failure",
+                    result.StartError is null
+                        ? null
+                        : "DEVBRIDGE_PROCESS_START_FAILED");
+                ProfilerActivity.SetCounts(
+                    activity,
+                    outputChars: (result.Stdout?.Length ?? 0) +
+                        (result.Stderr?.Length ?? 0));
+            },
+            phase: "child-process",
+            scope: operation);
+    }
+
+    private async Task<DevBridgeProcessResult> ExecuteCoreAsync(
         DevBridgeProcessRequest request,
         CancellationToken cancellationToken)
     {

@@ -1,5 +1,6 @@
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
+using RimLiaison.Profiling;
 
 namespace RimLiaison.Execution;
 
@@ -40,11 +41,33 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
             throw new KeyNotFoundException($"Test was not found: {testId}.");
         }
 
-        DevBridgeRecipeRunResult result = await adapter.RunAsync(
-            test.Recipe,
-            workflowId,
-            executionContext,
-            cancellationToken).ConfigureAwait(false);
+        DevBridgeRecipeRunResult result = await ProfilerActivity.ObserveAsync(
+                "recipe.run",
+                "testing",
+                () => adapter.RunAsync(
+                    test.Recipe,
+                    workflowId,
+                    executionContext,
+                    cancellationToken),
+                (activity, value) =>
+                {
+                    ProfilerActivity.SetOutcome(
+                        activity,
+                        value.Status.Outcome switch
+                        {
+                            DevBridgeOutcomeKind.Success => "success",
+                            DevBridgeOutcomeKind.Cancelled => "cancelled",
+                            DevBridgeOutcomeKind.TestFailure => "test-failure",
+                            _ => "failure"
+                        },
+                        value.Status.ErrorCode);
+                    ProfilerActivity.SetGeneration(activity, value.Generation);
+                    ProfilerActivity.SetCounts(activity, items: value.Operations.Count);
+                },
+                phase: "recipe",
+                target: test.Recipe,
+                scope: "recipe")
+            .ConfigureAwait(false);
         return new CatalogTestRunResult(test.Id, test.Recipe, result);
     }
 }

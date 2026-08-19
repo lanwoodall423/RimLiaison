@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
+using RimLiaison.DevBridge;
 using RimLiaison.Execution;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.Results;
 
@@ -26,6 +28,14 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("artifactFreshness")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RimTestArtifactFreshness? ArtifactFreshness { get; init; }
+
+    [JsonPropertyName("orchestration")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimTestOrchestrationSummary? Orchestration { get; init; }
+
+    [JsonPropertyName("prerequisiteRecovery")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RimTestPrerequisiteRecovery>? PrerequisiteRecovery { get; init; }
 
     [JsonPropertyName("reuse")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -101,6 +111,47 @@ public sealed class RimTestSuiteFailure
 
 public static class RimTestSuiteResultFactory
 {
+    public static RimTestSuiteResult FromSelectionFailure(
+        string suiteId,
+        string selectionStatus,
+        string errorCode,
+        string? error,
+        string? nextAction,
+        long durationMs,
+        string? workflowId = null,
+        IReadOnlyList<RimTestPrerequisiteRecovery>? prerequisiteRecovery = null)
+    {
+        var execution = new CatalogSuiteExecutionResult(
+            suiteId,
+            [],
+            0,
+            Cancelled: false,
+            PrerequisiteRecovery: prerequisiteRecovery);
+        return new RimTestSuiteResult
+        {
+            Status = "infrastructure",
+            Suite = suiteId,
+            WorkflowId = workflowId,
+            Passed = 0,
+            Failed = 0,
+            DurationMs = Math.Max(0, durationMs),
+            PrerequisiteRecovery = prerequisiteRecovery,
+            SelectionStatus = selectionStatus,
+            SelectionErrorCode = errorCode,
+            NextAction = nextAction,
+            Orchestration = RimTestOrchestrationProjector.Project(
+                execution,
+                suiteId,
+                selectionStatus,
+                errorCode,
+                nextAction,
+                freshnessRequested: false,
+                freshness: null,
+                freshnessStatus: null,
+                workflowId)
+        };
+    }
+
     public static RimTestSuiteResult FromExecution(
         CatalogSuiteExecutionResult execution,
         long durationMs,
@@ -108,7 +159,9 @@ public static class RimTestSuiteResultFactory
         string? selectionErrorCode = null,
         string? fallbackSuite = null,
         string? workflowId = null,
-        RimTestArtifactFreshness? artifactFreshness = null)
+        RimTestArtifactFreshness? artifactFreshness = null,
+        DevBridgeAdapterStatus? freshnessStatus = null,
+        bool freshnessRequested = false)
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
@@ -154,10 +207,17 @@ public static class RimTestSuiteResultFactory
         RimTestArtifactFreshness? projectedFreshness = artifactFreshness;
         if (projectedFreshness is not null)
         {
-            string? runId = children
+            IEnumerable<RimTestResult> artifactChildren =
+                string.IsNullOrWhiteSpace(projectedFreshness.ArtifactTestId)
+                    ? children
+                    : children.Where(child => string.Equals(
+                        child.Test,
+                        projectedFreshness.ArtifactTestId,
+                        StringComparison.Ordinal));
+            string? runId = artifactChildren
                 .Select(static child => child.RunId)
                 .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
-            string[] operationIds = children
+            string[] operationIds = artifactChildren
                 .SelectMany(static child => child.OperationIds ?? [])
                 .Where(static value => !string.IsNullOrWhiteSpace(value))
                 .Distinct(StringComparer.Ordinal)
@@ -181,6 +241,21 @@ public static class RimTestSuiteResultFactory
             Failed = failed,
             DurationMs = Math.Max(0, durationMs),
             ArtifactFreshness = projectedFreshness,
+            Orchestration = string.Equals(execution.SuiteId, "affected", StringComparison.Ordinal)
+                ? RimTestOrchestrationProjector.Project(
+                    execution,
+                    execution.SuiteId,
+                    selectionStatus,
+                    selectionErrorCode,
+                    execution.Tests
+                        .Select(static child => child.NextAction)
+                        .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action)),
+                    freshnessRequested,
+                    projectedFreshness,
+                    freshnessStatus,
+                    workflowId)
+                : null,
+            PrerequisiteRecovery = execution.PrerequisiteRecovery,
             Reuse = execution.Reuse,
             FailFast = execution.FailFast,
             Failures = failures.Length == 0 ? null : failures,

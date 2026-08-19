@@ -56,6 +56,13 @@ produce a valid PASS. A direct `mod-development-smoke` recipe run only checks it
 project/Quicktest readiness; by itself it is not evidence that current source was built and
 loaded.
 
+The catalog may mark the recipe that exercises the built project with
+`artifactFreshnessAnchor: true`. For a build-relevant affected run, only the selected anchor
+recipe must report the owner transaction's generation. Other selected recipes may legitimately
+move to a later generation when their DevBridge profiles are incompatible; their result is still
+validated normally. Catalogs without an explicit anchor retain the conservative legacy rule that
+all passing selected recipes must match the transaction generation.
+
 ## Recipe isolation and safe reuse
 
 The optional `isolation` object is an explicit, reviewed permission for sequential state reuse;

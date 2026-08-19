@@ -1,5 +1,6 @@
 using RimLiaison.Catalog;
 using RimLiaison.Git;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.RimContext;
 
@@ -30,7 +31,7 @@ public sealed class RimContextTestSelector
 
         if (context.Status.Outcome == RimContextImpactOutcome.Cancelled)
         {
-            return new RimTestSelectionResult
+            return WithRecovery(new RimTestSelectionResult
             {
                 Status = "cancelled",
                 ReasonCount = 1,
@@ -38,12 +39,12 @@ public sealed class RimContextTestSelector
                 Reasons = explain ?
                     [CreateStatusReason(context.Status.ErrorCode ?? "RIMTEST_CANCELLED", context.Status.Error)] :
                     null
-            };
+            }, context.Status);
         }
 
         if (context.Status.Outcome == RimContextImpactOutcome.InvalidInput)
         {
-            return new RimTestSelectionResult
+            return WithRecovery(new RimTestSelectionResult
             {
                 Status = "invalid",
                 ReasonCount = 1,
@@ -51,7 +52,7 @@ public sealed class RimContextTestSelector
                 Reasons = explain ?
                     [CreateStatusReason(context.Status.ErrorCode ?? "RIMCONTEXT_INPUT_INVALID", context.Status.Error)] :
                     null
-            };
+            }, context.Status);
         }
 
         if (!context.Status.IsSuccess &&
@@ -64,31 +65,64 @@ public sealed class RimContextTestSelector
                 "CONTEXT_STALE",
                 context.Status.Error,
                 nextAction: "rimliaison affected --run --json");
-            return conservative.Tests.Count > 0
-                ? conservative
-                : new RimTestSelectionResult
-                {
-                    Status = "blocked",
-                    ReasonCount = 1,
-                    ErrorCode = "CONTEXT_STALE",
-                    NextAction = "rimliaison affected --run --json",
-                    Reasons = explain
-                        ? conservative.Reasons
-                        : null
-                };
+            return WithRecovery(
+                conservative.Tests.Count > 0
+                    ? conservative
+                    : new RimTestSelectionResult
+                    {
+                        Status = "blocked",
+                        ReasonCount = 1,
+                        ErrorCode = "CONTEXT_STALE",
+                        NextAction = "rimliaison affected --run --json",
+                        Reasons = explain
+                            ? conservative.Reasons
+                            : null
+                    },
+                context.Status);
         }
 
         if (!context.Status.IsSuccess)
         {
-            return Conservative(
-                catalog,
-                fallbackSuite,
-                explain,
-                context.Status.ErrorCode ?? "RIMCONTEXT_IMPACT_UNKNOWN",
-                context.Status.Error);
+            return WithRecovery(
+                Conservative(
+                    catalog,
+                    fallbackSuite,
+                    explain,
+                    context.Status.ErrorCode ?? "RIMCONTEXT_IMPACT_UNKNOWN",
+                    context.Status.Error),
+                context.Status);
         }
 
-        return SelectKnown(catalog, context, fallbackSuite, explain, gitChanges);
+        return WithRecovery(
+            SelectKnown(catalog, context, fallbackSuite, explain, gitChanges),
+            context.Status);
+    }
+
+    private static RimTestSelectionResult WithRecovery(
+        RimTestSelectionResult result,
+        RimContextAdapterStatus status)
+    {
+        if (status.RecoveryState == PrerequisiteRecoveryState.Ready &&
+            status.RecoveryAttempts == 0)
+        {
+            return result;
+        }
+
+        return new RimTestSelectionResult
+        {
+            SchemaVersion = result.SchemaVersion,
+            Status = result.Status,
+            Tests = result.Tests,
+            ReasonCount = result.ReasonCount,
+            ErrorCode = result.ErrorCode,
+            NextAction = result.NextAction,
+            FallbackSuite = result.FallbackSuite,
+            Reasons = result.Reasons,
+            ReasonsTruncated = result.ReasonsTruncated,
+            RecoveryState = status.RecoveryState.ToWireName(),
+            RecoveryAttempts = Math.Max(0, status.RecoveryAttempts),
+            RecoveryAction = status.RecoveryAction
+        };
     }
 
     private static RimTestSelectionResult SelectKnown(

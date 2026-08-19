@@ -64,6 +64,9 @@ public sealed class CatalogTest
     [JsonPropertyName("recipe")]
     public required string Recipe { get; init; }
 
+    [JsonPropertyName("artifactFreshnessAnchor")]
+    public bool ArtifactFreshnessAnchor { get; init; }
+
     [JsonPropertyName("tags")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? Tags { get; init; }

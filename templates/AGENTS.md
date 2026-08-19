@@ -25,7 +25,9 @@ the normal `doctor` / `affected` loop. For UI or visual changes, functional test
 run the functional workflow,
 enumerate semantic targets with `rimliaison ui targets --json`, and capture the smallest relevant
 target with `rimliaison ui screenshot --target <target-id> --json`. Do not capture the whole screen
-when a smaller target is available.
+when a smaller target is available. For responsive validation, request a temporary supported
+viewport with `--viewport wide`, `--viewport narrow`, or `--viewport current`; RimLiaison captures
+the effective dimensions and restores the prior live window state through the canonical lease.
 
 Ownership:
 

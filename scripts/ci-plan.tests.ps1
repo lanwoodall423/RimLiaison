@@ -34,21 +34,26 @@ function Invoke-Plan {
         [AllowEmptyCollection()][string[]]$Paths,
         [string]$Base,
         [string]$Head,
-        [string]$OutputPath
+        [string]$OutputPath,
+        [string]$RepositoryRoot
     )
 
+    $arguments = @{ Json = $true }
     if ($PSBoundParameters.ContainsKey('Paths')) {
+        $arguments['ChangedPath'] = $Paths
         if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
-            $raw = @(& $plannerPath -Json -ChangedPath $Paths -GitHubOutputPath $OutputPath)
-        } else {
-            $raw = @(& $plannerPath -Json -ChangedPath $Paths)
+            $arguments['GitHubOutputPath'] = $OutputPath
         }
     } elseif (-not [string]::IsNullOrWhiteSpace($Base) -or -not [string]::IsNullOrWhiteSpace($Head)) {
-        $raw = @(& $plannerPath -Json -BaseRevision $Base -HeadRevision $Head)
-    } else {
-        $raw = @(& $plannerPath -Json)
+        $arguments['BaseRevision'] = $Base
+        $arguments['HeadRevision'] = $Head
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+        $arguments['RepositoryRoot'] = $RepositoryRoot
+    }
+
+    $raw = @(& $plannerPath @arguments)
     $text = ($raw -join [Environment]::NewLine).Trim()
     Assert-True (-not [string]::IsNullOrWhiteSpace($text)) 'planner emitted JSON'
     return $text | ConvertFrom-Json -Depth 10
@@ -113,6 +118,46 @@ $testsRun++
 Assert-True $plan.runRimError 'Fixture documentation is test input, not documentation-only'
 Assert-True (-not $plan.runCrossStack) 'Non-composition fixture input does not select composition'
 
+$plan = Invoke-Plan -Paths @('TestCatalog/rimtest.catalog.json')
+$testsRun++
+Assert-Equal $plan.category 'rimliaison-only' 'Catalog changes select catalog validation'
+Assert-True $plan.runRimLiaison 'Catalog changes select RimLiaison validation'
+Assert-True (-not $plan.runRimContext -and -not $plan.runRimError) 'Catalog changes omit unrelated internal suites'
+Assert-True (-not $plan.runCrossStack -and -not $plan.runFormat) 'Normal catalog changes omit composition and source formatting'
+
+$plan = Invoke-Plan -Paths @('tests/RimError.Core.Tests/DiagnosticJsonTests.cs')
+$testsRun++
+Assert-True $plan.runRimError 'RimError test changes select RimError validation'
+Assert-True (-not $plan.runRimContext -and -not $plan.runRimLiaison) 'RimError test changes omit unrelated suites'
+
+$plan = Invoke-Plan -Paths @('tests/fixtures/cross-stack/FixtureMod/Source/FixtureMarker.cs')
+$testsRun++
+Assert-Equal $plan.category 'composition-only' 'Cross-stack fixtures select only composition validation'
+Assert-True $plan.runCrossStack 'Cross-stack fixtures select composition'
+Assert-True (-not $plan.runRimContext -and -not $plan.runRimError -and -not $plan.runRimLiaison) 'Cross-stack fixtures omit deterministic internal suites'
+
+$plan = Invoke-Plan -Paths @('global.json')
+$testsRun++
+Assert-Equal $plan.category 'all-internal' 'Global SDK configuration selects complete validation'
+Assert-True ($plan.runAllInternal -and $plan.runCrossStack) 'Global SDK configuration selects all gates'
+
+$plan = Invoke-Plan -Paths @('src/RimContext.Core/RimContext.Core.csproj')
+$testsRun++
+Assert-Equal $plan.category 'all-internal' 'Project files select complete validation'
+Assert-True ($plan.runAllInternal -and $plan.runRimContext -and $plan.runRimError -and $plan.runRimLiaison) 'Project files select all internal suites'
+
+$plan = Invoke-Plan -Paths @('rimliaison.cmd')
+$testsRun++
+Assert-Equal $plan.category 'all-internal' 'Agent-facing wrappers select complete validation'
+Assert-True ($plan.runAllInternal -and $plan.runCrossStack) 'Agent-facing wrappers select all gates'
+
+$plan = Invoke-Plan -Paths @('src/RimLiaison.Cli/Execution/ArtifactFreshnessTransaction.cs')
+$testsRun++
+Assert-Equal $plan.category 'rimliaison-and-composition' 'Artifact freshness boundaries select composition'
+Assert-True $plan.runRimLiaison 'Artifact freshness changes select RimLiaison validation'
+Assert-True $plan.runCrossStack 'Artifact freshness changes select composition'
+Assert-True (-not $plan.runAllInternal -and -not $plan.runRimContext -and -not $plan.runRimError) 'Artifact freshness changes omit unrelated suites'
+
 $plan = Invoke-Plan -Paths @('src/new-component/Unknown.cs')
 $testsRun++
 Assert-Equal $plan.category 'full-uncertain' 'Ambiguous source paths fall back conservatively'
@@ -124,6 +169,38 @@ $testsRun++
 Assert-Equal $plan.category 'mixed' 'Multiple component changes remain deterministic and composable'
 Assert-True ($plan.runRimContext -and $plan.runRimError -and $plan.runRimLiaison) 'Mixed component changes select all affected internal suites'
 Assert-True (-not $plan.runAllInternal) 'Mixed component changes do not imply unrelated all-internal fallback'
+
+$repositoryRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-ci-plan-git-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $repositoryRoot | Out-Null
+try {
+    & git -C $repositoryRoot init --quiet
+    & git -C $repositoryRoot config user.email 'ci-plan@example.invalid'
+    & git -C $repositoryRoot config user.name 'CI planner tests'
+    Set-Content -LiteralPath (Join-Path $repositoryRoot 'old.cs') -Value 'class Old {}' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $repositoryRoot 'deleted.cs') -Value 'class Deleted {}' -Encoding utf8
+    & git -C $repositoryRoot add -- .
+    & git -C $repositoryRoot commit --quiet -m initial
+    $baseRevision = ([string](& git -C $repositoryRoot rev-parse HEAD)).Trim()
+
+    & git -C $repositoryRoot mv old.cs renamed.cs
+    Remove-Item -LiteralPath (Join-Path $repositoryRoot 'deleted.cs') -Force
+    & git -C $repositoryRoot add -- .
+    & git -C $repositoryRoot commit --quiet -m rename-and-delete
+    $headRevision = ([string](& git -C $repositoryRoot rev-parse HEAD)).Trim()
+
+    $plan = Invoke-Plan -Base $baseRevision -Head $headRevision -RepositoryRoot $repositoryRoot
+    $testsRun++
+    Assert-Equal $plan.category 'full-uncertain' 'Git renames and deletions escalate conservatively'
+    Assert-True (-not $plan.certain) 'Git renames and deletions are not classified as certain'
+    Assert-True ($plan.runAllInternal -and $plan.runCrossStack) 'Git renames and deletions select all gates'
+    Assert-Equal $plan.changeStatusCounts.renamed 1 'Git rename status is retained in the plan'
+    Assert-Equal $plan.changeStatusCounts.deleted 1 'Git deletion status is retained in the plan'
+}
+finally {
+    if (Test-Path -LiteralPath $repositoryRoot) {
+        Remove-Item -LiteralPath $repositoryRoot -Recurse -Force
+    }
+}
 
 $plan = Invoke-Plan -Paths @('src/RimLiaison.Cli/CliExitCodes.cs', 'src/RimContext.Core/Context.cs')
 $testsRun++

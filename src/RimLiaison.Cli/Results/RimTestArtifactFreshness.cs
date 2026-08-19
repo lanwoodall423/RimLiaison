@@ -26,6 +26,10 @@ public sealed record RimTestArtifactFreshness
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DeploymentDecision { get; init; }
 
+    [JsonPropertyName("evaluationStatus")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EvaluationStatus { get; init; }
+
     [JsonPropertyName("generationBefore")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? GenerationBefore { get; init; }
@@ -54,6 +58,10 @@ public sealed record RimTestArtifactFreshness
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? RunId { get; init; }
 
+    [JsonPropertyName("artifactTestId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ArtifactTestId { get; init; }
+
     [JsonPropertyName("operationIds")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? OperationIds { get; init; }
@@ -77,6 +85,20 @@ public sealed record RimTestArtifactFreshness
             BuiltArtifactSha256 = result.Freshness?.BuiltArtifactSha256,
             DeployedArtifactSha256 = result.Freshness?.DeployedArtifactSha256,
             DeploymentDecision = result.Freshness?.DeploymentDecision,
+            EvaluationStatus = result.Freshness is null
+                ? "NOT_EVALUATED"
+                : result.Success == true &&
+                    result.Freshness.LoadedArtifactFreshnessProven
+                    ? "FRESH"
+                    : result.Status.ErrorCode?.Contains(
+                        "STALE",
+                        StringComparison.OrdinalIgnoreCase) == true ||
+                      string.Equals(
+                          result.Freshness.DeploymentDecision,
+                          "stale",
+                          StringComparison.OrdinalIgnoreCase)
+                        ? "STALE"
+                        : "FAILED",
             GenerationBefore = result.Freshness?.GenerationBefore,
             GenerationAfter = result.Freshness?.GenerationAfter,
             Generation = result.Freshness?.Generation ?? result.Generation,

@@ -9,6 +9,7 @@
     <RootNamespace>RimLiaison</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
     <ProjectReference Include="..\RimContext.Core\RimContext.Core.csproj" />
     <ProjectReference Include="..\RimError.Core\RimError.Core.csproj" />
     <EmbeddedResource Include="..\..\templates\AGENTS.md"

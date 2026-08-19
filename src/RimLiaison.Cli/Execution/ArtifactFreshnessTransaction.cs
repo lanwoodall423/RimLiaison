@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using RimLiaison.DevBridge;
+using RimLiaison.Recovery;
 using RimLiaison.Results;
 
 namespace RimLiaison.Execution;
@@ -10,22 +11,32 @@ public sealed record ArtifactFreshnessTransactionRequest(
     string RepositoryRoot,
     IReadOnlyList<string> ChangedPaths,
     string SourceFingerprint,
-    string? WorkflowId);
+    string? WorkflowId,
+    string? TestRecipe = null,
+    string? LeaseId = null);
 
 public sealed record ArtifactFreshnessTransactionResult(
     bool Success,
     DevBridgeAdapterStatus Status,
-    RimTestArtifactFreshness Freshness);
+    RimTestArtifactFreshness Freshness,
+    IReadOnlyList<RimTestPrerequisiteRecovery>? RecoveryEvents = null,
+    RimTestCleanupSummary? Cleanup = null);
 
 public sealed class ArtifactFreshnessTransaction
 {
     private readonly IDevBridgeModDevelopmentAdapter developmentAdapter;
+    private readonly IDevBridgeLeaseAdapter? leaseAdapter;
+    private readonly IDevBridgeFreshGenerationAdapter? readinessAdapter;
 
     public ArtifactFreshnessTransaction(
-        IDevBridgeModDevelopmentAdapter developmentAdapter)
+        IDevBridgeModDevelopmentAdapter developmentAdapter,
+        IDevBridgeLeaseAdapter? leaseAdapter = null,
+        IDevBridgeFreshGenerationAdapter? readinessAdapter = null)
     {
         this.developmentAdapter = developmentAdapter ??
             throw new ArgumentNullException(nameof(developmentAdapter));
+        this.leaseAdapter = leaseAdapter;
+        this.readinessAdapter = readinessAdapter;
     }
 
     public async Task<ArtifactFreshnessTransactionResult> PrepareAsync(
@@ -54,6 +65,7 @@ public sealed class ArtifactFreshnessTransaction
                     "The current worktree fingerprint could not be established."));
         }
 
+        RimTestCleanupSummary? cleanup = null;
         DevBridgeModDevelopmentResult result;
         try
         {
@@ -62,6 +74,9 @@ public sealed class ArtifactFreshnessTransaction
                     request.RepositoryRoot,
                     request.SourceFingerprint,
                     request.WorkflowId,
+                    string.IsNullOrWhiteSpace(request.LeaseId)
+                        ? null
+                        : new DevBridgeModDevelopmentExecutionContext(request.LeaseId),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -80,7 +95,279 @@ public sealed class ArtifactFreshnessTransaction
                 new DevBridgeAdapterStatus(
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     "DEVBRIDGE_MOD_TRANSACTION_FAILED",
-                    Bound(exception.Message)));
+                Bound(exception.Message)));
+        }
+
+        // PROCESS_EXITED and the related identity/readiness codes are owned
+        // runtime conditions, not source failures.  Give the lifecycle owner
+        // one bounded chance to establish a fresh READY generation before the
+        // authoritative build/deploy transaction is attempted again.
+        if (IsReadinessRecoverable(result.Status) &&
+            readinessAdapter is not null &&
+            !string.IsNullOrWhiteSpace(request.TestRecipe))
+        {
+            DevBridgeFreshGenerationResult recovery;
+            try
+            {
+                recovery = await readinessAdapter.EnsureFreshGenerationAsync(
+                        request.TestRecipe!,
+                        result.Generation ?? result.Freshness?.Generation,
+                        request.WorkflowId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.Cancelled,
+                        "RIMTEST_CANCELLED",
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: 1,
+                        RecoveryAction: "restart-and-retry-development-transaction"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+            catch (Exception exception)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVBRIDGE_READINESS_RECOVERY_FAILED",
+                        Bound(exception.Message),
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: 1,
+                        RecoveryAction: "restart-and-retry-development-transaction"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            if (!recovery.IsUsable)
+            {
+                return Failure(
+                    request,
+                    result.Status with
+                    {
+                        ErrorCode = recovery.Status.ErrorCode ?? result.Status.ErrorCode,
+                        Error = recovery.Status.Error ?? result.Status.Error,
+                        RecoveryState = PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts = 1,
+                        RecoveryAction = "restart-and-retry-development-transaction"
+                    },
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            try
+            {
+                result = await developmentAdapter.RunAsync(
+                        request.Project,
+                        request.RepositoryRoot,
+                        request.SourceFingerprint,
+                        request.WorkflowId,
+                        executionContext: null,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.Cancelled,
+                        "RIMTEST_CANCELLED",
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: 1,
+                        RecoveryAction: "restart-and-retry-development-transaction"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+            catch (Exception exception)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVBRIDGE_MOD_TRANSACTION_FAILED",
+                        Bound(exception.Message),
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: 1,
+                        RecoveryAction: "restart-and-retry-development-transaction"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            result = result with
+            {
+                Status = result.Status with
+                {
+                    RecoveryState = result.Status.IsSuccess
+                        ? PrerequisiteRecoveryState.Recovered
+                        : PrerequisiteRecoveryState.RecoveryFailed,
+                    RecoveryAttempts = 1,
+                    RecoveryAction = "restart-and-retry-development-transaction"
+                }
+            };
+        }
+
+        int recoveryAttempts = 0;
+        if (IsLeaseRequired(result.Status))
+        {
+            if (leaseAdapter is null)
+            {
+                return Failure(
+                    request,
+                    result.Status with
+                    {
+                        RecoveryState = PrerequisiteRecoveryState.RecoveryRequired,
+                        RecoveryAttempts = 0,
+                        RecoveryAction = "acquire-compatible-lease"
+                    },
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            recoveryAttempts = 1;
+            DevBridgeLeaseResult lease;
+            try
+            {
+                lease = await leaseAdapter.BeginLeaseAsync(
+                        request.WorkflowId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.Cancelled,
+                        "RIMTEST_CANCELLED",
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: "acquire-compatible-lease"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+            catch (Exception exception)
+            {
+                return Failure(
+                    request,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVBRIDGE_LEASE_ACQUIRE_FAILED",
+                        Bound(exception.Message),
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: "acquire-compatible-lease"),
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            if (!lease.IsUsable)
+            {
+                PrerequisiteRecoveryState state = LeaseRecoveryState(lease.Status);
+                return Failure(
+                    request,
+                    result.Status with
+                    {
+                        ErrorCode = lease.Status.ErrorCode ?? result.Status.ErrorCode,
+                        Error = lease.Status.Error ?? result.Status.Error,
+                        RecoveryState = state,
+                        RecoveryAttempts = recoveryAttempts,
+                        RecoveryAction = "acquire-compatible-lease"
+                    },
+                    RimTestArtifactFreshness.From(result, request.WorkflowId));
+            }
+
+            bool released = false;
+            string? releaseErrorCode = null;
+            try
+            {
+                result = await developmentAdapter.RunAsync(
+                        request.Project,
+                        request.RepositoryRoot,
+                        request.SourceFingerprint,
+                        request.WorkflowId,
+                        new DevBridgeModDevelopmentExecutionContext(lease.LeaseId),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                result = result with
+                {
+                    Status = new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.Cancelled,
+                        "RIMTEST_CANCELLED",
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: "retry-after-lease-acquisition")
+                };
+            }
+            catch (Exception exception)
+            {
+                result = result with
+                {
+                    Status = new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVELOPMENT_TRANSACTION_FAILED",
+                        Bound(exception.Message),
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: "retry-after-lease-acquisition")
+                };
+            }
+            finally
+            {
+                try
+                {
+                    DevBridgeLeaseResult end = await leaseAdapter.EndLeaseAsync(
+                            lease.LeaseId!,
+                            request.WorkflowId,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    released = end.Status.IsSuccess;
+                    releaseErrorCode = end.Status.ErrorCode;
+                }
+                catch (Exception)
+                {
+                    released = false;
+                    releaseErrorCode = "DEVBRIDGE_LEASE_RELEASE_FAILED";
+                }
+
+                cleanup = new RimTestCleanupSummary
+                {
+                    Status = released ? "RESTORED" : "FAILED",
+                    LeaseReleased = released,
+                    TemporaryStateCleared = released,
+                    ErrorCode = released
+                        ? null
+                        : releaseErrorCode ?? "DEVBRIDGE_LEASE_RELEASE_FAILED"
+                };
+            }
+
+            if (!released)
+            {
+                result = result with
+                {
+                    Status = new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVBRIDGE_LEASE_RELEASE_FAILED",
+                        "The bounded lease recovery completed without authoritative release evidence.",
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: recoveryAttempts,
+                        RecoveryAction: "release-recovered-lease")
+                };
+            }
+            else
+            {
+                result = result with
+                {
+                    Status = result.Status with
+                    {
+                        RecoveryState = result.Status.IsSuccess
+                            ? PrerequisiteRecoveryState.Recovered
+                            : PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts = recoveryAttempts,
+                        RecoveryAction = "retry-after-lease-acquisition"
+                    }
+                };
+            }
         }
 
         RimTestArtifactFreshness freshness = RimTestArtifactFreshness.From(
@@ -89,7 +376,7 @@ public sealed class ArtifactFreshnessTransaction
 
         if (result.Status.Outcome == DevBridgeOutcomeKind.Cancelled)
         {
-            return Failure(request, result.Status, freshness);
+            return Failure(request, result.Status, freshness, cleanup: cleanup);
         }
 
         if (!result.Status.IsSuccess || result.Success != true)
@@ -104,7 +391,8 @@ public sealed class ArtifactFreshnessTransaction
                     Error = result.Status.Error ??
                         "DevBridge2 did not complete the mod-development transaction."
                 },
-                freshness);
+                freshness,
+                cleanup: cleanup);
         }
 
         if (result.Freshness is null ||
@@ -119,7 +407,8 @@ public sealed class ArtifactFreshnessTransaction
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     "RIMTEST_SOURCE_FINGERPRINT_MISMATCH",
                     "DevBridge2 did not bind the transaction to the selected worktree fingerprint."),
-                freshness);
+                freshness,
+                cleanup: cleanup);
         }
 
         string? metadataError = ValidateFreshnessMetadata(freshness);
@@ -131,7 +420,8 @@ public sealed class ArtifactFreshnessTransaction
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     metadataError,
                     "DevBridge2 returned incomplete or contradictory artifact-freshness evidence."),
-                freshness);
+                freshness,
+                cleanup: cleanup);
         }
 
         if (!freshness.LoadedArtifactFreshnessProven)
@@ -142,7 +432,8 @@ public sealed class ArtifactFreshnessTransaction
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     freshness.ErrorCode ?? "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN",
                     "DevBridge2 did not conservatively prove that the tested generation corresponds to the built and deployed artifact."),
-                freshness);
+                freshness,
+                cleanup: cleanup);
         }
 
         if (!WorktreeFingerprint.TryCompute(
@@ -162,10 +453,46 @@ public sealed class ArtifactFreshnessTransaction
                     "RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION",
                     fingerprintError ??
                         "The source worktree changed while the artifact transaction was running."),
-                freshness);
+                freshness,
+                cleanup: cleanup);
         }
 
-        return new(true, result.Status, freshness with { ErrorCode = null });
+        return new(
+            true,
+            result.Status,
+            freshness with { ErrorCode = null },
+            Cleanup: cleanup);
+    }
+
+    private static bool IsLeaseRequired(DevBridgeAdapterStatus status) =>
+        string.Equals(
+            status.ErrorCode,
+            "RIMBRIDGE_LEASE_REQUIRED",
+            StringComparison.Ordinal);
+
+    private static bool IsReadinessRecoverable(DevBridgeAdapterStatus status) =>
+        status.ErrorCode is "PROCESS_EXITED" or
+            "PROCESS_STOPPED" or
+            "READINESS_IDENTITY_MISMATCH" or
+            "RIMBRIDGE_NOT_READY" or
+            "RIMBRIDGE_STALE" or
+            "GENERATION_INPUT_MISMATCH";
+
+    private static PrerequisiteRecoveryState LeaseRecoveryState(
+        DevBridgeAdapterStatus status)
+    {
+        if (status.ErrorCode?.Contains("CONTEND", StringComparison.OrdinalIgnoreCase) == true ||
+            status.ErrorCode?.Contains("HELD", StringComparison.OrdinalIgnoreCase) == true ||
+            status.ErrorCode?.Contains("OWNER", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return PrerequisiteRecoveryState.Contended;
+        }
+
+        return status.Outcome is DevBridgeOutcomeKind.InfrastructureFailure or
+            DevBridgeOutcomeKind.Timeout or
+            DevBridgeOutcomeKind.MalformedResponse
+            ? PrerequisiteRecoveryState.Unavailable
+            : PrerequisiteRecoveryState.RecoveryFailed;
     }
 
     private static string? ValidateFreshnessMetadata(
@@ -210,7 +537,8 @@ public sealed class ArtifactFreshnessTransaction
     private static ArtifactFreshnessTransactionResult Failure(
         ArtifactFreshnessTransactionRequest request,
         DevBridgeAdapterStatus status,
-        RimTestArtifactFreshness? freshness = null)
+        RimTestArtifactFreshness? freshness = null,
+        RimTestCleanupSummary? cleanup = null)
     {
         RimTestArtifactFreshness projected = (freshness ?? new RimTestArtifactFreshness
         {
@@ -220,10 +548,21 @@ public sealed class ArtifactFreshnessTransaction
         {
             SourceFingerprint = freshness?.SourceFingerprint ?? request.SourceFingerprint,
             WorkflowId = freshness?.WorkflowId ?? request.WorkflowId,
+            EvaluationStatus = freshness is null ||
+                string.Equals(
+                    freshness.EvaluationStatus,
+                    "NOT_EVALUATED",
+                    StringComparison.Ordinal)
+                ? "NOT_EVALUATED"
+                : status.ErrorCode?.Contains(
+                    "STALE",
+                    StringComparison.OrdinalIgnoreCase) == true
+                    ? "STALE"
+                    : "FAILED",
             LoadedArtifactFreshnessProven = false,
             ErrorCode = status.ErrorCode ?? "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN"
         };
-        return new(false, status, projected);
+        return new(false, status, projected, Cleanup: cleanup);
     }
 
     private static string? Bound(string? value)

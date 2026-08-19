@@ -3,6 +3,8 @@
 .vs/
 .rimctx/
 .rimdev/*.local.json
+.rimdev/profiles/
+.rimdev/validation-proofs/
 .rimerror/
 TestResults/
 *.user

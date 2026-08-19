@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Text.Json;
+using RimLiaison.Profiling;
 
 namespace RimLiaison.DevBridge;
 
@@ -390,13 +392,54 @@ public sealed class DevBridgeRecipeAdapter :
         // An older coordinator rejects the additive request option before it can
         // mutate lifecycle state. Retry once without the optional context and
         // retain the caller's workflow locally.
-        return await InvokeAsync(
-            "run",
-            recipeId,
-            options.RunTimeout,
-            cancellationToken,
-            leaseId: executionContext?.LeaseId,
-            environmentWorkflowId: workflowId).ConfigureAwait(false);
+        Activity? retryActivity = ProfilerActivity.Start(
+            "devbridge.recipe.retry",
+            "retry",
+            phase: "devbridge",
+            target: recipeId,
+            scope: "workflow-option");
+        bool retryStopped = false;
+        try
+        {
+            DevBridgeProcessResult retry = await InvokeAsync(
+                    "run",
+                    recipeId,
+                    options.RunTimeout,
+                    cancellationToken,
+                    leaseId: executionContext?.LeaseId,
+                    environmentWorkflowId: workflowId)
+                .ConfigureAwait(false);
+            ProfilerActivity.SetRetry(retryActivity, 1);
+            ProfilerActivity.SetOutcome(
+                retryActivity,
+                retry.Cancelled
+                    ? "cancelled"
+                    : retry.TimedOut || retry.ExitCode is not 0
+                        ? "failure"
+                        : "success");
+            ProfilerActivity.Stop(retryActivity);
+            retryStopped = true;
+            return retry;
+        }
+        catch (OperationCanceledException)
+        {
+            ProfilerActivity.Stop(retryActivity, "cancelled", "RIMTEST_CANCELLED");
+            retryStopped = true;
+            throw;
+        }
+        catch
+        {
+            ProfilerActivity.Stop(retryActivity, "failure", "DEVBRIDGE_RETRY_FAILED");
+            retryStopped = true;
+            throw;
+        }
+        finally
+        {
+            if (!retryStopped)
+            {
+                ProfilerActivity.Stop(retryActivity, "failure");
+            }
+        }
     }
 
     public async Task<DevBridgeResetResult> ResetAsync(

@@ -3,6 +3,8 @@ using System.Text.Json.Serialization;
 using System.Security.Cryptography;
 using RimError.Core;
 using RimContext.Core;
+using RimContext.Core.Semantics;
+using RimContext.Core.Storage;
 using RimLiaison;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
@@ -10,6 +12,7 @@ using RimLiaison.Execution;
 using RimLiaison.Git;
 using RimLiaison.RimError;
 using RimLiaison.RimContext;
+using RimLiaison.Recovery;
 using RimLiaison.Results;
 
 namespace RimLiaison.Tests;
@@ -72,6 +75,9 @@ internal static class Program
         ("RimContext unavailable is conservative", RimContextUnavailableIsConservative),
         ("RimContext selection ordering is deterministic", RimContextSelectionOrderingIsDeterministic),
         ("RimContext adapter uses Core", RimContextAdapterUsesCore),
+        ("RimContext complete index stays ready", RimContextCompleteIndexStaysReady),
+        ("RimContext partial index is recovered once", RimContextPartialIndexIsRecoveredOnce),
+        ("RimContext failed recovery preserves diagnostics", RimContextFailedRecoveryPreservesDiagnostics),
         ("RimContext cancellation is bounded", RimContextCancellationIsBounded),
         ("affected CLI emits compact selection", AffectedCliEmitsCompactSelection),
         ("affected run pass is compact", AffectedRunPassIsCompact),
@@ -90,6 +96,8 @@ internal static class Program
         ("unannotated recipes use the safe path", UnannotatedRecipesUseSafePath),
         ("unsafe recipes never share state", UnsafeRecipesNeverShareState),
         ("mutation recipes never share state", MutationRecipesNeverShareState),
+        ("incompatible reuse profiles fall back safely", IncompatibleReuseProfilesFallBackSafely),
+        ("DevBridge reuse refusal preserves its cause", DevBridgeReuseRefusalPreservesCause),
         ("compatible recipes reuse one generation", CompatibleRecipesReuseOneGeneration),
         ("fail-fast preserves compatible reuse", FailFastPreservesCompatibleReuse),
         ("resettable recipes require successful reset", ResettableRecipesRequireSuccessfulReset),
@@ -98,6 +106,7 @@ internal static class Program
         ("generation and lease changes invalidate reuse", GenerationAndLeaseChangesInvalidateReuse),
         ("reuse result remains bounded and identities stay distinct", ReuseResultIsBoundedAndIdentitiesStayDistinct),
         ("lease adapter preserves owner and generation identity", LeaseAdapterPreservesOwnerAndGenerationIdentity),
+        ("existing compatible lease retries a blocked recipe", ExistingCompatibleLeaseRetriesBlockedRecipe),
         ("fresh generation adapter proves readiness conservatively", FreshGenerationAdapterProvesReadinessConservatively),
         ("affected run uses conservative fallback", AffectedRunUsesConservativeFallback),
         ("suite run CLI is deterministic", SuiteRunCliIsDeterministic),
@@ -110,12 +119,19 @@ internal static class Program
         ("capabilities reject incompatible response", CapabilitiesRejectIncompatibleResponse),
         ("capability discovery does not mutate lifecycle", CapabilityDiscoveryDoesNotMutateLifecycle),
         ("ui target enumeration", UiTargetEnumeration),
+        ("ui target object schema is supported", UiTargetObjectSchemaIsSupported),
+        ("ui target discovery recovers a required lease", UiTargetDiscoveryRecoversRequiredLease),
+        ("ui bridge calls carry workflow identity", UiBridgeCallsCarryWorkflowIdentity),
         ("ui targeted screenshot uses clipping", UiTargetedScreenshotUsesClipping),
         ("ui missing target fails before capture", UiMissingTargetFailsBeforeCapture),
         ("ui reports unavailable bridge", UiReportsUnavailableBridge),
         ("ui reports visual readiness failure", UiReportsVisualReadinessFailure),
         ("ui cell capture preserves camera", UiCellCapturePreservesCamera),
         ("ui requests do not mutate lifecycle", UiRequestsDoNotMutateLifecycle),
+        ("transactional ui viewport captures and restores", TransactionalUiViewportCapturesAndRestores),
+        ("transactional ui viewport restores after ui failure", TransactionalUiViewportRestoresAfterUiFailure),
+        ("transactional ui viewport surfaces restoration failure", TransactionalUiViewportSurfacesRestorationFailure),
+        ("transactional ui viewport validates explicit dimensions", TransactionalUiViewportValidatesExplicitDimensions),
         ("ui output is compact", UiOutputIsCompact),
         ("canonical UI guidance is generated", CanonicalUiGuidanceIsGenerated),
         ("doctor healthy output is compact", DoctorHealthyOutputIsCompact),
@@ -143,15 +159,27 @@ internal static class Program
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
         ("affected source run performs freshness transaction", AffectedSourceRunPerformsFreshnessTransaction),
         ("fail-fast affected run still proves freshness", FailFastAffectedRunStillProvesFreshness),
+        ("affected companion recipe may use a later generation", AffectedCompanionRecipeMayUseLaterGeneration),
         ("affected identical artifact uses no-deploy proof", AffectedIdenticalArtifactUsesNoDeployProof),
         ("affected build failure blocks pass", AffectedBuildFailureBlocksPass),
         ("affected deployment failure blocks pass", AffectedDeploymentFailureBlocksPass),
         ("affected readiness failure blocks pass", AffectedReadinessFailureBlocksPass),
+        ("affected run recovers readiness once", AffectedRunRecoversReadinessOnce),
         ("affected generation mismatch blocks pass", AffectedGenerationMismatchBlocksPass),
         ("affected unknown freshness blocks pass", AffectedUnknownFreshnessBlocksPass),
         ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
+        ("valid development descriptor is preserved", ValidDevelopmentDescriptorIsPreserved),
+        ("missing development descriptor is derived", MissingDevelopmentDescriptorIsDerived),
+        ("malformed development descriptor is repaired", MalformedDevelopmentDescriptorIsRepaired),
+        ("stale development descriptor is reconciled safely", StaleDevelopmentDescriptorIsReconciledSafely),
+        ("ambiguous development descriptor is blocked", AmbiguousDevelopmentDescriptorIsBlocked),
+        ("lease recovery retries the owner transaction once", LeaseRecoveryRetriesOwnerTransactionOnce),
+        ("lease contention remains explicit", LeaseContentionRemainsExplicit),
+        ("lease recovery has no loop", LeaseRecoveryHasNoLoop),
+        ("freshness cleanup failure remains visible", FreshnessCleanupFailureRemainsVisible),
+        ("cleanup failure remains independent in orchestration", CleanupFailureRemainsIndependentInOrchestration),
         ("Git discovery includes staged and untracked files", GitDiscoveryIncludesStagedAndUntrackedFiles),
         ("Git discovery preserves deleted and renamed paths", GitDiscoveryPreservesDeletedAndRenamedPaths),
         ("explicit affected paths take precedence", ExplicitAffectedPathsTakePrecedence),
@@ -161,7 +189,19 @@ internal static class Program
         ("Git discovery failure is conservative", GitDiscoveryFailureIsConservative),
         ("RimError diagnosis provides drill-down next action", RimErrorDiagnosisProvidesNextAction),
         ("DevBridge failure provides doctor next action", DevBridgeFailureProvidesNextAction),
-        ("RimContext stale result provides recovery next action", RimContextStaleProvidesNextAction)
+        ("RimContext stale result provides recovery next action", RimContextStaleProvidesNextAction),
+        ("efficiency profiler aggregates compact schema", ProfilerTests.AggregatesCompactSchema),
+        ("efficiency profiler groups repeated operations", ProfilerTests.GroupsRepeatedOperations),
+        ("efficiency profiler groups failures and retries safely", ProfilerTests.GroupsFailuresAndRetries),
+        ("efficiency profiler records unchanged generations", ProfilerTests.RecordsUnchangedGenerations),
+        ("efficiency profiler redacts raw values", ProfilerTests.RedactsRawValues),
+        ("efficiency profiler fingerprints are deterministic", ProfilerTests.FingerprintsAreDeterministic),
+        ("efficiency profiler prioritizes specialized evidence", ProfilerTests.PrioritizesSpecializedEvidence),
+        ("efficiency profiler bounds sections and total output", ProfilerTests.BoundsSectionsAndOutput),
+        ("efficiency profiler preserves overflow totals", ProfilerTests.PreservesOverflowTotals),
+        ("efficiency profiler failures do not alter command results", ProfilerTests.FailuresDoNotAlterCommandResults),
+        ("efficiency profiler preserves CLI output contracts", ProfilerTests.PreservesCliOutputContracts),
+        ("efficiency profiler emits success and failure profiles", ProfilerTests.EmitsSuccessAndFailureProfiles)
     ];
 
     public static int Main()
@@ -2088,6 +2128,136 @@ internal static class Program
         }
     }
 
+    private static void RimContextCompleteIndexStaysReady()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var adapter = new RimContextImpactAdapter(
+                new RimContextAdapterOptions
+                {
+                    RootPath = directory,
+                    Depth = 8,
+                    Limit = 100
+                },
+                refreshAndAffected: (request, _) =>
+                {
+                    calls++;
+                    Assert(!request.Force, "A complete index must not trigger a forced rebuild.");
+                    return CompleteContextAnalysis(directory);
+                });
+
+            RimContextImpactResult result = adapter.AffectedAsync(["Source.cs"])
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(RimContextImpactOutcome.Success, result.Status.Outcome);
+            AssertEqual(PrerequisiteRecoveryState.Ready, result.Status.RecoveryState);
+            AssertEqual(0, result.Status.RecoveryAttempts);
+            AssertEqual(1, calls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void RimContextPartialIndexIsRecoveredOnce()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var adapter = new RimContextImpactAdapter(
+                new RimContextAdapterOptions
+                {
+                    RootPath = directory,
+                    Depth = 8,
+                    Limit = 100
+                },
+                refreshAndAffected: (request, _) =>
+                {
+                    calls++;
+                    return request.Force
+                        ? CompleteContextAnalysis(directory)
+                        : PartialContextAnalysis(directory);
+                });
+
+            RimContextImpactResult result = adapter.AffectedAsync(["Source.cs"])
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(RimContextImpactOutcome.Success, result.Status.Outcome);
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.Status.RecoveryState);
+            AssertEqual(1, result.Status.RecoveryAttempts);
+            AssertEqual(2, calls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void RimContextFailedRecoveryPreservesDiagnostics()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var adapter = new RimContextImpactAdapter(
+                new RimContextAdapterOptions
+                {
+                    RootPath = directory,
+                    Depth = 8,
+                    Limit = 100
+                },
+                refreshAndAffected: (_, _) =>
+                {
+                    calls++;
+                    return PartialContextAnalysis(directory);
+                });
+
+            RimContextImpactResult result = adapter.AffectedAsync(["Source.cs"])
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(RimContextImpactOutcome.Unknown, result.Status.Outcome);
+            AssertEqual("RIMCONTEXT_INDEX_RECOVERY_FAILED", result.Status.ErrorCode);
+            AssertEqual(PrerequisiteRecoveryState.RecoveryFailed, result.Status.RecoveryState);
+            AssertEqual(1, result.Status.RecoveryAttempts);
+            Assert(result.Status.Error?.Contains("BROKEN_SOURCE", StringComparison.Ordinal) == true,
+                "A failed rebuild must retain bounded index diagnostics.");
+            AssertEqual(2, calls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static RimContextAffectedAnalysis CompleteContextAnalysis(string root) =>
+        new(
+            new IndexBuildResult(
+                new StoreMetadata(1, "test", "fixture", root, "fingerprint", "now"),
+                new IndexCounts(1, 0, 0),
+                1,
+                new IndexStatistics(1, 1, 0, 0, 0),
+                1,
+                []),
+            new AffectedResult([], [], [], [], false));
+
+    private static RimContextAffectedAnalysis PartialContextAnalysis(string root) =>
+        new(
+            new IndexBuildResult(
+                new StoreMetadata(1, "test", "fixture", root, "fingerprint", "now"),
+                new IndexCounts(1, 0, 0),
+                1,
+                new IndexStatistics(1, 1, 0, 0, 0),
+                1,
+                [new IndexDiagnostic("Source.cs", "source parse failed", "BROKEN_SOURCE")]),
+            null);
+
     private static void RimContextCancellationIsBounded()
     {
         using var cancellation = new CancellationTokenSource();
@@ -2209,6 +2379,15 @@ internal static class Program
             AssertEqual("affected", root.GetProperty("suite").GetString());
             AssertEqual(1, root.GetProperty("passed").GetInt32());
             AssertEqual(0, root.GetProperty("failed").GetInt32());
+            JsonElement orchestration = root.GetProperty("orchestration");
+            AssertEqual("rimtest-orchestration/v1",
+                orchestration.GetProperty("schemaVersion").GetString());
+            AssertEqual("PASS", orchestration.GetProperty("overall").GetString());
+            AssertEqual("NOT_RUN", orchestration.GetProperty("sourceBuild").GetString());
+            AssertEqual("PASS", orchestration.GetProperty("staticTests").GetString());
+            AssertEqual("NOT_EVALUATED", orchestration.GetProperty("deployment").GetString());
+            AssertEqual("PASS", orchestration.GetProperty("runtimeValidation").GetString());
+            AssertEqual("READY", orchestration.GetProperty("infrastructure").GetString());
             Assert(!root.TryGetProperty("selectionStatus", out _),
                 "Known-safe affected runs should omit redundant selection status.");
             Assert(!stdout.ToString().Contains("operations", StringComparison.Ordinal),
@@ -2764,7 +2943,7 @@ internal static class Program
                 PassRunWithGeneration(recipe, 7) with { WorkflowId = workflow }
         };
         using (JsonDocument document = JsonDocument.Parse(
-                   "{\"allowInGameMutation\":true}"))
+                   "{\"projects\":[],\"inputs\":{},\"allowInGameMutation\":true}"))
         {
             adapter.ShowDefinitions["recipe-a"] = document.RootElement.Clone();
         }
@@ -2788,6 +2967,107 @@ internal static class Program
         Assert(adapter.ExecutionContexts.All(static context => context is null),
             "A recipe that explicitly allows in-game mutation must not receive a shared lease.");
         AssertEqual("RIMTEST_RECIPE_MUTATION_NOT_SHAREABLE", execution.Reuse!.FallbackReason);
+    }
+
+    private static void IncompatibleReuseProfilesFallBackSafely()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("profile-project", "recipe-project"),
+            ReusableTest("profile-baseline", "recipe-baseline"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(recipe, 7, context?.LeaseId, workflow,
+                    "run-profile-" + index, "operation-profile-" + index)
+        };
+        SetRecipeProfile(adapter, "recipe-project", ["frontier"]);
+        SetRecipeProfile(adapter, "recipe-baseline", []);
+        adapter.Plans["recipe-project"] = SatisfiedPlan("recipe-project");
+        adapter.Plans["recipe-baseline"] = SatisfiedPlan("recipe-baseline");
+        var lease = new FakeLeaseAdapter();
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "profile-incompatible",
+                ["profile-baseline", "profile-project"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual(0, lease.BeginCalls);
+        Assert(adapter.ExecutionContexts.All(static context => context is null),
+            "Recipes with incompatible profiles must not share a supplied lease.");
+        Assert(execution.Reuse is not null,
+            "A rejected reuse group must remain visible in the bounded summary.");
+        AssertEqual(0, execution.Reuse!.GroupsPlanned);
+        AssertEqual("RIMTEST_REUSE_PROFILE_INCOMPATIBLE", execution.Reuse.FallbackReason);
+    }
+
+    private static void DevBridgeReuseRefusalPreservesCause()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("refusal-a", "recipe-a"),
+            ReusableTest("refusal-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) => index == 0
+                ? PassRunWithLease(recipe, 7, context?.LeaseId, workflow,
+                    "run-refusal-pass", "operation-refusal-pass")
+                : new DevBridgeRecipeRunResult(
+                    recipe,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.DevBridgeRefusal,
+                        "RECIPE_SUPPLIED_LEASE_REQUIRES_READY",
+                        "A supplied lease cannot authorize an autonomous restart."),
+                    false,
+                    "run-refusal-fail",
+                    7,
+                    context?.LeaseId,
+                    null,
+                    null,
+                    null,
+                    "ensure-ready",
+                    true,
+                    0,
+                    [],
+                    workflow)
+        };
+        SetRecipeProfile(adapter, "recipe-a", []);
+        SetRecipeProfile(adapter, "recipe-b", []);
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter
+        {
+            BeginResult = SuccessLease("lease-refusal", 7)
+        };
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "refusal",
+                ["refusal-a", "refusal-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("RECIPE_SUPPLIED_LEASE_REQUIRES_READY",
+            execution.Reuse!.ReuseInvalidationReason);
+        AssertEqual("RECIPE_SUPPLIED_LEASE_REQUIRES_READY",
+            execution.Tests[1].ErrorCode);
+        Assert(execution.Reuse.Mismatch is not null,
+            "A supplied-lease refusal must expose its bounded mismatch details.");
+        AssertEqual(true, execution.Reuse.Mismatch!.RestartRequired);
+        AssertEqual(0, execution.Reuse.Mismatch.LaunchesConsumed);
+        AssertEqual("RECIPE_SUPPLIED_LEASE_REQUIRES_READY",
+            execution.Reuse.Mismatch.ErrorCode);
+        AssertEqual("infrastructure",
+            RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
     }
 
     private static void CompatibleRecipesReuseOneGeneration()
@@ -3177,6 +3457,53 @@ internal static class Program
         Assert(transport.Requests.All(request =>
                 request.EnvironmentVariables!["DEVBRIDGE_AGENT"] == owner),
             "All workflow lease operations must use one stable DevBridge owner identity.");
+    }
+
+    private static void ExistingCompatibleLeaseRetriesBlockedRecipe()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("lease-a", "recipe-a"),
+            ReusableTest("lease-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) => index == 0
+                ? LeaseRequiredRun(recipe, workflow, context?.LeaseId)
+                : PassRunWithLease(
+                    recipe,
+                    7,
+                    context?.LeaseId,
+                    workflow,
+                    "run-compatible-" + index,
+                    "operation-compatible-" + index)
+        };
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter
+        {
+            BeginResult = SuccessLease("lease-existing", 7)
+        };
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "lease-recovery",
+                ["lease-a", "lease-b"],
+                workflowId: "wf-compatible-lease")
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertEqual(1, lease.BeginCalls);
+        AssertEqual(1, lease.EndCalls);
+        AssertEqual(3, adapter.RunCalls.Count);
+        Assert(execution.PrerequisiteRecovery?.Single().State == "recovered",
+            "A blocked operation resumed under the already-valid compatible lease.");
+        Assert(adapter.ExecutionContexts.All(
+                context => context?.LeaseId == "lease-existing"),
+            "The retry must reuse the supported transaction lease rather than acquire another one.");
     }
 
     private static void EnvironmentFallbackDrivesAffectedFallback()
@@ -3746,6 +4073,161 @@ internal static class Program
             "Target enumeration must call the registered screen-target capability.");
     }
 
+    private static void UiTargetObjectSchemaIsSupported()
+    {
+        (CliResult result, _) = RunUiFixture(
+            "targets",
+            targetResponse: RouteResponse(
+                """
+                {
+                  "success": true,
+                  "targets": {
+                    "windows": [
+                      {
+                        "windowTargetId": "window:dialog",
+                        "kind": "window",
+                        "title": "Dialog",
+                        "rect": { "x": 1, "y": 2, "width": 3, "height": 4 }
+                      }
+                    ]
+                  }
+                }
+                """,
+                "op-targets-object"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual(1, root.GetProperty("count").GetInt32());
+        JsonElement target = root.GetProperty("targets").EnumerateArray().Single();
+        AssertEqual("window:dialog", target.GetProperty("id").GetString());
+        AssertEqual("Dialog", target.GetProperty("label").GetString());
+    }
+
+    private static void UiTargetDiscoveryRecoversRequiredLease()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            int toolsCalls = 0;
+            var transport = new FakeTransport(
+                (request, _) =>
+                {
+                    if (request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(
+                            "{\"success\":true,\"exitCode\":0,\"leaseId\":\"lease-targets\",\"generation\":1}");
+                    }
+
+                    if (request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult("{\"success\":true,\"exitCode\":0}");
+                    }
+
+                    if (request.Arguments.Contains("tools", StringComparer.OrdinalIgnoreCase))
+                    {
+                        toolsCalls++;
+                        return toolsCalls == 1
+                            ? ProcessResult(
+                                "{\"success\":false,\"errorCode\":\"RIMBRIDGE_LEASE_REQUIRED\",\"error\":\"lease required\"}")
+                            : ProcessResult(UiToolsResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/get_screen_targets",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(UiTargetsCallResponse());
+                    }
+
+                    throw new InvalidOperationException(
+                        "Unexpected target-discovery request: " +
+                        string.Join(" ", request.Arguments));
+                });
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        [
+                            "ui",
+                            "targets",
+                            "--json",
+                            "--devbridge",
+                            "DevBridge.cmd",
+                            "--devbridge-root",
+                            directory
+                        ],
+                        stdout,
+                        stderr,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.Success, exitCode);
+            AssertEqual("ok", root.GetProperty("status").GetString());
+            AssertEqual(2, root.GetProperty("count").GetInt32());
+            AssertEqual(2, toolsCalls);
+            Assert(transport.Requests.Any(request =>
+                    request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase)),
+                "Lease-required target discovery must acquire a lease.");
+            Assert(transport.Requests.Any(request =>
+                    request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase)),
+                "Lease-required target discovery must release its lease.");
+            Assert(transport.Requests
+                .Where(request => request.Arguments.Contains(
+                    "rimworld/get_screen_targets",
+                    StringComparer.OrdinalIgnoreCase))
+                .All(request => request.Arguments.Contains("lease-targets", StringComparer.Ordinal)),
+                "The retried target call must carry the acquired lease.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void UiBridgeCallsCarryWorkflowIdentity()
+    {
+        (CliResult result, FakeTransport transport) = RunTransactionalUiFixture(
+            ["--target", "window:main", "--viewport", "current"]);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        DevBridgeProcessRequest[] bridgeCalls = transport.Requests
+            .Where(request => request.Arguments.Contains(
+                "call",
+                StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        DevBridgeProcessRequest[] routedUiRequests = transport.Requests
+            .Where(request => request.Arguments.Contains(
+                    "tools",
+                    StringComparer.OrdinalIgnoreCase) ||
+                request.Arguments.Contains("call", StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        Assert(bridgeCalls.Length > 0 &&
+            bridgeCalls.All(request =>
+                request.EnvironmentVariables is not null &&
+                request.EnvironmentVariables.TryGetValue(
+                    "DEVBRIDGE_AGENT",
+                out string? agent) &&
+                !string.IsNullOrWhiteSpace(agent)),
+            "All UI bridge calls must carry the canonical workflow owner identity.");
+        Assert(bridgeCalls.All(request =>
+                request.Arguments.Contains("--lease", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("lease-1", StringComparer.Ordinal)),
+            "Transactional UI bridge calls must carry the acquired lease identity.");
+        Assert(routedUiRequests.All(request =>
+                request.Arguments.Contains("--lease", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("lease-1", StringComparer.Ordinal)),
+            "Transactional UI capability discovery and calls must share the acquired lease identity.");
+    }
+
     private static void UiTargetedScreenshotUsesClipping()
     {
         (CliResult result, FakeTransport transport) = RunUiFixture(
@@ -3891,6 +4373,100 @@ internal static class Program
             .Any(argument => lifecycleTerms.Any(term =>
                 argument.Contains(term, StringComparison.OrdinalIgnoreCase))),
             "UI discovery/capture must not acquire leases or mutate lifecycle state.");
+    }
+
+    private static void TransactionalUiViewportCapturesAndRestores()
+    {
+        (CliResult result, FakeTransport transport) = RunTransactionalUiFixture(
+            ["--target", "window:main", "--viewport", "narrow"]);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("ok", root.GetProperty("status").GetString());
+        JsonElement viewport = root.GetProperty("viewport");
+        JsonElement preparation = viewport.GetProperty("preparation");
+        JsonElement restoration = viewport.GetProperty("restoration");
+        AssertEqual("prepared", preparation.GetProperty("status").GetString());
+        AssertEqual("restored", restoration.GetProperty("status").GetString());
+        AssertEqual(1024, preparation.GetProperty("effectiveViewport")
+            .GetProperty("clientWidth").GetInt32());
+        AssertEqual(768, preparation.GetProperty("effectiveViewport")
+            .GetProperty("clientHeight").GetInt32());
+        Assert(!preparation.GetProperty("persistentPreferenceMutation").GetBoolean(),
+            "temporary viewport evidence must prove no persistent preference mutation");
+        Assert(restoration.GetProperty("restorationVerified").GetBoolean(),
+            "temporary viewport evidence must prove restoration");
+
+        int beginIndex = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("environment", StringComparer.OrdinalIgnoreCase) &&
+            request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase));
+        int restoreIndex = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("environment", StringComparer.OrdinalIgnoreCase) &&
+            request.Arguments.Contains("restore", StringComparer.OrdinalIgnoreCase));
+        int endIndex = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+            request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase));
+        Assert(beginIndex >= 0 && restoreIndex > beginIndex && endIndex > restoreIndex,
+            "transactional UI validation must restore before releasing its temporary lease");
+    }
+
+    private static void TransactionalUiViewportSurfacesRestorationFailure()
+    {
+        (CliResult result, _) = RunTransactionalUiFixture(
+            ["--target", "window:main", "--viewport", "narrow"],
+            restoreResponse: """
+                {"success":false,"exitCode":4,"viewport":{"schemaVersion":"devbridge-viewport-environment/v1","success":false,"status":"cleanupFailed","errorCode":"VIEWPORT_RESTORE_FAILED","error":"The original window state could not be verified.","transactionId":"viewport-1","leaseId":"lease-1","persistentPreferenceMutation":false,"restorationVerified":false,"cleanupStatus":"restore-required"}}
+                """);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("error", root.GetProperty("status").GetString());
+        AssertEqual("RIMTEST_UI_VIEWPORT_RESTORE_FAILED", root.GetProperty("code").GetString());
+        AssertEqual("/evidence/main.png", root.GetProperty("screenshotEvidence")
+            .GetProperty("path").GetString());
+        AssertEqual("restorationFailure", root.GetProperty("viewportRestoration")
+            .GetProperty("outcome").GetString());
+        Assert(!root.GetProperty("viewportRestoration")
+            .GetProperty("restorationVerified").GetBoolean(),
+            "restoration failure must remain explicit in machine-readable evidence");
+    }
+
+    private static void TransactionalUiViewportRestoresAfterUiFailure()
+    {
+        (CliResult result, FakeTransport transport) = RunTransactionalUiFixture(
+            ["--target", "window:main", "--viewport", "narrow"],
+            screenshotResponse: RouteResponse(
+                "{\"success\":false,\"errorCode\":\"RIMBRIDGE_UI_ASSERTION_FAILED\",\"error\":\"layout assertion failed\"}",
+                "op-ui-failure"));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InternalError, result.ExitCode);
+        AssertEqual("RIMBRIDGE_UI_ASSERTION_FAILED", root.GetProperty("code").GetString());
+        AssertEqual("restored", root.GetProperty("viewportRestoration")
+            .GetProperty("status").GetString());
+        Assert(transport.Requests.Any(request =>
+                request.Arguments.Contains("environment", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("restore", StringComparer.OrdinalIgnoreCase)),
+            "viewport cleanup must run after a UI operation failure");
+    }
+
+    private static void TransactionalUiViewportValidatesExplicitDimensions()
+    {
+        (CliResult result, _) = RunUiFixture(
+            "screenshot",
+            ["--target", "window:main", "--viewport", "explicit",
+                "--viewport-width", "319", "--viewport-height", "720"]);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.InvalidInput, result.ExitCode);
+        AssertEqual("CLI_INVALID", root.GetProperty("code").GetString());
+        Assert(root.GetProperty("errors").EnumerateArray().Single()
+            .GetProperty("message").GetString()!.Contains("viewport-width", StringComparison.OrdinalIgnoreCase),
+            "explicit viewport bounds must be validated before any DevBridge call");
     }
 
     private static void UiOutputIsCompact()
@@ -4539,6 +5115,7 @@ internal static class Program
         AssertEqual("pass", root.GetProperty("status").GetString());
         AssertEqual(1, root.GetProperty("passed").GetInt32());
         AssertEqual("deployed", freshness.GetProperty("deploymentDecision").GetString());
+        AssertEqual("FRESH", freshness.GetProperty("evaluationStatus").GetString());
         AssertEqual(
             new string('b', 64),
             freshness.GetProperty("builtArtifactSha256").GetString());
@@ -4583,6 +5160,55 @@ internal static class Program
             "A passing affected fail-fast run must prove complete validation.");
         AssertEqual(1, result.DevelopmentCalls.Count);
         AssertEqual(1, result.RecipeCalls.Count);
+    }
+
+    private static void AffectedCompanionRecipeMayUseLaterGeneration()
+    {
+        CatalogDocument catalog = new()
+        {
+            SchemaVersion = CatalogSchema.Current,
+            Tests =
+            [
+                new CatalogTest
+                {
+                    Id = "artifact-smoke",
+                    Recipe = "artifact-fixture",
+                    ArtifactFreshnessAnchor = true,
+                    Covers =
+                    [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                },
+                new CatalogTest
+                {
+                    Id = "companion-smoke",
+                    Recipe = "companion-fixture",
+                    Covers =
+                    [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                }
+            ],
+            Suites = []
+        };
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed",
+                generation: 7),
+            recipeRunFactory: (recipeId, _) => PassRunWithGeneration(
+                recipeId,
+                recipeId == "artifact-fixture" ? 7 : 8),
+            scenarioCatalog: catalog);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        JsonElement freshness = root.GetProperty("artifactFreshness");
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        AssertEqual(2, root.GetProperty("passed").GetInt32());
+        Assert(freshness.GetProperty("loadedArtifactFreshnessProven").GetBoolean(),
+            "A later-generation companion recipe must not invalidate the artifact anchor proof.");
+        AssertEqual("artifact-smoke", freshness.GetProperty("artifactTestId").GetString());
+        AssertEqual(7, freshness.GetProperty("generation").GetInt32());
+        AssertEqual(2, result.RecipeCalls.Count);
     }
 
     private static void AffectedIdenticalArtifactUsesNoDeployProof()
@@ -4634,6 +5260,47 @@ internal static class Program
                 "READINESS_TIMEOUT"));
 
         AssertArtifactTransactionFailure(result, "READINESS_TIMEOUT");
+    }
+
+    private static void AffectedRunRecoversReadinessOnce()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string fingerprint = Convert.ToHexString(
+                SHA256.HashData([])).ToLowerInvariant();
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) => calls++ == 0
+                    ? FailedDevelopmentResult(workflowId, "PROCESS_EXITED")
+                    : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged")
+            };
+            var readiness = new FakeFreshGenerationAdapter(8);
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, readinessAdapter: readiness)
+                    .PrepareAsync(
+                        new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            "wf-readiness-recovery",
+                            TestRecipe: "recipe-a"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(result.Success, "A stopped runtime should recover before the owner transaction is retried.");
+            AssertEqual(2, development.Calls.Count);
+            AssertEqual(1, readiness.Calls.Count);
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.Status.RecoveryState);
+            AssertEqual(1, result.Status.RecoveryAttempts);
+            AssertEqual("FRESH", result.Freshness.EvaluationStatus);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
     }
 
     private static void AffectedGenerationMismatchBlocksPass()
@@ -4808,6 +5475,417 @@ internal static class Program
         AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
     }
 
+    private static void ValidDevelopmentDescriptorIsPreserved()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "fixture.json");
+            string original = """
+                {
+                  "schemaVersion": "devbridge-mod-development/v1",
+                  "project": "fixture",
+                  "sourceProject": "Source/Fixture.csproj",
+                  "configuration": "Debug",
+                  "expectedAssembly": "Fixture.dll",
+                  "deploymentTarget": "custom/Assemblies/Fixture.dll",
+                  "testRecipe": "custom-development"
+                }
+                """;
+            File.WriteAllText(descriptorPath, original);
+
+            DevBridgeDescriptorReconciliationResult result =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    "fixture",
+                    repository,
+                    descriptorPath,
+                    DescriptorOptions(coordinator));
+
+            Assert(result.CanProceed, "A valid descriptor should remain usable.");
+            AssertEqual(PrerequisiteRecoveryState.Ready, result.State);
+            AssertEqual(original, File.ReadAllText(descriptorPath));
+            AssertEqual(0, result.Attempts);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static void MissingDevelopmentDescriptorIsDerived()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "fixture.json");
+            DevBridgeDescriptorReconciliationResult result =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    "fixture",
+                    repository,
+                    descriptorPath,
+                    DescriptorOptions(coordinator));
+
+            Assert(result.CanProceed, "Canonical project metadata should derive the missing descriptor.");
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.State);
+            AssertEqual(1, result.Attempts);
+            Assert(File.Exists(descriptorPath), "The recovered descriptor should be atomically materialized.");
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptorPath));
+            AssertEqual("Source/Fixture.csproj", document.RootElement.GetProperty("sourceProject").GetString());
+            AssertEqual("Fixture.dll", document.RootElement.GetProperty("expectedAssembly").GetString());
+            AssertEqual("1.6/Assemblies/Fixture.dll", document.RootElement.GetProperty("deploymentTarget").GetString());
+            AssertEqual("fixture-development", document.RootElement.GetProperty("testRecipe").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static void MalformedDevelopmentDescriptorIsRepaired()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "fixture.json");
+            File.WriteAllText(descriptorPath, "{ malformed descriptor");
+
+            DevBridgeDescriptorReconciliationResult result =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    "fixture",
+                    repository,
+                    descriptorPath,
+                    DescriptorOptions(coordinator));
+
+            Assert(result.CanProceed, "Malformed descriptor JSON should be safely reconstructed.");
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.State);
+            Assert(!string.IsNullOrWhiteSpace(result.BackupPath) &&
+                File.Exists(result.BackupPath),
+                "The malformed input should remain recoverable through its backup.");
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptorPath));
+            AssertEqual("fixture", document.RootElement.GetProperty("project").GetString());
+            AssertEqual("fixture-development", document.RootElement.GetProperty("testRecipe").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static void StaleDevelopmentDescriptorIsReconciledSafely()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "fixture.json");
+            File.WriteAllText(
+                descriptorPath,
+                """
+                {
+                  "schemaVersion": "devbridge-mod-development/v1",
+                  "project": "fixture",
+                  "sourceProject": "Source/Deleted.csproj",
+                  "configuration": "Debug",
+                  "expectedAssembly": "Legacy.dll",
+                  "deploymentTarget": "custom/Assemblies/Legacy.dll",
+                  "testRecipe": "custom-development"
+                }
+                """);
+
+            DevBridgeDescriptorReconciliationResult result =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    "fixture",
+                    repository,
+                    descriptorPath,
+                    DescriptorOptions(coordinator) with
+                    {
+                        TestRecipe = null,
+                        DeploymentTarget = null
+                    });
+
+            Assert(result.CanProceed, "A stale descriptor with canonical replacement metadata should recover.");
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.State);
+            Assert(!string.IsNullOrWhiteSpace(result.BackupPath) &&
+                File.Exists(result.BackupPath),
+                "Reconciliation should preserve the stale descriptor as a bounded backup.");
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptorPath));
+            AssertEqual("Source/Fixture.csproj", document.RootElement.GetProperty("sourceProject").GetString());
+            AssertEqual("Fixture.dll", document.RootElement.GetProperty("expectedAssembly").GetString());
+            AssertEqual("Debug", document.RootElement.GetProperty("configuration").GetString());
+            AssertEqual("custom/Assemblies/Legacy.dll", document.RootElement.GetProperty("deploymentTarget").GetString());
+            AssertEqual("custom-development", document.RootElement.GetProperty("testRecipe").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static void AmbiguousDevelopmentDescriptorIsBlocked()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(repository, "Source", "Other.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "unknown.json");
+            DevBridgeDescriptorReconciliationResult result =
+                DevBridgeDevelopmentDescriptorReconciler.Reconcile(
+                    "unknown",
+                    repository,
+                    descriptorPath,
+                    DescriptorOptions(coordinator) with
+                    {
+                        ChangedPaths = null,
+                        TestRecipe = "unknown-development",
+                        DeploymentTarget = "1.6/Assemblies/Unknown.dll"
+                    });
+
+            Assert(!result.CanProceed, "Ambiguous canonical project metadata must fail closed.");
+            AssertEqual(PrerequisiteRecoveryState.RecoveryRequired, result.State);
+            AssertEqual("DEVBRIDGE_DESCRIPTOR_SOURCE_AMBIGUOUS", result.ErrorCode);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static DevBridgeModDevelopmentAdapterOptions DescriptorOptions(
+        string coordinator) =>
+        new()
+        {
+            RootPath = coordinator,
+            ChangedPaths = ["Source/Changed.cs"],
+            TestRecipe = "fixture-development"
+        };
+
+    private static (string Repository, string Coordinator) CreateDescriptorFixture()
+    {
+        string repository = CreateTempDirectory();
+        string coordinator = CreateTempDirectory();
+        Directory.CreateDirectory(Path.Combine(repository, "Source"));
+        Directory.CreateDirectory(Path.Combine(repository, "1.6", "Assemblies"));
+        Directory.CreateDirectory(Path.Combine(coordinator, "DevelopmentProjects"));
+        File.WriteAllText(
+            Path.Combine(repository, "Source", "Changed.cs"),
+            "namespace Fixture; public class Changed {}\n");
+        File.WriteAllText(
+            Path.Combine(repository, "Source", "Fixture.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Fixture</AssemblyName></PropertyGroup></Project>");
+        return (repository, coordinator);
+    }
+
+    private static void LeaseRecoveryRetriesOwnerTransactionOnce()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) =>
+                    calls++ == 0
+                        ? FailedDevelopmentResult(workflowId, "RIMBRIDGE_LEASE_REQUIRED")
+                        : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged")
+            };
+            var lease = new FakeLeaseAdapter();
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, lease)
+                    .PrepareAsync(
+                        new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            "wf-lease-recovery"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(result.Success, "A compatible lease should allow one bounded owner retry.");
+            AssertEqual(2, development.Calls.Count);
+            AssertEqual(1, lease.BeginCalls);
+            AssertEqual(1, lease.EndCalls);
+            AssertEqual(PrerequisiteRecoveryState.Recovered, result.Status.RecoveryState);
+            AssertEqual(1, result.Status.RecoveryAttempts);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void LeaseContentionRemainsExplicit()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            var development = new FakeModDevelopmentAdapter
+            {
+                Result = FailedDevelopmentResult(null, "RIMBRIDGE_LEASE_REQUIRED")
+            };
+            var lease = new FakeLeaseAdapter();
+            lease.BeginResults.Enqueue(new DevBridgeLeaseResult(
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.DevBridgeRefusal,
+                    "DEVBRIDGE_LEASE_CONTENDED"),
+                null,
+                null));
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, lease)
+                    .PrepareAsync(
+                        new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            null))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "An actively owned lease must remain a blocker.");
+            AssertEqual(PrerequisiteRecoveryState.Contended, result.Status.RecoveryState);
+            AssertEqual(1, development.Calls.Count);
+            AssertEqual(1, lease.BeginCalls);
+            AssertEqual(0, lease.EndCalls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void LeaseRecoveryHasNoLoop()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (_, workflowId) =>
+                {
+                    calls++;
+                    return FailedDevelopmentResult(workflowId, "RIMBRIDGE_LEASE_REQUIRED");
+                }
+            };
+            var lease = new FakeLeaseAdapter();
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, lease)
+                    .PrepareAsync(
+                        new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            null))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "A second lease-required response must remain a bounded failure.");
+            AssertEqual(2, calls);
+            AssertEqual(1, lease.BeginCalls);
+            AssertEqual(1, lease.EndCalls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void FreshnessCleanupFailureRemainsVisible()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) => calls++ == 0
+                    ? FailedDevelopmentResult(workflowId, "RIMBRIDGE_LEASE_REQUIRED")
+                    : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged")
+            };
+            var lease = new FakeLeaseAdapter
+            {
+                EndResult = new DevBridgeLeaseResult(
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "DEVBRIDGE_LEASE_RELEASE_FAILED"),
+                    null,
+                    null)
+            };
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, lease)
+                    .PrepareAsync(
+                        new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            "wf-cleanup-failure"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "A failed lease release must block the freshness proof.");
+            AssertEqual("DEVBRIDGE_LEASE_RELEASE_FAILED", result.Status.ErrorCode);
+            Assert(result.Cleanup is not null, "Lease cleanup evidence must be present on failure.");
+            AssertEqual("FAILED", result.Cleanup!.Status);
+            AssertEqual(false, result.Cleanup.LeaseReleased);
+            AssertEqual(false, result.Cleanup.TemporaryStateCleared);
+            AssertEqual(1, lease.EndCalls);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void CleanupFailureRemainsIndependentInOrchestration()
+    {
+        CatalogSuiteExecutionResult execution = new(
+            "affected",
+            [new RimTestResult { Status = "fail", Test = "fixture" }],
+            0,
+            Cancelled: false,
+            Cleanup: new RimTestCleanupSummary
+            {
+                Status = "FAILED",
+                LeaseReleased = false,
+                TemporaryStateCleared = false,
+                ErrorCode = "DEVBRIDGE_LEASE_RELEASE_FAILED"
+            });
+
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 1);
+
+        AssertEqual("TEST_FAILURE", result.Orchestration!.Overall);
+        AssertEqual("FAILED", result.Orchestration.Cleanup!.Status);
+        AssertEqual("RIMTEST_TEST_FAILURE", result.Orchestration.Failure!.ErrorCode);
+    }
+
     private static void AssertArtifactTransactionFailure(
         AffectedScenarioResult result,
         string errorCode)
@@ -4824,6 +5902,30 @@ internal static class Program
         Assert(!root.GetProperty("artifactFreshness")
             .GetProperty("loadedArtifactFreshnessProven")
             .GetBoolean(), "A failed transaction cannot prove freshness.");
+        JsonElement orchestration = root.GetProperty("orchestration");
+        bool sourceBuildFailed = errorCode.StartsWith(
+            "DEVELOPMENT_BUILD",
+            StringComparison.Ordinal) || errorCode.StartsWith("BUILD_", StringComparison.Ordinal);
+        AssertEqual(
+            sourceBuildFailed ? "SOURCE_BUILD_FAILURE" : "INFRASTRUCTURE_FAILURE",
+            orchestration.GetProperty("overall").GetString());
+        AssertEqual(
+            sourceBuildFailed ? "FAIL" : "NOT_RUN",
+            orchestration.GetProperty("sourceBuild").GetString());
+        string expectedDeployment = root.GetProperty("artifactFreshness")
+            .GetProperty("evaluationStatus").GetString() == "FAILED"
+            ? "FAILED"
+            : "NOT_EVALUATED";
+        AssertEqual(expectedDeployment, orchestration.GetProperty("deployment").GetString());
+        AssertEqual("BLOCKED", orchestration.GetProperty("runtimeValidation").GetString());
+        AssertEqual(
+            errorCode.StartsWith("RIMTEST_", StringComparison.Ordinal)
+                ? "RimLiaison"
+                : "DevBridge2",
+            orchestration.GetProperty("failure")
+            .GetProperty("owner").GetString());
+        AssertEqual(errorCode, orchestration.GetProperty("failure")
+            .GetProperty("errorCode").GetString());
         AssertEqual(0, result.RecipeCalls.Count);
     }
 
@@ -4901,10 +6003,24 @@ internal static class Program
 
             using JsonDocument document = JsonDocument.Parse(stdout.ToString());
             JsonElement root = document.RootElement;
-            AssertEqual(CliExitCodes.ConservativeSelection, exitCode);
-            AssertEqual("blocked", root.GetProperty("status").GetString());
-            AssertEqual("GIT_DISCOVERY_FAILED", root.GetProperty("errorCode").GetString());
+            AssertEqual(CliExitCodes.InternalError, exitCode);
+            AssertEqual("infrastructure", root.GetProperty("status").GetString());
+            AssertEqual("affected", root.GetProperty("suite").GetString());
+            AssertEqual("blocked", root.GetProperty("selectionStatus").GetString());
+            AssertEqual("GIT_DISCOVERY_FAILED", root.GetProperty("selectionErrorCode").GetString());
             AssertEqual("git status --short", root.GetProperty("nextAction").GetString());
+            JsonElement orchestration = root.GetProperty("orchestration");
+            AssertEqual("INFRASTRUCTURE_FAILURE", orchestration.GetProperty("overall").GetString());
+            AssertEqual("UNAVAILABLE", orchestration.GetProperty("infrastructure").GetString());
+            AssertEqual("NOT_EVALUATED", orchestration.GetProperty("deployment").GetString());
+            AssertEqual("RimLiaison", orchestration.GetProperty("failure")
+                .GetProperty("owner").GetString());
+            AssertEqual("selection", orchestration.GetProperty("failure")
+                .GetProperty("stage").GetString());
+            AssertEqual("GIT_DISCOVERY_FAILED", orchestration.GetProperty("failure")
+                .GetProperty("errorCode").GetString());
+            Assert(!root.TryGetProperty("artifactFreshness", out _),
+                "A selection failure must not emit a false freshness failure.");
         }
         finally
         {
@@ -5119,6 +6235,97 @@ internal static class Program
         }
     }
 
+    private static (CliResult Result, FakeTransport Transport) RunTransactionalUiFixture(
+        IReadOnlyList<string> options,
+        string? restoreResponse = null,
+        string? screenshotResponse = null)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            var transport = new FakeTransport(
+                (request, _) =>
+                {
+                    if (request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(
+                            "{\"success\":true,\"exitCode\":0,\"leaseId\":\"lease-1\",\"generation\":1}");
+                    }
+
+                    if (request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult("{\"success\":true,\"exitCode\":0}");
+                    }
+
+                    if (request.Arguments.Contains("environment", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(ViewportBeginResponse());
+                    }
+
+                    if (request.Arguments.Contains("environment", StringComparer.OrdinalIgnoreCase) &&
+                        request.Arguments.Contains("restore", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(restoreResponse ?? ViewportRestoreResponse());
+                    }
+
+                    if (request.Arguments.Contains("tools", StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(UiToolsResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/get_screen_targets",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(UiTargetsCallResponse());
+                    }
+
+                    if (request.Arguments.Contains(
+                        "rimworld/take_screenshot",
+                        StringComparer.OrdinalIgnoreCase))
+                    {
+                        return ProcessResult(screenshotResponse ?? UiTargetScreenshotCallResponse());
+                    }
+
+                    throw new InvalidOperationException(
+                        "Unexpected transactional UI request: " +
+                        string.Join(" ", request.Arguments));
+                });
+            var arguments = new List<string>
+            {
+                "ui",
+                "screenshot",
+                "--json",
+                "--devbridge",
+                "DevBridge.cmd",
+                "--devbridge-root",
+                directory
+            };
+            arguments.AddRange(options);
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        arguments.ToArray(),
+                        stdout,
+                        stderr,
+                        processTransport: transport)
+                    .GetAwaiter()
+                    .GetResult());
+            return (
+                new CliResult(exitCode, stdout.ToString(), stderr.ToString()),
+                transport);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static string UiToolsResponse() =>
         """
         {
@@ -5231,6 +6438,26 @@ internal static class Program
             """,
             "op-cell-shot",
             "evidence-cell-shot");
+
+    private static string ViewportBeginResponse() =>
+        "{" +
+        "\"success\":true,\"exitCode\":0,\"viewport\":" +
+        "{\"schemaVersion\":\"devbridge-viewport-environment/v1\",\"success\":true," +
+        "\"status\":\"prepared\",\"transactionId\":\"viewport-1\",\"leaseId\":\"lease-1\"," +
+        "\"generation\":1,\"requested\":{\"kind\":\"narrow\",\"width\":1024,\"height\":768}," +
+        "\"capturedState\":{\"clientWidth\":1920,\"clientHeight\":1080,\"windowHandle\":7001}," +
+        "\"effectiveViewport\":{\"clientWidth\":1024,\"clientHeight\":768,\"windowHandle\":7001}," +
+        "\"persistentPreferenceMutation\":false,\"restorationVerified\":false}" +
+        "}";
+
+    private static string ViewportRestoreResponse() =>
+        "{" +
+        "\"success\":true,\"exitCode\":0,\"viewport\":" +
+        "{\"schemaVersion\":\"devbridge-viewport-environment/v1\",\"success\":true," +
+        "\"status\":\"restored\",\"transactionId\":\"viewport-1\",\"leaseId\":\"lease-1\"," +
+        "\"generation\":1,\"restoredViewport\":{\"clientWidth\":1920,\"clientHeight\":1080,\"windowHandle\":7001}," +
+        "\"persistentPreferenceMutation\":false,\"restorationVerified\":true,\"cleanupStatus\":\"restored\"}" +
+        "}";
 
     private static string RouteResponse(
         string result,
@@ -5623,7 +6850,9 @@ internal static class Program
     private static AffectedScenarioResult RunAffectedSourceScenario(
         Func<string, string?, DevBridgeModDevelopmentResult>? resultFactory = null,
         DevBridgeRecipeRunResult? recipeRun = null,
-        bool failFast = false)
+        bool failFast = false,
+        CatalogDocument? scenarioCatalog = null,
+        Func<string, int, DevBridgeRecipeRunResult>? recipeRunFactory = null)
     {
         string directory = CreateTempDirectory();
         try
@@ -5633,9 +6862,14 @@ internal static class Program
                 Path.Combine(directory, "Source", "Changed.cs"),
                 "class Changed { int Value = 1; }\n");
             string catalogPath = Path.Combine(directory, "catalog.json");
-            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            File.WriteAllText(catalogPath, Serialize(scenarioCatalog ?? CreateCatalog()));
 
-            var recipeAdapter = new FakeRecipeAdapter();
+            var recipeAdapter = new FakeRecipeAdapter
+            {
+                RunFactory = recipeRunFactory is null
+                    ? null
+                    : (recipeId, _, _, index) => recipeRunFactory(recipeId, index)
+            };
             recipeAdapter.Runs["assembler-fixture"] =
                 recipeRun ?? PassRun("assembler-fixture");
             var developmentAdapter = new FakeModDevelopmentAdapter
@@ -5799,6 +7033,18 @@ internal static class Program
             }
         };
 
+    private static void SetRecipeProfile(
+        FakeRecipeAdapter adapter,
+        string recipeId,
+        IReadOnlyList<string> projects)
+    {
+        string projectJson = string.Join(",", projects.Select(project =>
+            "\"" + project + "\""));
+        using JsonDocument definition = JsonDocument.Parse(
+            "{\"projects\":[" + projectJson + "],\"inputs\":{\"quicktest\":true}}");
+        adapter.ShowDefinitions[recipeId] = definition.RootElement.Clone();
+    }
+
     private static CatalogTest ResettableTest(string id, string recipeId) =>
         new()
         {
@@ -5861,6 +7107,28 @@ internal static class Program
                 workflowId,
                 generation,
                 "launch-" + runId)],
+            workflowId);
+
+    private static DevBridgeRecipeRunResult LeaseRequiredRun(
+        string recipeId,
+        string? workflowId,
+        string? leaseId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                "RIMBRIDGE_LEASE_REQUIRED"),
+            false,
+            "run-lease-required",
+            7,
+            leaseId,
+            null,
+            null,
+            null,
+            null,
+            null,
+            0,
+            [],
             workflowId);
 
     private static DevBridgeRecipeRunResult FailedRunWithLease(
@@ -6147,12 +7415,22 @@ internal static class Program
             string recipeId,
             CancellationToken cancellationToken = default)
         {
+            JsonElement definition;
+            if (ShowDefinitions.TryGetValue(recipeId, out JsonElement configured))
+            {
+                definition = configured.Clone();
+            }
+            else
+            {
+                using JsonDocument document = JsonDocument.Parse(
+                    "{\"projects\":[],\"inputs\":{}}");
+                definition = document.RootElement.Clone();
+            }
+
             return Task.FromResult(new DevBridgeRecipeShowResult(
                 recipeId,
                 new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
-                ShowDefinitions.TryGetValue(recipeId, out JsonElement definition)
-                    ? definition.Clone()
-                    : null));
+                definition));
         }
 
         public Task<DevBridgeRecipePlanResult> PlanAsync(
@@ -6200,6 +7478,8 @@ internal static class Program
 
         public DevBridgeLeaseResult BeginResult { get; init; } = SuccessLease("lease-default", 7);
 
+        public DevBridgeLeaseResult? EndResult { get; set; }
+
         public int BeginCalls { get; private set; }
 
         public int RenewCalls { get; private set; }
@@ -6242,7 +7522,7 @@ internal static class Program
             CancellationToken cancellationToken = default)
         {
             EndCalls++;
-            return Task.FromResult(SuccessLease(leaseId, CurrentGeneration));
+            return Task.FromResult(EndResult ?? SuccessLease(leaseId, CurrentGeneration));
         }
     }
 

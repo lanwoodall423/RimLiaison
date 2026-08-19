@@ -7,8 +7,10 @@ using RimLiaison.Execution;
 using RimLiaison.Git;
 using RimLiaison.RimError;
 using RimLiaison.RimContext;
+using RimLiaison.Recovery;
 using RimLiaison.Results;
 using RimLiaison.Stack;
+using RimLiaison.Profiling;
 
 namespace RimLiaison;
 
@@ -82,89 +84,148 @@ public static class CliApplication
         IDevBridgeCapabilityAdapter? capabilityAdapter = null,
         IDevBridgeUiAdapter? uiAdapter = null,
         IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
-        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter = null)
+        IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter = null,
+        IDevBridgeViewportAdapter? viewportAdapter = null,
+        IDevBridgeLeaseAdapter? leaseAdapter = null)
     {
+        EfficiencyProfiler profiler = EfficiencyProfiler.Start();
         long started = Stopwatch.GetTimestamp();
         string? workflowId = null;
+        int exitCode = CliExitCodes.InternalError;
         try
         {
             CliRequest request = CliParser.Parse(args);
             if (request.HelpRequested)
             {
+                profiler.SetCommand("help");
                 CliParser.WriteHelp(stdout);
-                return CliExitCodes.Success;
+                exitCode = CliExitCodes.Success;
+                return exitCode;
             }
 
+            profiler.SetCommand(request.Command.ToString());
             workflowId = NeedsWorkflowCorrelation(request)
                 ? WorkflowCorrelation.Create()
                 : null;
+            profiler.SetWorkflow(workflowId);
 
             if (request.Command is CliCommand.RecipeShow or
                 CliCommand.RecipePlan or
                 CliCommand.RecipeRun)
             {
-                return await ExecuteRecipeCommandAsync(
-                    request,
-                    stdout,
-                    recipeAdapter,
-                    cancellationToken,
-                    workflowId).ConfigureAwait(false);
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.recipe",
+                        "command",
+                        () => ExecuteRecipeCommandAsync(
+                            request,
+                            stdout,
+                            recipeAdapter,
+                            cancellationToken,
+                            workflowId),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: request.Command.ToString())
+                    .ConfigureAwait(false);
+                return exitCode;
             }
 
             if (request.Command == CliCommand.Doctor)
             {
-                return await ExecuteDoctorCommandAsync(
-                        request,
-                        stdout,
-                        stderr,
-                        processTransport,
-                        cancellationToken)
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.doctor",
+                        "command",
+                        () => ExecuteDoctorCommandAsync(
+                            request,
+                            stdout,
+                            stderr,
+                            processTransport,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "doctor")
                     .ConfigureAwait(false);
+                return exitCode;
             }
 
             if (request.Command == CliCommand.Capabilities)
             {
-                return await ExecuteCapabilitiesCommandAsync(
-                        request,
-                        stdout,
-                        processTransport,
-                        capabilityAdapter,
-                    cancellationToken)
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.capabilities",
+                        "command",
+                        () => ExecuteCapabilitiesCommandAsync(
+                            request,
+                            stdout,
+                            processTransport,
+                            capabilityAdapter,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "capabilities")
                     .ConfigureAwait(false);
+                return exitCode;
             }
 
             if (request.Command is CliCommand.UiTargets or CliCommand.UiScreenshot)
             {
-                return await ExecuteUiCommandAsync(
-                        request,
-                        stdout,
-                        processTransport,
-                        uiAdapter,
-                        cancellationToken)
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.ui",
+                        "command",
+                        () => ExecuteUiCommandAsync(
+                            request,
+                            stdout,
+                            processTransport,
+                            uiAdapter,
+                            viewportAdapter,
+                            leaseAdapter,
+                            workflowId,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: request.Command.ToString())
                     .ConfigureAwait(false);
+                return exitCode;
             }
 
             if (request.Command == CliCommand.Init)
             {
-                StackInitResult result = StackInitializer.Run(request);
-                WriteJson(stdout, result.Output);
-                return result.ExitCode;
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.init",
+                        "command",
+                        () =>
+                        {
+                            StackInitResult result = StackInitializer.Run(request);
+                            WriteJson(stdout, result.Output);
+                            return Task.FromResult(result.ExitCode);
+                        },
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "init")
+                    .ConfigureAwait(false);
+                return exitCode;
             }
 
-            return await ExecuteCatalogCommandAsync(
-                request,
-                stdout,
-                stderr,
-                recipeAdapter,
-                diagnosisAdapter,
-                diagnosticSourceAdapter,
-                impactAdapter,
-                gitChangeProvider,
-                processTransport,
-                cancellationToken,
-                started,
-                workflowId,
-                developmentAdapter).ConfigureAwait(false);
+            exitCode = await ProfilerActivity.ObserveAsync(
+                    "command.catalog",
+                    "command",
+                    () => ExecuteCatalogCommandAsync(
+                        request,
+                        stdout,
+                        stderr,
+                        recipeAdapter,
+                        diagnosisAdapter,
+                        diagnosticSourceAdapter,
+                        impactAdapter,
+                        gitChangeProvider,
+                        processTransport,
+                        cancellationToken,
+                        started,
+                        workflowId,
+                        developmentAdapter),
+                    AnnotateExit,
+                    phase: "command",
+                    scope: request.Command.ToString())
+                .ConfigureAwait(false);
+            return exitCode;
         }
         catch (CliParseException exception)
         {
@@ -177,14 +238,16 @@ public static class CliApplication
                         "CLI_INVALID",
                         ElapsedMilliseconds(started),
                         workflowId));
-                return CliExitCodes.InvalidInput;
+                exitCode = CliExitCodes.InvalidInput;
+                return exitCode;
             }
 
             WriteError(
                 stdout,
                 "CLI_INVALID",
                 [new CatalogIssue("CLI_INVALID", exception.Message)]);
-            return CliExitCodes.InvalidInput;
+            exitCode = CliExitCodes.InvalidInput;
+            return exitCode;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -196,7 +259,8 @@ public static class CliApplication
                         testId,
                         ElapsedMilliseconds(started),
                         workflowId));
-                return CliExitCodes.Cancelled;
+                exitCode = CliExitCodes.Cancelled;
+                return exitCode;
             }
 
             WriteJson(
@@ -207,7 +271,8 @@ public static class CliApplication
                     code = "RIMTEST_CANCELLED",
                     outcome = "cancelled"
                 });
-            return CliExitCodes.Cancelled;
+            exitCode = CliExitCodes.Cancelled;
+            return exitCode;
         }
         catch (Exception)
         {
@@ -220,7 +285,8 @@ public static class CliApplication
                         "INTERNAL_ERROR",
                         ElapsedMilliseconds(started),
                         workflowId));
-                return CliExitCodes.InternalError;
+                exitCode = CliExitCodes.InternalError;
+                return exitCode;
             }
 
             stderr.WriteLine("rimliaison internal error.");
@@ -228,7 +294,13 @@ public static class CliApplication
                 stdout,
                 "INTERNAL_ERROR",
                 [new CatalogIssue("INTERNAL_ERROR", "An unexpected error occurred.")]);
-            return CliExitCodes.InternalError;
+            exitCode = CliExitCodes.InternalError;
+            return exitCode;
+        }
+        finally
+        {
+            profiler.Complete(exitCode, cancellationToken.IsCancellationRequested);
+            profiler.Dispose();
         }
     }
 
@@ -429,10 +501,25 @@ public static class CliApplication
                         GitChangeDiscoveryResult discovered;
                         try
                         {
-                            discovered = await git.DiscoverAsync(
-                                    AffectedGitRoot(request),
-                                    request.AffectedBase,
-                                    cancellationToken)
+                            discovered = await ProfilerActivity.ObserveAsync(
+                                    "git.change-discovery",
+                                    "git",
+                                    () => git.DiscoverAsync(
+                                        AffectedGitRoot(request),
+                                        request.AffectedBase,
+                                        cancellationToken),
+                                    (activity, result) =>
+                                    {
+                                        ProfilerActivity.SetOutcome(
+                                            activity,
+                                            result.Resolved ? "success" : "failure",
+                                            result.ErrorCode);
+                                        ProfilerActivity.SetCounts(
+                                            activity,
+                                            items: result.Paths.Count);
+                                    },
+                                    phase: "discovery",
+                                    scope: "affected")
                                 .ConfigureAwait(false);
                         }
                         catch (Exception exception)
@@ -454,6 +541,15 @@ public static class CliApplication
                                 ErrorCode = discovered.ErrorCode ?? "GIT_DISCOVERY_FAILED",
                                 NextAction = "git status --short"
                             };
+                            if (request.RunSelected)
+                            {
+                                return WriteAffectedSelectionFailure(
+                                    blocked,
+                                    started,
+                                    stdout,
+                                    workflowId);
+                            }
+
                             WriteJson(stdout, blocked);
                             return SelectionExitCode(blocked);
                         }
@@ -481,6 +577,15 @@ public static class CliApplication
                                 ErrorCode = "GIT_CHANGED_PATHS_MISSING",
                                 NextAction = "git status --short"
                             };
+                            if (request.RunSelected)
+                            {
+                                return WriteAffectedSelectionFailure(
+                                    blocked,
+                                    started,
+                                    stdout,
+                                    workflowId);
+                            }
+
                             WriteJson(stdout, blocked);
                             return SelectionExitCode(blocked);
                         }
@@ -488,13 +593,32 @@ public static class CliApplication
 
                     IRimContextImpactAdapter adapter = impactAdapter ?? CreateRimContextAdapter(request);
                     var selector = new RimContextTestSelector(adapter);
-                    RimTestSelectionResult selection = await selector.SelectAsync(
-                            loaded.Catalog,
-                            changedPaths,
-                            request.FallbackSuite,
-                            request.Explain,
-                            cancellationToken,
-                            gitChanges)
+                    RimTestSelectionResult selection = await ProfilerActivity.ObserveAsync(
+                            "affected-selection",
+                            "selection",
+                            () => selector.SelectAsync(
+                                loaded.Catalog,
+                                changedPaths,
+                                request.FallbackSuite,
+                                request.Explain,
+                                cancellationToken,
+                                gitChanges),
+                            (activity, result) =>
+                            {
+                                ProfilerActivity.SetOutcome(
+                                    activity,
+                                    result.Status is "ok" or "conservative"
+                                        ? "success"
+                                        : result.Status == "cancelled"
+                                            ? "cancelled"
+                                            : "failure",
+                                    result.ErrorCode);
+                                ProfilerActivity.SetCounts(
+                                    activity,
+                                    items: result.Tests.Count);
+                            },
+                            phase: "affected",
+                            scope: "changed-paths")
                         .ConfigureAwait(false);
 
                     if (selection.Status == "ok" && selection.Tests.Count == 0)
@@ -505,12 +629,24 @@ public static class CliApplication
                             ReasonCount = Math.Max(1, selection.ReasonCount),
                             ErrorCode = "AFFECTED_NO_TESTS",
                             NextAction = "rimliaison affected --run --fallback-suite <suite>",
-                            Reasons = selection.Reasons
+                            Reasons = selection.Reasons,
+                            RecoveryState = selection.RecoveryState,
+                            RecoveryAttempts = selection.RecoveryAttempts,
+                            RecoveryAction = selection.RecoveryAction
                         };
                     }
 
                     if (request.RunSelected && selection.Tests.Count == 0)
                     {
+                        if (selection.Status == "blocked")
+                        {
+                            return WriteAffectedSelectionFailure(
+                                selection,
+                                started,
+                                stdout,
+                                workflowId);
+                        }
+
                         WriteJson(stdout, selection);
                         return SelectionExitCode(selection);
                     }
@@ -521,6 +657,8 @@ public static class CliApplication
                         ArtifactFreshnessTransactionRequest? freshnessRequest =
                             CreateArtifactFreshnessRequest(
                                 request,
+                                loaded.Catalog,
+                                selection.Tests,
                                 changedPaths,
                                 workflowId);
                         return await RunSuiteAsync(
@@ -540,8 +678,18 @@ public static class CliApplication
                                 selection.FallbackSuite,
                                 workflowId,
                                 developmentAdapter,
-                                freshnessRequest)
+                                freshnessRequest,
+                                SelectionRecovery(selection))
                             .ConfigureAwait(false);
+                    }
+
+                    if (request.RunSelected)
+                    {
+                        return WriteAffectedSelectionFailure(
+                            selection,
+                            started,
+                            stdout,
+                            workflowId);
                     }
 
                     WriteJson(stdout, selection);
@@ -690,6 +838,9 @@ public static class CliApplication
         TextWriter stdout,
         IDevBridgeProcessTransport? processTransport,
         IDevBridgeUiAdapter? uiAdapter,
+        IDevBridgeViewportAdapter? viewportAdapter,
+        IDevBridgeLeaseAdapter? leaseAdapter,
+        string? workflowId,
         CancellationToken cancellationToken)
     {
         IDevBridgeUiAdapter adapter = CreateUiAdapter(
@@ -699,8 +850,72 @@ public static class CliApplication
 
         if (request.Command == CliCommand.UiTargets)
         {
-            DevBridgeUiTargetsResult result = await adapter.GetTargetsAsync(cancellationToken)
+            DevBridgeUiTargetsResult result = await adapter.GetTargetsAsync(workflowId, cancellationToken)
                 .ConfigureAwait(false);
+            DevBridgeLeaseResult? targetLeaseAcquisition = null;
+            DevBridgeLeaseResult? targetLeaseRelease = null;
+            IDevBridgeLeaseAdapter? targetLeaseAdapter = null;
+            if (!result.Status.IsSuccess &&
+                IsLeaseRequired(result.Status))
+            {
+                targetLeaseAdapter = CreateLeaseAdapter(
+                    request,
+                    processTransport,
+                    leaseAdapter);
+                targetLeaseAcquisition = await targetLeaseAdapter.BeginLeaseAsync(
+                        workflowId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!targetLeaseAcquisition.IsUsable)
+                {
+                    WriteUiFailure(
+                        stdout,
+                        DevBridgeUiSchemas.Targets,
+                        new DevBridgeUiStatus(
+                            targetLeaseAcquisition.Status.Outcome switch
+                            {
+                                DevBridgeOutcomeKind.DevBridgeRefusal => DevBridgeUiOutcome.Unavailable,
+                                DevBridgeOutcomeKind.Timeout => DevBridgeUiOutcome.Timeout,
+                                DevBridgeOutcomeKind.Cancelled => DevBridgeUiOutcome.Cancelled,
+                                _ => DevBridgeUiOutcome.InfrastructureFailure
+                            },
+                            targetLeaseAcquisition.Status.ErrorCode,
+                            targetLeaseAcquisition.Status.Error,
+                            targetLeaseAcquisition.Status.ProcessExitCode,
+                            NextAction: NextActionFor(targetLeaseAcquisition.Status.Outcome)));
+                    return LeaseExitCodeFor(targetLeaseAcquisition.Status.Outcome);
+                }
+
+                try
+                {
+                    result = await adapter.GetTargetsAsync(
+                            workflowId,
+                            targetLeaseAcquisition.LeaseId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    targetLeaseRelease = await targetLeaseAdapter.EndLeaseAsync(
+                            targetLeaseAcquisition.LeaseId!,
+                            workflowId,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+
+                if (targetLeaseRelease is not null && !targetLeaseRelease.Status.IsSuccess)
+                {
+                    result = new DevBridgeUiTargetsResult(
+                        new DevBridgeUiStatus(
+                            DevBridgeUiOutcome.InfrastructureFailure,
+                            "RIMTEST_UI_TARGETS_LEASE_RELEASE_FAILED",
+                            "Target discovery completed, but the temporary lease was not released safely.",
+                            targetLeaseRelease.Status.ProcessExitCode,
+                            NextAction: NextActionFor(targetLeaseRelease.Status.Outcome)),
+                        []);
+                }
+            }
+
             if (!result.Status.IsSuccess)
             {
                 WriteUiFailure(stdout, DevBridgeUiSchemas.Targets, result.Status);
@@ -745,17 +960,251 @@ public static class CliApplication
             cellRect = parsedCellRect;
         }
 
+        DevBridgeViewportResult? viewportPreparation = null;
+        DevBridgeViewportResult? viewportRestoration = null;
+        DevBridgeLeaseResult? leaseAcquisition = null;
+        DevBridgeLeaseResult? leaseRelease = null;
+        string? viewportLeaseId = request.UiLeaseId;
+        bool ownsViewportLease = false;
+        IDevBridgeViewportAdapter? environmentAdapter = null;
+        IDevBridgeLeaseAdapter? lifecycleLeaseAdapter = null;
+        DevBridgeViewportRequest? preparedViewportRequest = null;
+        DevBridgeUiInputCheckResult? inputCheck = null;
+        if (request.UiViewport is not null)
+        {
+            if (!DevBridgeViewportRequest.TryCreate(
+                    request.UiViewport,
+                    request.UiViewportWidth,
+                    request.UiViewportHeight,
+                    out DevBridgeViewportRequest viewportRequest,
+                    out string viewportError))
+            {
+                WriteUiViewportFailure(
+                    stdout,
+                    null,
+                    new DevBridgeViewportResult(
+                        new DevBridgeViewportStatus(
+                            DevBridgeViewportOutcome.InvalidRequest,
+                            "RIMTEST_VIEWPORT_REQUEST_INVALID",
+                            viewportError,
+                            NextAction: null),
+                        null),
+                    null,
+                    null,
+                    null);
+                return CliExitCodes.InvalidInput;
+            }
+
+            preparedViewportRequest = viewportRequest;
+            environmentAdapter = CreateViewportAdapter(
+                request,
+                processTransport,
+                viewportAdapter);
+            if (viewportLeaseId is null)
+            {
+                lifecycleLeaseAdapter = CreateLeaseAdapter(
+                    request,
+                    processTransport,
+                    leaseAdapter);
+                leaseAcquisition = await lifecycleLeaseAdapter.BeginLeaseAsync(
+                        workflowId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!leaseAcquisition.IsUsable)
+                {
+                    WriteUiViewportFailure(
+                        stdout,
+                        null,
+                        null,
+                        null,
+                        leaseAcquisition,
+                        null);
+                    return LeaseExitCodeFor(leaseAcquisition.Status.Outcome);
+                }
+
+                viewportLeaseId = leaseAcquisition.LeaseId;
+                ownsViewportLease = true;
+            }
+
+            viewportPreparation = await environmentAdapter.BeginAsync(
+                    viewportRequest,
+                    viewportLeaseId!,
+                    workflowId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!viewportPreparation.Status.IsSuccess ||
+                string.IsNullOrWhiteSpace(viewportPreparation.Evidence?.TransactionId))
+            {
+                if (ownsViewportLease && lifecycleLeaseAdapter is not null)
+                {
+                    leaseRelease = await lifecycleLeaseAdapter.EndLeaseAsync(
+                            viewportLeaseId!,
+                            workflowId,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+
+                WriteUiViewportFailure(
+                    stdout,
+                    null,
+                    viewportPreparation,
+                    null,
+                    leaseRelease,
+                    null);
+                return ViewportExitCodeFor(viewportPreparation.Status.Outcome);
+            }
+        }
+
         var screenshotRequest = new DevBridgeUiScreenshotRequest(
             request.UiTarget,
             cellRect);
-        DevBridgeUiScreenshotResult screenshot = await adapter.CaptureAsync(
-                screenshotRequest,
-                cancellationToken)
-            .ConfigureAwait(false);
+        DevBridgeUiScreenshotResult screenshot;
+        try
+        {
+            if (request.UiInputCheck)
+            {
+                inputCheck = adapter is IDevBridgeUiInspectionAdapter inspectionAdapter
+                    ? await inspectionAdapter.CheckInputAsync(
+                            workflowId,
+                            viewportLeaseId,
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : new DevBridgeUiInputCheckResult(
+                        new DevBridgeUiStatus(
+                            DevBridgeUiOutcome.IncompatibleSchema,
+                            "RIMTEST_UI_INPUT_CHECK_UNSUPPORTED",
+                            "The configured UI adapter does not expose semantic input-state inspection.",
+                            NextAction: null),
+                        null);
+            }
+
+            if (inputCheck is not null &&
+                !inputCheck.Status.IsSuccess &&
+                !string.Equals(inputCheck.Status.ErrorCode,
+                    "RIMTEST_UI_CAPABILITY_MISSING", StringComparison.Ordinal))
+            {
+                screenshot = new DevBridgeUiScreenshotResult(inputCheck.Status, null);
+            }
+            else
+            {
+                screenshot = await adapter.CaptureAsync(
+                        screenshotRequest,
+                        workflowId,
+                        viewportLeaseId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            screenshot = new DevBridgeUiScreenshotResult(
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.Cancelled,
+                    "RIMTEST_CANCELLED",
+                    "The RimLiaison UI screenshot request was cancelled.",
+                    NextAction: null),
+                null);
+        }
+        catch (Exception exception)
+        {
+            screenshot = new DevBridgeUiScreenshotResult(
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.InfrastructureFailure,
+                    "RIMTEST_UI_CAPTURE_EXCEPTION",
+                    BoundUiMessage(exception.Message)),
+                null);
+        }
+        finally
+        {
+            if (viewportPreparation?.Evidence?.TransactionId is not null &&
+                environmentAdapter is not null)
+            {
+                viewportRestoration = await environmentAdapter.RestoreAsync(
+                        viewportPreparation.Evidence.TransactionId,
+                        viewportLeaseId!,
+                        workflowId,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            if (ownsViewportLease && lifecycleLeaseAdapter is not null)
+            {
+                leaseRelease = await lifecycleLeaseAdapter.EndLeaseAsync(
+                        viewportLeaseId!,
+                        workflowId,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+
         if (!screenshot.Status.IsSuccess || screenshot.Evidence is null)
         {
-            WriteUiFailure(stdout, DevBridgeUiSchemas.Screenshot, screenshot.Status);
+            WriteUiViewportFailure(
+                stdout,
+                screenshot.Status,
+                viewportPreparation,
+                viewportRestoration,
+                leaseRelease,
+                screenshot,
+                inputCheck);
             return UiExitCodeFor(screenshot.Status.Outcome);
+        }
+
+        if (preparedViewportRequest is not null &&
+            !TryValidateViewportLayout(
+                preparedViewportRequest,
+                viewportPreparation!.Evidence!,
+                screenshot.Evidence,
+                out string layoutError))
+        {
+            WriteUiViewportFailure(
+                stdout,
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.InfrastructureFailure,
+                    "RIMTEST_UI_LAYOUT_ASSERTION_FAILED",
+                    layoutError,
+                    NextAction: viewportRestoration?.Status.NextAction),
+                viewportPreparation,
+                viewportRestoration,
+                leaseRelease,
+                screenshot,
+                inputCheck);
+            return CliExitCodes.InternalError;
+        }
+
+        if (viewportRestoration is not null && !viewportRestoration.Status.IsSuccess)
+        {
+            WriteUiViewportFailure(
+                stdout,
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.InfrastructureFailure,
+                    "RIMTEST_UI_VIEWPORT_RESTORE_FAILED",
+                    viewportRestoration.Status.Error ??
+                    "The screenshot was captured, but the user's prior viewport was not verified as restored.",
+                    viewportRestoration.Status.ProcessExitCode,
+                    NextAction: viewportRestoration.Status.NextAction),
+                viewportPreparation,
+                viewportRestoration,
+                leaseRelease,
+                screenshot,
+                inputCheck);
+            return CliExitCodes.InternalError;
+        }
+
+        if (leaseRelease is not null && !leaseRelease.Status.IsSuccess)
+        {
+            WriteUiViewportFailure(
+                stdout,
+                new DevBridgeUiStatus(
+                    DevBridgeUiOutcome.InfrastructureFailure,
+                    "RIMTEST_UI_VIEWPORT_LEASE_RELEASE_FAILED",
+                    "The screenshot completed, but the temporary viewport lease was not released safely.",
+                    leaseRelease.Status.ProcessExitCode),
+                viewportPreparation,
+                viewportRestoration,
+                leaseRelease,
+                screenshot);
+            return CliExitCodes.InternalError;
         }
 
         var evidence = screenshot.Evidence;
@@ -781,8 +1230,62 @@ public static class CliApplication
         AddUiField(screenshotOutput, "operationId", evidence.OperationId);
         AddUiField(screenshotOutput, "workflowId", evidence.WorkflowId);
         AddUiField(screenshotOutput, "evidenceId", evidence.EvidenceId);
+        if (viewportPreparation is not null)
+        {
+            screenshotOutput["viewport"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["preparation"] = ToViewportOutput(viewportPreparation),
+                ["restoration"] = ToViewportOutput(viewportRestoration)
+            };
+        }
+        if (inputCheck is not null)
+        {
+            screenshotOutput["inputCheck"] = ToInputCheckOutput(inputCheck);
+        }
         WriteJson(stdout, screenshotOutput);
         return CliExitCodes.Success;
+    }
+
+    private static bool TryValidateViewportLayout(
+        DevBridgeViewportRequest request,
+        DevBridgeViewportEvidence viewport,
+        DevBridgeUiScreenshotEvidence screenshot,
+        out string error)
+    {
+        error = "The live viewport response did not include verified client dimensions.";
+        if (viewport.EffectiveViewport is not JsonElement effective ||
+            !effective.TryGetProperty("clientWidth", out JsonElement widthElement) ||
+            !effective.TryGetProperty("clientHeight", out JsonElement heightElement) ||
+            !widthElement.TryGetInt32(out int width) ||
+            !heightElement.TryGetInt32(out int height) || width < 1 || height < 1)
+        {
+            return false;
+        }
+
+        if (request.Width.HasValue && request.Height.HasValue &&
+            (width != request.Width.Value || height != request.Height.Value))
+        {
+            error = $"The effective client viewport was {width}x{height}, not the requested {request.Width}x{request.Height}.";
+            return false;
+        }
+
+        if (screenshot.ClipRect is not JsonElement clip ||
+            clip.ValueKind != JsonValueKind.Object)
+        {
+            return true;
+        }
+
+        if (clip.TryGetProperty("width", out JsonElement clipWidthElement) &&
+            clip.TryGetProperty("height", out JsonElement clipHeightElement) &&
+            clipWidthElement.TryGetInt32(out int clipWidth) &&
+            clipHeightElement.TryGetInt32(out int clipHeight) &&
+            (clipWidth < 0 || clipHeight < 0 || clipWidth > width || clipHeight > height))
+        {
+            error = $"The captured UI region {clipWidth}x{clipHeight} exceeds the verified client viewport {width}x{height}.";
+            return false;
+        }
+
+        return true;
     }
 
     private static Dictionary<string, object?> ToUiTargetOutput(
@@ -826,6 +1329,193 @@ public static class CliApplication
         AddUiField(output, "workflowId", status.WorkflowId);
         AddUiField(output, "evidenceId", status.EvidenceId);
         WriteJson(stdout, output);
+    }
+
+    private static void WriteUiViewportFailure(
+        TextWriter stdout,
+        DevBridgeUiStatus? uiStatus,
+        DevBridgeViewportResult? preparation,
+        DevBridgeViewportResult? restoration,
+        DevBridgeLeaseResult? lease,
+        DevBridgeUiScreenshotResult? screenshot,
+        DevBridgeUiInputCheckResult? inputCheck = null)
+    {
+        DevBridgeViewportResult? failedViewport =
+            restoration is not null && !restoration.Status.IsSuccess
+                ? restoration
+                : preparation is not null && !preparation.Status.IsSuccess
+                    ? preparation
+                    : null;
+        DevBridgeViewportStatus? viewportStatus = failedViewport?.Status;
+        DevBridgeAdapterStatus? leaseStatus = lease?.Status;
+        string? code = uiStatus?.ErrorCode ?? viewportStatus?.ErrorCode ??
+            leaseStatus?.ErrorCode;
+        string? error = uiStatus?.Error ?? viewportStatus?.Error ?? leaseStatus?.Error;
+        string? nextAction = uiStatus?.NextAction ?? viewportStatus?.NextAction;
+        if (nextAction is null && leaseStatus is not null)
+        {
+            nextAction = "DevBridge.cmd doctor --json";
+        }
+
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = DevBridgeUiSchemas.Screenshot,
+            ["status"] = uiStatus?.Outcome is
+                DevBridgeUiOutcome.Unavailable or
+                DevBridgeUiOutcome.VisualReadinessFailure
+                || viewportStatus?.Outcome is
+                    DevBridgeViewportOutcome.Unavailable or
+                    DevBridgeViewportOutcome.Busy or
+                    DevBridgeViewportOutcome.Unsupported
+                ? "blocked"
+                : "error",
+            ["component"] = preparation is not null || restoration is not null || lease is not null
+                ? "devbridge"
+                : "rimbridge",
+            ["outcome"] = uiStatus is not null
+                ? UiOutcomeName(uiStatus.Outcome)
+                : viewportStatus is not null
+                    ? ViewportOutcomeName(viewportStatus.Outcome)
+                    : leaseStatus is not null
+                        ? OutcomeName(leaseStatus.Outcome)
+                        : "infrastructureFailure",
+            ["code"] = code ?? "RIMTEST_UI_VIEWPORT_FAILED",
+            ["error"] = error ?? "RimLiaison could not complete the transactional UI request."
+        };
+        AddUiField(output, "nextAction", nextAction);
+        if (uiStatus?.ProcessExitCode is int uiExit)
+        {
+            output["processExitCode"] = uiExit;
+        }
+        else if (viewportStatus?.ProcessExitCode is int viewportExit)
+        {
+            output["processExitCode"] = viewportExit;
+        }
+        else if (leaseStatus?.ProcessExitCode is int leaseExit)
+        {
+            output["processExitCode"] = leaseExit;
+        }
+
+        AddUiField(output, "operationId", uiStatus?.OperationId);
+        AddUiField(output, "workflowId", uiStatus?.WorkflowId);
+        AddUiField(output, "evidenceId", uiStatus?.EvidenceId);
+
+        if (preparation is not null)
+        {
+            output["viewportPreparation"] = ToViewportOutput(preparation);
+        }
+        if (restoration is not null)
+        {
+            output["viewportRestoration"] = ToViewportOutput(restoration);
+        }
+        if (screenshot?.Evidence is not null)
+        {
+            output["screenshotEvidence"] = ToUiScreenshotEvidenceOutput(screenshot.Evidence);
+        }
+        if (inputCheck is not null)
+        {
+            output["inputCheck"] = ToInputCheckOutput(inputCheck);
+        }
+
+        WriteJson(stdout, output);
+    }
+
+    private static Dictionary<string, object?> ToInputCheckOutput(
+        DevBridgeUiInputCheckResult result)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["status"] = result.Status.ErrorCode == "RIMTEST_UI_CAPABILITY_MISSING"
+                ? "notApplicable"
+                : result.Status.IsSuccess ? "ready" : "blocked",
+            ["outcome"] = UiOutcomeName(result.Status.Outcome)
+        };
+        AddUiField(output, "code", result.Status.ErrorCode);
+        AddUiField(output, "error", result.Status.Error);
+        AddUiField(output, "nextAction", result.Status.NextAction);
+        AddUiElement(output, "evidence", result.Evidence);
+        return output;
+    }
+
+    private static Dictionary<string, object?> ToViewportOutput(
+        DevBridgeViewportResult? result)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal);
+        if (result is null)
+        {
+            output["status"] = "notRequested";
+            return output;
+        }
+
+        output["schemaVersion"] = DevBridgeViewportSchemas.Environment;
+        output["status"] = result.Evidence?.Status ??
+            (result.Status.IsSuccess ? "prepared" : "error");
+        output["outcome"] = ViewportOutcomeName(result.Status.Outcome);
+        output["success"] = result.Status.IsSuccess;
+        AddUiField(output, "code", result.Status.ErrorCode);
+        AddUiField(output, "error", result.Status.Error);
+        AddUiField(output, "nextAction", result.Status.NextAction);
+        if (result.Status.ProcessExitCode.HasValue)
+        {
+            output["processExitCode"] = result.Status.ProcessExitCode.Value;
+        }
+
+        DevBridgeViewportEvidence? evidence = result.Evidence;
+        if (evidence is null)
+        {
+            return output;
+        }
+
+        AddUiField(output, "transactionId", evidence.TransactionId);
+        AddUiField(output, "leaseId", evidence.LeaseId);
+        if (evidence.Generation.HasValue)
+        {
+            output["generation"] = evidence.Generation.Value;
+        }
+        AddUiElement(output, "requested", evidence.Requested);
+        AddUiElement(output, "capturedState", evidence.CapturedState);
+        AddUiElement(output, "effectiveViewport", evidence.EffectiveViewport);
+        AddUiElement(output, "restoredViewport", evidence.RestoredViewport);
+        output["persistentPreferenceMutation"] = evidence.PersistentPreferenceMutation;
+        output["restorationVerified"] = evidence.RestorationVerified;
+        AddUiField(output, "cleanupStatus", evidence.CleanupStatus);
+        return output;
+    }
+
+    private static Dictionary<string, object?> ToUiScreenshotEvidenceOutput(
+        DevBridgeUiScreenshotEvidence evidence)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["path"] = evidence.Path,
+            ["captureStatus"] = evidence.CaptureStatus
+        };
+        AddUiField(output, "targetId", evidence.TargetId);
+        AddUiField(output, "targetKind", evidence.TargetKind);
+        AddUiField(output, "targetLabel", evidence.TargetLabel);
+        AddUiElement(output, "clipRect", evidence.ClipRect);
+        AddUiElement(output, "requestedRect", evidence.RequestedRect);
+        AddUiElement(output, "paddedRect", evidence.PaddedRect);
+        if (evidence.CameraRestored.HasValue)
+        {
+            output["cameraRestored"] = evidence.CameraRestored.Value;
+        }
+        AddUiField(output, "capturedAtUtc", evidence.CapturedAtUtc);
+        AddUiField(output, "operationId", evidence.OperationId);
+        AddUiField(output, "workflowId", evidence.WorkflowId);
+        AddUiField(output, "evidenceId", evidence.EvidenceId);
+        return output;
+    }
+
+    private static string BoundUiMessage(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "RimLiaison could not complete the UI request.";
+        }
+
+        string trimmed = value.Trim();
+        return trimmed.Length <= 512 ? trimmed : trimmed[..512];
     }
 
     private static void AddUiCorrelation(
@@ -1092,6 +1782,43 @@ public static class CliApplication
             (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
     }
 
+    private static void AnnotateExit(Activity? activity, int exitCode)
+    {
+        ProfilerActivity.SetOutcome(
+            activity,
+            exitCode == CliExitCodes.Cancelled
+                ? "cancelled"
+                : exitCode == CliExitCodes.Success
+                    ? "success"
+                    : "failure",
+            exitCode is 0 or CliExitCodes.Cancelled
+                ? null
+                : "CLI_EXIT_" + exitCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void AnnotateSuiteExecution(
+        Activity? activity,
+        CatalogSuiteExecutionResult execution)
+    {
+        ProfilerActivity.SetOutcome(
+            activity,
+            execution.Cancelled
+                ? "cancelled"
+                : execution.Tests.Any(static test =>
+                    test.Status is "fail" or "infrastructure" or "invalid")
+                    ? "failure"
+                    : "success");
+        ProfilerActivity.SetCounts(activity, items: execution.Tests.Count);
+        foreach (RimTestResult test in execution.Tests)
+        {
+            ProfilerActivity.SetGeneration(activity, test.Generation);
+            if (test.Generation.HasValue)
+            {
+                break;
+            }
+        }
+    }
+
     private static bool TryGetRunTestId(
         IReadOnlyList<string> args,
         out string testId)
@@ -1146,6 +1873,10 @@ public static class CliApplication
         "--source" or
         "--target" or
         "--cell-rect" or
+        "--viewport" or
+        "--viewport-width" or
+        "--viewport-height" or
+        "--lease" or
         "--base" => true,
         _ => false
     };
@@ -1182,6 +1913,42 @@ public static class CliApplication
             request.DevBridgePath,
             request.DevBridgeRootPath);
         return new DevBridgeUiAdapter(
+            processTransport ?? new SystemDevBridgeProcessTransport(),
+            options);
+    }
+
+    private static IDevBridgeViewportAdapter CreateViewportAdapter(
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeViewportAdapter? viewportAdapter)
+    {
+        if (viewportAdapter is not null)
+        {
+            return viewportAdapter;
+        }
+
+        DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
+            request.DevBridgePath,
+            request.DevBridgeRootPath);
+        return new DevBridgeViewportAdapter(
+            processTransport ?? new SystemDevBridgeProcessTransport(),
+            options);
+    }
+
+    private static IDevBridgeLeaseAdapter CreateLeaseAdapter(
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeLeaseAdapter? leaseAdapter)
+    {
+        if (leaseAdapter is not null)
+        {
+            return leaseAdapter;
+        }
+
+        DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
+            request.DevBridgePath,
+            request.DevBridgeRootPath);
+        return new DevBridgeLeaseAdapter(
             processTransport ?? new SystemDevBridgeProcessTransport(),
             options);
     }
@@ -1281,15 +2048,17 @@ public static class CliApplication
         string? fallbackSuite = null,
         string? workflowId = null,
         IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
-        ArtifactFreshnessTransactionRequest? freshnessRequest = null)
+        ArtifactFreshnessTransactionRequest? freshnessRequest = null,
+        RimTestPrerequisiteRecovery? selectionRecovery = null)
     {
         bool ownsRecipeAdapter = recipeAdapter is null;
-        DevBridgeAdapterOptions? bridgeOptions = ownsRecipeAdapter
+        bool needsBridgeTransport = ownsRecipeAdapter || freshnessRequest is not null;
+        DevBridgeAdapterOptions? bridgeOptions = needsBridgeTransport
             ? DevBridgeAdapterOptions.Discover(
                 request.DevBridgePath,
                 request.DevBridgeRootPath)
             : null;
-        IDevBridgeProcessTransport? bridgeTransport = ownsRecipeAdapter
+        IDevBridgeProcessTransport? bridgeTransport = needsBridgeTransport
             ? processTransport ?? new SystemDevBridgeProcessTransport()
             : null;
         IDevBridgeRecipeAdapter adapter = CreateAdapter(
@@ -1302,7 +2071,7 @@ public static class CliApplication
             diagnosisAdapter,
             diagnosticSourceAdapter,
             processTransport);
-        IDevBridgeLeaseAdapter? leaseAdapter = ownsRecipeAdapter &&
+        IDevBridgeLeaseAdapter? leaseAdapter = needsBridgeTransport &&
             bridgeOptions is not null && bridgeTransport is not null
             ? new DevBridgeLeaseAdapter(bridgeTransport, bridgeOptions)
             : null;
@@ -1322,36 +2091,125 @@ public static class CliApplication
         if (freshnessRequest is not null)
         {
             IDevBridgeModDevelopmentAdapter owner = developmentAdapter ??
-                CreateDevelopmentAdapter(request);
-            freshnessTransaction = await new ArtifactFreshnessTransaction(owner)
-                    .PrepareAsync(freshnessRequest, cancellationToken)
+                CreateDevelopmentAdapter(request, bridgeTransport, freshnessRequest);
+            freshnessTransaction = await ProfilerActivity.ObserveAsync(
+                    "artifact-freshness.transaction",
+                    "build-deploy",
+                    () => new ArtifactFreshnessTransaction(
+                            owner,
+                            leaseAdapter,
+                            freshGenerationAdapter)
+                        .PrepareAsync(freshnessRequest, cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                ? "cancelled"
+                                : value.Success
+                                    ? "success"
+                                    : "failure",
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, value.Freshness.Generation);
+                        ProfilerActivity.SetStateChanged(
+                            activity,
+                            value.Freshness.DeploymentDecision switch
+                            {
+                                "deployed" => true,
+                                "unchanged" => false,
+                                _ => null
+                            });
+                        ProfilerActivity.SetCounts(
+                            activity,
+                            items: freshnessRequest.ChangedPaths.Count);
+                    },
+                    phase: "freshness",
+                    scope: freshnessRequest.Project)
                 .ConfigureAwait(false);
             execution = freshnessTransaction.Success
-                ? await runner.RunAsync(
-                        catalog,
-                        suiteId,
-                        testIds,
-                        cancellationToken,
-                        workflowId,
-                        failFast: request.FailFast)
+                ? await ProfilerActivity.ObserveAsync(
+                        "test-suite",
+                        "testing",
+                        () => runner.RunAsync(
+                            catalog,
+                            suiteId,
+                            testIds,
+                            cancellationToken,
+                            workflowId,
+                            failFast: request.FailFast),
+                        AnnotateSuiteExecution,
+                        phase: "suite",
+                        target: suiteId,
+                        scope: "suite")
                     .ConfigureAwait(false)
                 : ArtifactFailureExecution(
                     suiteId,
                     testIds,
                     freshnessTransaction.Status,
                     workflowId,
-                    request.FailFast);
+                    request.FailFast,
+                    freshnessTransaction.Cleanup);
         }
         else
         {
-            execution = await runner.RunAsync(
-                    catalog,
-                    suiteId,
-                    testIds,
-                    cancellationToken,
-                    workflowId,
-                    failFast: request.FailFast)
+            execution = await ProfilerActivity.ObserveAsync(
+                    "test-suite",
+                    "testing",
+                    () => runner.RunAsync(
+                        catalog,
+                        suiteId,
+                        testIds,
+                        cancellationToken,
+                        workflowId,
+                        failFast: request.FailFast),
+                    AnnotateSuiteExecution,
+                    phase: "suite",
+                    target: suiteId,
+                    scope: "suite")
                 .ConfigureAwait(false);
+        }
+
+        if (freshnessTransaction?.RecoveryEvents is { Count: > 0 })
+        {
+            execution = execution with
+            {
+                PrerequisiteRecovery = (execution.PrerequisiteRecovery ?? [])
+                    .Concat(freshnessTransaction.RecoveryEvents)
+                    .ToArray()
+            };
+        }
+        else if (freshnessTransaction is not null &&
+            (freshnessTransaction.Status.RecoveryState != PrerequisiteRecoveryState.Ready ||
+             freshnessTransaction.Status.RecoveryAttempts > 0))
+        {
+            RimTestPrerequisiteRecovery recovery =
+                PrerequisiteRecoveryProjection.FromStatus(
+                    "artifact-freshness",
+                    freshnessTransaction.Status);
+            execution = execution with
+            {
+                PrerequisiteRecovery = (execution.PrerequisiteRecovery ?? [])
+                    .Append(recovery)
+                    .ToArray()
+            };
+        }
+
+        if (selectionRecovery is not null)
+        {
+            execution = execution with
+            {
+                PrerequisiteRecovery = (execution.PrerequisiteRecovery ?? [])
+                    .Append(selectionRecovery)
+                    .ToArray()
+            };
+        }
+
+        if (freshnessTransaction?.Cleanup is not null)
+        {
+            execution = execution with
+            {
+                Cleanup = MergeCleanup(execution.Cleanup, freshnessTransaction.Cleanup)
+            };
         }
 
         RimTestArtifactFreshness? artifactFreshness = freshnessTransaction?.Freshness;
@@ -1361,7 +2219,9 @@ public static class CliApplication
             (execution, artifactFreshness) = EnforceArtifactGeneration(
                 execution,
                 artifactFreshness,
-                workflowId);
+                workflowId,
+                catalog,
+                testIds);
         }
 
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
@@ -1371,13 +2231,17 @@ public static class CliApplication
             selectionErrorCode,
             fallbackSuite,
             workflowId,
-            artifactFreshness);
+            artifactFreshness,
+            freshnessTransaction?.Status,
+            freshnessRequest is not null);
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
     }
 
     private static ArtifactFreshnessTransactionRequest? CreateArtifactFreshnessRequest(
         CliRequest request,
+        CatalogDocument catalog,
+        IReadOnlyList<string> selectedTestIds,
         IReadOnlyList<string> changedPaths,
         string? workflowId)
     {
@@ -1397,18 +2261,73 @@ public static class CliApplication
             AffectedGitRoot(request),
             changedPaths,
             sourceFingerprint,
-            workflowId);
+            workflowId,
+            TestRecipe: SelectDevelopmentRecipe(catalog, selectedTestIds));
     }
 
     private static IDevBridgeModDevelopmentAdapter CreateDevelopmentAdapter(
-        CliRequest request)
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        ArtifactFreshnessTransactionRequest? freshnessRequest)
     {
         DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
             request.DevBridgePath,
             request.DevBridgeRootPath);
+        DevBridgeModDevelopmentAdapterOptions modOptions =
+            DevBridgeModDevelopmentAdapterOptions.Discover(bridgeOptions.RootPath) with
+            {
+                ChangedPaths = freshnessRequest?.ChangedPaths,
+                TestRecipe = freshnessRequest?.TestRecipe
+            };
         return new DevBridgeModDevelopmentAdapter(
-            new SystemDevBridgeProcessTransport(),
-            DevBridgeModDevelopmentAdapterOptions.Discover(bridgeOptions.RootPath));
+            processTransport ?? new SystemDevBridgeProcessTransport(),
+            modOptions);
+    }
+
+    private static string? SelectDevelopmentRecipe(
+        CatalogDocument catalog,
+        IReadOnlyList<string> selectedTestIds)
+    {
+        string[] selectedRecipes = selectedTestIds
+            .Select(testId => CatalogNavigator.FindTest(catalog, testId))
+            .Where(static test => test?.ArtifactFreshnessAnchor == true)
+            .Select(static test => test!.Recipe)
+            .Where(static recipe => !string.IsNullOrWhiteSpace(recipe))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (selectedRecipes.Length == 1)
+        {
+            return selectedRecipes[0];
+        }
+
+        // The catalog's single freshness anchor is canonical even when the
+        // impact map selected a companion test instead of the anchor itself.
+        // This keeps descriptor recovery targeted without inventing a second
+        // project/recipe registry.
+        string[] catalogRecipes = catalog.Tests
+            .Where(static test => test.ArtifactFreshnessAnchor)
+            .Select(static test => test.Recipe)
+            .Where(static recipe => !string.IsNullOrWhiteSpace(recipe))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return catalogRecipes.Length == 1 ? catalogRecipes[0] : null;
+    }
+
+    private static RimTestPrerequisiteRecovery? SelectionRecovery(
+        RimTestSelectionResult selection)
+    {
+        if (selection.RecoveryState is null ||
+            selection.RecoveryAttempts is null)
+        {
+            return null;
+        }
+
+        return new RimTestPrerequisiteRecovery(
+            "rimcontext-index",
+            selection.RecoveryState,
+            selection.RecoveryAttempts.Value,
+            selection.ErrorCode,
+            selection.RecoveryAction);
     }
 
     private static CatalogSuiteExecutionResult ArtifactFailureExecution(
@@ -1416,7 +2335,8 @@ public static class CliApplication
         IReadOnlyList<string> testIds,
         DevBridgeAdapterStatus status,
         string? workflowId,
-        bool failFast)
+        bool failFast,
+        RimTestCleanupSummary? cleanup)
     {
         string[] ordered = testIds
             .Where(static id => !string.IsNullOrWhiteSpace(id))
@@ -1434,7 +2354,8 @@ public static class CliApplication
                 Cancelled: true,
                 FailFast: failFast
                     ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
-                    : null);
+                    : null,
+                Cleanup: cleanup);
         }
 
         string errorCode = status.ErrorCode ?? "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN";
@@ -1450,7 +2371,33 @@ public static class CliApplication
             Cancelled: false,
             FailFast: failFast
                 ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
-                : null);
+                : null,
+            Cleanup: cleanup);
+    }
+
+    private static RimTestCleanupSummary MergeCleanup(
+        RimTestCleanupSummary? first,
+        RimTestCleanupSummary second)
+    {
+        if (first is null)
+        {
+            return second;
+        }
+
+        bool failed = string.Equals(first.Status, "FAILED", StringComparison.Ordinal) ||
+            string.Equals(second.Status, "FAILED", StringComparison.Ordinal);
+        return new RimTestCleanupSummary
+        {
+            Status = failed ? "FAILED" : "RESTORED",
+            LeaseReleased = first.LeaseReleased == false || second.LeaseReleased == false
+                ? false
+                : first.LeaseReleased ?? second.LeaseReleased,
+            TemporaryStateCleared = first.TemporaryStateCleared == false ||
+                    second.TemporaryStateCleared == false
+                ? false
+                : first.TemporaryStateCleared ?? second.TemporaryStateCleared,
+            ErrorCode = first.ErrorCode ?? second.ErrorCode
+        };
     }
 
     private static (
@@ -1458,12 +2405,23 @@ public static class CliApplication
         RimTestArtifactFreshness Freshness) EnforceArtifactGeneration(
         CatalogSuiteExecutionResult execution,
         RimTestArtifactFreshness freshness,
-        string? workflowId)
+        string? workflowId,
+        CatalogDocument catalog,
+        IReadOnlyList<string> selectedTestIds)
     {
+        string[] artifactTestIds = ResolveArtifactFreshnessTestIds(
+            catalog,
+            selectedTestIds);
+        string? artifactTestId = artifactTestIds.Length == 1
+            ? artifactTestIds[0]
+            : null;
+        freshness = freshness with { ArtifactTestId = artifactTestId };
+
         if (!freshness.Generation.HasValue)
         {
             string[] ids = execution.Tests
-                .Where(static test => test.Status == "pass")
+                .Where(test => test.Status == "pass" &&
+                    artifactTestIds.Contains(test.Test, StringComparer.Ordinal))
                 .Select(static test => test.Test)
                 .ToArray();
             return (
@@ -1481,6 +2439,7 @@ public static class CliApplication
 
         string[] mismatched = execution.Tests
             .Where(test => test.Status == "pass" &&
+                artifactTestIds.Contains(test.Test, StringComparer.Ordinal) &&
                 (!test.Generation.HasValue ||
                  test.Generation.Value != freshness.Generation.Value))
             .Select(static test => test.Test)
@@ -1501,6 +2460,23 @@ public static class CliApplication
                 LoadedArtifactFreshnessProven = false,
                 ErrorCode = "RIMTEST_ARTIFACT_GENERATION_MISMATCH"
             });
+    }
+
+    private static string[] ResolveArtifactFreshnessTestIds(
+        CatalogDocument catalog,
+        IReadOnlyList<string> selectedTestIds)
+    {
+        string[] explicitAnchors = selectedTestIds
+            .Where(testId => CatalogNavigator.FindTest(catalog, testId)
+                ?.ArtifactFreshnessAnchor == true)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return explicitAnchors.Length > 0
+            ? explicitAnchors
+            : selectedTestIds
+                .Where(static testId => !string.IsNullOrWhiteSpace(testId))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
     }
 
     private static CatalogSuiteExecutionResult ReplacePassingTestsWithFreshnessFailures(
@@ -1535,6 +2511,27 @@ public static class CliApplication
             "conservative" => CliExitCodes.ConservativeSelection,
             _ => CliExitCodes.InternalError
         };
+    }
+
+    private static int WriteAffectedSelectionFailure(
+        RimTestSelectionResult selection,
+        long started,
+        TextWriter stdout,
+        string? workflowId)
+    {
+        string errorCode = selection.ErrorCode ?? "RIMTEST_AFFECTED_SELECTION_FAILED";
+        RimTestPrerequisiteRecovery? recovery = SelectionRecovery(selection);
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromSelectionFailure(
+            "affected",
+            selection.Status,
+            errorCode,
+            error: null,
+            nextAction: selection.NextAction,
+            durationMs: ElapsedMilliseconds(started),
+            workflowId: workflowId,
+            prerequisiteRecovery: recovery is null ? null : [recovery]);
+        WriteJson(stdout, result);
+        return SuiteExitCodeFor(result.Status);
     }
 
     private static int SuiteExitCodeFor(string status) => status switch
@@ -1658,6 +2655,17 @@ public static class CliApplication
         {
             output["responseSchema"] = status.ResponseSchema;
         }
+
+        if (status.RecoveryState != PrerequisiteRecoveryState.Ready ||
+            status.RecoveryAttempts > 0)
+        {
+            output["recoveryState"] = status.RecoveryState.ToWireName();
+            output["recoveryAttempts"] = Math.Max(0, status.RecoveryAttempts);
+            if (status.RecoveryAction is not null)
+            {
+                output["recoveryAction"] = status.RecoveryAction;
+            }
+        }
     }
 
     private static string OutcomeName(DevBridgeOutcomeKind outcome)
@@ -1679,7 +2687,8 @@ public static class CliApplication
         request.Command is CliCommand.RecipeRun or
             CliCommand.RunTest or
             CliCommand.SuiteRun ||
-        request.Command == CliCommand.Affected && request.RunSelected;
+        request.Command == CliCommand.Affected && request.RunSelected ||
+        request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
 
     private static string? NextActionFor(DevBridgeOutcomeKind outcome) => outcome switch
     {
@@ -1748,6 +2757,46 @@ public static class CliApplication
             DevBridgeUiOutcome.Cancelled => CliExitCodes.Cancelled,
             _ => CliExitCodes.InternalError
         };
+
+    private static string ViewportOutcomeName(DevBridgeViewportOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeViewportOutcome.AlreadyRestored => "alreadyRestored",
+            DevBridgeViewportOutcome.Unavailable => "unavailable",
+            DevBridgeViewportOutcome.Busy => "busy",
+            DevBridgeViewportOutcome.InvalidRequest => "invalidRequest",
+            DevBridgeViewportOutcome.Unsupported => "unsupported",
+            DevBridgeViewportOutcome.VerificationFailure => "verificationFailure",
+            DevBridgeViewportOutcome.RestorationFailure => "restorationFailure",
+            DevBridgeViewportOutcome.InfrastructureFailure => "infrastructureFailure",
+            DevBridgeViewportOutcome.Timeout => "timeout",
+            DevBridgeViewportOutcome.Cancelled => "cancelled",
+            DevBridgeViewportOutcome.MalformedResponse => "malformedResponse",
+            DevBridgeViewportOutcome.IncompatibleSchema => "incompatibleSchema",
+            _ => "success"
+        };
+
+    private static int ViewportExitCodeFor(DevBridgeViewportOutcome outcome) =>
+        outcome switch
+        {
+            DevBridgeViewportOutcome.InvalidRequest => CliExitCodes.InvalidInput,
+            DevBridgeViewportOutcome.Timeout => CliExitCodes.Timeout,
+            DevBridgeViewportOutcome.Cancelled => CliExitCodes.Cancelled,
+            _ => CliExitCodes.InternalError
+        };
+
+    private static int LeaseExitCodeFor(DevBridgeOutcomeKind outcome) =>
+        outcome switch
+        {
+            DevBridgeOutcomeKind.Timeout => CliExitCodes.Timeout,
+            DevBridgeOutcomeKind.Cancelled => CliExitCodes.Cancelled,
+            DevBridgeOutcomeKind.DevBridgeRefusal => CliExitCodes.NotFound,
+            _ => CliExitCodes.InternalError
+        };
+
+    private static bool IsLeaseRequired(DevBridgeUiStatus status) =>
+        string.Equals(status.ErrorCode, "RIMBRIDGE_LEASE_REQUIRED", StringComparison.OrdinalIgnoreCase) ||
+        status.Error?.Contains("lease", StringComparison.OrdinalIgnoreCase) == true;
 
     private static int RimTestExitCodeFor(DevBridgeOutcomeKind outcome)
     {

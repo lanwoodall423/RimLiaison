@@ -102,6 +102,81 @@ display paths.
 All successful commands write one JSON object and a newline to stdout. Logging and unexpected
 exception diagnostics go to stderr. Queries never scan, build, launch the game, or repair an index.
 
+## Affected-run prerequisite ownership
+
+Tooling-owned runtime prerequisites should be recovered by Tooling when recovery is safe and
+deterministic. `RimLiaison` is the canonical recovery owner for the normal
+`rimliaison affected --run --json` transaction; `RimContext.Core` remains the index owner and
+DevBridge2 remains the lifecycle, descriptor-validation, deployment, and lease owner. RimLiaison
+does not launch RimWorld or replace DevBridge2's authoritative checks.
+
+Before the freshness anchor runs, RimLiaison reconciles a missing, malformed, or stale
+`DevelopmentProjects/<project>.json` only when the repository/catalog metadata identifies one
+project file, recipe, and deployment target. Existing valid descriptors are reused. Replacements
+are written atomically and stale files are retained as bounded recovery backups. Ambiguous source,
+recipe, or deployment metadata remains an explicit `RECOVERY_REQUIRED` blocker.
+
+If the in-process affected query returns a partial index, RimLiaison asks the canonical Core
+service for one forced rebuild and retries the affected query once. A second partial result keeps
+the bounded index diagnostics and reports `RIMCONTEXT_INDEX_RECOVERY_FAILED`.
+
+For `RIMBRIDGE_LEASE_REQUIRED`, RimLiaison first reuses the compatible lease already held by a
+supported suite transaction. Without one, it makes one canonical lease acquisition attempt,
+passes that lease to the blocked owner/recipe operation, retries once, and releases it in a
+`finally` path. Active ownership is never stolen; contention is reported as `contended`. Recovery
+events use structured states `ready`, `recovered`, `recoveryRequired`, `contended`, `unavailable`,
+or `recoveryFailed`, with bounded attempt counts and an action field where applicable.
+
+## Canonical affected-run orchestration contract
+
+`rimliaison affected --run --json` is the autonomous validation boundary. An agent invoking it
+does not need to create DevBridge development descriptors, repair a supported partial RimContext
+index, acquire a routine RimBridge lease, or change display preferences for a supported test. The
+workflow coordinates those owner operations in this order, when the selected change requires them:
+
+```text
+affected discovery -> descriptor/index readiness -> build -> deploy
+-> artifact identity/freshness -> live readiness/lease -> runtime assertions
+-> requested UI evidence -> scoped diagnostics -> restoration/cleanup -> result
+```
+
+The owning component still performs the specialized work. RimContext.Core owns static indexing and
+impact selection; DevBridge2 owns lifecycle, descriptor validation, build/deploy, generations,
+leases, and authoritative loaded-artifact evidence; RimBridgeServer owns live-game operations; and
+RimLiaison owns selection, bounded recovery coordination, result projection, and cleanup reporting.
+
+Affected runs add an `orchestration` object with schema `rimtest-orchestration/v1` while retaining
+the existing suite-result fields. Its dimensions are:
+
+| Dimension | Values |
+| --- | --- |
+| `sourceBuild` | `PASS`, `FAIL`, `NOT_RUN` |
+| `staticTests` | `PASS`, `FAIL`, `NOT_RUN` |
+| `deployment` | `FRESH`, `STALE`, `NOT_EVALUATED`, `FAILED` |
+| `runtimeValidation` | `PASS`, `FAIL`, `NOT_RUN`, `BLOCKED` |
+| `infrastructure` | `READY`, `RECOVERED`, `CONTENDED`, `UNAVAILABLE`, `RECOVERY_FAILED` |
+
+`artifactFreshness.evaluationStatus` is explicit. A missing proof caused by an aborted preflight is
+`NOT_EVALUATED`; it is not inferred to be a stale artifact from
+`loadedArtifactFreshnessProven=false`. The deterministic `overall` value distinguishes
+`TEST_FAILURE`, `SOURCE_BUILD_FAILURE`, `INFRASTRUCTURE_FAILURE`, `CANCELLED`, and `PASS`.
+
+Terminal orchestration failures identify `owner`, `stage`, `errorCode`, `recoveryAttempted`,
+`recoveryResult`, `retrySafe`, `manualInterventionRequired`, `nextAction`, and any available
+workflow, transaction, lease, run, generation, or evidence identifiers. Cleanup is a separate
+object. Lease release and suite-session cleanup run from `finally` paths; transactional viewport
+restoration runs even when inspection fails; and a cleanup failure remains visible alongside the
+original test failure rather than replacing it.
+
+Recovery budgets are stage-owned and bounded: descriptor reconciliation and partial-index repair
+are each single recovery actions, a stopped/stale live generation receives at most one restart and
+development-transaction retry, and a lease-required operation receives at most one acquisition,
+retry, and release. The suite runner may use a compatible existing lease or perform its own one
+runtime lease recovery, but it does not recursively re-enter the lower-layer recovery loops.
+Ambiguous project metadata, active lease contention, unsafe paths, unavailable credentials, an
+unwritable recovery root, or an owner refusal remain explicit blockers requiring the reported
+`nextAction` or human intervention.
+
 ## Indexing pipeline
 
 ```mermaid

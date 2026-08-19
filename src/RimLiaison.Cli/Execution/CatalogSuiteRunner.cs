@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
+using RimLiaison.Profiling;
+using RimLiaison.Recovery;
 using RimLiaison.Results;
 
 namespace RimLiaison.Execution;
@@ -13,12 +15,25 @@ public sealed record CatalogSuiteExecutionResult(
     int Skipped,
     bool Cancelled,
     CatalogSuiteReuseSummary? Reuse = null,
-    CatalogSuiteFailFastSummary? FailFast = null);
+    CatalogSuiteFailFastSummary? FailFast = null,
+    IReadOnlyList<RimTestPrerequisiteRecovery>? PrerequisiteRecovery = null,
+    RimTestCleanupSummary? Cleanup = null);
 
 public sealed record CatalogSuiteFailFastSummary(
     [property: JsonPropertyName("firstFailure")] string? FirstFailure,
     [property: JsonPropertyName("notLaunched")] int NotLaunched,
     [property: JsonPropertyName("validationCompleted")] bool ValidationCompleted);
+
+public sealed record CatalogSuiteReuseMismatch(
+    string TestId,
+    string Reason,
+    int? ExpectedGeneration,
+    int? ActualGeneration,
+    string? ExpectedLeaseId,
+    string? ActualLeaseId,
+    bool? RestartRequired,
+    int? LaunchesConsumed,
+    string? ErrorCode);
 
 public sealed record CatalogSuiteReuseSummary(
     int Selected,
@@ -30,7 +45,8 @@ public sealed record CatalogSuiteReuseSummary(
     string Status,
     string? ReuseInvalidatedAfter = null,
     string? ReuseInvalidationReason = null,
-    string? FallbackReason = null);
+    string? FallbackReason = null,
+    CatalogSuiteReuseMismatch? Mismatch = null);
 
 public sealed class CatalogSuiteRunner
 {
@@ -71,8 +87,22 @@ public sealed class CatalogSuiteRunner
             .OrderBy(static id => id, StringComparer.Ordinal)
             .ToArray();
         var results = new List<RimTestResult>();
-        CatalogSuiteReusePlan reusePlan = CatalogSuiteReusePlanner.Plan(catalog, orderedTestIds);
-        var reuse = new ReuseAccumulator(orderedTestIds.Length, reusePlan.Groups.Count);
+        IReadOnlyDictionary<string, DevBridgeRecipeShowResult> recipeShows =
+            orderedTestIds.Length > 1
+                ? await LoadRecipeShowsAsync(catalog, orderedTestIds, cancellationToken)
+                    .ConfigureAwait(false)
+                : new Dictionary<string, DevBridgeRecipeShowResult>(StringComparer.Ordinal);
+        Dictionary<string, CatalogSuiteRecipeProfile?> recipeProfiles =
+            CreateRecipeProfiles(recipeShows);
+        CatalogSuiteReusePlan reusePlan = CatalogSuiteReusePlanner.Plan(
+            catalog,
+            orderedTestIds,
+            recipeProfiles);
+        var reuse = new ReuseAccumulator(
+            orderedTestIds.Length,
+            reusePlan.Groups.Count,
+            reusePlan.FallbackReason);
+        var prerequisiteRecovery = new List<RimTestPrerequisiteRecovery>();
         var groupsByTest = reusePlan.Groups
             .SelectMany(group => group.TestIds.Select(testId => (testId, group)))
             .ToDictionary(value => value.testId, value => value.group, StringComparer.Ordinal);
@@ -240,6 +270,7 @@ public sealed class CatalogSuiteRunner
                             workflowId,
                             reuse,
                             lastGeneration,
+                            recipeShows,
                             cancellationToken)
                         .ConfigureAwait(false);
                     if (session is not null)
@@ -340,6 +371,7 @@ public sealed class CatalogSuiteRunner
                                 workflowId,
                                 reuse,
                                 lastGeneration,
+                                recipeShows,
                                 cancellationToken)
                             .ConfigureAwait(false);
                         if (session is not null)
@@ -355,31 +387,51 @@ public sealed class CatalogSuiteRunner
                     DevBridgeRecipeExecutionContext? executionContext = session is null
                         ? null
                         : new DevBridgeRecipeExecutionContext(session.LeaseId);
-                    CatalogTestExecutionResult execution = await testExecutor.RunAsync(
+                    ExecutionRecoveryResult executed = await RunWithLeaseRecoveryAsync(
                             catalog,
                             testId,
                             started,
                             cancellationToken,
                             workflowId,
-                            executionContext)
+                            executionContext,
+                            session,
+                            reuse)
                         .ConfigureAwait(false);
+                    CatalogTestExecutionResult execution = executed.Execution;
+                    if (executed.Recovery is not null)
+                    {
+                        prerequisiteRecovery.Add(executed.Recovery);
+                    }
                     reuse.Observe(execution.Run.RecipeResult);
                     lastGeneration = execution.Run.RecipeResult.Generation ?? lastGeneration;
 
-                    if (session is not null &&
-                        !MatchesSession(execution.Run.RecipeResult, session))
+                    string? sessionMismatch = session is null
+                        ? null
+                        : SessionMismatchReason(execution.Run.RecipeResult, session);
+                    if (session is not null && sessionMismatch is not null)
                     {
+                        CatalogSuiteReuseMismatch mismatch = new(
+                            testId,
+                            sessionMismatch,
+                            session.Generation,
+                            execution.Run.RecipeResult.Generation,
+                            session.LeaseId,
+                            execution.Run.RecipeResult.LeaseId,
+                            execution.Run.RecipeResult.RestartRequired,
+                            execution.Run.RecipeResult.LaunchesConsumed,
+                            execution.Run.RecipeResult.Status.ErrorCode);
                         InvalidateSession(
                             session,
                             testId,
-                            "RIMTEST_REUSE_GENERATION_MISMATCH",
-                            reuse);
+                            sessionMismatch,
+                            reuse,
+                            mismatch);
                         execution = execution with
                         {
-                            Result = RimTestResultFactory.Infrastructure(
-                                testId,
-                                "RIMTEST_REUSE_GENERATION_MISMATCH",
-                                workflowId: workflowId)
+                            Result = ResultForSessionMismatch(
+                                execution,
+                                sessionMismatch,
+                                workflowId)
                         };
                         needsFreshState = true;
                     }
@@ -464,8 +516,211 @@ public sealed class CatalogSuiteRunner
                 failFast,
                 firstFailure,
                 notLaunched,
-                validationCompleted));
+                validationCompleted),
+            prerequisiteRecovery.Count == 0 ? null : prerequisiteRecovery,
+            reuse.ToCleanup());
     }
+
+    private async Task<ExecutionRecoveryResult> RunWithLeaseRecoveryAsync(
+        CatalogDocument catalog,
+        string testId,
+        long started,
+        CancellationToken cancellationToken,
+        string? workflowId,
+        DevBridgeRecipeExecutionContext? executionContext,
+        ReuseSession? session,
+        ReuseAccumulator reuse)
+    {
+        CatalogTestExecutionResult first = await testExecutor.RunAsync(
+                catalog,
+                testId,
+                started,
+                cancellationToken,
+                workflowId,
+                executionContext)
+            .ConfigureAwait(false);
+        if (!IsLeaseRequired(first.Run.RecipeResult.Status))
+        {
+            return new ExecutionRecoveryResult(first, null);
+        }
+
+        if (session is not null && executionContext is not null)
+        {
+            CatalogTestExecutionResult retry = await testExecutor.RunAsync(
+                    catalog,
+                    testId,
+                    started,
+                    cancellationToken,
+                    workflowId,
+                    executionContext)
+                .ConfigureAwait(false);
+            return new ExecutionRecoveryResult(
+                retry,
+                RecoveryEvent(
+                    "rimbridge-lease",
+                    retry.Run.RecipeResult.Status.Outcome is
+                        DevBridgeOutcomeKind.Success or DevBridgeOutcomeKind.TestFailure
+                        ? PrerequisiteRecoveryState.Recovered
+                        : PrerequisiteRecoveryState.RecoveryFailed,
+                    1,
+                    retry.Run.RecipeResult.Status.ErrorCode,
+                    "retry-with-existing-compatible-lease"));
+        }
+
+        if (leaseAdapter is null)
+        {
+            reuse.FallbackReason ??= "DEVBRIDGE_LEASE_ADAPTER_UNAVAILABLE";
+            return new ExecutionRecoveryResult(
+                first,
+                RecoveryEvent(
+                    "rimbridge-lease",
+                    PrerequisiteRecoveryState.RecoveryRequired,
+                    0,
+                    first.Run.RecipeResult.Status.ErrorCode,
+                    "acquire-compatible-lease"));
+        }
+
+        DevBridgeLeaseResult lease;
+        try
+        {
+            lease = await leaseAdapter.BeginLeaseAsync(
+                    workflowId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new ExecutionRecoveryResult(
+                first,
+                RecoveryEvent(
+                    "rimbridge-lease",
+                    PrerequisiteRecoveryState.Unavailable,
+                    1,
+                    "DEVBRIDGE_LEASE_ACQUIRE_FAILED",
+                    "acquire-compatible-lease"));
+        }
+
+        if (!lease.IsUsable)
+        {
+            reuse.FallbackReason ??= lease.Status.ErrorCode ??
+                "DEVBRIDGE_LEASE_ACQUIRE_FAILED";
+            return new ExecutionRecoveryResult(
+                first,
+                RecoveryEvent(
+                    "rimbridge-lease",
+                    LeaseRecoveryState(lease.Status),
+                    1,
+                    lease.Status.ErrorCode ?? first.Run.RecipeResult.Status.ErrorCode,
+                    "acquire-compatible-lease"));
+        }
+
+        CatalogTestExecutionResult? retryResult = null;
+        bool released = false;
+        try
+        {
+            retryResult = await testExecutor.RunAsync(
+                    catalog,
+                    testId,
+                    started,
+                    cancellationToken,
+                    workflowId,
+                    new DevBridgeRecipeExecutionContext(lease.LeaseId))
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            reuse.MarkCleanupAttempted();
+            try
+            {
+                DevBridgeLeaseResult end = await leaseAdapter.EndLeaseAsync(
+                        lease.LeaseId!,
+                        workflowId,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                released = end.Status.IsSuccess;
+                reuse.MarkLeaseReleased(released, end.Status.ErrorCode);
+            }
+            catch (Exception)
+            {
+                released = false;
+                reuse.MarkLeaseReleased(false, "DEVBRIDGE_LEASE_RELEASE_FAILED");
+            }
+        }
+
+        if (!released)
+        {
+            retryResult = retryResult! with
+            {
+                Result = RimTestResultFactory.Infrastructure(
+                    testId,
+                    "DEVBRIDGE_LEASE_RELEASE_FAILED",
+                    retryResult!.Result.DurationMs,
+                    workflowId)
+            };
+        }
+
+        PrerequisiteRecoveryState state = released &&
+            retryResult!.Run.RecipeResult.Status.Outcome is
+                DevBridgeOutcomeKind.Success or DevBridgeOutcomeKind.TestFailure
+            ? PrerequisiteRecoveryState.Recovered
+            : PrerequisiteRecoveryState.RecoveryFailed;
+        return new ExecutionRecoveryResult(
+            retryResult!,
+            RecoveryEvent(
+                "rimbridge-lease",
+                state,
+                1,
+                released
+                    ? retryResult!.Run.RecipeResult.Status.ErrorCode
+                    : "DEVBRIDGE_LEASE_RELEASE_FAILED",
+                released
+                    ? "retry-after-lease-acquisition"
+                    : "release-recovered-lease"));
+    }
+
+    private static bool IsLeaseRequired(DevBridgeAdapterStatus status) =>
+        string.Equals(
+            status.ErrorCode,
+            "RIMBRIDGE_LEASE_REQUIRED",
+            StringComparison.Ordinal);
+
+    private static PrerequisiteRecoveryState LeaseRecoveryState(
+        DevBridgeAdapterStatus status)
+    {
+        if (status.ErrorCode?.Contains("CONTEND", StringComparison.OrdinalIgnoreCase) == true ||
+            status.ErrorCode?.Contains("HELD", StringComparison.OrdinalIgnoreCase) == true ||
+            status.ErrorCode?.Contains("OWNER", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return PrerequisiteRecoveryState.Contended;
+        }
+
+        return status.Outcome is DevBridgeOutcomeKind.InfrastructureFailure or
+            DevBridgeOutcomeKind.Timeout or
+            DevBridgeOutcomeKind.MalformedResponse
+            ? PrerequisiteRecoveryState.Unavailable
+            : PrerequisiteRecoveryState.RecoveryFailed;
+    }
+
+    private static RimTestPrerequisiteRecovery RecoveryEvent(
+        string component,
+        PrerequisiteRecoveryState state,
+        int attempts,
+        string? errorCode,
+        string action) =>
+        new(
+            component,
+            state.ToWireName(),
+            attempts,
+            errorCode,
+            action);
+
+    private sealed record ExecutionRecoveryResult(
+        CatalogTestExecutionResult Execution,
+        RimTestPrerequisiteRecovery? Recovery);
 
     private async Task<DevBridgeRecipePlanResult> TryPlanAsync(
         string recipeId,
@@ -473,7 +728,25 @@ public sealed class CatalogSuiteRunner
     {
         try
         {
-            return await recipeAdapter.PlanAsync(recipeId, cancellationToken)
+            return await ProfilerActivity.ObserveAsync(
+                    "recipe.plan",
+                    "devbridge",
+                    () => recipeAdapter.PlanAsync(recipeId, cancellationToken),
+                    (activity, result) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            result.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : result.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            result.Status.ErrorCode);
+                        ProfilerActivity.SetCounts(activity, items: result.Plan?.Steps.Count);
+                    },
+                    phase: "plan",
+                    target: recipeId,
+                    scope: "recipe")
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -496,20 +769,113 @@ public sealed class CatalogSuiteRunner
         }
     }
 
+    private async Task<IReadOnlyDictionary<string, DevBridgeRecipeShowResult>>
+        LoadRecipeShowsAsync(
+            CatalogDocument catalog,
+            IReadOnlyList<string> orderedTestIds,
+            CancellationToken cancellationToken)
+    {
+        var shows = new Dictionary<string, DevBridgeRecipeShowResult>(
+            StringComparer.Ordinal);
+        foreach (string recipeId in orderedTestIds
+                     .Select(testId => CatalogNavigator.FindTest(catalog, testId)?.Recipe)
+                     .Where(static recipe => !string.IsNullOrWhiteSpace(recipe))
+                     .Select(static recipe => recipe!)
+                     .Distinct(StringComparer.Ordinal))
+        {
+            shows[recipeId] = await TryShowAsync(recipeId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return shows;
+    }
+
+    private async Task<DevBridgeRecipeShowResult> TryShowAsync(
+        string recipeId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ProfilerActivity.ObserveAsync(
+                    "recipe.show",
+                    "devbridge",
+                    () => recipeAdapter.ShowAsync(recipeId, cancellationToken),
+                    (activity, result) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            result.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : result.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            result.Status.ErrorCode);
+                        ProfilerActivity.SetCounts(
+                            activity,
+                            items: result.Definition?.ValueKind == JsonValueKind.Object ? 1 : 0);
+                    },
+                    phase: "plan",
+                    target: recipeId,
+                    scope: "recipe")
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new DevBridgeRecipeShowResult(
+                recipeId,
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.Cancelled,
+                    "RIMTEST_CANCELLED"),
+                null);
+        }
+        catch (Exception)
+        {
+            return new DevBridgeRecipeShowResult(
+                recipeId,
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.InfrastructureFailure,
+                    "DEVBRIDGE_REUSE_SHOW_FAILED"),
+                null);
+        }
+    }
+
+    private static Dictionary<string, CatalogSuiteRecipeProfile?> CreateRecipeProfiles(
+        IReadOnlyDictionary<string, DevBridgeRecipeShowResult> shows)
+    {
+        var profiles = new Dictionary<string, CatalogSuiteRecipeProfile?>(
+            StringComparer.Ordinal);
+        foreach ((string recipeId, DevBridgeRecipeShowResult show) in shows)
+        {
+            profiles[recipeId] = show.Status.IsSuccess &&
+                show.Definition is JsonElement definition &&
+                CatalogSuiteReusePlanner.TryCreateRecipeProfile(
+                    definition,
+                    out CatalogSuiteRecipeProfile? profile)
+                ? profile
+                : null;
+        }
+
+        return profiles;
+    }
+
     private static CatalogSuiteExecutionResult Aggregate(
         string suiteId,
         IReadOnlyList<RimTestResult> results,
         int skipped,
         bool cancelled,
         CatalogSuiteReuseSummary? reuse = null,
-        CatalogSuiteFailFastSummary? failFast = null) =>
+        CatalogSuiteFailFastSummary? failFast = null,
+        IReadOnlyList<RimTestPrerequisiteRecovery>? prerequisiteRecovery = null,
+        RimTestCleanupSummary? cleanup = null) =>
         new(
             suiteId,
             results,
             Math.Max(0, skipped),
             cancelled,
             reuse,
-            failFast);
+            failFast,
+            prerequisiteRecovery,
+            cleanup);
 
     private static CatalogSuiteFailFastSummary? CreateFailFastSummary(
         bool enabled,
@@ -529,6 +895,7 @@ public sealed class CatalogSuiteRunner
         string? workflowId,
         ReuseAccumulator reuse,
         int? previousGeneration,
+        IReadOnlyDictionary<string, DevBridgeRecipeShowResult> recipeShows,
         CancellationToken cancellationToken)
     {
         if (leaseAdapter is null)
@@ -561,17 +928,11 @@ public sealed class CatalogSuiteRunner
             return null;
         }
 
-        DevBridgeRecipeShowResult show;
-        try
-        {
-            show = await recipeAdapter.ShowAsync(recipeId, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            reuse.FallbackReason ??= "DEVBRIDGE_REUSE_SHOW_FAILED";
-            return null;
-        }
+        DevBridgeRecipeShowResult show = recipeShows.TryGetValue(
+                recipeId,
+                out DevBridgeRecipeShowResult? cachedShow)
+            ? cachedShow
+            : await TryShowAsync(recipeId, cancellationToken).ConfigureAwait(false);
 
         if (!show.Status.IsSuccess)
         {
@@ -600,12 +961,31 @@ public sealed class CatalogSuiteRunner
             DevBridgeFreshGenerationResult prepared;
             try
             {
-                prepared = await freshGenerationAdapter
-                    .EnsureFreshGenerationAsync(
-                        recipeId,
-                        previousGeneration,
-                        workflowId,
-                        cancellationToken)
+                prepared = await ProfilerActivity.ObserveAsync(
+                        "generation.prepare",
+                        "lifecycle",
+                        () => freshGenerationAdapter
+                            .EnsureFreshGenerationAsync(
+                                recipeId,
+                                previousGeneration,
+                                workflowId,
+                                cancellationToken),
+                        (activity, result) =>
+                        {
+                            ProfilerActivity.SetOutcome(
+                                activity,
+                                result.Status.Outcome == DevBridgeOutcomeKind.Success
+                                    ? "success"
+                                    : result.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                        ? "cancelled"
+                                        : "failure",
+                                result.Status.ErrorCode);
+                            ProfilerActivity.SetGeneration(activity, result.Generation);
+                            ProfilerActivity.SetStateChanged(activity, true);
+                        },
+                        phase: "generation",
+                        target: recipeId,
+                        scope: "fresh-generation")
                     .ConfigureAwait(false);
             }
             catch (Exception)
@@ -629,9 +1009,27 @@ public sealed class CatalogSuiteRunner
         DevBridgeLeaseResult lease;
         try
         {
-            lease = await leaseAdapter.BeginLeaseAsync(
-                    workflowId,
-                    cancellationToken)
+            lease = await ProfilerActivity.ObserveAsync(
+                    "lease.begin",
+                    "lifecycle",
+                    () => leaseAdapter.BeginLeaseAsync(
+                        workflowId,
+                        cancellationToken),
+                    (activity, result) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            result.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : result.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            result.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, result.Generation);
+                        ProfilerActivity.SetStateChanged(activity, true);
+                    },
+                    phase: "lease",
+                    scope: "begin")
                 .ConfigureAwait(false);
         }
         catch (Exception)
@@ -710,10 +1108,28 @@ public sealed class CatalogSuiteRunner
         DevBridgeLeaseResult result;
         try
         {
-            result = await leaseAdapter.RenewLeaseAsync(
-                    session.LeaseId,
-                    workflowId,
-                    cancellationToken)
+            result = await ProfilerActivity.ObserveAsync(
+                    "lease.renew",
+                    "lifecycle",
+                    () => leaseAdapter.RenewLeaseAsync(
+                        session.LeaseId,
+                        workflowId,
+                        cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : value.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, value.Generation);
+                        ProfilerActivity.SetStateChanged(activity, false);
+                    },
+                    phase: "lease",
+                    scope: "renew")
                 .ConfigureAwait(false);
         }
         catch (Exception)
@@ -750,12 +1166,31 @@ public sealed class CatalogSuiteRunner
         DevBridgeResetResult result;
         try
         {
-            result = await resetAdapter.ResetAsync(
-                    group.ResetRecipe,
-                    session.LeaseId,
-                    session.Generation,
-                    workflowId,
-                    cancellationToken)
+            result = await ProfilerActivity.ObserveAsync(
+                    "fixture.reset",
+                    "lifecycle",
+                    () => resetAdapter.ResetAsync(
+                        group.ResetRecipe,
+                        session.LeaseId,
+                        session.Generation,
+                        workflowId,
+                        cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : value.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, value.Generation);
+                        ProfilerActivity.SetStateChanged(activity, true);
+                    },
+                    phase: "fixture-reset",
+                    target: group.ResetRecipe,
+                    scope: "fixture")
                 .ConfigureAwait(false);
         }
         catch (Exception)
@@ -791,12 +1226,31 @@ public sealed class CatalogSuiteRunner
         DevBridgeFreshGenerationResult result;
         try
         {
-            result = await freshGenerationAdapter
-                .EnsureFreshGenerationAsync(
-                    testId,
-                    previousGeneration,
-                    workflowId,
-                    cancellationToken)
+            result = await ProfilerActivity.ObserveAsync(
+                    "generation.ensure-fresh",
+                    "lifecycle",
+                    () => freshGenerationAdapter
+                        .EnsureFreshGenerationAsync(
+                            testId,
+                            previousGeneration,
+                            workflowId,
+                            cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : value.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, value.Generation);
+                        ProfilerActivity.SetStateChanged(activity, true);
+                    },
+                    phase: "generation",
+                    target: testId,
+                    scope: "fresh-generation")
                 .ConfigureAwait(false);
         }
         catch (Exception)
@@ -824,14 +1278,68 @@ public sealed class CatalogSuiteRunner
         return result;
     }
 
-    private static bool MatchesSession(
+    private static string? SessionMismatchReason(
         DevBridgeRecipeRunResult result,
-        ReuseSession session) =>
-        result.Generation == session.Generation &&
-        string.Equals(result.LeaseId, session.LeaseId, StringComparison.Ordinal) &&
-        result.RestartRequired != true &&
-        (result.LaunchesConsumed ?? 0) == 0 &&
-        result.Status.Outcome is DevBridgeOutcomeKind.Success or DevBridgeOutcomeKind.TestFailure;
+        ReuseSession session)
+    {
+        bool expectedOutcome = result.Status.Outcome is
+            DevBridgeOutcomeKind.Success or DevBridgeOutcomeKind.TestFailure;
+        if (!expectedOutcome)
+        {
+            return result.Status.ErrorCode ??
+                (result.RestartRequired == true
+                    ? "RIMTEST_REUSE_RESTART_REQUIRED"
+                    : (result.LaunchesConsumed ?? 0) != 0
+                        ? "RIMTEST_REUSE_LAUNCHES_CONSUMED"
+                        : "RIMTEST_REUSE_DEVBRIDGE_REFUSAL");
+        }
+
+        if (result.Generation != session.Generation)
+        {
+            return "RIMTEST_REUSE_GENERATION_MISMATCH";
+        }
+
+        if (!string.Equals(result.LeaseId, session.LeaseId, StringComparison.Ordinal))
+        {
+            return "RIMTEST_REUSE_LEASE_MISMATCH";
+        }
+
+        if (result.RestartRequired == true)
+        {
+            return "RIMTEST_REUSE_RESTART_REQUIRED";
+        }
+
+        if ((result.LaunchesConsumed ?? 0) != 0)
+        {
+            return "RIMTEST_REUSE_LAUNCHES_CONSUMED";
+        }
+
+        return null;
+    }
+
+    private static RimTestResult ResultForSessionMismatch(
+        CatalogTestExecutionResult execution,
+        string reason,
+        string? workflowId)
+    {
+        DevBridgeRecipeRunResult run = execution.Run.RecipeResult;
+        if (run.Status.Outcome is not
+                (DevBridgeOutcomeKind.Success or DevBridgeOutcomeKind.TestFailure) &&
+            !string.IsNullOrWhiteSpace(run.Status.ErrorCode))
+        {
+            return RimTestResultFactory.FromRun(
+                execution.Run.TestId,
+                run,
+                execution.Result.DurationMs,
+                workflowId);
+        }
+
+        return RimTestResultFactory.Infrastructure(
+            execution.Run.TestId,
+            reason,
+            execution.Result.DurationMs,
+            workflowId);
+    }
 
     private async Task CloseSessionAsync(
         ReuseSession? session,
@@ -845,17 +1353,37 @@ public sealed class CatalogSuiteRunner
         }
 
         session.Closed = true;
+        reuse.MarkCleanupAttempted();
         DevBridgeLeaseResult result;
         try
         {
-            result = await leaseAdapter.EndLeaseAsync(
-                    session.LeaseId,
-                    workflowId,
-                    cancellationToken)
+            result = await ProfilerActivity.ObserveAsync(
+                    "lease.end",
+                    "lifecycle",
+                    () => leaseAdapter.EndLeaseAsync(
+                        session.LeaseId,
+                        workflowId,
+                        cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Status.Outcome == DevBridgeOutcomeKind.Success
+                                ? "success"
+                                : value.Status.Outcome == DevBridgeOutcomeKind.Cancelled
+                                    ? "cancelled"
+                                    : "failure",
+                            value.Status.ErrorCode);
+                        ProfilerActivity.SetGeneration(activity, value.Generation);
+                        ProfilerActivity.SetStateChanged(activity, true);
+                    },
+                    phase: "lease",
+                    scope: "end")
                 .ConfigureAwait(false);
         }
         catch (Exception)
         {
+            reuse.MarkLeaseReleased(false, "DEVBRIDGE_LEASE_RELEASE_FAILED");
             InvalidateSession(
                 session,
                 session.TestsRun == 0 ? null : session.Group.TestIds[Math.Min(
@@ -867,6 +1395,7 @@ public sealed class CatalogSuiteRunner
         }
         if (!result.Status.IsSuccess)
         {
+            reuse.MarkLeaseReleased(false, result.Status.ErrorCode ?? "DEVBRIDGE_LEASE_RELEASE_FAILED");
             InvalidateSession(
                 session,
                 session.TestsRun == 0 ? null : session.Group.TestIds[Math.Min(
@@ -875,15 +1404,20 @@ public sealed class CatalogSuiteRunner
                 result.Status.ErrorCode ?? "DEVBRIDGE_LEASE_RELEASE_FAILED",
                 reuse);
         }
+        else
+        {
+            reuse.MarkLeaseReleased(true, null);
+        }
     }
 
     private static void InvalidateSession(
         ReuseSession session,
         string? testId,
         string reason,
-        ReuseAccumulator reuse)
+        ReuseAccumulator reuse,
+        CatalogSuiteReuseMismatch? mismatch = null)
     {
-        reuse.Invalidate(testId, reason);
+        reuse.Invalidate(testId, reason, mismatch);
         session.Invalidated = true;
     }
 
@@ -909,10 +1443,14 @@ public sealed class CatalogSuiteRunner
     {
         private readonly HashSet<int> generations = [];
 
-        internal ReuseAccumulator(int selected, int groupsPlanned)
+        internal ReuseAccumulator(
+            int selected,
+            int groupsPlanned,
+            string? fallbackReason = null)
         {
             Selected = selected;
             GroupsPlanned = groupsPlanned;
+            FallbackReason = fallbackReason;
         }
 
         internal int Selected { get; }
@@ -923,6 +1461,10 @@ public sealed class CatalogSuiteRunner
         internal string? ReuseInvalidatedAfter { get; private set; }
         internal string? ReuseInvalidationReason { get; private set; }
         internal string? FallbackReason { get; set; }
+        internal CatalogSuiteReuseMismatch? Mismatch { get; private set; }
+        internal bool CleanupAttempted { get; private set; }
+        internal bool LeaseReleased { get; private set; }
+        internal string? CleanupErrorCode { get; private set; }
 
         internal void Observe(DevBridgeRecipeRunResult result)
         {
@@ -938,10 +1480,45 @@ public sealed class CatalogSuiteRunner
             }
         }
 
-        internal void Invalidate(string? testId, string reason)
+        internal void Invalidate(
+            string? testId,
+            string reason,
+            CatalogSuiteReuseMismatch? mismatch = null)
         {
             ReuseInvalidatedAfter ??= testId;
             ReuseInvalidationReason ??= reason;
+            Mismatch ??= mismatch;
+        }
+
+        internal void MarkCleanupAttempted() => CleanupAttempted = true;
+
+        internal void MarkLeaseReleased(bool released, string? errorCode)
+        {
+            CleanupAttempted = true;
+            if (released)
+            {
+                LeaseReleased = true;
+                return;
+            }
+
+            CleanupErrorCode ??= errorCode ?? "DEVBRIDGE_LEASE_RELEASE_FAILED";
+        }
+
+        internal RimTestCleanupSummary? ToCleanup()
+        {
+            if (!CleanupAttempted)
+            {
+                return null;
+            }
+
+            bool failed = !string.IsNullOrWhiteSpace(CleanupErrorCode);
+            return new RimTestCleanupSummary
+            {
+                Status = failed ? "FAILED" : "RESTORED",
+                LeaseReleased = LeaseReleased,
+                TemporaryStateCleared = !failed,
+                ErrorCode = CleanupErrorCode
+            };
         }
 
         internal CatalogSuiteReuseSummary? ToSummary()
@@ -967,7 +1544,8 @@ public sealed class CatalogSuiteRunner
                 status,
                 ReuseInvalidatedAfter,
                 ReuseInvalidationReason,
-                FallbackReason);
+                FallbackReason,
+                Mismatch);
         }
     }
 }

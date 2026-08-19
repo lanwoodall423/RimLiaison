@@ -38,9 +38,11 @@ authority.
 For `rimliaison affected --run`, build-relevant changes first cross the DevBridge2 owner transaction with the
 same workflowId and a worktree source fingerprint. RimLiaison then projects the owner transaction
 identity and the selected recipe run/operation identities into `artifactFreshness`. The generation
-must match the selected recipe result; if it is missing or mismatched, RimLiaison changes the child
-to infrastructure failure instead of reporting PASS. This is chronology/ownership evidence, not
-direct runtime DLL-hash introspection.
+must match the selected catalog `artifactFreshnessAnchor` recipe result when an anchor is declared;
+if no anchor is declared, it must match every selected passing recipe. A missing or mismatched
+anchor generation changes that child to infrastructure failure instead of reporting PASS. Other
+recipes may use a later generation when profile-aware planning correctly keeps them out of a shared
+reuse group. This is chronology/ownership evidence, not direct runtime DLL-hash introspection.
 
 When a catalog suite uses explicit compatible isolation metadata, the lease and generation are
 shared only within that sequential group. Each child still retains its own runId and operationId;
