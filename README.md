@@ -1,13 +1,16 @@
 # RimLiaison
 
-RimLiaison is the canonical agent-facing RimWorld development toolchain. The normal loop is:
+RimLiaison is the canonical agent-facing RimWorld development toolchain. The active edit loop is:
 
 ```text
 edit
-→ rimliaison affected --run --json
-→ inspect the bounded result
-→ edit again
+→ rimliaison affected --run --fail-fast --json
+→ fix immediately on failure
+→ repeat
 ```
+
+Once stable, run `rimliaison affected --run --json` for complete pre-submit validation. Fail-fast
+only shortens a failure path; a fail-fast PASS still means every selected test executed.
 
 Use `rimliaison doctor --json` as the bounded onboarding/recovery entrypoint when readiness is
 unknown, and follow its `nextAction`. `rimliaison init`, `capabilities`, `ui`, `affected`, and the

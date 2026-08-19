@@ -50,6 +50,7 @@ internal sealed record CliRequest(
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
     bool RunSelected,
+    bool FailFast,
     bool InitForce,
     bool InitManifestOnly,
     bool CatalogExplicit,
@@ -104,6 +105,7 @@ internal static class CliParser
         bool depthSpecified = false;
         bool limitSpecified = false;
         bool runSelected = false;
+        bool failFast = false;
         bool initForce = false;
         bool initManifestOnly = false;
         bool helpRequested = false;
@@ -205,6 +207,9 @@ internal static class CliParser
                 case "--run":
                     runSelected = true;
                     break;
+                case "--fail-fast":
+                    failFast = true;
+                    break;
                 case "--force":
                 case "--update":
                     initForce = true;
@@ -265,6 +270,7 @@ internal static class CliParser
                 explain,
                 null,
                 [],
+                false,
                 false,
                 initForce,
                 initManifestOnly,
@@ -374,6 +380,18 @@ internal static class CliParser
         {
             throw new CliParseException(
                 "RimContext selection options are only valid for affected.");
+        }
+
+        if (failFast && command is not (CliCommand.Affected or CliCommand.SuiteRun))
+        {
+            throw new CliParseException(
+                "Option --fail-fast is only valid for affected --run or suite run.");
+        }
+
+        if (failFast && command == CliCommand.Affected && !runSelected)
+        {
+            throw new CliParseException(
+                "Option --fail-fast requires --run with affected.");
         }
 
         if (command != CliCommand.Capabilities &&
@@ -487,6 +505,7 @@ internal static class CliParser
                 .Skip(1)
                 .ToArray(),
             runSelected,
+            failFast,
             initForce,
             initManifestOnly,
             catalogExplicit,
@@ -501,7 +520,7 @@ internal static class CliParser
         var help = new
         {
             progressiveDisclosure =
-                "Canonical loop: edit, rimliaison affected --run --json, inspect the result, edit again. Run rimliaison doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimliaison capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation.",
+                "Canonical loop: edit, rimliaison affected --run --fail-fast --json, inspect the result, fix immediately on failure, and repeat; once stable, run rimliaison affected --run --json for complete validation. Run rimliaison doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimliaison capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation.",
             commands = new[]
             {
                 "list",
@@ -547,6 +566,7 @@ internal static class CliParser
                 "--base <git-ref> (with affected)",
                 "--json (default output)",
                 "--run (with affected)",
+                "--fail-fast (with affected --run or suite run)",
                 "--force/--update (with init)",
                 "--manifest-only (with init)"
             }

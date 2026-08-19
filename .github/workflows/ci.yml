@@ -6,24 +6,157 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: rimliaison-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
+  plan:
+    name: Plan affected validation
+    runs-on: windows-latest
+    outputs:
+      plan_category: ${{ steps.plan.outputs.plan_category }}
+      plan_reason: ${{ steps.plan.outputs.plan_reason }}
+      run_all_internal: ${{ steps.plan.outputs.run_all_internal }}
+      run_rimcontext: ${{ steps.plan.outputs.run_rimcontext }}
+      run_rimerror: ${{ steps.plan.outputs.run_rimerror }}
+      run_rimliaison: ${{ steps.plan.outputs.run_rimliaison }}
+      run_format: ${{ steps.plan.outputs.run_format }}
+      run_cross_stack: ${{ steps.plan.outputs.run_cross_stack }}
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute conservative CI plan
+        id: plan
+        shell: pwsh
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plannerArguments = @{
+            EventName = $env:CI_EVENT_NAME
+            BaseRevision = $env:CI_BASE_REVISION
+            HeadRevision = $env:CI_HEAD_REVISION
+            GitHubOutputPath = $env:GITHUB_OUTPUT
+          }
+          & .\scripts\ci-plan.ps1 @plannerArguments -Json
+
+      - name: Test CI planner
+        shell: pwsh
+        run: .\scripts\ci-plan.tests.ps1
+
+  rimcontext:
+    name: RimContext deterministic suite
+    needs: plan
+    if: needs.plan.outputs.run_rimcontext == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.424
-      - name: Build all internal projects
-        run: dotnet build RimLiaison.sln -c Release --nologo
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: rimliaison-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
+          restore-keys: |
+            rimliaison-nuget-${{ runner.os }}-
+
+      - name: Build RimContext deterministic suite
+        run: dotnet build .\tests\RimContext.Tests\RimContext.Tests.csproj --configuration Release --nologo
+
       - name: Run RimContext deterministic suite
-        run: dotnet run --project tests\RimContext.Tests\RimContext.Tests.csproj -c Release --no-build --no-restore
+        run: dotnet run --project .\tests\RimContext.Tests\RimContext.Tests.csproj --configuration Release --no-build --no-restore
+
+  rimerror:
+    name: RimError deterministic suite
+    needs: plan
+    if: needs.plan.outputs.run_rimerror == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: rimliaison-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
+          restore-keys: |
+            rimliaison-nuget-${{ runner.os }}-
+
+      - name: Build RimError deterministic suite
+        run: dotnet build .\tests\RimError.Core.Tests\RimError.Core.Tests.csproj --configuration Release --nologo
+
       - name: Run RimError deterministic suite
-        run: dotnet test tests\RimError.Core.Tests\RimError.Core.Tests.csproj -c Release --no-build --no-restore --nologo
+        run: dotnet test .\tests\RimError.Core.Tests\RimError.Core.Tests.csproj --configuration Release --no-build --no-restore --nologo
+
+  rimliaison:
+    name: RimLiaison deterministic suite
+    needs: plan
+    if: needs.plan.outputs.run_rimliaison == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: rimliaison-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
+          restore-keys: |
+            rimliaison-nuget-${{ runner.os }}-
+
+      - name: Build RimLiaison deterministic suite
+        run: dotnet build .\tests\RimLiaison.Tests\RimLiaison.Tests.csproj --configuration Release --nologo
+
       - name: Run RimLiaison deterministic suite
-        run: dotnet run --project tests\RimLiaison.Tests\RimLiaison.Tests.csproj -c Release --no-build --no-restore
+        run: dotnet run --project .\tests\RimLiaison.Tests\RimLiaison.Tests.csproj --configuration Release --no-build --no-restore
+
+  format:
+    name: Formatting and whitespace
+    needs: plan
+    if: needs.plan.outputs.run_format == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: rimliaison-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
+          restore-keys: |
+            rimliaison-nuget-${{ runner.os }}-
+
+      - name: Restore formatting inputs
+        run: dotnet restore .\RimLiaison.sln --nologo
+
       - name: Verify formatting
-        run: dotnet format RimLiaison.sln --verify-no-changes --no-restore
+        run: dotnet format .\RimLiaison.sln --verify-no-changes --no-restore
+
       - name: Check committed diff whitespace
         shell: pwsh
         run: git diff --check

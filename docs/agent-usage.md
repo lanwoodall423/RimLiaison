@@ -1,21 +1,29 @@
 # RimLiaison agent usage
 
 RimLiaison is the default agent-facing workflow. Use the bounded recovery entrypoint when
-readiness is unknown, then follow the normal affected loop:
+readiness is unknown, then use the short feedback loop while editing:
 
 ```text
 rimliaison doctor --json                 # only when readiness is unknown
 edit
+rimliaison affected --run --fail-fast --json
+fix immediately on failure
+repeat
+
+# once stable, run the complete pre-submit validation
 rimliaison affected --run --json
-inspect the bounded result
-edit again
 ```
 
-`rimliaison affected --run --json` owns changed-file impact selection, test selection, execution,
+Both affected commands own changed-file impact selection, test selection, execution,
 DevBridge2 coordination, and bounded results. It calls `RimContext.Core` and `RimError.Core`
 in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff files for the normal
 path. DevBridge2 remains the external lifecycle/deployment boundary and RimBridgeServer remains the
 external live-game control boundary.
+
+Without `--fail-fast`, ordinary test failures continue to aggregate as before. With `--fail-fast`,
+the same selection, freshness, generation, lease, and ownership checks occur; after the first
+trustworthy ordinary test failure, tests not yet started are left unlaunched. A PASS still requires
+every selected test to have executed.
 
 ## Narrow drill-down tools
 

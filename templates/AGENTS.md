@@ -3,11 +3,15 @@
 Use `rimliaison` as the workflow entrypoint. `rimtest` remains a silent compatibility alias for
 older target repositories and automation.
 
-Normal loop:
+Active edit loop:
 
 1. Edit the smallest necessary change.
-2. Run `rimliaison affected --run --json`.
-3. Inspect the bounded result, then edit again.
+2. Run `rimliaison affected --run --fail-fast --json`.
+3. Fix the first failure immediately and repeat.
+
+Once the change is stable, run `rimliaison affected --run --json` as the complete pre-submit
+validation. A fail-fast PASS still proves that every selected test executed; it only shortens a
+failure path.
 
 Run `rimliaison doctor --json` only when readiness is unknown. If it is blocked, follow its JSON
 `nextAction` and use `rimliaison init --json` with the explicit missing manifest values until it

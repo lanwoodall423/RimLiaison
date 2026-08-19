@@ -31,6 +31,10 @@ public sealed class RimTestSuiteResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CatalogSuiteReuseSummary? Reuse { get; init; }
 
+    [JsonPropertyName("failFast")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CatalogSuiteFailFastSummary? FailFast { get; init; }
+
     [JsonPropertyName("passed")]
     public int Passed { get; init; }
 
@@ -116,6 +120,8 @@ public static class RimTestSuiteResultFactory
         int cancelled = cancelledChildren > 0
             ? cancelledChildren
             : execution.Cancelled ? 1 : 0;
+        bool failFastIncomplete =
+            execution.FailFast is { ValidationCompleted: false } or { NotLaunched: > 0 };
 
         string status = execution.Cancelled || cancelled > 0
             ? "cancelled"
@@ -125,9 +131,11 @@ public static class RimTestSuiteResultFactory
                     ? "infrastructure"
                     : failed > 0
                         ? "fail"
-                        : execution.Reuse?.Status == "invalidated"
-                            ? "infrastructure"
-                        : "pass";
+                        : failFastIncomplete
+                            ? "conservative"
+                            : execution.Reuse?.Status == "invalidated"
+                                ? "infrastructure"
+                                : "pass";
 
         RimTestSuiteFailure[] failures = children
             .Where(static child => child.Status is "fail" or "infrastructure" or "invalid")
@@ -174,6 +182,7 @@ public static class RimTestSuiteResultFactory
             DurationMs = Math.Max(0, durationMs),
             ArtifactFreshness = projectedFreshness,
             Reuse = execution.Reuse,
+            FailFast = execution.FailFast,
             Failures = failures.Length == 0 ? null : failures,
             Skipped = execution.Skipped > 0 ? execution.Skipped : null,
             Cancelled = cancelled > 0 ? cancelled : null,

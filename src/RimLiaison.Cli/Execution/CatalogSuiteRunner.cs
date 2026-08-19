@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Results;
@@ -11,7 +12,13 @@ public sealed record CatalogSuiteExecutionResult(
     IReadOnlyList<RimTestResult> Tests,
     int Skipped,
     bool Cancelled,
-    CatalogSuiteReuseSummary? Reuse = null);
+    CatalogSuiteReuseSummary? Reuse = null,
+    CatalogSuiteFailFastSummary? FailFast = null);
+
+public sealed record CatalogSuiteFailFastSummary(
+    [property: JsonPropertyName("firstFailure")] string? FirstFailure,
+    [property: JsonPropertyName("notLaunched")] int NotLaunched,
+    [property: JsonPropertyName("validationCompleted")] bool ValidationCompleted);
 
 public sealed record CatalogSuiteReuseSummary(
     int Selected,
@@ -52,7 +59,8 @@ public sealed class CatalogSuiteRunner
         string suiteId,
         IReadOnlyList<string> testIds,
         CancellationToken cancellationToken = default,
-        string? workflowId = null)
+        string? workflowId = null,
+        bool failFast = false)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(testIds);
@@ -88,7 +96,12 @@ public sealed class CatalogSuiteRunner
                         suiteId,
                         results,
                         orderedTestIds.Length - results.Count,
-                        cancelled: true);
+                        cancelled: true,
+                        failFast: CreateFailFastSummary(
+                            failFast,
+                            firstFailure: null,
+                            notLaunched: orderedTestIds.Length,
+                            validationCompleted: false));
                 }
 
                 CatalogTest? test = CatalogNavigator.FindTest(catalog, testId);
@@ -109,7 +122,12 @@ public sealed class CatalogSuiteRunner
                         suiteId,
                         results,
                         orderedTestIds.Length - results.Count,
-                        cancelled: true);
+                        cancelled: true,
+                        failFast: CreateFailFastSummary(
+                            failFast,
+                            firstFailure: null,
+                            notLaunched: orderedTestIds.Length,
+                            validationCompleted: false));
                 }
 
                 if (plan.Status.Outcome != DevBridgeOutcomeKind.Success ||
@@ -127,11 +145,19 @@ public sealed class CatalogSuiteRunner
                     suiteId,
                     results,
                     orderedTestIds.Length - results.Count,
-                    cancelled: false);
+                    cancelled: false,
+                    failFast: CreateFailFastSummary(
+                        failFast,
+                        firstFailure: null,
+                        notLaunched: orderedTestIds.Length,
+                        validationCompleted: false));
             }
         }
 
         bool cancelled = false;
+        string? firstFailure = null;
+        int notLaunched = 0;
+        bool validationCompleted = true;
         try
         {
             for (int index = 0; index < orderedTestIds.Length; index++)
@@ -140,6 +166,8 @@ public sealed class CatalogSuiteRunner
                 if (cancellationToken.IsCancellationRequested)
                 {
                     cancelled = true;
+                    notLaunched = orderedTestIds.Length - index;
+                    validationCompleted = false;
                     break;
                 }
 
@@ -374,12 +402,31 @@ public sealed class CatalogSuiteRunner
 
                     if (string.Equals(execution.Result.Status, "cancelled", StringComparison.Ordinal))
                     {
+                        notLaunched = orderedTestIds.Length - index - 1;
+                        validationCompleted = false;
                         cancelled = true;
+                        break;
+                    }
+
+                    // A test failure is the only ordinary outcome that may
+                    // activate fail-fast. Infrastructure, invalid, and
+                    // ownership/cancellation outcomes retain the normal
+                    // conservative aggregation path. The operation above is
+                    // already complete; fail-fast never cancels it.
+                    if (failFast &&
+                        string.Equals(execution.Result.Status, "fail", StringComparison.Ordinal) &&
+                        !cancellationToken.IsCancellationRequested)
+                    {
+                        firstFailure = testId;
+                        notLaunched = orderedTestIds.Length - index - 1;
+                        validationCompleted = notLaunched == 0;
                         break;
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
+                    notLaunched = orderedTestIds.Length - index;
+                    validationCompleted = false;
                     cancelled = true;
                     break;
                 }
@@ -412,7 +459,12 @@ public sealed class CatalogSuiteRunner
             results,
             orderedTestIds.Length - results.Count,
             cancelled,
-            reuse.ToSummary());
+            reuse.ToSummary(),
+            CreateFailFastSummary(
+                failFast,
+                firstFailure,
+                notLaunched,
+                validationCompleted));
     }
 
     private async Task<DevBridgeRecipePlanResult> TryPlanAsync(
@@ -449,13 +501,27 @@ public sealed class CatalogSuiteRunner
         IReadOnlyList<RimTestResult> results,
         int skipped,
         bool cancelled,
-        CatalogSuiteReuseSummary? reuse = null) =>
+        CatalogSuiteReuseSummary? reuse = null,
+        CatalogSuiteFailFastSummary? failFast = null) =>
         new(
             suiteId,
             results,
             Math.Max(0, skipped),
             cancelled,
-            reuse);
+            reuse,
+            failFast);
+
+    private static CatalogSuiteFailFastSummary? CreateFailFastSummary(
+        bool enabled,
+        string? firstFailure,
+        int notLaunched,
+        bool validationCompleted) =>
+        enabled
+            ? new(
+                firstFailure,
+                Math.Max(0, notLaunched),
+                validationCompleted)
+            : null;
 
     private async Task<ReuseSession?> OpenSessionAsync(
         CatalogSuiteReuseGroup group,

@@ -1332,13 +1332,15 @@ public static class CliApplication
                         suiteId,
                         testIds,
                         cancellationToken,
-                        workflowId)
+                        workflowId,
+                        failFast: request.FailFast)
                     .ConfigureAwait(false)
                 : ArtifactFailureExecution(
                     suiteId,
                     testIds,
                     freshnessTransaction.Status,
-                    workflowId);
+                    workflowId,
+                    request.FailFast);
         }
         else
         {
@@ -1347,7 +1349,8 @@ public static class CliApplication
                     suiteId,
                     testIds,
                     cancellationToken,
-                    workflowId)
+                    workflowId,
+                    failFast: request.FailFast)
                 .ConfigureAwait(false);
         }
 
@@ -1412,7 +1415,8 @@ public static class CliApplication
         string suiteId,
         IReadOnlyList<string> testIds,
         DevBridgeAdapterStatus status,
-        string? workflowId)
+        string? workflowId,
+        bool failFast)
     {
         string[] ordered = testIds
             .Where(static id => !string.IsNullOrWhiteSpace(id))
@@ -1427,7 +1431,10 @@ public static class CliApplication
                     ? []
                     : [RimTestResultFactory.Cancelled(ordered[0], workflowId: workflowId)],
                 Math.Max(0, ordered.Length - 1),
-                Cancelled: true);
+                Cancelled: true,
+                FailFast: failFast
+                    ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
+                    : null);
         }
 
         string errorCode = status.ErrorCode ?? "RIMTEST_ARTIFACT_FRESHNESS_UNKNOWN";
@@ -1440,7 +1447,10 @@ public static class CliApplication
                     workflowId))
                 .ToArray(),
             0,
-            Cancelled: false);
+            Cancelled: false,
+            FailFast: failFast
+                ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
+                : null);
     }
 
     private static (
@@ -1498,9 +1508,9 @@ public static class CliApplication
         IReadOnlyCollection<string> testIds,
         string errorCode,
         string? workflowId) =>
-        new(
-            execution.SuiteId,
-            execution.Tests
+        execution with
+        {
+            Tests = execution.Tests
                 .Select(test => test.Status == "pass" && testIds.Contains(test.Test)
                     ? RimTestResultFactory.ArtifactFreshnessFailure(
                         test.Test,
@@ -1508,8 +1518,10 @@ public static class CliApplication
                         workflowId)
                     : test)
                 .ToArray(),
-            execution.Skipped,
-            execution.Cancelled);
+            // Preserve the historical default projection while retaining the
+            // reuse summary for an explicit fail-fast run.
+            Reuse = execution.FailFast is null ? null : execution.Reuse
+        };
 
     private static int SelectionExitCode(RimTestSelectionResult selection)
     {

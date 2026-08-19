@@ -81,6 +81,8 @@ internal static class Program
         ("empty suite execution is conservative", EmptySuiteExecutionIsConservative),
         ("suite one failure is summarized", SuiteOneFailureIsSummarized),
         ("suite multiple failures are deterministic", SuiteMultipleFailuresAreDeterministic),
+        ("suite fail-fast stops after first failure", SuiteFailFastStopsAfterFirstFailure),
+        ("suite fail-fast pass is complete", SuiteFailFastPassExecutesEverySelectedTest),
         ("suite cancellation stops new children", SuiteCancellationStopsNewChildren),
         ("suite duplicate tests execute once", SuiteDuplicateTestsExecuteOnce),
         ("suite plan refusal blocks execution", SuitePlanRefusalBlocksExecution),
@@ -89,6 +91,7 @@ internal static class Program
         ("unsafe recipes never share state", UnsafeRecipesNeverShareState),
         ("mutation recipes never share state", MutationRecipesNeverShareState),
         ("compatible recipes reuse one generation", CompatibleRecipesReuseOneGeneration),
+        ("fail-fast preserves compatible reuse", FailFastPreservesCompatibleReuse),
         ("resettable recipes require successful reset", ResettableRecipesRequireSuccessfulReset),
         ("failed reset invalidates reuse", FailedResetInvalidatesReuse),
         ("test failure cannot contaminate later recipes", TestFailureCannotContaminateLaterRecipes),
@@ -139,6 +142,7 @@ internal static class Program
         ("affected discovers Git changes without paths", AffectedDiscoversGitChangesWithoutPaths),
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
         ("affected source run performs freshness transaction", AffectedSourceRunPerformsFreshnessTransaction),
+        ("fail-fast affected run still proves freshness", FailFastAffectedRunStillProvesFreshness),
         ("affected identical artifact uses no-deploy proof", AffectedIdenticalArtifactUsesNoDeployProof),
         ("affected build failure blocks pass", AffectedBuildFailureBlocksPass),
         ("affected deployment failure blocks pass", AffectedDeploymentFailureBlocksPass),
@@ -453,6 +457,18 @@ internal static class Program
             "A suite parse error must not use the single-test result schema.");
         Assert(!result.Stdout.Contains("rimtest-result/v1", StringComparison.Ordinal),
             "A suite parse error must not pretend the suite name is a test id.");
+
+        CliResult incompleteFailFast = RunCli(
+            CreateCatalog(),
+            "affected",
+            "--fail-fast");
+        AssertEqual(CliExitCodes.InvalidInput, incompleteFailFast.ExitCode);
+        AssertEqual(
+            "CLI_INVALID",
+            JsonDocument.Parse(incompleteFailFast.Stdout)
+                .RootElement
+                .GetProperty("code")
+                .GetString());
     }
 
     private static void ShowExposesMetadata()
@@ -2437,6 +2453,102 @@ internal static class Program
         AssertSequence(
             ["assembler-fixture", "settings-fixture"],
             adapter.RunCalls);
+        Assert(execution.FailFast is null,
+            "The default suite mode must not add fail-fast execution metadata.");
+    }
+
+    private static void SuiteFailFastStopsAfterFirstFailure()
+    {
+        CatalogDocument catalog = CreateCatalog();
+        catalog.Tests.Add(new CatalogTest
+        {
+            Id = "third-smoke",
+            Recipe = "third-fixture"
+        });
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = FailedRun(
+            "assembler-fixture",
+            "fp-assembler",
+            "RECIPE_ASSERTION_FAILED");
+        adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+        adapter.Runs["third-fixture"] = PassRun("third-fixture");
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter));
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "smoke",
+                ["third-smoke", "assembler-smoke", "settings-smoke"],
+                failFast: true)
+            .GetAwaiter()
+            .GetResult();
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 100);
+        string json = CatalogJsonFacade.Serialize(result);
+
+        AssertEqual("fail", result.Status);
+        AssertEqual(1, result.Failed);
+        AssertEqual(2, result.Skipped);
+        AssertSequence(["assembler-fixture"], adapter.RunCalls);
+        AssertEqual("assembler-smoke", result.FailFast!.FirstFailure);
+        AssertEqual(2, result.FailFast.NotLaunched);
+        Assert(!result.FailFast.ValidationCompleted,
+            "A stopped failure path must report incomplete validation.");
+        Assert(!json.Contains("third-fixture", StringComparison.Ordinal),
+            "Fail-fast output must not include unlaunched recipe payloads.");
+        Assert(!json.Contains("operations", StringComparison.Ordinal),
+            "Fail-fast output must not include child transcripts.");
+        Assert(RimTestOutputBudgets.Utf8Bytes(json) <=
+                RimTestOutputBudgets.AffectedSuitePassMaxBytes,
+            "Fail-fast output exceeded the bounded suite budget.");
+    }
+
+    private static void SuiteFailFastPassExecutesEverySelectedTest()
+    {
+        CatalogDocument catalog = CreateCatalog();
+        catalog.Tests.Add(new CatalogTest
+        {
+            Id = "third-smoke",
+            Recipe = "third-fixture"
+        });
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["assembler-fixture"] = PassRun("assembler-fixture");
+        adapter.Runs["settings-fixture"] = PassRun("settings-fixture");
+        adapter.Runs["third-fixture"] = PassRun("third-fixture");
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter));
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "smoke",
+                ["third-smoke", "assembler-smoke", "settings-smoke"],
+                failFast: true)
+            .GetAwaiter()
+            .GetResult();
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 100);
+        string json = CatalogJsonFacade.Serialize(result);
+
+        AssertEqual("pass", result.Status);
+        AssertEqual(3, result.Passed);
+        AssertSequence(
+            ["assembler-fixture", "settings-fixture", "third-fixture"],
+            adapter.RunCalls);
+        Assert(result.FailFast!.FirstFailure is null,
+            "A passing fail-fast run must not invent a failure reference.");
+        AssertEqual(0, result.FailFast.NotLaunched);
+        Assert(result.FailFast.ValidationCompleted,
+            "A fail-fast PASS must prove complete selected-test execution.");
+        RimTestSuiteResult partial = RimTestSuiteResultFactory.FromExecution(
+            execution with
+            {
+                FailFast = new CatalogSuiteFailFastSummary(null, 1, false)
+            },
+            100);
+        AssertEqual("conservative", partial.Status);
+        Assert(RimTestOutputBudgets.Utf8Bytes(json) <=
+                RimTestOutputBudgets.AffectedSuitePassMaxBytes,
+            "Passing fail-fast output exceeded the bounded suite budget.");
     }
 
     private static void SuiteCancellationStopsNewChildren()
@@ -2458,7 +2570,8 @@ internal static class Program
         CatalogSuiteExecutionResult execution = runner.RunAsync(
                 catalog,
                 "affected",
-                ["third-smoke", "assembler-smoke", "settings-smoke"])
+                ["third-smoke", "assembler-smoke", "settings-smoke"],
+                failFast: true)
             .GetAwaiter()
             .GetResult();
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 100);
@@ -2467,6 +2580,10 @@ internal static class Program
         AssertEqual(1, result.Cancelled!.Value);
         AssertEqual(2, result.Skipped!.Value);
         AssertSequence(["assembler-fixture"], adapter.RunCalls);
+        Assert(result.FailFast is not null &&
+                result.FailFast.FirstFailure is null &&
+                !result.FailFast.ValidationCompleted,
+            "Cancellation must remain conservative in fail-fast mode.");
     }
 
     private static void SuiteDuplicateTestsExecuteOnce()
@@ -2503,7 +2620,8 @@ internal static class Program
         CatalogSuiteExecutionResult execution = runner.RunAsync(
                 CreateCatalog(),
                 "smoke",
-                ["assembler-smoke", "settings-smoke"])
+                ["assembler-smoke", "settings-smoke"],
+                failFast: true)
             .GetAwaiter()
             .GetResult();
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 100);
@@ -2514,6 +2632,10 @@ internal static class Program
         AssertEqual("infrastructure", result.Failures![0].Status);
         AssertEqual("DEVBRIDGE_CLIENT_TIMEOUT", result.Failures[0].ErrorCode);
         AssertSequence(["assembler-fixture", "settings-fixture"], adapter.RunCalls);
+        Assert(result.FailFast is not null &&
+                result.FailFast.FirstFailure is null &&
+                result.FailFast.ValidationCompleted,
+            "Infrastructure failures must not be treated as ordinary fail-fast failures.");
     }
 
     private static void SuitePlanRefusalBlocksExecution()
@@ -2670,6 +2792,16 @@ internal static class Program
 
     private static void CompatibleRecipesReuseOneGeneration()
     {
+        AssertCompatibleRecipesReuse(failFast: false);
+    }
+
+    private static void FailFastPreservesCompatibleReuse()
+    {
+        AssertCompatibleRecipesReuse(failFast: true);
+    }
+
+    private static void AssertCompatibleRecipesReuse(bool failFast)
+    {
         const string workflowId = "workflow-reuse";
         CatalogDocument catalog = CreateIsolationCatalog(
             ReusableTest("read-a", "recipe-a"),
@@ -2700,7 +2832,8 @@ internal static class Program
                 catalog,
                 "reuse",
                 ["read-b", "read-a"],
-                workflowId: workflowId)
+                workflowId: workflowId,
+                failFast: failFast)
             .GetAwaiter()
             .GetResult();
         CatalogSuiteReuseSummary reuse = execution.Reuse!;
@@ -2726,6 +2859,13 @@ internal static class Program
                 .ToArray());
         Assert(adapter.RunResults.All(result => result.WorkflowId == workflowId),
             "Workflow identity must propagate to every shared-generation recipe.");
+        if (failFast)
+        {
+            Assert(execution.FailFast is not null &&
+                    execution.FailFast.NotLaunched == 0 &&
+                    execution.FailFast.ValidationCompleted,
+                "Fail-fast PASS must preserve complete reuse execution.");
+        }
     }
 
     private static void ResettableRecipesRequireSuccessfulReset()
@@ -3306,7 +3446,9 @@ internal static class Program
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             int exitCode = CliApplication.RunAsync(
-                    ["suite", "run", "smoke", "--json", "--catalog", catalogPath],
+                    [
+                        "suite", "run", "smoke", "--fail-fast", "--json", "--catalog", catalogPath
+                    ],
                     stdout,
                     stderr,
                     adapter)
@@ -3320,6 +3462,9 @@ internal static class Program
             AssertEqual("smoke", root.GetProperty("suite").GetString());
             AssertEqual(2, root.GetProperty("passed").GetInt32());
             AssertEqual(0, root.GetProperty("failed").GetInt32());
+            Assert(root.GetProperty("failFast").GetProperty("validationCompleted").GetBoolean(),
+                "The suite CLI must expose complete fail-fast validation on PASS.");
+            AssertEqual(0, root.GetProperty("failFast").GetProperty("notLaunched").GetInt32());
             Assert(!stdout.ToString().Contains("operations", StringComparison.Ordinal),
                 "Suite CLI must not emit child operations.");
         }
@@ -4415,6 +4560,31 @@ internal static class Program
             result.DevelopmentCalls[0].WorkflowId);
     }
 
+    private static void FailFastAffectedRunStillProvesFreshness()
+    {
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) => SuccessfulDevelopmentResult(
+                sourceFingerprint,
+                workflowId,
+                "deployed"),
+            failFast: true);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        Assert(root.GetProperty("artifactFreshness")
+            .GetProperty("loadedArtifactFreshnessProven")
+            .GetBoolean(),
+            "Fail-fast must not bypass the artifact freshness transaction.");
+        JsonElement failFast = root.GetProperty("failFast");
+        AssertEqual(0, failFast.GetProperty("notLaunched").GetInt32());
+        Assert(failFast.GetProperty("validationCompleted").GetBoolean(),
+            "A passing affected fail-fast run must prove complete validation.");
+        AssertEqual(1, result.DevelopmentCalls.Count);
+        AssertEqual(1, result.RecipeCalls.Count);
+    }
+
     private static void AffectedIdenticalArtifactUsesNoDeployProof()
     {
         AffectedScenarioResult result = RunAffectedSourceScenario(
@@ -5452,7 +5622,8 @@ internal static class Program
 
     private static AffectedScenarioResult RunAffectedSourceScenario(
         Func<string, string?, DevBridgeModDevelopmentResult>? resultFactory = null,
-        DevBridgeRecipeRunResult? recipeRun = null)
+        DevBridgeRecipeRunResult? recipeRun = null,
+        bool failFast = false)
     {
         string directory = CreateTempDirectory();
         try
@@ -5484,19 +5655,30 @@ internal static class Program
             var stdout = new StringWriter();
             var stderr = new StringWriter();
 
+            var arguments = new List<string>
+            {
+                "affected",
+                "Source/Changed.cs",
+                "--run"
+            };
+            if (failFast)
+            {
+                arguments.Add("--fail-fast");
+            }
+
+            arguments.AddRange(
+                [
+                    "--json",
+                    "--devbridge-project",
+                    "fixture",
+                    "--catalog",
+                    catalogPath
+                ]);
+
             int exitCode = WithCurrentDirectory(
                 directory,
                 () => CliApplication.RunAsync(
-                        [
-                            "affected",
-                            "Source/Changed.cs",
-                            "--run",
-                            "--json",
-                            "--devbridge-project",
-                            "fixture",
-                            "--catalog",
-                            catalogPath
-                        ],
+                        arguments.ToArray(),
                         stdout,
                         stderr,
                         recipeAdapter,

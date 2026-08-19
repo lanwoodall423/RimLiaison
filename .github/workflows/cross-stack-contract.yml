@@ -10,9 +10,45 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: rimliaison-cross-stack-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  plan:
+    name: Plan composition gate
+    runs-on: windows-latest
+    outputs:
+      plan_category: ${{ steps.plan.outputs.plan_category }}
+      plan_reason: ${{ steps.plan.outputs.plan_reason }}
+      run_cross_stack: ${{ steps.plan.outputs.run_cross_stack }}
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute conservative CI plan
+        id: plan
+        shell: pwsh
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plannerArguments = @{
+            EventName = $env:CI_EVENT_NAME
+            BaseRevision = $env:CI_BASE_REVISION
+            HeadRevision = $env:CI_HEAD_REVISION
+            GitHubOutputPath = $env:GITHUB_OUTPUT
+          }
+          & .\scripts\ci-plan.ps1 @plannerArguments -Json
+
   cross-stack-contract:
     name: No-RimWorld composition gate
+    needs: plan
+    if: needs.plan.outputs.run_cross_stack == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -54,7 +90,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\.nuget\packages
-          key: cross-stack-nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/global.json') }}
+          key: cross-stack-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
           restore-keys: |
             cross-stack-nuget-${{ runner.os }}-
 
@@ -71,27 +107,32 @@ jobs:
           dotnet build .\Source\FakeRimWorld\FakeRimWorld.csproj --configuration Release --no-restore --nologo
           if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 fake process host build failed.' }
 
-      - name: Build RimLiaison and run deterministic suites
+      - name: Build required RimLiaison command-line tools
         shell: pwsh
         run: |
-          dotnet build .\RimLiaison.sln --configuration Release --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'RimLiaison build failed.' }
-          dotnet run --project .\tests\RimContext.Tests\RimContext.Tests.csproj --configuration Release --no-build --no-restore
-          if ($LASTEXITCODE -ne 0) { throw 'RimContext offline suite failed.' }
-          dotnet test .\tests\RimError.Core.Tests\RimError.Core.Tests.csproj --configuration Release --no-build --no-restore --nologo
-          if ($LASTEXITCODE -ne 0) { throw 'RimError offline suite failed.' }
-          dotnet run --project .\tests\RimLiaison.Tests\RimLiaison.Tests.csproj --configuration Release --no-build --no-restore
-          if ($LASTEXITCODE -ne 0) { throw 'RimLiaison offline suite failed.' }
+          $projects = @(
+              '.\src\RimContext.Cli\RimContext.Cli.csproj',
+              '.\src\RimError.Cli\RimError.Cli.csproj',
+              '.\src\RimLiaison.Cli\RimLiaison.Cli.csproj'
+          )
+          foreach ($project in $projects) {
+              dotnet build $project --configuration Release --nologo
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Required RimLiaison tool build failed: $project"
+              }
+          }
 
       - name: Run merged no-RimWorld cross-stack contract workflow
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $reportPath = Join-Path $env:GITHUB_WORKSPACE 'cross-stack-contract.json'
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 `
-              -RimLiaisonRoot $env:GITHUB_WORKSPACE `
-              -DevBridgeRoot (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2') `
-              -Json
+          $contractArguments = @(
+              '-RimLiaisonRoot', $env:GITHUB_WORKSPACE,
+              '-DevBridgeRoot', (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2'),
+              '-Json'
+          )
+          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 @contractArguments
           $exitCode = $LASTEXITCODE
           $output | Set-Content -LiteralPath $reportPath -Encoding utf8
           $output | Write-Output

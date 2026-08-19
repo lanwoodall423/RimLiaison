@@ -1,10 +1,14 @@
 # RimLiaison agent handoff
 
-Use `rimliaison` as the canonical agent-facing entrypoint:
+Use `rimliaison` as the canonical agent-facing entrypoint. During an active edit iteration, use
+the opt-in fail-fast path so the first trustworthy ordinary test failure returns promptly:
 
 ```text
-edit -> rimliaison affected --run --json -> inspect the bounded result -> edit again
+edit -> rimliaison affected --run --fail-fast --json -> fix immediately on failure -> repeat
 ```
+
+Once the change is stable, run `rimliaison affected --run --json` as the complete pre-submit
+validation. A fail-fast PASS is never a partial PASS: it proves that every selected test ran.
 
 Use `rimliaison doctor --json` when readiness is unknown and follow its bounded `nextAction`.
 Use `rimliaison capabilities --json` for live capability discovery. For UI evidence, enumerate
