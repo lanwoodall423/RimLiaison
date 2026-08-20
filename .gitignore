@@ -4,6 +4,7 @@
 .rimctx/
 .rimdev/*.local.json
 .rimdev/profiles/
+.rimdev/observability/
 .rimdev/validation-proofs/
 .rimerror/
 TestResults/

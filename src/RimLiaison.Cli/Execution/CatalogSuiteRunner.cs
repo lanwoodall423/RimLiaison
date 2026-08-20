@@ -80,7 +80,8 @@ public sealed class CatalogSuiteRunner
         IReadOnlyList<string> testIds,
         CancellationToken cancellationToken = default,
         string? workflowId = null,
-        bool failFast = false)
+        bool failFast = false,
+        string? sourceFingerprint = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(testIds);
@@ -404,9 +405,12 @@ public sealed class CatalogSuiteRunner
                 long started = Stopwatch.GetTimestamp();
                 try
                 {
-                    DevBridgeRecipeExecutionContext? executionContext = session is null
-                        ? null
-                        : new DevBridgeRecipeExecutionContext(session.LeaseId);
+                    DevBridgeRecipeExecutionContext? executionContext =
+                        session is null && string.IsNullOrWhiteSpace(sourceFingerprint)
+                            ? null
+                            : new DevBridgeRecipeExecutionContext(
+                                session?.LeaseId,
+                                sourceFingerprint);
                     ExecutionRecoveryResult executed = await RunWithLeaseRecoveryAsync(
                             catalog,
                             testId,
@@ -656,7 +660,9 @@ public sealed class CatalogSuiteRunner
                     started,
                     cancellationToken,
                     workflowId,
-                    new DevBridgeRecipeExecutionContext(lease.LeaseId))
+                    new DevBridgeRecipeExecutionContext(
+                        lease.LeaseId,
+                        executionContext?.SourceFingerprint))
                 .ConfigureAwait(false);
         }
         finally

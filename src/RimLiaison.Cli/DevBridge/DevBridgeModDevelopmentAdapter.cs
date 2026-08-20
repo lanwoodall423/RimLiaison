@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RimLiaison.Observability;
 using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
@@ -145,6 +146,27 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             arguments.Insert(arguments.Count - 2, workflowId);
         }
 
+        AgentOperationScope? buildObservation = AgentObservabilityRuntime.BeginOperation(
+            "tool",
+            "build.deploy",
+            DevelopmentStage.Implementation,
+            "build:" + project,
+            new
+            {
+                toolName = "DevBridge",
+                operationType = "build",
+                project,
+                sourceFingerprint
+            });
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildStarted,
+            "Build and deployment transaction started.",
+            new
+            {
+                operationKey = "build:" + project,
+                project
+            });
         DevBridgeProcessResult process;
         try
         {
@@ -159,9 +181,58 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         DevBridgeProcessEnvironment.ForWorkflow(workflowId)),
                     cancellationToken)
                 .ConfigureAwait(false);
+            var processDetails = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["project"] = project,
+                ["exitCode"] = process.ExitCode,
+                ["stderrExcerpt"] = AgentObservabilityData.BoundText(process.Stderr, 2048),
+                ["stdoutExcerpt"] = AgentObservabilityData.BoundText(process.Stdout, 2048)
+            };
+            if (process.ExitCode is 0 && process.StartError is null &&
+                !process.TimedOut && !process.Cancelled)
+            {
+                buildObservation?.Complete("Build and deployment command completed.", processDetails);
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Implementation,
+                    AgentEventTypes.BuildSucceeded,
+                    "Build and deployment command succeeded.",
+                    new { operationKey = "build:" + project, project });
+            }
+            else
+            {
+                buildObservation?.Fail(
+                    process.TimedOut
+                        ? "Build and deployment command timed out."
+                        : "Build and deployment command failed.",
+                    process.TimedOut
+                        ? "DEVBRIDGE_BUILD_TIMEOUT"
+                        : "DEVBRIDGE_BUILD_FAILED",
+                    processDetails,
+                    timeout: process.TimedOut);
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Implementation,
+                    AgentEventTypes.BuildFailed,
+                    process.TimedOut
+                        ? "Build and deployment command timed out."
+                        : "Build and deployment command failed.",
+                    new
+                    {
+                        operationKey = "build:" + project,
+                        project,
+                        errorCode = process.TimedOut
+                            ? "DEVBRIDGE_BUILD_TIMEOUT"
+                            : "DEVBRIDGE_BUILD_FAILED"
+                    });
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            buildObservation?.Fail("Build and deployment was cancelled.", "RIMTEST_CANCELLED");
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Implementation,
+                AgentEventTypes.BuildFailed,
+                "Build and deployment was cancelled.",
+                new { operationKey = "build:" + project, project, errorCode = "RIMTEST_CANCELLED" });
             return Failed(
                 project,
                 new DevBridgeAdapterStatus(
@@ -171,13 +242,26 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         }
         catch (Exception exception)
         {
+            buildObservation?.Fail(
+                "Build and deployment raised an exception.",
+                "DEVBRIDGE_MOD_TRANSACTION_FAILED",
+                new { project, error = AgentObservabilityData.BoundText(exception.Message, 1024) });
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Implementation,
+                AgentEventTypes.BuildFailed,
+                "Build and deployment raised an exception.",
+                new { operationKey = "build:" + project, project, errorCode = "DEVBRIDGE_MOD_TRANSACTION_FAILED" });
             return Failed(
                 project,
                 new DevBridgeAdapterStatus(
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     "DEVBRIDGE_MOD_TRANSACTION_FAILED",
-                    Bound(exception.Message)),
+                Bound(exception.Message)),
                 workflowId);
+        }
+        finally
+        {
+            buildObservation?.Dispose();
         }
 
         if (process.Cancelled)

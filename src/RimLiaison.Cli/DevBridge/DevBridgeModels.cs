@@ -208,7 +208,8 @@ public sealed record DevBridgeRecipeShowResult(
     JsonElement? Definition);
 
 public sealed record DevBridgeRecipeExecutionContext(
-    string? LeaseId = null);
+    string? LeaseId = null,
+    string? SourceFingerprint = null);
 
 public sealed record DevBridgeLeaseResult(
     DevBridgeAdapterStatus Status,

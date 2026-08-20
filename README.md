@@ -41,8 +41,15 @@ For UI or visual changes, use the semantic UI surface: run the affected workflow
 `rimliaison ui screenshot --target <target-id> --json`. Inspect that targeted evidence; do not
 capture the whole screen when a smaller semantic target is available.
 
-The frontend is `RimLiaison.Cli`, with the canonical `rimliaison` executable and wrapper. The
-solution is [RimLiaison.sln](RimLiaison.sln). Stable `rimtest-*` JSON schemas, `RIMTEST_*`
+The graphical frontend is `RimLiaison.Desktop`, a small WinForms `net8.0-windows` executable.
+WinForms is the lowest-complexity fit here: the repository is already C#/.NET, the target
+environment is Windows, and it adds no web server, browser runtime, or third-party UI framework.
+Launch it with `dotnet run --project src/RimLiaison.Desktop/RimLiaison.Desktop.csproj`. The
+`RimLiaison.Cli` executable and wrapper remain available for automation and diagnostics. The
+  desktop form consumes the shared application-level structured observability store directly;
+  that runtime state lives outside mod worktrees. It does not call an LLM or require OpenTelemetry
+  to render, filter, update, or prepare issue bundles. The solution is
+[RimLiaison.sln](RimLiaison.sln). Stable `rimtest-*` JSON schemas, `RIMTEST_*`
 environment/error identifiers, `.rimdev`, catalog fields, and DevBridge protocol fields remain
 unchanged for compatibility.
 
