@@ -37,6 +37,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.424
+
       - name: Compute conservative CI plan
         id: plan
         shell: pwsh
