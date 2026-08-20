@@ -258,16 +258,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $reportPath = Join-Path $env:GITHUB_WORKSPACE 'cross-stack-contract.json'
-          $arguments = @(
-              '-Stage', 'cross-stack',
-              '-RepositoryRoot', $env:GITHUB_WORKSPACE,
-              '-DevBridgeRoot', (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2'),
-              '-StageReportPath', $reportPath,
-              '-Json')
-          if ($env:DEVBRIDGE_BINARY_CACHE_HIT -eq 'true') {
-              $arguments += '-DevBridgeBinaryCacheHit'
+          $parameters = @{
+              StageId = @('cross-stack')
+              RepositoryRoot = $env:GITHUB_WORKSPACE
+              DevBridgeRoot = (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2')
+              StageReportPath = $reportPath
+              Json = $true
           }
-          $output = & .\scripts\ci-validate.ps1 @arguments
+          if ($env:DEVBRIDGE_BINARY_CACHE_HIT -eq 'true') {
+              $parameters.DevBridgeBinaryCacheHit = $true
+          }
+          $output = & .\scripts\ci-validate.ps1 @parameters
           $exitCode = $LASTEXITCODE
           $output | Write-Output
           if ($exitCode -ne 0) { throw "Cross-stack contract gate failed with exit code $exitCode." }

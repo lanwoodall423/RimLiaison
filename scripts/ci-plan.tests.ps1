@@ -305,8 +305,8 @@ $testsRun++
 Assert-True (-not $binaryCacheBlock.Contains('restore-keys:', [StringComparison]::Ordinal)) `
     'Binary cache has no loose restore key'
 $testsRun++
-Assert-True ($workflowText.Contains('-DevBridgeBinaryCacheHit', [StringComparison]::Ordinal)) `
-    'Cross-stack execution receives the exact binary-cache hit signal'
+Assert-True ($workflowText.Contains('DevBridgeBinaryCacheHit = $true', [StringComparison]::Ordinal)) `
+    'Cross-stack execution receives the exact binary-cache hit parameter'
 
 $global:LASTEXITCODE = 0
 Write-Output ('CI planner tests passed: {0}' -f $testsRun)
