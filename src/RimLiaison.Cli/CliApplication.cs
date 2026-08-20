@@ -2353,7 +2353,14 @@ public static class CliApplication
                 Math.Max(0, ordered.Length - 1),
                 Cancelled: true,
                 FailFast: failFast
-                    ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
+                    ? new CatalogSuiteFailFastSummary(
+                        null,
+                        ordered.Length,
+                        false,
+                        new CatalogSuiteFailFastOrderingSummary(
+                            false,
+                            "not-attempted",
+                            CatalogSuiteFailFastOrdering.PolicyVersion))
                     : null,
                 Cleanup: cleanup);
         }
@@ -2370,7 +2377,14 @@ public static class CliApplication
             0,
             Cancelled: false,
             FailFast: failFast
-                ? new CatalogSuiteFailFastSummary(null, ordered.Length, false)
+                ? new CatalogSuiteFailFastSummary(
+                    null,
+                    ordered.Length,
+                    false,
+                    new CatalogSuiteFailFastOrderingSummary(
+                        false,
+                        "not-attempted",
+                        CatalogSuiteFailFastOrdering.PolicyVersion))
                 : null,
             Cleanup: cleanup);
     }

@@ -31,6 +31,13 @@ RimLiaison hot path uses the shared Core APIs in-process:
    direct RimError CLI for compatibility coverage; the normal RimLiaison diagnostic path calls
    RimError.Core directly and the resulting diagnostic is checked for run and operation correlation.
 
+The merged `.github/workflows/ci.yml` composition job checks out DevBridge2 at the exact manifest
+SHA. It derives an exact binary-cache identity from that SHA, the runner/runtime assumptions, and
+the source/project/build-import/package-lock closure. A cache hit reuses only the Coordinator,
+Coordinator.Core, and FakeRimWorld compiled `bin`/`obj` outputs; it never caches mutable runtime
+state and never skips this contract execution. The independent validation-proof layer may skip the
+whole stage only after a complete PASS proof is found.
+
 Each component still owns its independent guarantee:
 
 - RimContext is an internal module that owns static indexing and affected-impact analysis

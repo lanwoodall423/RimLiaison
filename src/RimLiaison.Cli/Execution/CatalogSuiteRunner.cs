@@ -22,7 +22,9 @@ public sealed record CatalogSuiteExecutionResult(
 public sealed record CatalogSuiteFailFastSummary(
     [property: JsonPropertyName("firstFailure")] string? FirstFailure,
     [property: JsonPropertyName("notLaunched")] int NotLaunched,
-    [property: JsonPropertyName("validationCompleted")] bool ValidationCompleted);
+    [property: JsonPropertyName("validationCompleted")] bool ValidationCompleted,
+    [property: JsonPropertyName("historicalOrdering")]
+    CatalogSuiteFailFastOrderingSummary? HistoricalOrdering = null);
 
 public sealed record CatalogSuiteReuseMismatch(
     string TestId,
@@ -46,7 +48,9 @@ public sealed record CatalogSuiteReuseSummary(
     string? ReuseInvalidatedAfter = null,
     string? ReuseInvalidationReason = null,
     string? FallbackReason = null,
-    CatalogSuiteReuseMismatch? Mismatch = null);
+    CatalogSuiteReuseMismatch? Mismatch = null,
+    int GenerationsAvoided = 0,
+    int RelaunchesAvoided = 0);
 
 public sealed class CatalogSuiteRunner
 {
@@ -98,8 +102,19 @@ public sealed class CatalogSuiteRunner
             catalog,
             orderedTestIds,
             recipeProfiles);
+        CatalogSuiteFailFastOrderingResult? historicalOrdering = failFast
+            ? CatalogSuiteFailFastOrdering.Order(catalog, reusePlan)
+            : null;
+        EfficiencyProfiler.Active?.SetOrderingContext(
+            historicalOrdering?.HistoryContext ??
+            CatalogSuiteFailFastOrdering.BuildHistoryContext(catalog, reusePlan));
+        string[] executionTestIds = (historicalOrdering?.ExecutionOrder ??
+                reusePlan.ExecutionOrder)
+            .ToArray();
+        CatalogSuiteFailFastOrderingSummary? historicalOrderingSummary =
+            historicalOrdering?.Summary;
         var reuse = new ReuseAccumulator(
-            orderedTestIds.Length,
+            executionTestIds.Length,
             reusePlan.Groups.Count,
             reusePlan.FallbackReason);
         var prerequisiteRecovery = new List<RimTestPrerequisiteRecovery>();
@@ -116,22 +131,23 @@ public sealed class CatalogSuiteRunner
         // operation. The plan remains a lifecycle-owner preflight; explicit
         // catalog isolation metadata is the only permission RimLiaison uses to
         // hold a shared lease.
-        if (orderedTestIds.Length > 1)
+        if (executionTestIds.Length > 1)
         {
-            foreach (string testId in orderedTestIds)
+            foreach (string testId in executionTestIds)
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
                     return Aggregate(
                         suiteId,
                         results,
-                        orderedTestIds.Length - results.Count,
+                        executionTestIds.Length - results.Count,
                         cancelled: true,
                         failFast: CreateFailFastSummary(
                             failFast,
                             firstFailure: null,
-                            notLaunched: orderedTestIds.Length,
-                            validationCompleted: false));
+                            notLaunched: executionTestIds.Length,
+                            validationCompleted: false,
+                            historicalOrdering: historicalOrderingSummary));
                 }
 
                 CatalogTest? test = CatalogNavigator.FindTest(catalog, testId);
@@ -151,13 +167,14 @@ public sealed class CatalogSuiteRunner
                     return Aggregate(
                         suiteId,
                         results,
-                        orderedTestIds.Length - results.Count,
+                        executionTestIds.Length - results.Count,
                         cancelled: true,
                         failFast: CreateFailFastSummary(
                             failFast,
                             firstFailure: null,
-                            notLaunched: orderedTestIds.Length,
-                            validationCompleted: false));
+                            notLaunched: executionTestIds.Length,
+                            validationCompleted: false,
+                            historicalOrdering: historicalOrderingSummary));
                 }
 
                 if (plan.Status.Outcome != DevBridgeOutcomeKind.Success ||
@@ -174,13 +191,14 @@ public sealed class CatalogSuiteRunner
                 return Aggregate(
                     suiteId,
                     results,
-                    orderedTestIds.Length - results.Count,
+                    executionTestIds.Length - results.Count,
                     cancelled: false,
                     failFast: CreateFailFastSummary(
                         failFast,
                         firstFailure: null,
-                        notLaunched: orderedTestIds.Length,
-                        validationCompleted: false));
+                        notLaunched: executionTestIds.Length,
+                        validationCompleted: false,
+                        historicalOrdering: historicalOrderingSummary));
             }
         }
 
@@ -190,13 +208,13 @@ public sealed class CatalogSuiteRunner
         bool validationCompleted = true;
         try
         {
-            for (int index = 0; index < orderedTestIds.Length; index++)
+            for (int index = 0; index < executionTestIds.Length; index++)
             {
-                string testId = orderedTestIds[index];
+                string testId = executionTestIds[index];
                 if (cancellationToken.IsCancellationRequested)
                 {
                     cancelled = true;
-                    notLaunched = orderedTestIds.Length - index;
+                    notLaunched = executionTestIds.Length - index;
                     validationCompleted = false;
                     break;
                 }
@@ -381,6 +399,8 @@ public sealed class CatalogSuiteRunner
                     }
                 }
 
+                bool wasSharingExistingGeneration = session is not null &&
+                    session.TestsRun > 0;
                 long started = Stopwatch.GetTimestamp();
                 try
                 {
@@ -436,6 +456,13 @@ public sealed class CatalogSuiteRunner
                         needsFreshState = true;
                     }
 
+                    if (wasSharingExistingGeneration &&
+                        sessionMismatch is null &&
+                        string.Equals(execution.Result.Status, "pass", StringComparison.Ordinal))
+                    {
+                        reuse.ObserveSuccessfulReuse();
+                    }
+
                     results.Add(execution.Result);
                     hasExecuted = true;
                     if (session is not null)
@@ -454,7 +481,7 @@ public sealed class CatalogSuiteRunner
 
                     if (string.Equals(execution.Result.Status, "cancelled", StringComparison.Ordinal))
                     {
-                        notLaunched = orderedTestIds.Length - index - 1;
+                        notLaunched = executionTestIds.Length - index - 1;
                         validationCompleted = false;
                         cancelled = true;
                         break;
@@ -470,14 +497,14 @@ public sealed class CatalogSuiteRunner
                         !cancellationToken.IsCancellationRequested)
                     {
                         firstFailure = testId;
-                        notLaunched = orderedTestIds.Length - index - 1;
+                        notLaunched = executionTestIds.Length - index - 1;
                         validationCompleted = notLaunched == 0;
                         break;
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    notLaunched = orderedTestIds.Length - index;
+                    notLaunched = executionTestIds.Length - index;
                     validationCompleted = false;
                     cancelled = true;
                     break;
@@ -509,14 +536,15 @@ public sealed class CatalogSuiteRunner
         return Aggregate(
             suiteId,
             results,
-            orderedTestIds.Length - results.Count,
+            executionTestIds.Length - results.Count,
             cancelled,
             reuse.ToSummary(),
             CreateFailFastSummary(
                 failFast,
                 firstFailure,
                 notLaunched,
-                validationCompleted),
+                validationCompleted,
+                historicalOrderingSummary),
             prerequisiteRecovery.Count == 0 ? null : prerequisiteRecovery,
             reuse.ToCleanup());
     }
@@ -881,12 +909,14 @@ public sealed class CatalogSuiteRunner
         bool enabled,
         string? firstFailure,
         int notLaunched,
-        bool validationCompleted) =>
+        bool validationCompleted,
+        CatalogSuiteFailFastOrderingSummary? historicalOrdering = null) =>
         enabled
             ? new(
                 firstFailure,
                 Math.Max(0, notLaunched),
-                validationCompleted)
+                validationCompleted,
+                historicalOrdering)
             : null;
 
     private async Task<ReuseSession?> OpenSessionAsync(
@@ -1458,6 +1488,8 @@ public sealed class CatalogSuiteRunner
         internal int GroupsUsed { get; set; }
         internal int FixtureResets { get; set; }
         internal int Relaunches { get; set; }
+        internal int GenerationsAvoided { get; private set; }
+        internal int RelaunchesAvoided { get; private set; }
         internal string? ReuseInvalidatedAfter { get; private set; }
         internal string? ReuseInvalidationReason { get; private set; }
         internal string? FallbackReason { get; set; }
@@ -1478,6 +1510,12 @@ public sealed class CatalogSuiteRunner
             {
                 generations.Add(generation.Value);
             }
+        }
+
+        internal void ObserveSuccessfulReuse()
+        {
+            GenerationsAvoided++;
+            RelaunchesAvoided++;
         }
 
         internal void Invalidate(
@@ -1545,7 +1583,9 @@ public sealed class CatalogSuiteRunner
                 ReuseInvalidatedAfter,
                 ReuseInvalidationReason,
                 FallbackReason,
-                Mismatch);
+                Mismatch,
+                GenerationsAvoided,
+                RelaunchesAvoided);
         }
     }
 }

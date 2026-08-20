@@ -32,7 +32,10 @@ requiring intervention should stop for manual repair.
 Without `--fail-fast`, ordinary test failures continue to aggregate as before. With `--fail-fast`,
 the same selection, freshness, generation, lease, and ownership checks occur; after the first
 trustworthy ordinary test failure, tests not yet started are left unlaunched. A PASS still requires
-every selected test to have executed.
+every selected test to have executed. Fail-fast may use bounded recent efficiency history only to
+order tests inside the reuse planner's already-proven compatible groups. It never changes selected
+membership or lifecycle boundaries; missing or incompatible history falls back to deterministic
+planner order. The final non-fail-fast command remains the complete validation path.
 
 ## Narrow drill-down tools
 

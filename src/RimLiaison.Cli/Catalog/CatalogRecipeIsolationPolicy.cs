@@ -27,6 +27,9 @@ public static class CatalogRecipeIsolationPolicy
         CatalogRecipeIsolation right)
     {
         if (!CanShareGeneration(left) || !CanShareGeneration(right) ||
+            left.Mode != right.Mode ||
+            HasInvalidResetRecipe(left) ||
+            HasInvalidResetRecipe(right) ||
             !string.Equals(ShareKey(left), ShareKey(right), StringComparison.Ordinal))
         {
             return false;
@@ -42,5 +45,12 @@ public static class CatalogRecipeIsolationPolicy
         }
 
         return true;
+    }
+
+    private static bool HasInvalidResetRecipe(CatalogRecipeIsolation isolation)
+    {
+        return RequiresResetBetweenRecipes(isolation)
+            ? string.IsNullOrWhiteSpace(isolation.ResetRecipe)
+            : !string.IsNullOrWhiteSpace(isolation.ResetRecipe);
     }
 }

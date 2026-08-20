@@ -59,6 +59,21 @@ function Invoke-Plan {
     return $text | ConvertFrom-Json -Depth 10
 }
 
+function Invoke-GitChecked {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+
+    $output = @(& git @Arguments)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "CI planner test Git command failed: $Operation (exit code $exitCode)"
+    }
+
+    return $output
+}
+
 $testsRun = 0
 
 $plan = Invoke-Plan -Paths @('src/RimContext.Core/Semantics/ProjectSemanticIndexer.cs')
@@ -173,20 +188,20 @@ Assert-True (-not $plan.runAllInternal) 'Mixed component changes do not imply un
 $repositoryRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-ci-plan-git-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $repositoryRoot | Out-Null
 try {
-    & git -C $repositoryRoot init --quiet
-    & git -C $repositoryRoot config user.email 'ci-plan@example.invalid'
-    & git -C $repositoryRoot config user.name 'CI planner tests'
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'init', '--quiet') -Operation 'git init'
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'config', 'user.email', 'ci-plan@example.invalid') -Operation 'git config user.email'
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'config', 'user.name', 'CI planner tests') -Operation 'git config user.name'
     Set-Content -LiteralPath (Join-Path $repositoryRoot 'old.cs') -Value 'class Old {}' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $repositoryRoot 'deleted.cs') -Value 'class Deleted {}' -Encoding utf8
-    & git -C $repositoryRoot add -- .
-    & git -C $repositoryRoot commit --quiet -m initial
-    $baseRevision = ([string](& git -C $repositoryRoot rev-parse HEAD)).Trim()
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'add', '--', '.') -Operation 'git add initial fixture'
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'commit', '--quiet', '-m', 'initial') -Operation 'git commit initial fixture'
+    $baseRevision = ([string](Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'rev-parse', 'HEAD') -Operation 'git rev-parse initial fixture')).Trim()
 
-    & git -C $repositoryRoot mv old.cs renamed.cs
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'mv', 'old.cs', 'renamed.cs') -Operation 'git mv fixture'
     Remove-Item -LiteralPath (Join-Path $repositoryRoot 'deleted.cs') -Force
-    & git -C $repositoryRoot add -- .
-    & git -C $repositoryRoot commit --quiet -m rename-and-delete
-    $headRevision = ([string](& git -C $repositoryRoot rev-parse HEAD)).Trim()
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'add', '--', '.') -Operation 'git add renamed fixture'
+    Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'commit', '--quiet', '-m', 'rename-and-delete') -Operation 'git commit renamed fixture'
+    $headRevision = ([string](Invoke-GitChecked -Arguments @('-C', $repositoryRoot, 'rev-parse', 'HEAD') -Operation 'git rev-parse renamed fixture')).Trim()
 
     $plan = Invoke-Plan -Base $baseRevision -Head $headRevision -RepositoryRoot $repositoryRoot
     $testsRun++
@@ -212,6 +227,8 @@ $testsRun++
 Assert-Equal $plan.category 'full-uncertain' 'Unavailable base information falls back conservatively'
 Assert-True (-not $plan.certain) 'Unavailable base information is reported as uncertain'
 Assert-True ($plan.runAllInternal -and $plan.runCrossStack) 'Unavailable base information cannot skip validation'
+$testsRun++
+Assert-Equal $LASTEXITCODE 0 'Handled native revision failure does not leak into the caller exit state'
 
 $outputPath = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-ci-plan-' + [Guid]::NewGuid().ToString('N') + '.out')
 try {
@@ -229,4 +246,68 @@ finally {
     }
 }
 
+$pwshPath = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Path
+& $pwshPath -NoProfile -ExecutionPolicy Bypass -Command 'function Assert-True { param([bool]$Condition); if (-not $Condition) { throw "intentional assertion failure" } }; Assert-True $false' 2>$null
+$assertionExitCode = $LASTEXITCODE
+$testsRun++
+Assert-True ($assertionExitCode -ne 0) 'Genuine assertion failure retains a nonzero exit code'
+
+$workflowPath = Join-Path $PSScriptRoot '..\.github\workflows\ci.yml'
+$workflowText = Get-Content -LiteralPath $workflowPath -Raw
+$testsRun++
+Assert-True ($workflowText.Contains('run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-plan.tests.ps1', [StringComparison]::Ordinal)) `
+    'The single CI plan job invokes ci-plan.tests.ps1 through a fresh pwsh -File process'
+$testsRun++
+Assert-True ($workflowText.Contains('run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation-proofs.tests.ps1', [StringComparison]::Ordinal)) `
+    'The single CI plan job invokes validation-proofs.tests.ps1 through a fresh pwsh -File process'
+$testsRun++
+Assert-True ($workflowText.Contains('run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\devbridge-binary-cache.tests.ps1', [StringComparison]::Ordinal)) `
+    'The single CI plan job invokes the exact binary-cache identity tests'
+$testsRun++
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\cross-stack-contract.yml'))) `
+    'The standalone cross-stack workflow is removed after consolidation'
+$testsRun++
+Assert-Equal ([regex]::Matches($workflowText, '(?m)^  plan:\s*$').Count) 1 `
+    'The consolidated workflow has exactly one authoritative plan job'
+
+$deterministicStart = $workflowText.IndexOf("  deterministic:", [StringComparison]::Ordinal)
+$crossStackStart = $workflowText.IndexOf("  cross-stack-contract:", [StringComparison]::Ordinal)
+Assert-True ($deterministicStart -ge 0 -and $crossStackStart -gt $deterministicStart) `
+    'The consolidated workflow contains deterministic and cross-stack fan-out jobs'
+$deterministicBlock = $workflowText.Substring($deterministicStart, $crossStackStart - $deterministicStart)
+$crossStackBlock = $workflowText.Substring($crossStackStart)
+$testsRun++
+Assert-True (-not $deterministicBlock.Contains('planner-tests', [StringComparison]::Ordinal)) `
+    'Planner tests are not rerun in deterministic validation'
+$testsRun++
+Assert-True ($crossStackBlock.Contains("needs: plan", [StringComparison]::Ordinal) -and
+    $crossStackBlock.Contains("if: needs.plan.outputs.run_cross_stack == 'true'", [StringComparison]::Ordinal)) `
+    'Cross-stack validation is conditional on the authoritative plan'
+$testsRun++
+Assert-True (-not $crossStackBlock.Contains('RimLiaison.Tests', [StringComparison]::Ordinal) -and
+    -not $crossStackBlock.Contains('RimContext.Tests', [StringComparison]::Ordinal) -and
+    -not $crossStackBlock.Contains('RimError.Core.Tests', [StringComparison]::Ordinal)) `
+    'Cross-stack validation does not rerun deterministic suites'
+
+$binaryCacheMatch = [regex]::Match(
+    $workflowText,
+    '(?ms)- name: Cache exact pinned DevBridge2 binaries\r?\n(?<block>.*?)(?=\r?\n      - name:|\z)')
+Assert-True $binaryCacheMatch.Success 'Exact DevBridge2 binary cache step is present'
+$binaryCacheBlock = $binaryCacheMatch.Groups['block'].Value
+$testsRun++
+Assert-True ($binaryCacheBlock.Contains('steps.devbridge-binary-key.outputs.cache_key', [StringComparison]::Ordinal)) `
+    'Binary cache uses the derived exact identity'
+$testsRun++
+Assert-True ($binaryCacheBlock.Contains('Coordinator/bin/Release/net8.0', [StringComparison]::Ordinal) -and
+    $binaryCacheBlock.Contains('FakeRimWorld/bin/Release/net8.0', [StringComparison]::Ordinal)) `
+    'Binary cache covers both immutable DevBridge2 fixture outputs'
+$testsRun++
+Assert-True (-not $binaryCacheBlock.Contains('restore-keys:', [StringComparison]::Ordinal)) `
+    'Binary cache has no loose restore key'
+$testsRun++
+Assert-True ($workflowText.Contains('DevBridgeBinaryCacheHit = $true', [StringComparison]::Ordinal)) `
+    'Cross-stack execution receives the exact binary-cache hit parameter'
+
+$global:LASTEXITCODE = 0
 Write-Output ('CI planner tests passed: {0}' -f $testsRun)
+exit 0

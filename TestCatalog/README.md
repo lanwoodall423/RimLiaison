@@ -71,13 +71,17 @@ the safe per-recipe path. Supported modes are `pureRead`, `sameGenerationSafe`,
 `fixtureResettable`, `freshGameRequired`, and `freshGenerationRequired`. Reusable modes require a
 non-empty `reuseKey`; `fixtureResettable` additionally requires a deterministic `resetRecipe`.
 
-Only contiguous compatible catalog tests are grouped. Execution remains sequential inside one
-DevBridge-owned generation and lease. A failed/timeout/uncertain recipe, lost readiness, ownership
-or generation mismatch, failed reset, or failed lease release invalidates reuse; RimLiaison then asks
-DevBridge2 for a fresh safe state. It never launches or stops RimWorld itself. Suite JSON exposes a
-bounded `reuse` summary with selected count, groups, generations, reset/relaunch counts, and the
-first invalidation reason. A reuse invalidation makes an otherwise passing batch infrastructure,
-except when a child already reports the underlying test failure.
+The compatibility-aware planner makes each proven reusable group contiguous within a segment bounded
+by fresh-generation, unknown/unavailable-profile, invalid-isolation, or other uncertain tests. Groups
+are ordered by first selected test and retain deterministic order inside the group; incompatible
+reuse keys, modes, reset recipes, projects, and inputs never share. Execution remains sequential
+inside one DevBridge-owned generation and lease. A failed/timeout/uncertain recipe, lost readiness,
+ownership or generation mismatch, failed reset, or failed lease release invalidates reuse; RimLiaison
+then asks DevBridge2 for a fresh safe state. It never launches or stops RimWorld itself. Suite JSON
+exposes a bounded `reuse` summary with selected count, groups, generations, reset/relaunch counts,
+verified generation/relaunch transitions avoided, and the first invalidation reason. A reuse
+invalidation makes an otherwise passing batch infrastructure, except when a child already reports
+the underlying test failure.
 
 `rimliaison doctor --json` uses the versioned `rimtest-doctor/v1` envelope. Its `nextAction` values are
 canonical RimLiaison onboarding/validation commands, or owner commands only when RimLiaison cannot
@@ -212,5 +216,14 @@ DevBridge cancellation retains its existing conservative stop semantics. There i
 distributed execution. DevBridge2 remains authoritative for lifecycle, readiness, leases, profiles,
 recovery, and generation boundaries; RimLiaison only plans from explicit catalog permissions and
 validates owner responses.
+
+In fail-fast mode, the reuse planner's deterministic compatible groups remain the hard execution
+boundaries. RimLiaison may use a bounded, versioned local efficiency history to order tests within
+one already-proven reusable group, favoring inexpensive tests with recent failure/retry evidence.
+Missing, stale, malformed, incompatible, or insufficient history returns to the planner's ordinary
+order; history never changes selected membership, creates a reuse group, crosses a fresh-generation
+boundary, or suppresses a test. Non-fail-fast runs do not use historical ordering. The optional
+`failFast.historicalOrdering` result object reports whether the hint was applied and a compact reason,
+without exposing profile contents.
 
 Suite output uses `rimtest-suite-result/v1` and summarizes successful children numerically. An empty execution is `status: "conservative"` with `RIMTEST_EMPTY_EXECUTION`, never a normal pass. Failure output contains only failure-scaled references: test id, optional diagnostic id, failure fingerprint, evidence id, and error code. Optional `skipped`, `cancelled`, and conservative `selectionStatus` fields explain fallback or cancellation without embedding child DevBridge responses, logs, operations, or evidence. A requested fail-fast run may also include a bounded `failFast` object with `firstFailure`, `notLaunched`, and `validationCompleted`; it contains no child transcript. A known-safe affected run omits redundant `selectionStatus: "ok"`; an affected fallback run retains `selectionStatus: "conservative"` and `fallbackSuite` even when all fallback tests pass.
