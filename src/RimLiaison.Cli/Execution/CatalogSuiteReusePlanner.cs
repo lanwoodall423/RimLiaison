@@ -23,6 +23,8 @@ public sealed record CatalogSuiteReusePlan(
     string? FallbackReason = null)
 {
     public bool HasReusableGroups => Groups.Count > 0;
+
+    public IReadOnlyList<string> ExecutionOrder { get; init; } = [];
 }
 
 public static class CatalogSuiteReusePlanner
@@ -42,72 +44,165 @@ public static class CatalogSuiteReusePlanner
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(orderedTestIds);
 
+        string[] selectedTestIds = orderedTestIds
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static id => id, StringComparer.Ordinal)
+            .ToArray();
         var groups = new List<CatalogSuiteReuseGroup>();
-        CatalogSuiteReuseGroupBuilder? current = null;
+        var executionOrder = new List<string>(selectedTestIds.Length);
+        var candidateSegment = new List<ReusableCandidate>();
+        var profilesByCompatibility = new Dictionary<ReuseCompatibilityBase, string>();
         string? fallbackReason = null;
-        foreach (string testId in orderedTestIds)
+        foreach (string testId in selectedTestIds)
         {
             CatalogTest? test = CatalogNavigator.FindTest(catalog, testId);
             if (test is null)
             {
-                Flush(current, groups);
-                current = null;
+                FlushSegment(candidateSegment, executionOrder, groups);
+                executionOrder.Add(testId);
                 continue;
             }
 
             CatalogRecipeIsolation isolation = CatalogRecipeIsolationPolicy.Resolve(test);
             string? reuseKey = CatalogRecipeIsolationPolicy.ShareKey(isolation);
-            CatalogSuiteRecipeProfile? profile = recipeProfiles is not null &&
-                recipeProfiles.TryGetValue(test.Recipe, out CatalogSuiteRecipeProfile? knownProfile)
-                ? knownProfile
-                : null;
-            if (reuseKey is null || !CatalogRecipeIsolationPolicy.CanShareGeneration(isolation))
+            bool hasReusableIsolation = reuseKey is not null &&
+                CatalogRecipeIsolationPolicy.CanShareGeneration(isolation) &&
+                CatalogRecipeIsolationPolicy.CanJoin(isolation, isolation);
+            if (!hasReusableIsolation)
             {
-                Flush(current, groups);
-                current = null;
+                FlushSegment(candidateSegment, executionOrder, groups);
+                executionOrder.Add(testId);
                 continue;
             }
 
-            bool canJoin = current is not null &&
-                CatalogRecipeIsolationPolicy.CanJoin(current.Isolation, isolation) &&
-                (recipeProfiles is null ||
-                    current.ProfileSignature is not null &&
-                    profile?.Signature is not null &&
-                    string.Equals(current.ProfileSignature, profile.Signature,
-                        StringComparison.Ordinal));
-            if (!canJoin)
+            var compatibilityBase = new ReuseCompatibilityBase(
+                reuseKey!,
+                isolation.Mode,
+                isolation.ResetRecipe);
+            if (recipeProfiles is null ||
+                !recipeProfiles.TryGetValue(test.Recipe, out CatalogSuiteRecipeProfile? profile) ||
+                profile is null ||
+                string.IsNullOrWhiteSpace(profile.Signature))
             {
-                if (current is not null &&
-                    string.Equals(current.ReuseKey, reuseKey, StringComparison.Ordinal) &&
-                    CatalogRecipeIsolationPolicy.CanJoin(current.Isolation, isolation) &&
-                    recipeProfiles is not null)
-                {
-                    fallbackReason ??= current.ProfileSignature is null || profile is null
-                        ? "RIMTEST_REUSE_PROFILE_UNAVAILABLE"
-                        : "RIMTEST_REUSE_PROFILE_INCOMPATIBLE";
-                }
-                Flush(current, groups);
-                current = new CatalogSuiteReuseGroupBuilder(
-                    test.Id,
-                    isolation,
-                    reuseKey,
-                    profile?.Signature);
+                fallbackReason ??= "RIMTEST_REUSE_PROFILE_UNAVAILABLE";
+                FlushSegment(candidateSegment, executionOrder, groups);
+                executionOrder.Add(testId);
+                continue;
+            }
+
+            if (profilesByCompatibility.TryGetValue(
+                    compatibilityBase,
+                    out string? knownSignature) &&
+                !string.Equals(knownSignature, profile.Signature,
+                    StringComparison.Ordinal))
+            {
+                fallbackReason ??= "RIMTEST_REUSE_PROFILE_INCOMPATIBLE";
             }
             else
             {
-                current!.TestIds.Add(test.Id);
+                profilesByCompatibility[compatibilityBase] = profile.Signature;
+            }
+
+            candidateSegment.Add(new ReusableCandidate(
+                test.Id,
+                isolation,
+                reuseKey!,
+                profile.Signature));
+        }
+
+        FlushSegment(candidateSegment, executionOrder, groups);
+        return new CatalogSuiteReusePlan(
+            selectedTestIds.Length,
+            groups.ToArray(),
+            fallbackReason)
+        {
+            ExecutionOrder = executionOrder.ToArray()
+        };
+    }
+
+    private static void FlushSegment(
+        ICollection<ReusableCandidate> segment,
+        ICollection<string> executionOrder,
+        ICollection<CatalogSuiteReuseGroup> groups)
+    {
+        if (segment.Count == 0)
+        {
+            return;
+        }
+
+        var buckets = new Dictionary<ReuseCompatibilityKey, CandidateBucket>();
+        int index = 0;
+        foreach (ReusableCandidate candidate in segment)
+        {
+            var key = new ReuseCompatibilityKey(
+                candidate.ReuseKey,
+                candidate.Isolation.Mode,
+                candidate.Isolation.ResetRecipe,
+                candidate.ProfileSignature);
+            if (!buckets.TryGetValue(key, out CandidateBucket? bucket))
+            {
+                bucket = new CandidateBucket(index, candidate);
+                buckets.Add(key, bucket);
+            }
+            else
+            {
+                bucket.Candidates.Add(candidate);
+            }
+
+            index++;
+        }
+
+        foreach (CandidateBucket bucket in buckets.Values.OrderBy(
+                     static bucket => bucket.FirstIndex))
+        {
+            foreach (ReusableCandidate candidate in bucket.Candidates)
+            {
+                executionOrder.Add(candidate.TestId);
+            }
+            if (bucket.Candidates.Count > 1)
+            {
+                ReusableCandidate first = bucket.Candidates[0];
+                groups.Add(new CatalogSuiteReuseGroup(
+                    first.ReuseKey,
+                    first.Isolation.Mode,
+                    bucket.Candidates.Select(static candidate => candidate.TestId).ToArray(),
+                    first.Isolation.ResetRecipe,
+                    first.ProfileSignature));
             }
         }
 
-        Flush(current, groups);
-        return new CatalogSuiteReusePlan(
-            orderedTestIds.Count,
-            groups
-                .Where(static group => group.TestIds.Count > 1)
-                .Select(static group => group)
-                .ToArray(),
-            fallbackReason);
+        segment.Clear();
     }
+
+    private sealed record ReusableCandidate(
+        string TestId,
+        CatalogRecipeIsolation Isolation,
+        string ReuseKey,
+        string ProfileSignature);
+
+    private sealed class CandidateBucket
+    {
+        internal CandidateBucket(int firstIndex, ReusableCandidate first)
+        {
+            FirstIndex = firstIndex;
+            Candidates = [first];
+        }
+
+        internal int FirstIndex { get; }
+        internal List<ReusableCandidate> Candidates { get; }
+    }
+
+    private readonly record struct ReuseCompatibilityBase(
+        string ReuseKey,
+        CatalogRecipeIsolationMode Mode,
+        string? ResetRecipe);
+
+    private readonly record struct ReuseCompatibilityKey(
+        string ReuseKey,
+        CatalogRecipeIsolationMode Mode,
+        string? ResetRecipe,
+        string ProfileSignature);
 
     public static bool TryCreateRecipeProfile(
         JsonElement definition,
@@ -128,43 +223,6 @@ public static class CatalogSuiteReusePlanner
             SHA256.HashData(Encoding.UTF8.GetBytes(material)));
         profile = new CatalogSuiteRecipeProfile(signature, projects, inputs);
         return true;
-    }
-
-    private static void Flush(
-        CatalogSuiteReuseGroupBuilder? group,
-        ICollection<CatalogSuiteReuseGroup> groups)
-    {
-        if (group is not null)
-        {
-            groups.Add(group.ToRecord());
-        }
-    }
-
-    private sealed class CatalogSuiteReuseGroupBuilder
-    {
-        internal CatalogSuiteReuseGroupBuilder(
-            string testId,
-            CatalogRecipeIsolation isolation,
-            string reuseKey,
-            string? profileSignature)
-        {
-            Isolation = isolation;
-            ReuseKey = reuseKey;
-            ProfileSignature = profileSignature;
-            TestIds = [testId];
-        }
-
-        internal CatalogRecipeIsolation Isolation { get; }
-        internal string ReuseKey { get; }
-        internal string? ProfileSignature { get; }
-        internal List<string> TestIds { get; }
-
-        internal CatalogSuiteReuseGroup ToRecord() => new(
-            ReuseKey,
-            Isolation.Mode,
-            TestIds.ToArray(),
-            Isolation.ResetRecipe,
-            ProfileSignature);
     }
 
     private static bool TryGetStringArray(

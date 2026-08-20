@@ -647,4 +647,8 @@ if (-not [string]::IsNullOrWhiteSpace($GitHubOutputPath)) {
     [IO.File]::AppendAllText($GitHubOutputPath, $outputText, [Text.UTF8Encoding]::new($false))
 }
 
+# Git failures used while resolving unavailable revisions are handled
+# conservatively above.  Do not let those expected probes become the exit
+# status of a successful planner invocation in a PowerShell caller.
+$global:LASTEXITCODE = 0
 Write-Output $planJson

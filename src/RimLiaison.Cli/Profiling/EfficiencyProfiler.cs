@@ -18,6 +18,7 @@ public sealed class EfficiencyProfiler : IDisposable
 {
     public const string ActivitySourceName = "RimLiaison.Efficiency";
     public const string SchemaVersion = "rimliaison-efficiency-profile/v1";
+    public const string HistoricalOrderingSchemaVersion = "rimliaison-fail-fast-ordering/v1";
     public const int MaximumProfileBytes = 16 * 1024;
     public const int MaximumRetainedProfiles = 20;
     public const int MaximumRetentionBytes = 256 * 1024;
@@ -34,6 +35,7 @@ public sealed class EfficiencyProfiler : IDisposable
     private readonly string profileDirectory;
     private readonly string runId;
     private string command = "unknown";
+    private string? orderingContext;
     private string outcome = "unknown";
     private int exitCode = -1;
     private int completed;
@@ -150,6 +152,28 @@ public sealed class EfficiencyProfiler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Associates this bounded profile with the selected catalog/reuse shape
+    /// used by fail-fast historical ordering. Only the fixed-size context hash
+    /// is persisted; catalog contents and execution details are never copied.
+    /// </summary>
+    public void SetOrderingContext(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            value.Length != 66 ||
+            !value.StartsWith("h-", StringComparison.Ordinal) ||
+            !value.Skip(2).All(static character =>
+                character is >= '0' and <= '9' or
+                    >= 'a' and <= 'f' or
+                    >= 'A' and <= 'F'))
+        {
+            orderingContext = null;
+            return;
+        }
+
+        orderingContext = value;
+    }
+
     public void Complete(int commandExitCode, bool wasCancelled = false)
     {
         if (Interlocked.Exchange(ref completed, 1) != 0)
@@ -247,16 +271,11 @@ public sealed class EfficiencyProfiler : IDisposable
 
     private byte[] Serialize(EfficiencyProfileSnapshot snapshot, int evidenceLimit)
     {
+        Dictionary<string, object?> identity = CreateIdentity();
         var profile = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["schema"] = SchemaVersion,
-            ["identity"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["runId"] = runId,
-                ["command"] = command,
-                ["startedUtc"] = startedUtc.ToString("O", CultureInfo.InvariantCulture),
-                ["processId"] = Environment.ProcessId
-            },
+            ["identity"] = identity,
             ["coverage"] = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["boundary"] = "RimLiaison process only",
@@ -458,12 +477,7 @@ public sealed class EfficiencyProfiler : IDisposable
         JsonSerializer.Serialize(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["schema"] = SchemaVersion,
-            ["identity"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["runId"] = runId,
-                ["command"] = command,
-                ["startedUtc"] = startedUtc.ToString("O", CultureInfo.InvariantCulture)
-            },
+            ["identity"] = CreateIdentity(includeProcessId: false),
             ["coverage"] = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["boundary"] = "RimLiaison process only"
@@ -480,6 +494,28 @@ public sealed class EfficiencyProfiler : IDisposable
                 ["reason"] = reason
             }
         });
+
+    private Dictionary<string, object?> CreateIdentity(bool includeProcessId = true)
+    {
+        var identity = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["runId"] = runId,
+            ["command"] = command,
+            ["startedUtc"] = startedUtc.ToString("O", CultureInfo.InvariantCulture)
+        };
+        if (includeProcessId)
+        {
+            identity["processId"] = Environment.ProcessId;
+        }
+
+        if (orderingContext is not null)
+        {
+            identity["orderingSchema"] = HistoricalOrderingSchemaVersion;
+            identity["orderingContext"] = orderingContext;
+        }
+
+        return identity;
+    }
 
     private long ElapsedMilliseconds() =>
         Math.Max(0, (long)Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds);

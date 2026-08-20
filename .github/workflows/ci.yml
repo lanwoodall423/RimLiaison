@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,6 +30,7 @@ jobs:
       run_rimliaison: ${{ steps.plan.outputs.run_rimliaison }}
       run_format: ${{ steps.plan.outputs.run_format }}
       run_cross_stack: ${{ steps.plan.outputs.run_cross_stack }}
+      run_diff_check: ${{ steps.plan.outputs.run_diff_check }}
     steps:
       - name: Check out workflow revision
         uses: actions/checkout@v4
@@ -44,12 +46,13 @@ jobs:
           CI_HEAD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          & .\scripts\ci-plan.ps1 `
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-plan.ps1 `
               -EventName $env:CI_EVENT_NAME `
               -BaseRevision $env:CI_BASE_REVISION `
               -HeadRevision $env:CI_HEAD_REVISION `
               -GitHubOutputPath $env:GITHUB_OUTPUT `
               -Json
+          if ($LASTEXITCODE -ne 0) { throw 'CI planner failed.' }
 
       - name: Check committed diff whitespace
         shell: pwsh
@@ -94,16 +97,20 @@ jobs:
 
       - name: Test CI planner
         shell: pwsh
-        run: .\scripts\ci-plan.tests.ps1
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-plan.tests.ps1
 
       - name: Test validation proof storage and invalidation
         shell: pwsh
-        run: .\scripts\validation-proofs.tests.ps1
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation-proofs.tests.ps1
+
+      - name: Test exact DevBridge2 binary cache identity
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\devbridge-binary-cache.tests.ps1
 
   deterministic:
     name: Selected deterministic validation
     needs: plan
-    if: needs.plan.outputs.run_rimcontext == 'true' || needs.plan.outputs.run_rimerror == 'true' || needs.plan.outputs.run_rimliaison == 'true'
+    if: needs.plan.outputs.run_rimcontext == 'true' || needs.plan.outputs.run_rimerror == 'true' || needs.plan.outputs.run_rimliaison == 'true' || needs.plan.outputs.run_format == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,9 +150,128 @@ jobs:
           if ($env:RUN_RIMLIAISON -eq 'true') { [void]$stages.Add('rimliaison') }
           if ($env:RUN_FORMAT -eq 'true') { [void]$stages.Add('format') }
           [void]$stages.Add('diff-check')
-          [void]$stages.Add('planner-tests')
           & .\scripts\ci-validate.ps1 `
               -StageId $stages.ToArray() `
               -RepositoryRoot $env:GITHUB_WORKSPACE `
               -Json
           if ($LASTEXITCODE -ne 0) { throw 'Selected deterministic validation failed.' }
+
+  cross-stack-contract:
+    name: No-RimWorld composition gate
+    needs: plan
+    if: needs.plan.outputs.run_cross_stack == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out RimLiaison at the workflow revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read external DevBridge2 compatibility pin
+        id: pins
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content .\contracts\cross-stack-compatibility.json -Raw | ConvertFrom-Json -Depth 20
+          if ([string]$manifest.schemaVersion -ne 'rimtest-cross-stack-compatibility/v1') {
+              throw 'Cross-stack compatibility manifest schema is unsupported.'
+          }
+          $revision = [string]$manifest.repositories.devBridge2.revision
+          if ($revision -notmatch '^[0-9a-fA-F]{40}$') {
+              throw 'DevBridge2 compatibility pin is not a full commit SHA.'
+          }
+          "devBridge2=$revision" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Check out pinned DevBridge2
+        uses: actions/checkout@v4
+        with:
+          repository: lanwoodall423/DevBridge2
+          ref: ${{ steps.pins.outputs.devBridge2 }}
+          path: DevBridge2
+          fetch-depth: 1
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Derive exact DevBridge2 binary cache key
+        id: devbridge-binary-key
+        shell: pwsh
+        env:
+          DEVBRIDGE_PIN: ${{ steps.pins.outputs.devBridge2 }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\devbridge-binary-cache.ps1 `
+              -DevBridgeRoot (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2') `
+              -PinnedRevision $env:DEVBRIDGE_PIN `
+              -RunnerOs $env:RUNNER_OS_NAME `
+              -RunnerArch $env:RUNNER_ARCH_NAME `
+              -DotnetSdk '8.0.424' `
+              -Configuration 'Release' `
+              -TargetFramework 'net8.0' `
+              -GitHubOutputPath $env:GITHUB_OUTPUT `
+              -Json
+          if ($LASTEXITCODE -ne 0) { throw 'DevBridge2 binary cache identity derivation failed.' }
+
+      - name: Cache exact pinned DevBridge2 binaries
+        id: devbridge-binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            DevBridge2/Source/Coordinator/bin/Release/net8.0
+            DevBridge2/Source/Coordinator/obj
+            DevBridge2/Source/Coordinator.Core/bin/Release/net8.0
+            DevBridge2/Source/Coordinator.Core/obj
+            DevBridge2/Source/FakeRimWorld/bin/Release/net8.0
+            DevBridge2/Source/FakeRimWorld/obj
+          key: ${{ steps.devbridge-binary-key.outputs.cache_key }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: cross-stack-nuget-${{ runner.os }}-${{ hashFiles('RimLiaison.sln', '**/*.csproj', '**/global.json', '**/Directory.Build.*', '**/Directory.Packages.*', '**/NuGet.config', '**/nuget.config', '**/packages.lock.json') }}
+          restore-keys: |
+            cross-stack-nuget-${{ runner.os }}-
+
+      - name: Restore bounded validation proofs
+        uses: actions/cache@v4
+        with:
+          path: .rimdev/validation-proofs
+          key: rimliaison-validation-proofs-${{ runner.os }}-${{ github.repository }}
+          restore-keys: |
+            rimliaison-validation-proofs-${{ runner.os }}-${{ github.repository }}
+
+      - name: Run merged no-RimWorld cross-stack validation with proof reuse
+        shell: pwsh
+        env:
+          DEVBRIDGE_BINARY_CACHE_HIT: ${{ steps.devbridge-binaries.outputs.cache-hit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportPath = Join-Path $env:GITHUB_WORKSPACE 'cross-stack-contract.json'
+          $arguments = @(
+              '-Stage', 'cross-stack',
+              '-RepositoryRoot', $env:GITHUB_WORKSPACE,
+              '-DevBridgeRoot', (Join-Path $env:GITHUB_WORKSPACE 'DevBridge2'),
+              '-StageReportPath', $reportPath,
+              '-Json')
+          if ($env:DEVBRIDGE_BINARY_CACHE_HIT -eq 'true') {
+              $arguments += '-DevBridgeBinaryCacheHit'
+          }
+          $output = & .\scripts\ci-validate.ps1 @arguments
+          $exitCode = $LASTEXITCODE
+          $output | Write-Output
+          if ($exitCode -ne 0) { throw "Cross-stack contract gate failed with exit code $exitCode." }
+
+      - name: Upload bounded cross-stack report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-stack-contract-report
+          path: ${{ github.workspace }}/cross-stack-contract.json
+          if-no-files-found: warn

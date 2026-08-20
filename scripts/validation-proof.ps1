@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:ValidationProofSchemaVersion = 'rimliaison-validation-proof/v1'
-$script:ValidationProofValidatorVersion = 'rimliaison-validation-proof-1'
+$script:ValidationProofValidatorVersion = 'rimliaison-validation-proof-2'
 $script:ValidationProofMaxRecordBytes = 64KB
 $script:ValidationProofDefaultMaxRecords = 64
 $script:ValidationProofDefaultMaxBytes = 1MB
@@ -71,7 +71,13 @@ function Get-ValidationProofStageDefinition {
                 Toolchain = 'dotnet'
                 SourceRoots = @('src', 'tests/fixtures/cross-stack', 'contracts')
                 ExtraRoots = @()
-                RequiredFiles = @('scripts/cross-stack-contract.tests.ps1', 'scripts/cross-stack-fake-devbridge.ps1', 'scripts/cross-stack-fake-mod-development.ps1')
+                RequiredFiles = @(
+                    'scripts/cross-stack-contract.tests.ps1',
+                    'scripts/cross-stack-fake-devbridge.ps1',
+                    'scripts/cross-stack-fake-mod-development.ps1',
+                    'scripts/ci-validate.ps1',
+                    'scripts/devbridge-binary-cache.ps1',
+                    '.github/workflows/ci.yml')
                 RequiresDevBridge = $true
             }
         }
@@ -82,7 +88,12 @@ function Get-ValidationProofStageDefinition {
                 Toolchain = 'powershell'
                 SourceRoots = @()
                 ExtraRoots = @()
-                RequiredFiles = @('scripts/ci-plan.ps1', 'scripts/ci-plan.tests.ps1')
+                RequiredFiles = @(
+                    'scripts/ci-plan.ps1',
+                    'scripts/ci-plan.tests.ps1',
+                    'scripts/devbridge-binary-cache.ps1',
+                    'scripts/devbridge-binary-cache.tests.ps1',
+                    '.github/workflows/ci.yml')
             }
         }
         'diff-check' {

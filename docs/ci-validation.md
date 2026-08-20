@@ -1,8 +1,10 @@
 # Change-aware repository validation
 
-GitHub Actions uses `scripts/ci-plan.ps1` as the single validation selector. It compares the
+GitHub Actions uses one workflow (`.github/workflows/ci.yml`) and one authoritative planning job.
+That job runs the planner/proof/cache infrastructure checks once, then fans out to selected
+deterministic validation and a conditional composition gate. `scripts/ci-plan.ps1` compares the
 workflow base and head revisions, emits the bounded `rimliaison-ci-plan/v1` JSON document, and
-executes only the selected deterministic suites and composition gate. The planner is conservative:
+controls both downstream jobs. The planner is conservative:
 unknown paths, project or SDK configuration, wrappers, renames, deletions, and unparseable Git
 status all select the complete internal validation and the cross-stack gate.
 
@@ -41,6 +43,23 @@ The normal selection matrix is:
 | Cross-stack contract, adapter, freshness, or harness | composition gate | unrelated deterministic suites |
 | Unknown, renamed, deleted, or shared configuration | complete deterministic validation and composition | none |
 
-The cross-stack workflow is a composition gate. It builds the pinned DevBridge2 host and the three
-required command-line tools, then runs `scripts/cross-stack-contract.tests.ps1`; it does not rerun
-the complete RimContext, RimError, or RimLiaison deterministic suites solely because they exist.
+The cross-stack job is a composition gate. It builds the pinned DevBridge2 host when its exact
+binary cache misses, builds the three required command-line tools, then runs
+`scripts/cross-stack-contract.tests.ps1`; it does not rerun the complete RimContext, RimError, or
+RimLiaison deterministic suites solely because they exist. The former standalone cross-stack
+workflow is intentionally gone, so planner and proof infrastructure setup cannot drift between
+the two gates.
+
+CI has three separate cache/proof layers:
+
+- The NuGet cache may use a broad OS-scoped restore key because packages are inputs to a later
+  restore/build and are independently validated.
+- The DevBridge2 binary cache is exact-only. `scripts/devbridge-binary-cache.ps1` derives a key
+  from the pinned commit, runner OS/architecture, .NET SDK, Release/net8.0 configuration, and
+  all relevant source/project/build-import/package-lock inputs. It caches only immutable `bin`/
+  `obj` outputs for Coordinator, Coordinator.Core, and FakeRimWorld; it has no restore key. An
+  exact hit skips only the proven-identical external restore/build, and the cross-stack contract
+  still executes.
+- Validation proof reuse means a complete deterministic or cross-stack validation closure already
+  passed with the same fingerprint. It is independent of binary artifact reuse and may skip the
+  entire stage only when the proof contract permits it.

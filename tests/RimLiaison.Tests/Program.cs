@@ -89,6 +89,20 @@ internal static class Program
         ("suite multiple failures are deterministic", SuiteMultipleFailuresAreDeterministic),
         ("suite fail-fast stops after first failure", SuiteFailFastStopsAfterFirstFailure),
         ("suite fail-fast pass is complete", SuiteFailFastPassExecutesEverySelectedTest),
+        ("fail-fast ordering surfaces cheap historical failures", FailFastOrderingTests.HistoricallyFailureProneCheapTestsMoveEarlier),
+        ("fail-fast ordering moves expensive stable tests later", FailFastOrderingTests.ExpensiveStableTestsMoveLater),
+        ("fail-fast ordering falls back without history", FailFastOrderingTests.NoHistoryFallsBackDeterministically),
+        ("fail-fast ordering ignores corrupt stale and incompatible history", FailFastOrderingTests.CorruptStaleAndIncompatibleHistoryIsIgnored),
+        ("fail-fast ordering falls back with insufficient history", FailFastOrderingTests.InsufficientHistoryFallsBackDeterministically),
+        ("fail-fast ordering ignores partial group history", FailFastOrderingTests.PartialHistoryDoesNotPreferOneGroupMember),
+        ("fail-fast ordering preserves selected membership", FailFastOrderingTests.SelectedTestMembershipNeverChanges),
+        ("generation reuse safety dominates fail-fast ordering", FailFastOrderingTests.GenerationReuseSafetyDominatesHeuristicOrdering),
+        ("fail-fast ordering keeps reuse groups contiguous", FailFastOrderingTests.HistoricalOrderingKeepsMultipleReuseGroupsContiguous),
+        ("fail-fast ordering is deterministic for identical history", FailFastOrderingTests.IdenticalHistoryProducesIdenticalOrdering),
+        ("synthetic history reduces expected first failure time", FailFastOrderingTests.SyntheticHistoryReducesExpectedFailureTimeWithoutNewTransitions),
+        ("non-fail-fast execution remains complete", FailFastOrderingTests.NonFailFastExecutionRemainsComplete),
+        ("fail-fast ordering result metadata is bounded", FailFastOrderingTests.ResultMetadataExplainsHistoricalOrderingBoundedly),
+        ("fail-fast ordering context is versioned and bounded", FailFastOrderingTests.HistoricalOrderingContextIsVersionedAndBounded),
         ("suite cancellation stops new children", SuiteCancellationStopsNewChildren),
         ("suite duplicate tests execute once", SuiteDuplicateTestsExecuteOnce),
         ("suite plan refusal blocks execution", SuitePlanRefusalBlocksExecution),
@@ -97,6 +111,10 @@ internal static class Program
         ("unsafe recipes never share state", UnsafeRecipesNeverShareState),
         ("mutation recipes never share state", MutationRecipesNeverShareState),
         ("incompatible reuse profiles fall back safely", IncompatibleReuseProfilesFallBackSafely),
+        ("reuse planner groups compatible tests deterministically", ReusePlannerGroupsCompatibleTestsDeterministically),
+        ("reuse planner preserves hard boundaries", ReusePlannerPreservesHardBoundaries),
+        ("grouped suite execution avoids lifecycle transitions", GroupedSuiteExecutionAvoidsLifecycleTransitions),
+        ("reuse cancellation cannot contaminate later tests", ReuseCancellationCannotContaminateLaterTests),
         ("DevBridge reuse refusal preserves its cause", DevBridgeReuseRefusalPreservesCause),
         ("compatible recipes reuse one generation", CompatibleRecipesReuseOneGeneration),
         ("fail-fast preserves compatible reuse", FailFastPreservesCompatibleReuse),
@@ -3007,6 +3025,237 @@ internal static class Program
         AssertEqual("RIMTEST_REUSE_PROFILE_INCOMPATIBLE", execution.Reuse.FallbackReason);
     }
 
+    private static void ReusePlannerGroupsCompatibleTestsDeterministically()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTestWithKey("a-shared-1", "recipe-a", "shared"),
+            ReusableTestWithKey("b-other-1", "recipe-b", "other"),
+            ReusableTestWithKey("c-shared-2", "recipe-c", "shared"),
+            ReusableTestWithKey("d-other-2", "recipe-d", "other"));
+        var profiles = new Dictionary<string, CatalogSuiteRecipeProfile?>(
+            StringComparer.Ordinal)
+        {
+            ["recipe-a"] = RecipeProfile("profile-shared"),
+            ["recipe-b"] = RecipeProfile("profile-other"),
+            ["recipe-c"] = RecipeProfile("profile-shared"),
+            ["recipe-d"] = RecipeProfile("profile-other")
+        };
+
+        CatalogSuiteReusePlan first = CatalogSuiteReusePlanner.Plan(
+            catalog,
+            ["d-other-2", "c-shared-2", "b-other-1", "a-shared-1"],
+            profiles);
+        CatalogSuiteReusePlan second = CatalogSuiteReusePlanner.Plan(
+            catalog,
+            ["a-shared-1", "b-other-1", "c-shared-2", "d-other-2"],
+            profiles);
+
+        string[] expectedOrder =
+            ["a-shared-1", "c-shared-2", "b-other-1", "d-other-2"];
+        AssertSequence(expectedOrder, first.ExecutionOrder.ToArray());
+        AssertSequence(expectedOrder, second.ExecutionOrder.ToArray());
+        AssertEqual(2, first.Groups.Count);
+        AssertSequence(["a-shared-1", "c-shared-2"], first.Groups[0].TestIds.ToArray());
+        AssertSequence(["b-other-1", "d-other-2"], first.Groups[1].TestIds.ToArray());
+        AssertEqual(first.Groups[0].ReuseKey, second.Groups[0].ReuseKey);
+        AssertEqual(first.Groups[0].Mode, second.Groups[0].Mode);
+        AssertEqual(first.Groups[0].ProfileSignature, second.Groups[0].ProfileSignature);
+        AssertEqual(first.Groups[1].ReuseKey, second.Groups[1].ReuseKey);
+        AssertEqual(first.Groups[1].Mode, second.Groups[1].Mode);
+        AssertEqual(first.Groups[1].ProfileSignature, second.Groups[1].ProfileSignature);
+        AssertSequence(first.Groups[0].TestIds.ToArray(), second.Groups[0].TestIds.ToArray());
+        AssertSequence(first.Groups[1].TestIds.ToArray(), second.Groups[1].TestIds.ToArray());
+        AssertEqual(null, first.FallbackReason);
+    }
+
+    private static void ReusePlannerPreservesHardBoundaries()
+    {
+        CatalogTest fresh = new()
+        {
+            Id = "b-fresh",
+            Recipe = "recipe-fresh",
+            Isolation = new CatalogRecipeIsolation
+            {
+                Mode = CatalogRecipeIsolationMode.FreshGenerationRequired
+            }
+        };
+        CatalogDocument freshCatalog = CreateIsolationCatalog(
+            ReusableTestWithKey("a-shared", "recipe-a", "shared"),
+            fresh,
+            ReusableTestWithKey("c-shared", "recipe-c", "shared"));
+        var compatibleProfiles = new Dictionary<string, CatalogSuiteRecipeProfile?>(
+            StringComparer.Ordinal)
+        {
+            ["recipe-a"] = RecipeProfile("same"),
+            ["recipe-c"] = RecipeProfile("same")
+        };
+        CatalogSuiteReusePlan freshPlan = CatalogSuiteReusePlanner.Plan(
+            freshCatalog,
+            ["a-shared", "b-fresh", "c-shared"],
+            compatibleProfiles);
+        AssertSequence(
+            ["a-shared", "b-fresh", "c-shared"],
+            freshPlan.ExecutionOrder.ToArray());
+        AssertEqual(0, freshPlan.Groups.Count);
+
+        CatalogDocument unavailableCatalog = CreateIsolationCatalog(
+            ReusableTestWithKey("a-unavailable", "recipe-a", "shared"),
+            ReusableTestWithKey("b-unavailable", "recipe-b", "shared"));
+        CatalogSuiteReusePlan unavailablePlan = CatalogSuiteReusePlanner.Plan(
+            unavailableCatalog,
+            ["a-unavailable", "b-unavailable"],
+            new Dictionary<string, CatalogSuiteRecipeProfile?>(StringComparer.Ordinal)
+            {
+                ["recipe-a"] = RecipeProfile("same")
+            });
+        AssertEqual(0, unavailablePlan.Groups.Count);
+        AssertEqual("RIMTEST_REUSE_PROFILE_UNAVAILABLE", unavailablePlan.FallbackReason);
+
+        CatalogSuiteReusePlan incompatiblePlan = CatalogSuiteReusePlanner.Plan(
+            unavailableCatalog,
+            ["a-unavailable", "b-unavailable"],
+            new Dictionary<string, CatalogSuiteRecipeProfile?>(StringComparer.Ordinal)
+            {
+                ["recipe-a"] = RecipeProfile("projects-a"),
+                ["recipe-b"] = RecipeProfile("projects-b")
+            });
+        AssertEqual(0, incompatiblePlan.Groups.Count);
+        AssertEqual("RIMTEST_REUSE_PROFILE_INCOMPATIBLE", incompatiblePlan.FallbackReason);
+
+        CatalogTest wrongMode = ReusableTestWithKey(
+            "b-mode", "recipe-b", "shared", CatalogRecipeIsolationMode.SameGenerationSafe);
+        CatalogDocument modeCatalog = CreateIsolationCatalog(
+            ReusableTestWithKey("a-mode", "recipe-a", "shared"),
+            wrongMode);
+        CatalogSuiteReusePlan modePlan = CatalogSuiteReusePlanner.Plan(
+            modeCatalog,
+            ["a-mode", "b-mode"],
+            new Dictionary<string, CatalogSuiteRecipeProfile?>(StringComparer.Ordinal)
+            {
+                ["recipe-a"] = RecipeProfile("same"),
+                ["recipe-b"] = RecipeProfile("same")
+            });
+        AssertEqual(0, modePlan.Groups.Count);
+
+        CatalogTest invalidResetA = new()
+        {
+            Id = "a-invalid-reset",
+            Recipe = "recipe-a",
+            Isolation = new CatalogRecipeIsolation
+            {
+                Mode = CatalogRecipeIsolationMode.FixtureResettable,
+                ReuseKey = "shared"
+            }
+        };
+        CatalogTest invalidResetB = new()
+        {
+            Id = "b-invalid-reset",
+            Recipe = "recipe-b",
+            Isolation = new CatalogRecipeIsolation
+            {
+                Mode = CatalogRecipeIsolationMode.FixtureResettable,
+                ReuseKey = "shared",
+                ResetRecipe = ""
+            }
+        };
+        CatalogSuiteReusePlan invalidResetPlan = CatalogSuiteReusePlanner.Plan(
+            CreateIsolationCatalog(invalidResetA, invalidResetB),
+            ["a-invalid-reset", "b-invalid-reset"],
+            new Dictionary<string, CatalogSuiteRecipeProfile?>(StringComparer.Ordinal)
+            {
+                ["recipe-a"] = RecipeProfile("same"),
+                ["recipe-b"] = RecipeProfile("same")
+            });
+        AssertEqual(0, invalidResetPlan.Groups.Count);
+    }
+
+    private static void GroupedSuiteExecutionAvoidsLifecycleTransitions()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTestWithKey("a-shared-1", "recipe-a", "shared"),
+            ReusableTestWithKey("b-other-1", "recipe-b", "other"),
+            ReusableTestWithKey("c-shared-2", "recipe-c", "shared"),
+            ReusableTestWithKey("d-other-2", "recipe-d", "other"));
+        var adapter = new FakeRecipeAdapter
+        {
+            RunFactory = static (recipe, workflow, context, index) =>
+                PassRunWithLease(
+                    recipe,
+                    context?.LeaseId == "lease-other" ? 8 : 7,
+                    context?.LeaseId,
+                    workflow,
+                    "run-grouped-" + index,
+                    "operation-grouped-" + index)
+        };
+        foreach (string recipe in new[] { "recipe-a", "recipe-b", "recipe-c", "recipe-d" })
+        {
+            adapter.Plans[recipe] = SatisfiedPlan(recipe);
+        }
+        var lease = new FakeLeaseAdapter();
+        lease.BeginResults.Enqueue(SuccessLease("lease-shared", 7));
+        lease.BeginResults.Enqueue(SuccessLease("lease-other", 8));
+        var fresh = new FakeFreshGenerationAdapter(8);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease,
+            freshGenerationAdapter: fresh);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "grouped",
+                ["d-other-2", "c-shared-2", "b-other-1", "a-shared-1"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
+        AssertSequence(
+            ["recipe-a", "recipe-c", "recipe-b", "recipe-d"],
+            adapter.RunCalls);
+        AssertEqual(2, lease.BeginCalls);
+        AssertEqual(1, fresh.Calls.Count);
+        AssertEqual(2, execution.Reuse!.GroupsPlanned);
+        AssertEqual(2, execution.Reuse.GroupsUsed);
+        AssertEqual(2, execution.Reuse.GenerationsAvoided);
+        AssertEqual(2, execution.Reuse.RelaunchesAvoided);
+        AssertEqual(1, execution.Reuse.Relaunches);
+    }
+
+    private static void ReuseCancellationCannotContaminateLaterTests()
+    {
+        CatalogDocument catalog = CreateIsolationCatalog(
+            ReusableTest("cancel-a", "recipe-a"),
+            ReusableTest("cancel-b", "recipe-b"));
+        var adapter = new FakeRecipeAdapter();
+        adapter.Runs["recipe-a"] = CancelledRun("recipe-a");
+        adapter.Runs["recipe-b"] = PassRunWithLease(
+            "recipe-b", 8, "lease-recovered", null,
+            "cancel-recovered", "cancel-recovered-operation");
+        adapter.Plans["recipe-a"] = SatisfiedPlan("recipe-a");
+        adapter.Plans["recipe-b"] = SatisfiedPlan("recipe-b");
+        var lease = new FakeLeaseAdapter
+        {
+            BeginResult = SuccessLease("lease-cancel", 7)
+        };
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter),
+            lease);
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                catalog,
+                "cancel-reuse",
+                ["cancel-a", "cancel-b"])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertSequence(["recipe-a"], adapter.RunCalls);
+        AssertEqual(1, lease.EndCalls);
+        AssertEqual("invalidated", execution.Reuse!.Status);
+        AssertEqual(0, execution.Reuse.GenerationsAvoided);
+        AssertEqual(0, execution.Reuse.RelaunchesAvoided);
+    }
+
     private static void DevBridgeReuseRefusalPreservesCause()
     {
         CatalogDocument catalog = CreateIsolationCatalog(
@@ -3124,6 +3373,8 @@ internal static class Program
         AssertEqual(1, reuse.GroupsUsed);
         AssertEqual(1, reuse.GenerationsUsed);
         AssertEqual(0, reuse.Relaunches);
+        AssertEqual(1, reuse.GenerationsAvoided);
+        AssertEqual(1, reuse.RelaunchesAvoided);
         AssertEqual("used", reuse.Status);
         AssertEqual(2, adapter.ExecutionContexts.Count);
         Assert(adapter.ExecutionContexts.All(
@@ -3182,6 +3433,8 @@ internal static class Program
         AssertEqual(1, reset.Calls.Count);
         AssertEqual("fixture-reset", reset.Calls[0].RecipeId);
         AssertEqual(1, execution.Reuse!.FixtureResets);
+        AssertEqual(1, execution.Reuse.GenerationsAvoided);
+        AssertEqual(1, execution.Reuse.RelaunchesAvoided);
         AssertEqual("used", execution.Reuse.Status);
         AssertEqual("pass", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
     }
@@ -3236,6 +3489,8 @@ internal static class Program
         AssertEqual("invalidated", execution.Reuse!.Status);
         AssertEqual("reset-fail-b", execution.Reuse.ReuseInvalidatedAfter);
         AssertEqual("RESET_NOT_VERIFIED", execution.Reuse.ReuseInvalidationReason);
+        AssertEqual(0, execution.Reuse.GenerationsAvoided);
+        AssertEqual(0, execution.Reuse.RelaunchesAvoided);
         AssertEqual("infrastructure", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
         AssertEqual("lease-reset-2", adapter.ExecutionContexts[1]!.LeaseId);
     }
@@ -3276,6 +3531,7 @@ internal static class Program
         AssertEqual("fail", result.Status);
         AssertEqual(1, fresh.Calls.Count);
         AssertEqual(2, lease.BeginCalls);
+        AssertEqual(0, execution.Reuse?.GenerationsAvoided ?? 0);
         AssertEqual("lease-failure-2", adapter.ExecutionContexts[1]!.LeaseId);
         AssertEqual("failure-run", adapter.RunResults[0].RunId);
     }
@@ -3315,6 +3571,8 @@ internal static class Program
         AssertEqual("invalidated", execution.Reuse!.Status);
         AssertEqual("RIMTEST_REUSE_LEASE_INVALID", execution.Reuse.ReuseInvalidationReason);
         AssertEqual(1, fresh.Calls.Count);
+        AssertEqual(0, execution.Reuse.GenerationsAvoided);
+        AssertEqual(0, execution.Reuse.RelaunchesAvoided);
         AssertEqual("infrastructure", RimTestSuiteResultFactory.FromExecution(execution, 10).Status);
     }
 
@@ -7022,16 +7280,28 @@ internal static class Program
                 []));
 
     private static CatalogTest ReusableTest(string id, string recipeId) =>
+        ReusableTestWithKey(id, recipeId, "fixture-ready");
+
+    private static CatalogTest ReusableTestWithKey(
+        string id,
+        string recipeId,
+        string reuseKey,
+        CatalogRecipeIsolationMode mode = CatalogRecipeIsolationMode.PureRead,
+        string? resetRecipe = null) =>
         new()
         {
             Id = id,
             Recipe = recipeId,
             Isolation = new CatalogRecipeIsolation
             {
-                Mode = CatalogRecipeIsolationMode.PureRead,
-                ReuseKey = "fixture-ready"
+                Mode = mode,
+                ReuseKey = reuseKey,
+                ResetRecipe = resetRecipe
             }
         };
+
+    private static CatalogSuiteRecipeProfile RecipeProfile(string signature) =>
+        new(signature, [], []);
 
     private static void SetRecipeProfile(
         FakeRecipeAdapter adapter,

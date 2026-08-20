@@ -11,7 +11,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-validate.ps1 `
 
 When the plan selects `cross-stack`, the executor uses a sibling `DevBridge2` checkout by default;
 pass `-DevBridgeRoot <path>` when it is elsewhere. A missing, dirty, or unpinned checkout is a
-normal validation blocker and never becomes a reusable proof.
+normal validation blocker and never becomes a reusable proof. The GitHub Actions workflow has a
+separate exact-only compiled-binary cache for that pinned checkout; a binary cache hit is not a
+validation proof and does not by itself skip the cross-stack contract.
 
 The normal run automatically looks for PASS-only records in the ignored
 `.rimdev/validation-proofs` directory. A result reports only bounded counters, for example

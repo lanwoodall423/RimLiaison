@@ -7,6 +7,7 @@ param(
     [string]$DevBridgeRoot,
     [string]$GitBaseRevision,
     [string]$GitHeadRevision,
+    [switch]$DevBridgeBinaryCacheHit,
     [switch]$NoProofReuse,
     [string]$StageReportPath,
     [switch]$Json
@@ -136,7 +137,8 @@ function Get-ValidationStageCommands {
         [Parameter(Mandatory = $true)][string]$StageId,
         [Parameter(Mandatory = $true)][string]$Root,
         [string]$ExternalRoot,
-        [switch]$RestoreAlreadyRun
+        [switch]$RestoreAlreadyRun,
+        [switch]$DevBridgeBinaryCacheHit
     )
 
     $rootDotnet = Join-Path $Root 'RimLiaison.sln'
@@ -183,14 +185,26 @@ function Get-ValidationStageCommands {
                 throw 'VALIDATION_DEVBRIDGE_ROOT_MISSING'
             }
             $devRoot = [IO.Path]::GetFullPath($ExternalRoot)
-            [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                        'restore', (Join-Path $devRoot 'Source/Coordinator/DevBridge.Coordinator.csproj'), '--locked-mode', '--nologo') $devRoot 600000))
-            [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                        'restore', (Join-Path $devRoot 'Source/FakeRimWorld/FakeRimWorld.csproj'), '--locked-mode', '--nologo') $devRoot 600000))
-            [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                        'build', (Join-Path $devRoot 'Source/Coordinator/DevBridge.Coordinator.csproj'), '--configuration', 'Release', '--no-restore', '--nologo') $devRoot 900000))
-            [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                        'build', (Join-Path $devRoot 'Source/FakeRimWorld/FakeRimWorld.csproj'), '--configuration', 'Release', '--no-restore', '--nologo') $devRoot 900000))
+            $requiredDevBridgeOutputs = @(
+                'Source/Coordinator/bin/Release/net8.0/DevBridge.Coordinator.exe',
+                'Source/FakeRimWorld/bin/Release/net8.0/DevBridge.FakeRimWorld.exe')
+            if ($DevBridgeBinaryCacheHit) {
+                foreach ($relativeOutput in $requiredDevBridgeOutputs) {
+                    $outputPath = Join-Path $devRoot ($relativeOutput.Replace('/', [IO.Path]::DirectorySeparatorChar))
+                    if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+                        throw "VALIDATION_DEVBRIDGE_BINARY_CACHE_OUTPUT_MISSING:$relativeOutput"
+                    }
+                }
+            } else {
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'restore', (Join-Path $devRoot 'Source/Coordinator/DevBridge.Coordinator.csproj'), '--locked-mode', '--nologo') $devRoot 600000))
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'restore', (Join-Path $devRoot 'Source/FakeRimWorld/FakeRimWorld.csproj'), '--locked-mode', '--nologo') $devRoot 600000))
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'build', (Join-Path $devRoot 'Source/Coordinator/DevBridge.Coordinator.csproj'), '--configuration', 'Release', '--no-restore', '--nologo') $devRoot 900000))
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'build', (Join-Path $devRoot 'Source/FakeRimWorld/FakeRimWorld.csproj'), '--configuration', 'Release', '--no-restore', '--nologo') $devRoot 900000))
+            }
             [void]$commands.Add((New-ValidationCommand 'dotnet' @('restore', $rootDotnet, '--nologo') $Root 600000))
             foreach ($project in @(
                     'src/RimContext.Cli/RimContext.Cli.csproj',
@@ -363,7 +377,8 @@ try {
                     -StageId $stage `
                     -Root $repositoryRoot `
                     -ExternalRoot $DevBridgeRoot `
-                    -RestoreAlreadyRun:$restoreAlreadyRun)
+                    -RestoreAlreadyRun:$restoreAlreadyRun `
+                    -DevBridgeBinaryCacheHit:$DevBridgeBinaryCacheHit)
         }
         catch {
             $status = 'fail'
