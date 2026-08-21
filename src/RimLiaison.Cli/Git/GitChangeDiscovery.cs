@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using RimLiaison.Observability;
 
 namespace RimLiaison.Git;
 
@@ -138,7 +139,7 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
             }
         }
 
-        return new GitChangeDiscoveryResult(
+        GitChangeDiscoveryResult result = new GitChangeDiscoveryResult(
             true,
             paths
                 .Distinct(StringComparer.Ordinal)
@@ -152,6 +153,40 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
                 .ThenBy(static change => change.Status, StringComparer.Ordinal)
                 .ToArray()
         };
+        foreach (GitChangedPath change in result.Changes)
+        {
+            string eventType = change.IsDeleted
+                ? AgentEventTypes.FileDeleted
+                : change.IsRenamed
+                    ? AgentEventTypes.FileModified
+                    : change.Status.IndexOf('A') >= 0
+                        ? AgentEventTypes.FileCreated
+                        : AgentEventTypes.FileModified;
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Analysis,
+                eventType,
+                "Source file change discovered.",
+                new
+                {
+                    operationKey = "file:" + change.Path,
+                    filePath = change.Path,
+                    originalPath = change.OriginalPath,
+                    status = change.Status
+                });
+        }
+        foreach (string path in result.Paths)
+        {
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Analysis,
+                AgentEventTypes.FileInspected,
+                "Source file inspected for affected-test selection.",
+                new
+                {
+                    operationKey = "file:" + path,
+                    filePath = path
+                });
+        }
+        return result;
     }
 
     private static bool TryParseStatus(

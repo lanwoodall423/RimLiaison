@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using RimLiaison.Observability;
 using RimLiaison.Profiling;
 
 namespace RimLiaison.DevBridge;
@@ -306,7 +307,8 @@ public sealed class DevBridgeRecipeAdapter :
         CancellationToken cancellationToken,
         string? workflowId = null,
         string? leaseId = null,
-        string? environmentWorkflowId = null)
+        string? environmentWorkflowId = null,
+        string? sourceFingerprint = null)
     {
         if (string.IsNullOrWhiteSpace(recipeId))
         {
@@ -336,6 +338,11 @@ public sealed class DevBridgeRecipeAdapter :
         {
             arguments.Add("--lease");
             arguments.Add(leaseId);
+        }
+        if (!string.IsNullOrWhiteSpace(sourceFingerprint))
+        {
+            arguments.Add("--source-fingerprint");
+            arguments.Add(sourceFingerprint);
         }
 
         var request = new DevBridgeProcessRequest(
@@ -382,7 +389,8 @@ public sealed class DevBridgeRecipeAdapter :
             options.RunTimeout,
             cancellationToken,
             workflowId,
-            executionContext?.LeaseId).ConfigureAwait(false);
+            executionContext?.LeaseId,
+            sourceFingerprint: executionContext?.SourceFingerprint).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(workflowId) ||
             !IsWorkflowOptionRejected(process))
         {
@@ -398,6 +406,28 @@ public sealed class DevBridgeRecipeAdapter :
             phase: "devbridge",
             target: recipeId,
             scope: "workflow-option");
+        AgentOperationScope? observation = AgentObservabilityRuntime.BeginOperation(
+            "retry",
+            "devbridge.recipe.retry",
+            DevelopmentStage.Testing,
+            "recipe:" + recipeId,
+            new
+            {
+                toolName = "DevBridge",
+                operationType = "recipe",
+                recipe = recipeId,
+                reason = "workflow-option"
+            });
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.RetryStarted,
+            "Retrying recipe without the optional workflow argument.",
+            new
+            {
+                operationKey = "recipe:" + recipeId,
+                recipe = recipeId,
+                reason = "workflow-option"
+            });
         bool retryStopped = false;
         try
         {
@@ -407,7 +437,8 @@ public sealed class DevBridgeRecipeAdapter :
                     options.RunTimeout,
                     cancellationToken,
                     leaseId: executionContext?.LeaseId,
-                    environmentWorkflowId: workflowId)
+                    environmentWorkflowId: workflowId,
+                    sourceFingerprint: executionContext?.SourceFingerprint)
                 .ConfigureAwait(false);
             ProfilerActivity.SetRetry(retryActivity, 1);
             ProfilerActivity.SetOutcome(
@@ -418,18 +449,46 @@ public sealed class DevBridgeRecipeAdapter :
                         ? "failure"
                         : "success");
             ProfilerActivity.Stop(retryActivity);
+            observation?.Complete(
+                "DevBridge recipe retry completed.",
+                new
+                {
+                    recipe = recipeId,
+                    exitCode = retry.ExitCode,
+                    outcome = retry.Cancelled
+                        ? "cancelled"
+                        : retry.TimedOut || retry.ExitCode is not 0
+                            ? "failure"
+                            : "success"
+                });
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.RetryCompleted,
+                "DevBridge recipe retry completed.",
+                new
+                {
+                    operationKey = "recipe:" + recipeId,
+                    recipe = recipeId,
+                    outcome = retry.Cancelled
+                        ? "cancelled"
+                        : retry.TimedOut || retry.ExitCode is not 0
+                            ? "failure"
+                            : "success"
+                });
             retryStopped = true;
             return retry;
         }
         catch (OperationCanceledException)
         {
             ProfilerActivity.Stop(retryActivity, "cancelled", "RIMTEST_CANCELLED");
+            observation?.Fail("DevBridge recipe retry was cancelled.", "RIMTEST_CANCELLED");
             retryStopped = true;
             throw;
         }
         catch
         {
             ProfilerActivity.Stop(retryActivity, "failure", "DEVBRIDGE_RETRY_FAILED");
+            observation?.Fail("DevBridge recipe retry failed.", "DEVBRIDGE_RETRY_FAILED");
             retryStopped = true;
             throw;
         }
@@ -439,6 +498,7 @@ public sealed class DevBridgeRecipeAdapter :
             {
                 ProfilerActivity.Stop(retryActivity, "failure");
             }
+            observation?.Dispose();
         }
     }
 

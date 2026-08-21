@@ -1,42 +1,115 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using RimLiaison.Observability;
 using RimLiaison.Profiling;
 
 namespace RimLiaison.DevBridge;
 
 public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
 {
-    public Task<DevBridgeProcessResult> ExecuteAsync(
+    public async Task<DevBridgeProcessResult> ExecuteAsync(
         DevBridgeProcessRequest request,
         CancellationToken cancellationToken)
     {
         string operation = ProfilerActivity.DevBridgeOperation(request.Arguments);
-        return ProfilerActivity.ObserveAsync(
+        AgentOperationScope? observation = AgentObservabilityRuntime.BeginOperation(
+            "tool",
             operation,
-            "devbridge",
-            () => ExecuteCoreAsync(request, cancellationToken),
-            (activity, result) =>
+            DevelopmentStage.Testing,
+            "devbridge:" + operation,
+            new
             {
-                ProfilerActivity.SetOutcome(
-                    activity,
-                    result.Cancelled
-                        ? "cancelled"
-                        : result.TimedOut
-                            ? "timeout"
-                            : result.ExitCode is 0 && result.StartError is null
-                                ? "success"
-                                : "failure",
+                toolName = "DevBridge",
+                operationType = "command",
+                command = AgentObservabilityData.SanitizeCommand(
+                    request.FileName + " " + string.Join(' ', request.Arguments))
+            });
+        try
+        {
+            DevBridgeProcessResult result = await ProfilerActivity.ObserveAsync(
+                    operation,
+                    "devbridge",
+                    () => ExecuteCoreAsync(request, cancellationToken),
+                    (activity, value) =>
+                    {
+                        ProfilerActivity.SetOutcome(
+                            activity,
+                            value.Cancelled
+                                ? "cancelled"
+                                : value.TimedOut
+                                    ? "timeout"
+                                    : value.ExitCode is 0 && value.StartError is null
+                                        ? "success"
+                                        : "failure",
+                            value.StartError is null
+                                ? null
+                                : "DEVBRIDGE_PROCESS_START_FAILED");
+                        ProfilerActivity.SetCounts(
+                            activity,
+                            outputChars: (value.Stdout?.Length ?? 0) +
+                                (value.Stderr?.Length ?? 0));
+                    },
+                    phase: "child-process",
+                    scope: operation)
+                .ConfigureAwait(false);
+            var details = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["exitCode"] = result.ExitCode,
+                ["stdoutExcerpt"] = AgentObservabilityData.BoundText(result.Stdout, 2048),
+                ["stderrExcerpt"] = AgentObservabilityData.BoundText(result.Stderr, 2048),
+                ["stdoutTruncated"] = result.StdoutTruncated,
+                ["stderrTruncated"] = result.StderrTruncated
+            };
+            if (result.Cancelled)
+            {
+                observation?.Fail(
+                    "DevBridge command was cancelled.",
+                    "RIMTEST_CANCELLED",
+                    details);
+            }
+            else if (result.TimedOut)
+            {
+                observation?.Fail(
+                    "DevBridge command timed out.",
+                    "DEVBRIDGE_COMMAND_TIMEOUT",
+                    details,
+                    timeout: true);
+            }
+            else if (result.ExitCode is 0 && result.StartError is null)
+            {
+                observation?.Complete("DevBridge command completed.", details);
+            }
+            else
+            {
+                observation?.Fail(
+                    "DevBridge command failed.",
                     result.StartError is null
-                        ? null
-                        : "DEVBRIDGE_PROCESS_START_FAILED");
-                ProfilerActivity.SetCounts(
-                    activity,
-                    outputChars: (result.Stdout?.Length ?? 0) +
-                        (result.Stderr?.Length ?? 0));
-            },
-            phase: "child-process",
-            scope: operation);
+                        ? "DEVBRIDGE_COMMAND_FAILED"
+                        : "DEVBRIDGE_PROCESS_START_FAILED",
+                    details);
+            }
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            observation?.Fail(
+                "DevBridge command was cancelled.",
+                "RIMTEST_CANCELLED");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            observation?.Fail(
+                "DevBridge command raised an exception.",
+                "DEVBRIDGE_COMMAND_EXCEPTION",
+                new { error = AgentObservabilityData.BoundText(exception.Message, 1024) });
+            throw;
+        }
+        finally
+        {
+            observation?.Dispose();
+        }
     }
 
     private async Task<DevBridgeProcessResult> ExecuteCoreAsync(

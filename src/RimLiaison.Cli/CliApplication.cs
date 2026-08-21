@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Diagnostics;
+using System.Xml;
+using System.Xml.Linq;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Doctor;
@@ -11,6 +13,7 @@ using RimLiaison.Recovery;
 using RimLiaison.Results;
 using RimLiaison.Stack;
 using RimLiaison.Profiling;
+using RimLiaison.Observability;
 
 namespace RimLiaison;
 
@@ -86,12 +89,17 @@ public static class CliApplication
         IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
         IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter = null,
         IDevBridgeViewportAdapter? viewportAdapter = null,
-        IDevBridgeLeaseAdapter? leaseAdapter = null)
+        IDevBridgeLeaseAdapter? leaseAdapter = null,
+        IAgentObservabilityStore? observabilityStore = null,
+        IAgentObservabilityTelemetry? observabilityTelemetry = null)
     {
         EfficiencyProfiler profiler = EfficiencyProfiler.Start();
         long started = Stopwatch.GetTimestamp();
         string? workflowId = null;
         int exitCode = CliExitCodes.InternalError;
+        AgentObservabilityRun? observabilityRun = null;
+        AgentObservabilitySession? observabilityAgent = null;
+        IDisposable? observabilityActivation = null;
         try
         {
             CliRequest request = CliParser.Parse(args);
@@ -104,6 +112,30 @@ public static class CliApplication
             }
 
             profiler.SetCommand(request.Command.ToString());
+            IAgentObservabilityStore eventStore = observabilityStore ??
+                AgentObservabilityStore.CreateDefault();
+            observabilityRun = new AgentObservabilityRun(
+                profiler.RunId,
+                eventStore,
+                observabilityTelemetry);
+            (string modId, string modName) = ResolveObservabilityMod(request);
+            observabilityAgent = observabilityRun.CreateAgent(modId, modName);
+            observabilityActivation = observabilityAgent.Activate();
+            observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
+            DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
+            observabilityAgent.SetStage(
+                commandStage,
+                "command:" + request.Command.ToString().ToLowerInvariant());
+            observabilityAgent.Record(
+                commandStage,
+                AgentEventTypes.CommandStarted,
+                "RimLiaison command started.",
+                new
+                {
+                    operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                    command = request.Command.ToString().ToLowerInvariant(),
+                    target = request.Id
+                });
             workflowId = NeedsWorkflowCorrelation(request)
                 ? WorkflowCorrelation.Create()
                 : null;
@@ -299,6 +331,48 @@ public static class CliApplication
         }
         finally
         {
+            if (observabilityAgent is not null)
+            {
+                try
+                {
+                    observabilityAgent.Record(
+                        observabilityAgent.Snapshot.CurrentStage,
+                        AgentEventTypes.CommandCompleted,
+                        "RimLiaison command completed.",
+                        new
+                        {
+                            operationKey = "cli",
+                            exitCode,
+                            outcome = exitCode == CliExitCodes.Success
+                                ? "success"
+                                : exitCode == CliExitCodes.Cancelled
+                                    ? "cancelled"
+                                    : "failure"
+                        });
+                    if (exitCode == CliExitCodes.Success)
+                    {
+                        observabilityAgent.Complete("RimLiaison command completed.");
+                    }
+                    else
+                    {
+                        observabilityAgent.Fail(
+                            exitCode == CliExitCodes.Cancelled
+                                ? "RimLiaison command was cancelled."
+                                : "RimLiaison command failed.",
+                            exitCode == CliExitCodes.Cancelled
+                                ? "RIMTEST_CANCELLED"
+                                : "RIMLIAISON_COMMAND_FAILED",
+                            completionState: exitCode == CliExitCodes.Cancelled
+                                ? AgentCompletionState.Cancelled
+                                : AgentCompletionState.Failed);
+                    }
+                }
+                catch
+                {
+                }
+            }
+            observabilityActivation?.Dispose();
+            observabilityRun?.Dispose();
             profiler.Complete(exitCode, cancellationToken.IsCancellationRequested);
             profiler.Dispose();
         }
@@ -2136,7 +2210,8 @@ public static class CliApplication
                             testIds,
                             cancellationToken,
                             workflowId,
-                            failFast: request.FailFast),
+                            failFast: request.FailFast,
+                            sourceFingerprint: freshnessTransaction.Freshness.SourceFingerprint),
                         AnnotateSuiteExecution,
                         phase: "suite",
                         target: suiteId,
@@ -2703,6 +2778,69 @@ public static class CliApplication
             CliCommand.SuiteRun ||
         request.Command == CliCommand.Affected && request.RunSelected ||
         request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
+
+    private static (string ModId, string ModName) ResolveObservabilityMod(CliRequest request)
+    {
+        string? project = request.StackManifest.Manifest?.Project;
+        string root = request.StackManifest.RepositoryRoot;
+        string fallback = Path.GetFileName(
+                Path.TrimEndingDirectorySeparator(root))
+            .Trim();
+        if (string.IsNullOrWhiteSpace(fallback))
+        {
+            fallback = "RimWorldMod";
+        }
+
+        string modId = !string.IsNullOrWhiteSpace(project)
+            ? project
+            : fallback;
+        string? modDisplayName = TryReadModDisplayName(root);
+        if (!string.IsNullOrWhiteSpace(project))
+        {
+            return (project, modDisplayName ?? project);
+        }
+
+        return (modId, modDisplayName ?? fallback);
+    }
+
+    private static string? TryReadModDisplayName(string repositoryRoot)
+    {
+        string aboutPath = Path.Combine(repositoryRoot, "About", "About.xml");
+        try
+        {
+            if (!File.Exists(aboutPath) || new FileInfo(aboutPath).Length > 256_000)
+            {
+                return null;
+            }
+
+            XDocument document = XDocument.Load(aboutPath, LoadOptions.None);
+            string? name = document
+                .Descendants()
+                .FirstOrDefault(element =>
+                    string.Equals(element.Name.LocalName, "name", StringComparison.OrdinalIgnoreCase))?
+                .Value
+                .Trim();
+            return string.IsNullOrWhiteSpace(name) || name.Length > 256 || name.Any(char.IsControl)
+                ? null
+                : name;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            NotSupportedException or XmlException)
+        {
+            return null;
+        }
+    }
+
+    private static DevelopmentStage ObservabilityStageFor(CliCommand command) =>
+        command switch
+        {
+            CliCommand.RecipeRun or CliCommand.RunTest or CliCommand.SuiteRun or
+            CliCommand.Affected => DevelopmentStage.Testing,
+            CliCommand.Capabilities or CliCommand.UiTargets => DevelopmentStage.Research,
+            CliCommand.UiScreenshot => DevelopmentStage.Testing,
+            CliCommand.Init or CliCommand.Doctor => DevelopmentStage.Analysis,
+            _ => DevelopmentStage.Analysis
+        };
 
     private static string? NextActionFor(DevBridgeOutcomeKind outcome) => outcome switch
     {
