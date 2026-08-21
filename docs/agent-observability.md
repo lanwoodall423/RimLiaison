@@ -27,6 +27,19 @@ Selected issue IDs can be converted to a bounded
 `AgentDiagnosticBundle` containing only their supporting events and related
 evidence.
 
+Diagnostic exports use the `rimliaison-agent-diagnostic-bundle/v2` contract.
+`selectedIssueIds` and `selectedIssues` preserve the exact checkbox selection;
+`correlatedIssueIds` and `correlatedIssues` are a separate, bounded causal
+closure. The closure follows stable event, operation, trace/span,
+transaction/workflow, and structured relationship identifiers, while keeping
+the `(runId, agentId, modId)` identity boundary. It does not use a broad time
+window or dump every event from a run. The bundle also exposes structured
+command, build/deployment, tool-operation, repository, environment, recovery,
+trace, and correlation evidence. `completeness.status` and
+`completeness.missingEvidence` make missing command output or build/compiler
+diagnostics explicit instead of presenting an empty but apparently complete
+export.
+
 The canonical root is resolved by
 `AgentObservabilityStorage.ResolveCanonicalRoot()`. On Windows the default is
 the application's local-data directory (`%LOCALAPPDATA%\\RimLiaison\\observability`),
@@ -78,8 +91,33 @@ and export only.
 Events, issues, and agent snapshots use bounded append-only JSONL files with
 compaction. Output excerpts, summaries, commands, and arbitrary event data are
 bounded and common credential fields are redacted. Diagnostic bundles are
-created in memory; only the desktop's explicit Save dialog writes an export,
-including when the user deliberately chooses a path inside a mod worktree.
+created in memory; consequential process and build output is retained as
+bounded, redacted evidence files under the canonical observability root rather
+than in event JSON. Evidence persistence is best effort and cannot fail the
+observed command. Only the desktop's explicit Save dialog writes a diagnostic
+export, including when the user deliberately chooses a path inside a mod
+worktree. In the Issues view, checked issues directly enable `Export diagnostic
+bundle`; the action rebuilds the current selection before opening the Save
+dialog, and the UI reports complete versus incomplete evidence afterward.
+
+DevBridge2 owns raw build execution and bounded compiler/MSBuild capture. Its
+`scripts/mod-test.ps1` `devbridge-mod-development/v1` response carries the
+bounded build command, source project, staging path, configuration, exit code,
+timeout state, compiler output, explicit `outputTruncated` state, and
+transaction/workflow IDs. The nested failure projection repeats the stage,
+command, exit code, error code/message, output, and truncation state so older
+consumers can still diagnose a failed build. The pinned cross-stack fixture
+executes this real owner serializer with an intentionally failing C# project.
+
+RimLiaison's adapter parses and persists those fields as canonical,
+identity-safe evidence. Event records retain only small excerpts and structured
+identifiers so the event-data byte bound cannot replace the complete event with
+a generic truncation sentinel; the full owner-bounded text is reloaded through
+the evidence IDs. The observability store owns bounded evidence reload and
+causal grouping; the desktop/diagnostic bundle layer assembles the user-facing
+`rimliaison-agent-diagnostic-bundle/v2`. A compiler failure such as `CS0246`
+therefore remains diagnosable without another log lookup, while an explicit
+truncation flag is preserved rather than being mistaken for missing evidence.
 
 `.rimdev/observability` is legacy repository-local state from older builds. It
 is not imported, rewritten, or treated as authoritative by the new default.

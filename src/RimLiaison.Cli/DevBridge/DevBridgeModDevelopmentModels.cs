@@ -20,6 +20,32 @@ public sealed record DevBridgeArtifactFreshness(
     string? LeaseId,
     string? ErrorCode = null);
 
+/// <summary>
+/// Structured diagnostics returned by the DevBridge2 mod-development
+/// transaction. Keep this separate from the adapter status so a failed
+/// transaction can carry the compiler/build reason all the way to
+/// observability without flattening it into a short error message.
+/// </summary>
+public sealed record DevBridgeBuildDiagnostics(
+    string? Command,
+    int? ExitCode,
+    string? Output,
+    string? SourceProject,
+    string? StagingPath,
+    bool? TimedOut,
+    string? BuiltSha256,
+    string? DiagnosticOutput = null,
+    string? ErrorOutput = null,
+    string? Configuration = null,
+    bool? Cancelled = null,
+    string? WorkingDirectory = null,
+    string? SourceFingerprint = null,
+    string? FailureMessage = null,
+    string? TransactionId = null,
+    string? WorkflowId = null,
+    string? ErrorCode = null,
+    bool? OutputTruncated = null);
+
 public sealed record DevBridgeModDevelopmentResult(
     string Project,
     DevBridgeAdapterStatus Status,
@@ -28,7 +54,8 @@ public sealed record DevBridgeModDevelopmentResult(
     string? WorkflowId,
     int? Generation,
     string? LeaseId,
-    DevBridgeArtifactFreshness? Freshness);
+    DevBridgeArtifactFreshness? Freshness,
+    DevBridgeBuildDiagnostics? Build = null);
 
 public sealed record DevBridgeModDevelopmentExecutionContext(
     string? LeaseId = null);

@@ -342,6 +342,7 @@ public static class CliApplication
                         new
                         {
                             operationKey = "cli",
+                            workflowId,
                             exitCode,
                             outcome = exitCode == CliExitCodes.Success
                                 ? "success"
@@ -355,13 +356,28 @@ public static class CliApplication
                     }
                     else
                     {
+                        string failureCode = exitCode == CliExitCodes.Cancelled
+                            ? "RIMTEST_CANCELLED"
+                            : "RIMLIAISON_COMMAND_FAILED";
+                        observabilityAgent.Record(
+                            observabilityAgent.Snapshot.CurrentStage,
+                            AgentEventTypes.CommandFailed,
+                            exitCode == CliExitCodes.Cancelled
+                                ? "RimLiaison command was cancelled."
+                                : "RimLiaison command failed.",
+                            new
+                            {
+                                operationKey = "cli",
+                                workflowId,
+                                exitCode,
+                                errorCode = failureCode,
+                                outcome = "failure"
+                            });
                         observabilityAgent.Fail(
                             exitCode == CliExitCodes.Cancelled
                                 ? "RimLiaison command was cancelled."
                                 : "RimLiaison command failed.",
-                            exitCode == CliExitCodes.Cancelled
-                                ? "RIMTEST_CANCELLED"
-                                : "RIMLIAISON_COMMAND_FAILED",
+                            failureCode,
                             completionState: exitCode == CliExitCodes.Cancelled
                                 ? AgentCompletionState.Cancelled
                                 : AgentCompletionState.Failed);

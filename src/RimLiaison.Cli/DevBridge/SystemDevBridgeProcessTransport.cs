@@ -13,11 +13,12 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
         CancellationToken cancellationToken)
     {
         string operation = ProfilerActivity.DevBridgeOperation(request.Arguments);
+        string operationKey = request.OperationKey ?? "devbridge:" + operation;
         AgentOperationScope? observation = AgentObservabilityRuntime.BeginOperation(
             "tool",
             operation,
             DevelopmentStage.Testing,
-            "devbridge:" + operation,
+            operationKey,
             new
             {
                 toolName = "DevBridge",
@@ -53,14 +54,39 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                     phase: "child-process",
                     scope: operation)
                 .ConfigureAwait(false);
+            AgentDiagnosticEvidenceReference? stdoutEvidence =
+                AgentObservabilityRuntime.PersistEvidence(
+                    "devbridge.process.stdout",
+                    result.Stdout,
+                    result.StdoutTruncated);
+            AgentDiagnosticEvidenceReference? stderrEvidence =
+                AgentObservabilityRuntime.PersistEvidence(
+                    "devbridge.process.stderr",
+                    result.Stderr,
+                    result.StderrTruncated);
             var details = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
+                ["command"] = AgentObservabilityData.SanitizeCommand(
+                    request.FileName + " " + string.Join(' ', request.Arguments),
+                    4_096),
+                ["workingDirectory"] = request.WorkingDirectory,
                 ["exitCode"] = result.ExitCode,
                 ["stdoutExcerpt"] = AgentObservabilityData.BoundText(result.Stdout, 2048),
                 ["stderrExcerpt"] = AgentObservabilityData.BoundText(result.Stderr, 2048),
                 ["stdoutTruncated"] = result.StdoutTruncated,
-                ["stderrTruncated"] = result.StderrTruncated
+                ["stderrTruncated"] = result.StderrTruncated,
+                ["timedOut"] = result.TimedOut,
+                ["cancelled"] = result.Cancelled
             };
+            details["operationKey"] = operationKey;
+            if (stdoutEvidence is not null)
+            {
+                details["stdoutEvidenceId"] = stdoutEvidence.Id;
+            }
+            if (stderrEvidence is not null)
+            {
+                details["stderrEvidenceId"] = stderrEvidence.Id;
+            }
             if (result.Cancelled)
             {
                 observation?.Fail(

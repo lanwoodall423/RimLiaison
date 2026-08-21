@@ -7,7 +7,7 @@
     },
     "devBridge2": {
       "repository": "lanwoodall423/DevBridge2",
-      "revision": "eeed19cbd217be98c12036f14e476dcef702c9e3"
+      "revision": "3b084973b70c1e03fe9eae0153a81507ea82ba78"
     }
   },
   "components": {
@@ -48,6 +48,40 @@
         "artifactFreshness.loadedArtifactFreshnessProven"
       ]
     },
+    "devBridgeModDevelopmentFailure": {
+      "schemaVersion": "devbridge-mod-development/v1",
+      "required": [
+        "success",
+        "project",
+        "transactionId",
+        "workflowId",
+        "stage",
+        "exitCode",
+        "build.stage",
+        "build.command",
+        "build.exitCode",
+        "build.output",
+        "build.outputTruncated",
+        "build.sourceProject",
+        "build.stagingPath",
+        "build.timedOut",
+        "build.workingDirectory",
+        "build.configuration",
+        "build.transactionId",
+        "build.workflowId",
+        "build.errorCode",
+        "build.failureMessage",
+        "failure.stage",
+        "failure.command",
+        "failure.exitCode",
+        "failure.errorCode",
+        "failure.message",
+        "failure.output",
+        "failure.outputTruncated",
+        "failure.transactionId",
+        "failure.workflowId"
+      ]
+    },
     "devBridgeRecipeRun": {
       "schemaVersion": "devbridge-test-recipe-run/v1",
       "required": [
@@ -84,11 +118,12 @@
   "limits": {
     "maxResultBytes": 8192,
     "maxDiagnosticBytes": 8192,
-    "maxIntegrationBytes": 8192
+    "maxIntegrationBytes": 8192,
+    "maxDevBridgeBuildOutputCharacters": 16384
   },
-  "update": "Change only the external DevBridge2 revision in a deliberate compatibility update, run scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
+  "update": "Change the external DevBridge2 revision only in a deliberate compatibility update, run the pinned DevBridge2 build-diagnostic fixture plus scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
   "scope": {
-    "offline": "This gate proves the no-RimWorld composition and wire contracts using a deterministic DevBridge-compatible fake host.",
+    "offline": "This gate proves the no-RimWorld composition and wire contracts using the pinned DevBridge2 synthetic failing-build transaction plus a deterministic fake host for lifecycle composition.",
     "live": "Real RimWorld/RimBridgeServer compatibility remains covered only by DevBridge2/scripts/live-stack-smoke.ps1 on the configured self-hosted runner."
   }
 }

@@ -25,6 +25,12 @@ public static class AgentObservabilityRuntime
         object? data = null) =>
         Current?.Record(stage, type, summary, data);
 
+    public static AgentDiagnosticEvidenceReference? PersistEvidence(
+        string kind,
+        string? content,
+        bool truncated = false) =>
+        Current?.PersistEvidence(kind, content, truncated);
+
     internal static IDisposable Activate(AgentObservabilitySession session)
     {
         AgentObservabilitySession? previous = CurrentSlot.Value;
@@ -487,6 +493,29 @@ public sealed class AgentObservabilitySession : IDisposable
         {
             // Instrumentation is intentionally non-fatal. The agent's owning
             // operation must continue even if the local store is unavailable.
+            return null;
+        }
+    }
+
+    public AgentDiagnosticEvidenceReference? PersistEvidence(
+        string kind,
+        string? content,
+        bool truncated = false)
+    {
+        if (Volatile.Read(ref disposed) != 0 ||
+            string.IsNullOrWhiteSpace(content))
+        {
+            return null;
+        }
+
+        try
+        {
+            return store.PersistEvidence(kind, content, truncated);
+        }
+        catch
+        {
+            // Long-form evidence is best effort and must never change the
+            // outcome of the command being observed.
             return null;
         }
     }

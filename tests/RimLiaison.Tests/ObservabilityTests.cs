@@ -263,6 +263,237 @@ internal static class ObservabilityTests
             "bundle should include related commands");
     }
 
+    public static void DiagnosticBundleV2ContainsStructuredBuildEvidence()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "run-diagnostic-v2",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession buildAgent = run.CreateAgent(
+            "mod.build",
+            "Build Mod");
+        using AgentObservabilitySession unrelatedAgent = run.CreateAgent(
+            "mod.unrelated",
+            "Unrelated Mod");
+        buildAgent.Start();
+        unrelatedAgent.Start();
+
+        buildAgent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildStarted,
+            "Build started.",
+            new
+            {
+                operationKey = "build:fixture",
+                project = "fixture",
+                sourceProject = "Source/Fixture.csproj",
+                configuration = "Debug",
+                command = "dotnet build Source/Fixture.csproj --configuration Debug",
+                workingDirectory = "C:/repo",
+                transactionId = "tx-build-1",
+                workflowId = "wf-build-1",
+                sourceFingerprint = "source-fingerprint-1"
+            });
+        buildAgent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildFailed,
+            "Build and deployment command failed.",
+            new
+            {
+                operationKey = "build:fixture",
+                project = "fixture",
+                sourceProject = "Source/Fixture.csproj",
+                configuration = "Debug",
+                command = "dotnet build Source/Fixture.csproj --configuration Debug",
+                workingDirectory = "C:/repo",
+                exitCode = 1,
+                stderr = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found.",
+                diagnosticOutput = "error CS0246: The type or namespace name 'MissingType' could not be found.",
+                transactionId = "tx-build-1",
+                workflowId = "wf-build-1",
+                builtSha256 = new string('b', 64),
+                token = "secret-value"
+            });
+        unrelatedAgent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildFailed,
+            "Unrelated build failed.",
+            new
+            {
+                operationKey = "build:unrelated",
+                command = "dotnet build Unrelated.csproj",
+                exitCode = 1,
+                diagnosticOutput = "CS9999 unrelated failure",
+                transactionId = "tx-build-1",
+                workflowId = "wf-build-1"
+            });
+        buildAgent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.IntegrationFailed,
+            "Build wrapper failed after the compiler failure.",
+            new
+            {
+                operationKey = "build:fixture",
+                transactionId = "tx-build-1",
+                workflowId = "wf-build-1"
+            });
+
+        AgentIssue selected = store.GetIssues(agentId: buildAgent.AgentId)
+            .First(issue => issue.Category == AgentIssueCategory.Error);
+        AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([selected.Id]);
+
+        AssertEqual(AgentObservabilitySchemas.Bundle, bundle.SchemaVersion);
+        Assert(bundle.SelectedIssueIds.SequenceEqual([selected.Id]));
+        Assert(bundle.SelectedIssues.Any(issue => issue.Id == selected.Id));
+        Assert(bundle.CorrelatedIssues.Any(issue => issue.Category == AgentIssueCategory.IntegrationIssue),
+            "same-operation wrapper failures should be separated as correlated issues");
+        Assert(bundle.SupportingEvents.All(eventRecord =>
+            eventRecord.AgentId == buildAgent.AgentId),
+            "causal closure must exclude the concurrent agent");
+        AgentDiagnosticBuildEvidence build = bundle.BuildEvidence.First(value =>
+            value.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true);
+        AssertEqual("Source/Fixture.csproj", build.SourceProject);
+        AssertEqual("Debug", build.Configuration);
+        AssertEqual(1, build.ExitCode);
+        Assert(build.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true);
+        Assert(build.TransactionId == "tx-build-1" && build.WorkflowId == "wf-build-1");
+        Assert(bundle.CommandEvidence.Any(command =>
+            command.Command?.Contains("dotnet build Source/Fixture.csproj", StringComparison.Ordinal) == true &&
+            command.ExitCode == 1 &&
+            command.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true));
+        Assert(bundle.Correlations.Any(value =>
+            value.Kind == "transaction" && value.Value == "tx-build-1"));
+        Assert(bundle.Completeness.IsComplete,
+            "a compiler diagnostic plus command/build metadata should be complete");
+
+        string json = JsonSerializer.Serialize(bundle, AgentObservabilityJson.Options);
+        Assert(!json.Contains("secret-value", StringComparison.Ordinal),
+            "new structured evidence must retain credential redaction");
+        Assert(!json.Contains("CS9999 unrelated failure", StringComparison.Ordinal),
+            "unrelated agent diagnostics must not enter the bundle");
+    }
+
+    public static void DiagnosticBundleMissingBuildDiagnosticsIsExplicitlyIncomplete()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "run-diagnostic-incomplete",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.incomplete",
+            "Incomplete Build");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildFailed,
+            "Build failed without diagnostics.",
+            new
+            {
+                operationKey = "build:incomplete",
+                project = "incomplete",
+                command = "dotnet build Incomplete.csproj",
+                exitCode = 1
+            });
+
+        AgentIssue issue = store.GetIssues(agentId: agent.AgentId).Single();
+        AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([issue.Id]);
+
+        AssertEqual(AgentDiagnosticCompletenessStatuses.Incomplete, bundle.Completeness.Status);
+        Assert(bundle.Completeness.MissingEvidence.Contains("build.diagnostics"));
+        Assert(bundle.BuildEvidence.Count > 0);
+        Assert(bundle.BuildEvidence.All(value =>
+            string.IsNullOrWhiteSpace(value.Output) &&
+            string.IsNullOrWhiteSpace(value.DiagnosticOutput) &&
+            string.IsNullOrWhiteSpace(value.ErrorOutput)));
+    }
+
+    public static void DiagnosticEvidenceSurvivesStoreReloadOutsideWorktree()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-diagnostic-evidence-" + Guid.NewGuid().ToString("N"));
+        string? issueId = null;
+        try
+        {
+            using (var store = new AgentObservabilityStore(directory))
+            using (var run = new AgentObservabilityRun(
+                       "run-diagnostic-evidence",
+                       store,
+                       new NoopAgentObservabilityTelemetry()))
+            using (AgentObservabilitySession agent = run.CreateAgent(
+                       "mod.evidence",
+                       "Evidence Mod"))
+            {
+                agent.Start();
+                AgentDiagnosticEvidenceReference? evidence = store.PersistEvidence(
+                    "compiler.diagnostics",
+                    new string('x', 5_000) +
+                    "\nerror CS0246: MissingType was not found. apiKey=secret-value");
+                Assert(evidence is not null, "the bounded evidence store should accept compiler output");
+                agent.Record(
+                    DevelopmentStage.Implementation,
+                    AgentEventTypes.BuildFailed,
+                    "Build failed with persisted diagnostics.",
+                    new
+                    {
+                        operationKey = "build:evidence",
+                        command = "dotnet build Evidence.csproj",
+                        exitCode = 1,
+                        diagnosticEvidenceId = evidence!.Id
+                    });
+                issueId = store.GetIssues(agentId: agent.AgentId).Single().Id;
+                AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([issueId]);
+                Assert(bundle.BuildEvidence.Any(value =>
+                    value.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true));
+                Assert(!JsonSerializer.Serialize(bundle, AgentObservabilityJson.Options)
+                    .Contains("secret-value", StringComparison.Ordinal));
+            }
+
+            using var reloaded = new AgentObservabilityStore(directory);
+            AgentDiagnosticBundle reloadedBundle = reloaded.CreateDiagnosticBundle([issueId!]);
+            Assert(reloadedBundle.BuildEvidence.Any(value =>
+                value.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true),
+                "long-form evidence must be available after a store reload");
+            Assert(reloadedBundle.Completeness.IsComplete);
+            Assert(Directory.Exists(Path.Combine(directory, "evidence")),
+                "evidence must live under the canonical observability root");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    public static void DiagnosticEvidenceHonorsConfiguredBounds()
+    {
+        using var store = new AgentObservabilityStore(options: new AgentObservabilityOptions
+        {
+            MaximumEvidenceBytes = 128,
+            MaximumEvidenceEntries = 2
+        });
+        AgentDiagnosticEvidenceReference? reference = store.PersistEvidence(
+            "compiler.diagnostics",
+            new string('x', 512) + " apiKey=secret-value");
+        Assert(reference is not null && reference.Truncated,
+            "evidence larger than the configured bound must be marked truncated");
+        AgentDiagnosticEvidence? evidence = store.GetEvidence(reference!.Id);
+        Assert(evidence is not null && evidence.Content.Length <= 128,
+            "persisted evidence must remain within its configured character bound");
+        Assert(!evidence!.Content.Contains("secret-value", StringComparison.Ordinal),
+            "bounded evidence must retain redaction while truncating");
+    }
+
     public static void DurableStoreReloadsStructuredState()
     {
         string directory = Path.Combine(
