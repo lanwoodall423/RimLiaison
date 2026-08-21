@@ -158,6 +158,9 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                 project,
                 sourceFingerprint
             });
+        string commandText = AgentObservabilityData.SanitizeCommand(
+            options.PowerShellPath + " " + string.Join(" ", arguments),
+            4_096);
         AgentObservabilityRuntime.Record(
             DevelopmentStage.Implementation,
             AgentEventTypes.BuildStarted,
@@ -165,7 +168,11 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             new
             {
                 operationKey = "build:" + project,
-                project
+                project,
+                command = commandText,
+                workingDirectory = options.RootPath,
+                sourceFingerprint,
+                workflowId
             });
         DevBridgeProcessResult process;
         try
@@ -178,25 +185,53 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         options.Timeout,
                         options.MaxStdoutBytes,
                         options.MaxStderrBytes,
-                        DevBridgeProcessEnvironment.ForWorkflow(workflowId)),
+                        DevBridgeProcessEnvironment.ForWorkflow(workflowId),
+                        OperationKey: "build:" + project),
                     cancellationToken)
                 .ConfigureAwait(false);
+            AgentDiagnosticEvidenceReference? stdoutEvidence =
+                AgentObservabilityRuntime.PersistEvidence(
+                    "devbridge.process.stdout",
+                    process.Stdout,
+                    process.StdoutTruncated);
+            AgentDiagnosticEvidenceReference? stderrEvidence =
+                AgentObservabilityRuntime.PersistEvidence(
+                    "devbridge.process.stderr",
+                    process.Stderr,
+                    process.StderrTruncated);
             var processDetails = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["project"] = project,
+                ["command"] = commandText,
+                ["workingDirectory"] = options.RootPath,
+                ["sourceFingerprint"] = sourceFingerprint,
+                ["workflowId"] = workflowId,
                 ["exitCode"] = process.ExitCode,
                 ["stderrExcerpt"] = AgentObservabilityData.BoundText(process.Stderr, 2048),
-                ["stdoutExcerpt"] = AgentObservabilityData.BoundText(process.Stdout, 2048)
+                ["stdoutExcerpt"] = AgentObservabilityData.BoundText(process.Stdout, 2048),
+                ["stdoutTruncated"] = process.StdoutTruncated,
+                ["stderrTruncated"] = process.StderrTruncated,
+                ["timedOut"] = process.TimedOut,
+                ["cancelled"] = process.Cancelled
             };
+            if (stdoutEvidence is not null)
+            {
+                processDetails["stdoutEvidenceId"] = stdoutEvidence.Id;
+            }
+            if (stderrEvidence is not null)
+            {
+                processDetails["stderrEvidenceId"] = stderrEvidence.Id;
+            }
             if (process.ExitCode is 0 && process.StartError is null &&
                 !process.TimedOut && !process.Cancelled)
             {
                 buildObservation?.Complete("Build and deployment command completed.", processDetails);
+                processDetails["operationKey"] = "build:" + project;
                 AgentObservabilityRuntime.Record(
                     DevelopmentStage.Implementation,
                     AgentEventTypes.BuildSucceeded,
                     "Build and deployment command succeeded.",
-                    new { operationKey = "build:" + project, project });
+                    processDetails);
             }
             else
             {
@@ -209,20 +244,17 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         : "DEVBRIDGE_BUILD_FAILED",
                     processDetails,
                     timeout: process.TimedOut);
+                processDetails["operationKey"] = "build:" + project;
+                processDetails["errorCode"] = process.TimedOut
+                    ? "DEVBRIDGE_BUILD_TIMEOUT"
+                    : "DEVBRIDGE_BUILD_FAILED";
                 AgentObservabilityRuntime.Record(
                     DevelopmentStage.Implementation,
                     AgentEventTypes.BuildFailed,
                     process.TimedOut
                         ? "Build and deployment command timed out."
                         : "Build and deployment command failed.",
-                    new
-                    {
-                        operationKey = "build:" + project,
-                        project,
-                        errorCode = process.TimedOut
-                            ? "DEVBRIDGE_BUILD_TIMEOUT"
-                            : "DEVBRIDGE_BUILD_FAILED"
-                    });
+                    processDetails);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -405,6 +437,15 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             TryGetNullableString(root, "leaseId", out string? leaseId);
             TryGetNullableInt(root, "generation", out int? generation);
             DevBridgeArtifactFreshness? freshness = ParseFreshness(root);
+            DevBridgeBuildDiagnostics? build = ParseBuild(root);
+            RecordBuildDiagnostics(
+                project,
+                sourceFingerprint,
+                transactionId,
+                responseWorkflowId ?? workflowId,
+                process,
+                build,
+                freshness);
 
             if (!string.IsNullOrWhiteSpace(workflowId) &&
                 !string.IsNullOrWhiteSpace(responseWorkflowId) &&
@@ -424,7 +465,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     workflowId,
                     generation,
                     leaseId,
-                    freshness);
+                    freshness,
+                    build);
             }
 
             if (success &&
@@ -445,7 +487,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     responseWorkflowId ?? workflowId,
                     generation,
                     leaseId,
-                    freshness);
+                    freshness,
+                    build);
             }
 
             if (!success)
@@ -469,7 +512,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     responseWorkflowId ?? workflowId,
                     generation,
                     leaseId,
-                    freshness);
+                    freshness,
+                    build);
             }
 
             return new DevBridgeModDevelopmentResult(
@@ -489,7 +533,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                 responseWorkflowId ?? workflowId,
                 generation,
                 leaseId,
-                freshness);
+                freshness,
+                build);
         }
     }
 
@@ -581,6 +626,231 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             leaseId,
             errorCode);
     }
+
+    private static DevBridgeBuildDiagnostics? ParseBuild(JsonElement root)
+    {
+        JsonElement? build = GetObject(root, "build");
+        JsonElement? failure = GetObject(root, "failure");
+        if (build is null && failure is null)
+        {
+            return null;
+        }
+
+        string? command = FirstString(build, failure, "command", "commandText");
+        int? exitCode = FirstInt(build, failure, "exitCode");
+        string? output = FirstString(build, null, "output", "stdout");
+        string? diagnosticOutput = FirstString(failure, build, "output", "diagnosticOutput", "error");
+        string? errorOutput = FirstString(build, failure, "errorOutput", "stderr");
+        string? sourceProject = FirstString(build, null, "sourceProject");
+        string? stagingPath = FirstString(build, null, "stagingPath");
+        bool? timedOut = FirstBoolean(build, failure, "timedOut");
+        bool? cancelled = FirstBoolean(build, failure, "cancelled");
+        string? builtSha256 = FirstString(build, null, "builtSha256", "builtArtifactSha256");
+        string? configuration = FirstString(build, null, "configuration");
+        string? workingDirectory = FirstString(build, failure, "workingDirectory", "workingContext", "cwd");
+        string? sourceFingerprint = FirstString(build, null, "sourceFingerprint");
+        string? failureMessage = FirstString(failure, build, "message", "error", "failureMessage");
+        string? transactionId = FirstString(build, failure, "transactionId", "transaction");
+        string? workflowId = FirstString(build, failure, "workflowId", "workflow");
+        string? errorCode = FirstString(failure, build, "errorCode", "code");
+        bool? outputTruncated = FirstBoolean(build, failure, "outputTruncated");
+        if (command is null && exitCode is null && output is null &&
+            diagnosticOutput is null && errorOutput is null && sourceProject is null &&
+            stagingPath is null && timedOut is null && cancelled is null &&
+            builtSha256 is null && configuration is null && workingDirectory is null &&
+            sourceFingerprint is null && failureMessage is null && transactionId is null &&
+            workflowId is null && errorCode is null && outputTruncated is null)
+        {
+            return null;
+        }
+
+        return new DevBridgeBuildDiagnostics(
+            command,
+            exitCode,
+            output,
+            sourceProject,
+            stagingPath,
+            timedOut,
+            builtSha256,
+            diagnosticOutput,
+            errorOutput,
+            configuration,
+            cancelled,
+            workingDirectory,
+            sourceFingerprint,
+            failureMessage,
+            transactionId,
+            workflowId,
+            errorCode,
+            outputTruncated);
+    }
+
+    private static void RecordBuildDiagnostics(
+        string project,
+        string sourceFingerprint,
+        string? transactionId,
+        string? workflowId,
+        DevBridgeProcessResult process,
+        DevBridgeBuildDiagnostics? build,
+        DevBridgeArtifactFreshness? freshness)
+    {
+        if (build is null)
+        {
+            return;
+        }
+
+        AgentDiagnosticEvidenceReference? outputEvidence =
+            AgentObservabilityRuntime.PersistEvidence(
+                "devbridge.build.output",
+                build.Output,
+                build.OutputTruncated ?? false);
+        AgentDiagnosticEvidenceReference? diagnosticEvidence =
+            AgentObservabilityRuntime.PersistEvidence(
+                "devbridge.build.diagnostics",
+                build.DiagnosticOutput,
+                build.OutputTruncated ?? false);
+        AgentDiagnosticEvidenceReference? errorEvidence =
+            AgentObservabilityRuntime.PersistEvidence(
+                "devbridge.build.error",
+                build.ErrorOutput,
+                false);
+        var data = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["operationKey"] = "build:" + project,
+            ["project"] = project,
+            ["sourceFingerprint"] = build.SourceFingerprint ?? sourceFingerprint,
+            ["transactionId"] = transactionId ?? build.TransactionId,
+            ["workflowId"] = workflowId ?? build.WorkflowId,
+            ["command"] = build.Command,
+            ["workingDirectory"] = build.WorkingDirectory,
+            ["sourceProject"] = build.SourceProject,
+            ["stagingPath"] = build.StagingPath,
+            ["configuration"] = build.Configuration,
+            ["exitCode"] = build.ExitCode ?? process.ExitCode,
+            ["timedOut"] = build.TimedOut ?? process.TimedOut,
+            ["cancelled"] = build.Cancelled ?? process.Cancelled,
+            // Keep the structured event below MaximumEventDataBytes. The complete
+            // bounded owner output lives in the evidence records referenced below.
+            ["output"] = AgentObservabilityData.BoundText(build.Output, 1_024),
+            ["diagnosticOutput"] = AgentObservabilityData.BoundText(build.DiagnosticOutput, 1_024),
+            ["errorOutput"] = AgentObservabilityData.BoundText(build.ErrorOutput, 1_024),
+            ["outputTruncated"] = build.OutputTruncated ?? outputEvidence?.Truncated ?? false,
+            ["diagnosticOutputTruncated"] = diagnosticEvidence?.Truncated ?? false,
+            ["errorOutputTruncated"] = errorEvidence?.Truncated ?? false,
+            ["builtSha256"] = build.BuiltSha256,
+            ["deployedArtifactSha256"] = freshness?.DeployedArtifactSha256,
+            ["deploymentDecision"] = freshness?.DeploymentDecision,
+            ["generationBefore"] = freshness?.GenerationBefore,
+            ["generationAfter"] = freshness?.GenerationAfter,
+            ["generation"] = freshness?.Generation,
+            ["loadedArtifactFreshnessProven"] = freshness?.LoadedArtifactFreshnessProven,
+            ["freshnessState"] = freshness?.Proof ?? freshness?.DeploymentDecision,
+            ["failureMessage"] = build.FailureMessage,
+            ["errorCode"] = build.ErrorCode
+        };
+        if (outputEvidence is not null)
+        {
+            data["outputEvidenceId"] = outputEvidence.Id;
+        }
+        if (diagnosticEvidence is not null)
+        {
+            data["diagnosticEvidenceId"] = diagnosticEvidence.Id;
+        }
+        if (errorEvidence is not null)
+        {
+            data["errorOutputEvidenceId"] = errorEvidence.Id;
+        }
+
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildDiagnostics,
+            "DevBridge returned structured build diagnostics.",
+            data);
+    }
+
+    private static JsonElement? GetObject(JsonElement parent, string name)
+    {
+        if (parent.ValueKind != JsonValueKind.Object ||
+            !parent.TryGetProperty(name, out JsonElement value) ||
+            value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return value;
+    }
+
+    private static string? FirstString(
+        JsonElement? first,
+        JsonElement? second,
+        params string[] names)
+    {
+        foreach (JsonElement? source in new[] { first, second })
+        {
+            if (source is not { ValueKind: JsonValueKind.Object } element)
+            {
+                continue;
+            }
+
+            foreach (string name in names)
+            {
+                if (element.TryGetProperty(name, out JsonElement value) &&
+                    value.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(value.GetString()))
+                {
+                    return BoundDiagnostic(value.GetString());
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int? FirstInt(
+        JsonElement? first,
+        JsonElement? second,
+        string name)
+    {
+        foreach (JsonElement? source in new[] { first, second })
+        {
+            if (source is not { ValueKind: JsonValueKind.Object } element ||
+                !element.TryGetProperty(name, out JsonElement value) ||
+                value.ValueKind != JsonValueKind.Number ||
+                !value.TryGetInt32(out int parsed))
+            {
+                continue;
+            }
+
+            return parsed;
+        }
+
+        return null;
+    }
+
+    private static bool? FirstBoolean(
+        JsonElement? first,
+        JsonElement? second,
+        string name)
+    {
+        foreach (JsonElement? source in new[] { first, second })
+        {
+            if (source is not { ValueKind: JsonValueKind.Object } element ||
+                !element.TryGetProperty(name, out JsonElement value) ||
+                value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                continue;
+            }
+
+            return value.GetBoolean();
+        }
+
+        return null;
+    }
+
+    private static string? BoundDiagnostic(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? null
+            : AgentObservabilityData.BoundText(value, 16 * 1024);
 
     private static string? ReadFailureCode(JsonElement root)
     {

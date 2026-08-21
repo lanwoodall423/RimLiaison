@@ -207,9 +207,10 @@ function Get-ValidationStageCommands {
             }
             [void]$commands.Add((New-ValidationCommand 'dotnet' @('restore', $rootDotnet, '--nologo') $Root 600000))
             foreach ($project in @(
-                    'src/RimContext.Cli/RimContext.Cli.csproj',
-                    'src/RimError.Cli/RimError.Cli.csproj',
-                    'src/RimLiaison.Cli/RimLiaison.Cli.csproj')) {
+                'src/RimContext.Cli/RimContext.Cli.csproj',
+                'src/RimError.Cli/RimError.Cli.csproj',
+                'src/RimLiaison.Cli/RimLiaison.Cli.csproj',
+                'tests/RimLiaison.Tests/RimLiaison.Tests.csproj')) {
                 [void]$commands.Add((New-ValidationCommand 'dotnet' @(
                             'build', (Join-Path $Root $project), '--configuration', 'Release', '--no-restore', '--nologo') $Root 900000))
             }

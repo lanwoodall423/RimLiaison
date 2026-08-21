@@ -10,6 +10,7 @@ using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Execution;
 using RimLiaison.Git;
+using RimLiaison.Observability;
 using RimLiaison.RimError;
 using RimLiaison.RimContext;
 using RimLiaison.Recovery;
@@ -188,6 +189,8 @@ internal static class Program
         ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
+        ("mod-development build failure exports compiler diagnostics", ModDevelopmentBuildFailureExportsCompilerDiagnostics),
+        ("pinned DevBridge build diagnostics cross the real wire boundary", PinnedDevBridgeBuildDiagnosticsCrossWireBoundary),
         ("valid development descriptor is preserved", ValidDevelopmentDescriptorIsPreserved),
         ("missing development descriptor is derived", MissingDevelopmentDescriptorIsDerived),
         ("malformed development descriptor is repaired", MalformedDevelopmentDescriptorIsRepaired),
@@ -214,6 +217,10 @@ internal static class Program
         ("observability failure recovery and references work", ObservabilityTests.FailureIssueRecoveryAndReferencesWork),
         ("observability retry heuristics and stalls are conservative", ObservabilityTests.RetryHeuristicsAndStallsAreConservative),
         ("observability diagnostic bundles exclude unrelated history", ObservabilityTests.DiagnosticBundlesExcludeUnrelatedHistory),
+        ("observability v2 bundle contains structured build evidence", ObservabilityTests.DiagnosticBundleV2ContainsStructuredBuildEvidence),
+        ("observability incomplete bundle reports missing build diagnostics", ObservabilityTests.DiagnosticBundleMissingBuildDiagnosticsIsExplicitlyIncomplete),
+        ("observability diagnostic evidence survives reload", ObservabilityTests.DiagnosticEvidenceSurvivesStoreReloadOutsideWorktree),
+        ("observability diagnostic evidence honors configured bounds", ObservabilityTests.DiagnosticEvidenceHonorsConfiguredBounds),
         ("observability durable store reloads structured state", ObservabilityTests.DurableStoreReloadsStructuredState),
         ("observability OTel correlation is optional and hierarchical", ObservabilityTests.OTelCorrelationIsOptionalAndHierarchical),
         ("observability OTel disabled still stores product state", ObservabilityTests.OTelDisabledStillStoresProductState),
@@ -268,10 +275,23 @@ internal static class Program
         ("efficiency profiler emits success and failure profiles", ProfilerTests.EmitsSuccessAndFailureProfiles)
     ];
 
-    public static int Main()
+    public static int Main(string[] args)
     {
+        string? filter = args.Length == 2 &&
+            string.Equals(args[0], "--filter", StringComparison.Ordinal)
+                ? args[1]
+                : null;
+        (string Name, Action Test)[] selected = string.IsNullOrWhiteSpace(filter)
+            ? Tests
+            : Tests.Where(value => string.Equals(value.Name, filter, StringComparison.Ordinal)).ToArray();
+        if (selected.Length == 0)
+        {
+            Console.Error.WriteLine($"No test matched filter '{filter}'.");
+            return 2;
+        }
+
         int failures = 0;
-        foreach ((string name, Action test) in Tests)
+        foreach ((string name, Action test) in selected)
         {
             try
             {
@@ -285,7 +305,7 @@ internal static class Program
             }
         }
 
-        Console.WriteLine($"{Tests.Length - failures}/{Tests.Length} tests passed.");
+        Console.WriteLine($"{selected.Length - failures}/{selected.Length} tests passed.");
         return failures == 0 ? 0 : 1;
     }
 
@@ -5777,6 +5797,246 @@ internal static class Program
             transport.Requests[0].Arguments[developmentRootIndex + 1]);
         AssertEqual("DevBridgeRoot", transport.Requests[0].Arguments[additionalRootIndex + 1]);
         AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
+    }
+
+    private static void ModDevelopmentBuildFailureExportsCompilerDiagnostics()
+    {
+        const string workflowId = "wf-build-export";
+        const string transactionId = "tx-build-export";
+        const string sourceFingerprint = "source-fingerprint-build-export";
+        string response = JsonSerializer.Serialize(new
+        {
+            schemaVersion = DevBridgeModDevelopmentSchemas.Current,
+            project = "fixture",
+            success = false,
+            transactionId,
+            workflowId,
+            generation = 7,
+            failure = new
+            {
+                errorCode = "DEVELOPMENT_BUILD_FAILED",
+                command = "dotnet build Source/Fixture.csproj --configuration Debug",
+                output = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found. apiKey=secret-value"
+            },
+            build = new
+            {
+                command = "dotnet build Source/Fixture.csproj --configuration Debug",
+                exitCode = 1,
+                output = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found.",
+                sourceProject = "Source/Fixture.csproj",
+                stagingPath = "staging/Fixture",
+                timedOut = false,
+                builtSha256 = "built-sha-1",
+                configuration = "Debug"
+            }
+        });
+        var transport = new FakeTransport((_, _) => ProcessResult(response, exitCode: 1));
+        var adapter = new DevBridgeModDevelopmentAdapter(
+            transport,
+            new DevBridgeModDevelopmentAdapterOptions
+            {
+                RootPath = "DevBridgeRoot",
+                DescriptorPath = "DevBridgeRoot/fixture.json",
+                DeploymentRoot = "DeploymentRoot",
+                PowerShellPath = "pwsh",
+                Timeout = TimeSpan.FromSeconds(1),
+                MaxStdoutBytes = 16 * 1024,
+                MaxStderrBytes = 1024,
+                EnableDescriptorRecovery = false
+            });
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "run-build-export",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.build-export",
+            "Build Export");
+        agent.Start();
+        using IDisposable activation = agent.Activate();
+
+        DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                "fixture",
+                "RepositoryRoot",
+                sourceFingerprint,
+                workflowId)
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(DevBridgeOutcomeKind.InfrastructureFailure, result.Status.Outcome);
+        AssertEqual("DEVELOPMENT_BUILD_FAILED", result.Status.ErrorCode);
+        Assert(
+            result.Build?.Output?.Contains("CS0246", StringComparison.Ordinal) == true,
+            "the DevBridge parser must preserve compiler output");
+        AssertEqual("Source/Fixture.csproj", result.Build!.SourceProject);
+        AssertEqual(1, result.Build.ExitCode);
+        AgentIssue issue = store.GetIssues(agentId: agent.AgentId)
+            .Single(value => value.Category == AgentIssueCategory.Error);
+        AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([issue.Id]);
+
+        Assert(
+            bundle.SelectedIssueIds.SequenceEqual([issue.Id]),
+            "the selected issue identity must remain explicit");
+        Assert(bundle.BuildEvidence.Any(value =>
+            value.SourceProject == "Source/Fixture.csproj" &&
+            value.ExitCode == 1 &&
+            value.ErrorCode == "DEVELOPMENT_BUILD_FAILED" &&
+            value.DiagnosticOutput?.Contains("CS0246", StringComparison.Ordinal) == true),
+            "structured build evidence must retain the compiler diagnostic");
+        Assert(bundle.CommandEvidence.Any(value =>
+            value.Command?.Contains("dotnet build Source/Fixture.csproj", StringComparison.Ordinal) == true &&
+            value.ExitCode == 1),
+            "structured command evidence must retain the failed build command");
+        Assert(bundle.Completeness.IsComplete,
+            "the bundle must carry the compiler reason and build command without a second lookup");
+        string bundleJson = JsonSerializer.Serialize(bundle, AgentObservabilityJson.Options);
+        Assert(
+            !bundleJson.Contains("secret-value", StringComparison.Ordinal),
+            "exported build evidence must redact credentials");
+    }
+
+    private static void PinnedDevBridgeBuildDiagnosticsCrossWireBoundary()
+    {
+        string? fixturePath = Environment.GetEnvironmentVariable(
+            "RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE");
+        // The cross-stack validator supplies the fixture generated by the pinned
+        // DevBridge process test. Keep the ordinary offline suite independent of
+        // that external repository while still exercising this test when selected.
+        if (string.IsNullOrWhiteSpace(fixturePath))
+        {
+            return;
+        }
+        string response = File.ReadAllText(fixturePath!);
+        using JsonDocument document = JsonDocument.Parse(response);
+        JsonElement root = document.RootElement;
+        AssertEqual(
+            DevBridgeModDevelopmentSchemas.Current,
+            root.GetProperty("schemaVersion").GetString());
+        JsonElement wireBuild = root.GetProperty("build");
+        JsonElement wireFailure = root.GetProperty("failure");
+        AssertEqual("DEVELOPMENT_BUILD_FAILED", wireFailure.GetProperty("errorCode").GetString());
+        Assert(wireBuild.TryGetProperty("command", out _) &&
+            wireBuild.TryGetProperty("sourceProject", out _) &&
+            wireBuild.TryGetProperty("outputTruncated", out _),
+            "the pinned DevBridge wire response must expose structured build fields");
+        string workflowId = root.GetProperty("workflowId").GetString()!;
+        string transactionId = root.GetProperty("transactionId").GetString()!;
+        string sourceFingerprint = root.GetProperty("sourceFingerprint").GetString()!;
+
+        string temporaryRoot = CreateTempDirectory();
+        string previousFixture = Environment.GetEnvironmentVariable(
+            "RIMLIAISON_CROSS_STACK_FIXTURE") ?? string.Empty;
+        try
+        {
+            string scriptsRoot = Path.Combine(temporaryRoot, "scripts");
+            Directory.CreateDirectory(scriptsRoot);
+            File.WriteAllText(
+                Path.Combine(scriptsRoot, "mod-test.ps1"),
+                "Get-Content -LiteralPath $env:RIMLIAISON_CROSS_STACK_FIXTURE -Raw\nexit 1\n");
+            Environment.SetEnvironmentVariable("RIMLIAISON_CROSS_STACK_FIXTURE", fixturePath);
+
+            using var store = new AgentObservabilityStore();
+            using var run = new AgentObservabilityRun("run-cross-stack-wire", store);
+            using AgentObservabilitySession agent = run.CreateAgent(
+                "mod.frontier",
+                "Frontier");
+            agent.Start();
+            using IDisposable activation = agent.Activate();
+
+            var adapter = new DevBridgeModDevelopmentAdapter(
+                new SystemDevBridgeProcessTransport(),
+                new DevBridgeModDevelopmentAdapterOptions
+                {
+                    RootPath = temporaryRoot,
+                    PowerShellPath = "pwsh",
+                    EnableDescriptorRecovery = false,
+                    PreserveDescriptorBackup = false,
+                    Timeout = TimeSpan.FromSeconds(30)
+                });
+            DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                    "frontier",
+                    temporaryRoot,
+                    sourceFingerprint,
+                    workflowId)
+                .GetAwaiter()
+                .GetResult();
+
+            AssertEqual(DevBridgeOutcomeKind.InfrastructureFailure, result.Status.Outcome);
+            AssertEqual("DEVELOPMENT_BUILD_FAILED", result.Status.ErrorCode);
+            AssertEqual(transactionId, result.TransactionId);
+            AssertEqual(workflowId, result.WorkflowId);
+            AssertEqual("DEVELOPMENT_BUILD_FAILED", result.Build!.ErrorCode);
+            AssertEqual(1, result.Build.ExitCode);
+            AssertEqual(false, result.Build.TimedOut);
+            AssertEqual(
+                wireBuild.GetProperty("outputTruncated").GetBoolean(),
+                result.Build.OutputTruncated);
+            Assert(result.Build.Output?.Contains("CS", StringComparison.OrdinalIgnoreCase) == true,
+                "the parser must preserve a compiler diagnostic from the DevBridge fixture");
+            Assert(!string.IsNullOrWhiteSpace(result.Build.Command),
+                "the parser must preserve the exact bounded build command");
+            Assert(!string.IsNullOrWhiteSpace(result.Build.SourceProject),
+                "the parser must preserve the source project");
+            Assert(!string.IsNullOrWhiteSpace(result.Build.StagingPath),
+                "the parser must preserve the staging path");
+
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandFailed,
+                "RimLiaison top-level command failed.",
+                new
+                {
+                    operationKey = "cli",
+                    workflowId,
+                    transactionId,
+                    errorCode = "RIMLIAISON_COMMAND_FAILED",
+                    exitCode = 1,
+                    outcome = "failure"
+                });
+            agent.Fail("RimLiaison command failed.", "RIMLIAISON_COMMAND_FAILED");
+
+            IReadOnlyList<AgentEvent> events = store.GetEvents(agentId: agent.AgentId);
+            IReadOnlyList<AgentIssue> issues = store.GetIssues(agentId: agent.AgentId);
+            string? CodeFor(AgentEvent value) => AgentObservabilityData.GetString(value.Data, "errorCode");
+            AgentIssue primary = issues.Single(issue =>
+                issue.Category == AgentIssueCategory.Error &&
+                string.Equals(issue.OperationKey, "build:frontier", StringComparison.Ordinal));
+            AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([primary.Id]);
+            string[] codes = bundle.SupportingEvents
+                .Select(CodeFor)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            Assert(codes.Contains("DEVELOPMENT_BUILD_FAILED", StringComparer.Ordinal),
+                "the build failure must remain the primary causal event");
+            Assert(codes.Contains("DEVBRIDGE_COMMAND_FAILED", StringComparer.Ordinal),
+                "the DevBridge command wrapper failure must be correlated");
+            Assert(codes.Contains("DEVBRIDGE_BUILD_FAILED", StringComparer.Ordinal),
+                "the RimLiaison build operation failure must be correlated");
+            Assert(codes.Contains("RIMLIAISON_COMMAND_FAILED", StringComparer.Ordinal),
+                "the top-level command failure must be correlated");
+            Assert(bundle.CorrelatedIssues.Count > 0,
+                "the causal bundle must distinguish correlated wrapper failures");
+            Assert(bundle.BuildEvidence.Any(value =>
+                    value.ErrorCode == "DEVELOPMENT_BUILD_FAILED" &&
+                    value.DiagnosticOutput?.Contains("CS", StringComparison.OrdinalIgnoreCase) == true &&
+                    value.TransactionId == transactionId &&
+                    value.WorkflowId == workflowId),
+                "the v2 export must retain build output and transaction/workflow identity");
+            Assert(bundle.BuildEvidence.Any(value => value.OutputTruncated ==
+                    wireBuild.GetProperty("outputTruncated").GetBoolean()),
+                "the v2 export must carry the DevBridge truncation indicator");
+            Assert(bundle.Completeness.IsComplete,
+                "the end-to-end compiler-failure bundle must be diagnostically complete");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                "RIMLIAISON_CROSS_STACK_FIXTURE",
+                string.IsNullOrEmpty(previousFixture) ? null : previousFixture);
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
     }
 
     private static void ValidDevelopmentDescriptorIsPreserved()

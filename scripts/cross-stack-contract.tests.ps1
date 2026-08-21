@@ -362,6 +362,66 @@ try {
     Assert-Equal $rimliaisonCapabilities.count 1 'RimLiaison capability count'
     Assert-Equal $rimliaisonCapabilities.capabilities[0].id 'rimworld/inspect_fixture' 'RimLiaison capability id'
 
+    # Exercise the actual pinned DevBridge2 mod-test serializer with a
+    # synthetic compiler failure before feeding its JSON through the
+    # RimLiaison parser and observability export test. The fake host above
+    # remains the bounded lifecycle composition fixture; this block proves
+    # that the authoritative build owner emits the richer failure contract.
+    $devBridgeDiagnosticScript = Join-Path $DevBridgeRoot 'scripts\process-e2e.tests.ps1'
+    Require-Path $devBridgeDiagnosticScript 'DevBridge2 diagnostic contract test'
+    $devBridgeDiagnosticPath = Join-Path $workspaceRoot 'devbridge-build-failure.json'
+    $devBridgeDiagnosticProcess = Invoke-ProcessBounded 'pwsh' @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $devBridgeDiagnosticScript,
+        '-OnlyBuildFailure', '-DiagnosticFixturePath', $devBridgeDiagnosticPath
+    ) $DevBridgeRoot 900000
+    if ($devBridgeDiagnosticProcess.ExitCode -ne 0) {
+        throw "CROSS_STACK_DEVBRIDGE_DIAGNOSTIC_FAILED: $(Limit-Text ((@($devBridgeDiagnosticProcess.Stderr, $devBridgeDiagnosticProcess.Stdout) | Where-Object { $_ }) -join "`n") 4096)"
+    }
+    Require-Path $devBridgeDiagnosticPath 'DevBridge2 generated build-failure response'
+    $devBridgeBuildFailure = Get-Content -LiteralPath $devBridgeDiagnosticPath -Raw | ConvertFrom-Json -Depth 40
+    Assert-Contract $devBridgeBuildFailure 'DevBridge2 build-failure response' $manifest.contracts.devBridgeModDevelopmentFailure
+    Assert-Equal $devBridgeBuildFailure.stage 'build' 'DevBridge2 build-failure stage'
+    Assert-Equal $devBridgeBuildFailure.failure.stage 'build' 'DevBridge2 nested failure stage'
+    Assert-Equal $devBridgeBuildFailure.failure.errorCode 'DEVELOPMENT_BUILD_FAILED' 'DevBridge2 primary build error code'
+    Assert-Equal $devBridgeBuildFailure.build.errorCode 'DEVELOPMENT_BUILD_FAILED' 'DevBridge2 build error code'
+    Assert-Equal $devBridgeBuildFailure.build.command $devBridgeBuildFailure.failure.command 'DevBridge2 preserves one exact build command'
+    Assert-True ([string]$devBridgeBuildFailure.build.output -match '(?i)(error\s+(CS|MSB)|CS\d{4}|MSB\d{4})') 'DevBridge2 preserves compiler output'
+    Assert-True ([string]$devBridgeBuildFailure.failure.output -match '(?i)(error\s+(CS|MSB)|CS\d{4}|MSB\d{4})') 'DevBridge2 failure projection preserves compiler output'
+    Assert-True (([string]$devBridgeBuildFailure.build.output).Length -le [int]$manifest.limits.maxDevBridgeBuildOutputCharacters) 'DevBridge2 build output remains bounded'
+    Assert-Equal $devBridgeBuildFailure.build.outputTruncated $devBridgeBuildFailure.failure.outputTruncated 'DevBridge2 truncation state is repeated consistently'
+    if ([bool]$devBridgeBuildFailure.build.outputTruncated) {
+        Assert-True ([string]$devBridgeBuildFailure.build.output -match '\[truncated to') 'DevBridge2 build output exposes an explicit truncation marker'
+        Assert-True ([string]$devBridgeBuildFailure.failure.output -match '\[truncated to') 'DevBridge2 failure output exposes an explicit truncation marker'
+    }
+    Assert-Equal $devBridgeBuildFailure.build.transactionId $devBridgeBuildFailure.transactionId 'DevBridge2 build transaction identity'
+    Assert-Equal $devBridgeBuildFailure.build.workflowId $devBridgeBuildFailure.workflowId 'DevBridge2 build workflow identity'
+    Assert-Equal $devBridgeBuildFailure.failure.transactionId $devBridgeBuildFailure.transactionId 'DevBridge2 failure transaction identity'
+    Assert-Equal $devBridgeBuildFailure.failure.workflowId $devBridgeBuildFailure.workflowId 'DevBridge2 failure workflow identity'
+
+    $rimliaisonTestsExe = Join-Path $RimLiaisonRoot 'tests\RimLiaison.Tests\bin\Release\net8.0\RimLiaison.Tests.exe'
+    Require-Path $rimliaisonTestsExe 'RimLiaison focused cross-stack test executable'
+    $previousDiagnosticFixture = $env:RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE
+    try {
+        $env:RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE = $devBridgeDiagnosticPath
+        $rimliaisonDiagnosticProcess = Invoke-ProcessBounded $rimliaisonTestsExe @(
+            '--filter', 'pinned DevBridge build diagnostics cross the real wire boundary'
+        ) $RimLiaisonRoot 300000
+    } finally {
+        $env:RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE = $previousDiagnosticFixture
+    }
+    if ($rimliaisonDiagnosticProcess.ExitCode -ne 0) {
+        throw "CROSS_STACK_RIMLIAISON_DIAGNOSTIC_FAILED: $(Limit-Text ((@($rimliaisonDiagnosticProcess.Stderr, $rimliaisonDiagnosticProcess.Stdout) | Where-Object { $_ }) -join "`n") 4096)"
+    }
+    $diagnosticCrossStack = [ordered]@{
+        source = 'DevBridge2/scripts/process-e2e.tests.ps1 -OnlyBuildFailure'
+        responseSchema = [string]$devBridgeBuildFailure.schemaVersion
+        errorCode = [string]$devBridgeBuildFailure.failure.errorCode
+        compilerOutputPreserved = [bool](-not [string]::IsNullOrWhiteSpace([string]$devBridgeBuildFailure.build.output))
+        outputTruncated = [bool]$devBridgeBuildFailure.build.outputTruncated
+        outputLimitCharacters = [int]$manifest.limits.maxDevBridgeBuildOutputCharacters
+        rimLiaisonWireTest = 'pass'
+    }
+
     $brokenSuite = ($suite | ConvertTo-Json -Depth 40 | ConvertFrom-Json -Depth 40)
     $brokenSuite.PSObject.Properties.Remove('artifactFreshness')
     $contractBreakDetected = $false
@@ -474,6 +534,7 @@ try {
             operationId = $operationId
             correlationVerified = $true
         }
+        devBridgeBuildDiagnostics = $diagnosticCrossStack
         contracts = [ordered]@{
             rimContextAffected = [string]$affected.schemaVersion
             devBridgeModDevelopment = [string]$manifest.contracts.devBridgeModDevelopment.schemaVersion

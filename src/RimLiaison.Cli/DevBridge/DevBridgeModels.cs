@@ -118,7 +118,8 @@ public sealed record DevBridgeProcessRequest(
     TimeSpan Timeout,
     int MaxStdoutBytes,
     int MaxStderrBytes,
-    IReadOnlyDictionary<string, string>? EnvironmentVariables = null);
+    IReadOnlyDictionary<string, string>? EnvironmentVariables = null,
+    string? OperationKey = null);
 
 public sealed record DevBridgeProcessResult(
     int? ExitCode,

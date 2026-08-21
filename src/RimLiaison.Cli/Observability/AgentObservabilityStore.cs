@@ -38,6 +38,13 @@ public interface IAgentObservabilityStore
         bool issuesOnly = false,
         int limit = 500);
 
+    AgentDiagnosticEvidenceReference? PersistEvidence(
+        string kind,
+        string? content,
+        bool truncated = false);
+
+    AgentDiagnosticEvidence? GetEvidence(string evidenceId);
+
     AgentDiagnosticBundle CreateDiagnosticBundle(
         IEnumerable<string> issueIds);
 
@@ -70,6 +77,7 @@ public sealed class AgentObservabilityStore :
     private const string IssuesFileName = "issues.jsonl";
     private const string AgentsFileName = "agents.jsonl";
     private const string SequenceFileName = "metadata.sequence";
+    private const string EvidenceDirectoryName = "evidence";
     private const string EventRecordKind = "event";
     private const string IssueRecordKind = "issue";
     private const string AgentRecordKind = "agent";
@@ -82,9 +90,12 @@ public sealed class AgentObservabilityStore :
     private readonly string? issuesPath;
     private readonly string? agentsPath;
     private readonly string? sequencePath;
+    private readonly string? evidenceDirectory;
     private readonly FileSystemWatcher? storageWatcher;
     private readonly List<AgentEvent> events = [];
     private readonly Dictionary<string, AgentIssue> issues = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentDiagnosticEvidence> evidence =
+        new(StringComparer.Ordinal);
     private readonly Dictionary<AgentObservabilityAgentIdentity, AgentSnapshot> agents = [];
     private readonly List<Action<AgentObservabilityNotification>> subscribers = [];
     private readonly AgentIssueDetector issueDetector;
@@ -108,6 +119,8 @@ public sealed class AgentObservabilityStore :
             issuesPath = Path.Combine(this.storageDirectory, IssuesFileName);
             agentsPath = Path.Combine(this.storageDirectory, AgentsFileName);
             sequencePath = Path.Combine(this.storageDirectory, SequenceFileName);
+            evidenceDirectory = Path.Combine(this.storageDirectory, EvidenceDirectoryName);
+            Directory.CreateDirectory(evidenceDirectory);
         }
 
         issueDetector = new AgentIssueDetector(this.options);
@@ -381,6 +394,76 @@ public sealed class AgentObservabilityStore :
             selectedIssues);
     }
 
+    public AgentDiagnosticEvidenceReference? PersistEvidence(
+        string kind,
+        string? content,
+        bool truncated = false)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return null;
+        }
+
+        string normalizedKind = AgentObservabilityData.BoundIdentifier(kind, 128) ??
+            "diagnostic";
+        string trimmed = content.Trim();
+        string bounded = AgentObservabilityData.BoundText(
+            trimmed,
+            options.MaximumEvidenceBytes);
+        bool boundedByLimit = Encoding.UTF8.GetByteCount(trimmed) >
+            options.MaximumEvidenceBytes;
+        var value = new AgentDiagnosticEvidence(
+            "evd-" + Guid.NewGuid().ToString("N"),
+            normalizedKind,
+            bounded,
+            truncated || boundedByLimit);
+        lock (gate)
+        {
+            if (Volatile.Read(ref disposed) != 0)
+            {
+                return null;
+            }
+
+            evidence[value.Id] = value;
+            PersistEvidenceFile(value);
+            TrimEvidence();
+        }
+
+        return new AgentDiagnosticEvidenceReference(
+            value.Id,
+            value.Kind,
+            value.Content.Length,
+            value.Truncated);
+    }
+
+    public AgentDiagnosticEvidence? GetEvidence(string evidenceId)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceId))
+        {
+            return null;
+        }
+
+        lock (gate)
+        {
+            if (evidence.TryGetValue(evidenceId, out AgentDiagnosticEvidence? value))
+            {
+                return value;
+            }
+
+            if (evidenceDirectory is null)
+            {
+                return null;
+            }
+
+            AgentDiagnosticEvidence? persisted = ReadEvidenceFile(evidenceId);
+            if (persisted is not null)
+            {
+                evidence[persisted.Id] = persisted;
+            }
+            return persisted;
+        }
+    }
+
     public AgentDiagnosticBundle CreateDiagnosticBundle(
         IEnumerable<string> issueIds)
     {
@@ -399,17 +482,176 @@ public sealed class AgentObservabilityStore :
                 .OrderBy(static issue => issue.Timestamp)
                 .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
                 .ToArray();
-            HashSet<string> selectedEventIds = selectedIssues
-                .SelectMany(static issue => issue.EventIds)
+            HashSet<string> selectedIssueIdSet = selectedIssues
+                .Select(static issue => issue.Id)
                 .ToHashSet(StringComparer.Ordinal);
-            AgentEvent[] supportingEvents = events
-                .Where(eventRecord => selectedEventIds.Contains(eventRecord.Id))
-                .OrderBy(static eventRecord => eventRecord.Sequence)
-                .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
-                .ToArray();
+            Dictionary<string, AgentEvent> eventsById = events
+                .ToDictionary(static eventRecord => eventRecord.Id, StringComparer.Ordinal);
             HashSet<(string RunId, string AgentId, string ModId)> identities = selectedIssues
                 .Select(issue => (issue.RunId, issue.AgentId, issue.ModId))
                 .ToHashSet();
+            string[] selectedEventReferences = selectedIssues
+                .SelectMany(issue => issue.EventIds.Concat(
+                    issue.ResolutionEventId is string resolution
+                        ? [resolution]
+                        : []))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            HashSet<string> includedEventIds = selectedIssues
+                .SelectMany(static issue => issue.EventIds)
+                .Where(eventsById.ContainsKey)
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> missingEventIds = selectedEventReferences
+                .Where(eventId => !eventsById.ContainsKey(eventId))
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> relatedEventIds = new(includedEventIds, StringComparer.Ordinal);
+            HashSet<string> relatedIssueIds = new(selectedIssueIdSet, StringComparer.Ordinal);
+            HashSet<string> operationKeys = selectedIssues
+                .Select(static issue => issue.OperationKey)
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => value!)
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> traceIds = selectedIssues
+                .Select(static issue => issue.TraceId)
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => value!)
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> spanIds = selectedIssues
+                .SelectMany(static issue => issue.SpanIds ?? [])
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> transactionIds = [];
+            HashSet<string> workflowIds = [];
+
+            foreach (AgentIssue issue in selectedIssues)
+            {
+                foreach (string eventId in issue.EventIds)
+                {
+                    relatedEventIds.Add(eventId);
+                }
+
+                if (issue.ResolutionEventId is not null)
+                {
+                    relatedEventIds.Add(issue.ResolutionEventId);
+                }
+            }
+
+            foreach (AgentEvent eventRecord in events
+                         .Where(eventRecord => includedEventIds.Contains(eventRecord.Id)))
+            {
+                AddCorrelationValues(
+                    eventRecord,
+                    operationKeys,
+                    traceIds,
+                    spanIds,
+                    transactionIds,
+                    workflowIds,
+                    relatedEventIds,
+                    relatedIssueIds);
+            }
+
+            // Expand only through stable causal identifiers. Identity is a
+            // hard boundary: a concurrent agent in the same run cannot enter
+            // the bundle merely because it used the same tool or workflow.
+            var correlatedIssues = new Dictionary<string, AgentIssue>(StringComparer.Ordinal);
+            bool expanded;
+            do
+            {
+                expanded = false;
+                foreach (AgentEvent eventRecord in events
+                             .OrderBy(static value => value.Sequence)
+                             .ThenBy(static value => value.Id, StringComparer.Ordinal))
+                {
+                    if (includedEventIds.Count >= options.MaximumBundleSupportingEvents ||
+                        !identities.Contains((eventRecord.RunId, eventRecord.AgentId, eventRecord.ModId)) ||
+                        includedEventIds.Contains(eventRecord.Id) ||
+                        !MatchesDiagnosticCorrelation(
+                            eventRecord,
+                            includedEventIds,
+                            relatedEventIds,
+                            operationKeys,
+                            traceIds,
+                            spanIds,
+                            transactionIds,
+                            workflowIds,
+                            relatedIssueIds))
+                    {
+                        continue;
+                    }
+
+                    includedEventIds.Add(eventRecord.Id);
+                    AddCorrelationValues(
+                        eventRecord,
+                        operationKeys,
+                        traceIds,
+                        spanIds,
+                        transactionIds,
+                        workflowIds,
+                        relatedEventIds,
+                        relatedIssueIds);
+                    expanded = true;
+                }
+
+                foreach (AgentIssue issue in issues.Values
+                             .OrderBy(static value => value.Timestamp)
+                             .ThenBy(static value => value.Id, StringComparer.Ordinal))
+                {
+                    if (selectedIssueIdSet.Contains(issue.Id) ||
+                        correlatedIssues.ContainsKey(issue.Id) ||
+                        correlatedIssues.Count >= options.MaximumBundleCorrelatedIssues ||
+                        !identities.Contains((issue.RunId, issue.AgentId, issue.ModId)) ||
+                        !MatchesDiagnosticIssue(
+                            issue,
+                            includedEventIds,
+                            relatedIssueIds,
+                            operationKeys,
+                            traceIds,
+                            spanIds))
+                    {
+                        continue;
+                    }
+
+                    correlatedIssues[issue.Id] = issue;
+                    relatedIssueIds.Add(issue.Id);
+                    foreach (string eventId in issue.EventIds)
+                    {
+                        relatedEventIds.Add(eventId);
+                        if (!eventsById.ContainsKey(eventId))
+                        {
+                            missingEventIds.Add(eventId);
+                        }
+                    }
+                    if (issue.ResolutionEventId is not null)
+                    {
+                        relatedEventIds.Add(issue.ResolutionEventId);
+                        if (!eventsById.ContainsKey(issue.ResolutionEventId))
+                        {
+                            missingEventIds.Add(issue.ResolutionEventId);
+                        }
+                    }
+                    if (!string.IsNullOrWhiteSpace(issue.OperationKey))
+                    {
+                        operationKeys.Add(issue.OperationKey);
+                    }
+                    if (!string.IsNullOrWhiteSpace(issue.TraceId))
+                    {
+                        traceIds.Add(issue.TraceId);
+                    }
+                    foreach (string spanId in issue.SpanIds ?? [])
+                    {
+                        spanIds.Add(spanId);
+                    }
+                    expanded = true;
+                }
+            }
+            while (expanded);
+
+            AgentEvent[] supportingEvents = events
+                .Where(eventRecord => includedEventIds.Contains(eventRecord.Id))
+                .OrderBy(static eventRecord => eventRecord.Sequence)
+                .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
+                .Take(options.MaximumBundleSupportingEvents)
+                .ToArray();
             AgentDiagnosticMod[] mods = agents.Values
                 .Where(agent => identities.Contains((agent.RunId, agent.AgentId, agent.ModId)))
                 .Select(agent => new AgentDiagnosticMod(
@@ -424,15 +666,60 @@ public sealed class AgentObservabilityStore :
             var toolCalls = new HashSet<string>(StringComparer.Ordinal);
             var commands = new HashSet<string>(StringComparer.Ordinal);
             var files = new HashSet<string>(StringComparer.Ordinal);
+            var commandEvidence = new List<AgentDiagnosticCommandEvidence>();
+            var buildEvidence = new List<AgentDiagnosticBuildEvidence>();
+            var toolOperations = new List<AgentDiagnosticToolOperationEvidence>();
             foreach (AgentEvent eventRecord in supportingEvents)
             {
                 AddDataString(eventRecord.Data, toolCalls, "toolCallId", "toolName");
                 AddDataString(eventRecord.Data, commands, "command");
+                AddDataString(eventRecord.Data, commands, "commandText");
                 AddDataString(eventRecord.Data, files, "filePath", "path");
                 AddDataStrings(eventRecord.Data, toolCalls, "relatedToolCalls");
                 AddDataStrings(eventRecord.Data, commands, "relatedCommands");
                 AddDataStrings(eventRecord.Data, files, "relatedFiles");
+
+                AgentDiagnosticCommandEvidence? command =
+                    ToCommandEvidence(eventRecord);
+                if (command is not null)
+                {
+                    commandEvidence.Add(command);
+                    if (!string.IsNullOrWhiteSpace(command.Command))
+                    {
+                        commands.Add(command.Command);
+                    }
+                }
+
+                AgentDiagnosticBuildEvidence? build =
+                    ToBuildEvidence(eventRecord);
+                if (build is not null)
+                {
+                    buildEvidence.Add(build);
+                }
+
+                AgentDiagnosticToolOperationEvidence? tool =
+                    ToToolOperationEvidence(eventRecord);
+                if (tool is not null)
+                {
+                    toolOperations.Add(tool);
+                }
             }
+
+            commandEvidence = commandEvidence
+                .GroupBy(static value => value.EventId, StringComparer.Ordinal)
+                .Select(static group => group.First())
+                .Take(options.MaximumBundleEvidenceValues)
+                .ToList();
+            buildEvidence = buildEvidence
+                .GroupBy(static value => value.EventId, StringComparer.Ordinal)
+                .Select(static group => group.First())
+                .Take(options.MaximumBundleEvidenceValues)
+                .ToList();
+            toolOperations = toolOperations
+                .GroupBy(static value => value.EventId, StringComparer.Ordinal)
+                .Select(static group => group.First())
+                .Take(options.MaximumBundleEvidenceValues)
+                .ToList();
 
             AgentRecoveryStep[] recoveryPath = supportingEvents
                 .Where(static eventRecord => IsRecoveryEvent(eventRecord.Type) ||
@@ -459,9 +746,34 @@ public sealed class AgentObservabilityStore :
                 .OrderBy(static trace => trace.TraceId, StringComparer.Ordinal)
                 .ToArray();
 
+            AgentDiagnosticCorrelation[] correlations =
+                BuildCorrelations(supportingEvents)
+                    .Take(options.MaximumBundleEvidenceValues)
+                    .ToArray();
+            AgentDiagnosticRepositoryState? repository =
+                BuildRepositoryState(supportingEvents, buildEvidence);
+            AgentDiagnosticEnvironmentState? environment =
+                BuildEnvironmentState(supportingEvents);
+            AgentDiagnosticCompleteness completeness = BuildCompleteness(
+                requestedIds,
+                selectedIssues,
+                correlatedIssues.Values,
+                missingEventIds,
+                supportingEvents,
+                commandEvidence,
+                buildEvidence);
+            AgentIssue[] correlated = correlatedIssues.Values
+                .OrderBy(static issue => issue.Timestamp)
+                .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
+                .ToArray();
+
             return new AgentDiagnosticBundle
             {
                 IssueIds = selectedIssues.Select(static issue => issue.Id).ToArray(),
+                SelectedIssueIds = requestedIds,
+                SelectedIssues = selectedIssues,
+                CorrelatedIssueIds = correlated.Select(static issue => issue.Id).ToArray(),
+                CorrelatedIssues = correlated,
                 Mods = mods,
                 Issues = selectedIssues,
                 SupportingEvents = supportingEvents,
@@ -473,15 +785,699 @@ public sealed class AgentObservabilityStore :
                     .OrderBy(static value => value, StringComparer.Ordinal)
                     .Take(options.MaximumBundleEvidenceValues)
                     .ToArray(),
+                CommandEvidence = commandEvidence,
+                BuildEvidence = buildEvidence,
+                ToolOperations = toolOperations,
                 Files = files
                     .OrderBy(static value => value, StringComparer.Ordinal)
                     .Take(options.MaximumBundleEvidenceValues)
                     .ToArray(),
+                RelatedFiles = files
+                    .OrderBy(static value => value, StringComparer.Ordinal)
+                    .Take(options.MaximumBundleEvidenceValues)
+                    .ToArray(),
                 RecoveryPath = recoveryPath,
-                Traces = traces.Take(options.MaximumBundleEvidenceValues).ToArray()
+                Traces = traces.Take(options.MaximumBundleEvidenceValues).ToArray(),
+                Correlations = correlations,
+                Repository = repository,
+                Environment = environment,
+                Completeness = completeness
             };
         }
     }
+
+    private static void AddCorrelationValues(
+        AgentEvent eventRecord,
+        ISet<string> operationKeys,
+        ISet<string> traceIds,
+        ISet<string> spanIds,
+        ISet<string> transactionIds,
+        ISet<string> workflowIds,
+        ISet<string> relatedEventIds,
+        ISet<string> relatedIssueIds)
+    {
+        string? operationKey = EventOperationKey(eventRecord);
+        if (!string.IsNullOrWhiteSpace(operationKey))
+        {
+            operationKeys.Add(operationKey);
+        }
+
+        string? traceId = eventRecord.TraceId ??
+            AgentObservabilityData.GetString(eventRecord.Data, "traceId");
+        if (!string.IsNullOrWhiteSpace(traceId))
+        {
+            traceIds.Add(traceId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(eventRecord.SpanId))
+        {
+            spanIds.Add(eventRecord.SpanId);
+        }
+        AddDataString(eventRecord.Data, spanIds, "spanId", "parentSpanId");
+        AddDataString(eventRecord.Data, transactionIds, "transactionId", "transaction");
+        AddDataString(eventRecord.Data, workflowIds, "workflowId", "workflow");
+        AddDataStrings(
+            eventRecord.Data,
+            relatedEventIds,
+            "relatedEventIds");
+        AddDataString(
+            eventRecord.Data,
+            relatedEventIds,
+            "parentEventId",
+            "causeEventId",
+            "causedByEventId");
+        AddDataStrings(
+            eventRecord.Data,
+            relatedIssueIds,
+            "relatedIssueIds");
+    }
+
+    private static bool MatchesDiagnosticCorrelation(
+        AgentEvent eventRecord,
+        IReadOnlySet<string> includedEventIds,
+        IReadOnlySet<string> relatedEventIds,
+        IReadOnlySet<string> operationKeys,
+        IReadOnlySet<string> traceIds,
+        IReadOnlySet<string> spanIds,
+        IReadOnlySet<string> transactionIds,
+        IReadOnlySet<string> workflowIds,
+        IReadOnlySet<string> relatedIssueIds)
+    {
+        if (relatedEventIds.Contains(eventRecord.Id))
+        {
+            return true;
+        }
+
+        string? operationKey = EventOperationKey(eventRecord);
+        if (!string.IsNullOrWhiteSpace(operationKey) && operationKeys.Contains(operationKey))
+        {
+            return true;
+        }
+
+        string? traceId = eventRecord.TraceId ??
+            AgentObservabilityData.GetString(eventRecord.Data, "traceId");
+        if (!string.IsNullOrWhiteSpace(traceId) && traceIds.Contains(traceId))
+        {
+            return true;
+        }
+
+        if ((!string.IsNullOrWhiteSpace(eventRecord.SpanId) &&
+             spanIds.Contains(eventRecord.SpanId)) ||
+            AgentObservabilityData.GetStrings(eventRecord.Data, "spanIds")
+                .Any(spanIds.Contains))
+        {
+            return true;
+        }
+
+        string? transactionId = FirstString(
+            eventRecord.Data,
+            "transactionId",
+            "transaction");
+        if (!string.IsNullOrWhiteSpace(transactionId) && transactionIds.Contains(transactionId))
+        {
+            return true;
+        }
+
+        string? workflowId = FirstString(
+            eventRecord.Data,
+            "workflowId",
+            "workflow");
+        if (!string.IsNullOrWhiteSpace(workflowId) && workflowIds.Contains(workflowId))
+        {
+            return true;
+        }
+
+        if (AgentObservabilityData.GetStrings(eventRecord.Data, "relatedEventIds")
+                .Any(includedEventIds.Contains) ||
+            AgentObservabilityData.GetStrings(eventRecord.Data, "relatedIssueIds")
+                .Any(relatedIssueIds.Contains) ||
+            new[] { "parentEventId", "causeEventId", "causedByEventId" }
+                .Select(name => AgentObservabilityData.GetString(eventRecord.Data, name))
+                .Any(value => value is not null && includedEventIds.Contains(value)))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool MatchesDiagnosticIssue(
+        AgentIssue issue,
+        IReadOnlySet<string> includedEventIds,
+        IReadOnlySet<string> relatedIssueIds,
+        IReadOnlySet<string> operationKeys,
+        IReadOnlySet<string> traceIds,
+        IReadOnlySet<string> spanIds) =>
+        relatedIssueIds.Contains(issue.Id) ||
+        issue.EventIds.Any(includedEventIds.Contains) ||
+        (!string.IsNullOrWhiteSpace(issue.OperationKey) &&
+         operationKeys.Contains(issue.OperationKey)) ||
+        (!string.IsNullOrWhiteSpace(issue.TraceId) &&
+         traceIds.Contains(issue.TraceId)) ||
+        (issue.SpanIds ?? []).Any(spanIds.Contains);
+
+    private static string? EventOperationKey(AgentEvent eventRecord) =>
+        AgentObservabilityData.GetString(eventRecord.Data, "operationKey") ??
+        AgentObservabilityData.GetString(eventRecord.Data, "operation");
+
+    private AgentDiagnosticCommandEvidence? ToCommandEvidence(AgentEvent eventRecord)
+    {
+        JsonElement? data = eventRecord.Data;
+        JsonElement? build = GetObject(data, "build");
+        JsonElement? failure = GetObject(data, "failure");
+        EvidenceValue stdout = ReadEvidenceValue(
+            data,
+            build,
+            failure,
+            ["stdoutEvidenceId"],
+            ["stdout", "stdoutExcerpt"]);
+        EvidenceValue stderr = ReadEvidenceValue(
+            data,
+            build,
+            failure,
+            ["stderrEvidenceId"],
+            ["stderr", "stderrExcerpt", "errorOutput"]);
+        EvidenceValue diagnostic = ReadEvidenceValue(
+            data,
+            build,
+            failure,
+            ["diagnosticEvidenceId", "outputEvidenceId", "buildOutputEvidenceId"],
+            ["diagnosticOutput", "output", "error"]);
+        string? command = FirstString(
+            data,
+            "command",
+            "commandText") ?? FirstString(build, "command") ?? FirstString(failure, "command");
+        string? tool = FirstString(data, "toolName", "tool") ?? FirstString(build, "tool");
+        int? exitCode = ToInt32(FirstInt64(data, "exitCode")) ??
+            ToInt32(FirstInt64(build, "exitCode")) ??
+            ToInt32(FirstInt64(failure, "exitCode"));
+        string? operationKey = EventOperationKey(eventRecord);
+        bool isCommandEvent = eventRecord.Type.Contains("command", StringComparison.OrdinalIgnoreCase) ||
+            eventRecord.Type.Contains("tool", StringComparison.OrdinalIgnoreCase) ||
+            eventRecord.Type.StartsWith("build", StringComparison.OrdinalIgnoreCase) ||
+            eventRecord.Type.StartsWith("test", StringComparison.OrdinalIgnoreCase);
+        if (!isCommandEvent && command is null && tool is null && exitCode is null &&
+            stdout.Text is null && stderr.Text is null && diagnostic.Text is null)
+        {
+            return null;
+        }
+
+        return new AgentDiagnosticCommandEvidence(
+            eventRecord.Id,
+            string.IsNullOrWhiteSpace(command)
+                ? null
+                : AgentObservabilityData.SanitizeCommand(command, options.MaximumBundleOutputCharacters),
+            AgentObservabilityData.BoundIdentifier(tool, 256),
+            FirstString(
+                data,
+                "workingDirectory",
+                "workingContext",
+                "cwd") ?? FirstString(build, "workingDirectory", "workingContext", "cwd"),
+            exitCode,
+            FirstBoolean(data, build, failure, "timedOut") ??
+                eventRecord.Type.EndsWith("timeout", StringComparison.OrdinalIgnoreCase),
+            FirstBoolean(data, build, failure, "cancelled") ??
+                string.Equals(
+                    AgentObservabilityData.GetString(data, "outcome"),
+                    "cancelled",
+                    StringComparison.OrdinalIgnoreCase),
+            stdout.Text,
+            stderr.Text,
+            diagnostic.Text,
+            stdout.Truncated || AgentObservabilityData.GetBoolean(data, "stdoutTruncated"),
+            stderr.Truncated || AgentObservabilityData.GetBoolean(data, "stderrTruncated"),
+            diagnostic.Truncated || AgentObservabilityData.GetBoolean(data, "diagnosticOutputTruncated"),
+            string.IsNullOrWhiteSpace(operationKey)
+                ? null
+                : AgentObservabilityData.SanitizeCommand(
+                    operationKey,
+                    options.MaximumBundleOutputCharacters),
+            FirstString(data, "transactionId", "transaction") ??
+                FirstString(build, "transactionId", "transaction"),
+            FirstString(data, "workflowId", "workflow") ??
+                FirstString(build, "workflowId", "workflow"));
+    }
+
+    private AgentDiagnosticBuildEvidence? ToBuildEvidence(AgentEvent eventRecord)
+    {
+        JsonElement? data = eventRecord.Data;
+        JsonElement? build = GetObject(data, "build");
+        JsonElement? failure = GetObject(data, "failure");
+        bool isBuildEvent = eventRecord.Type.StartsWith("build", StringComparison.OrdinalIgnoreCase) ||
+            eventRecord.Type == AgentEventTypes.BuildDiagnostics ||
+            build is not null ||
+            FirstString(data, "sourceProject", "builtSha256", "stagingPath") is not null;
+        if (!isBuildEvent)
+        {
+            return null;
+        }
+
+        EvidenceValue output = ReadEvidenceValue(
+            build,
+            data,
+            failure,
+            ["outputEvidenceId", "buildOutputEvidenceId", "stdoutEvidenceId"],
+            ["output", "stdout", "stdoutExcerpt"]);
+        EvidenceValue errorOutput = ReadEvidenceValue(
+            build,
+            data,
+            failure,
+            ["errorOutputEvidenceId", "stderrEvidenceId"],
+            ["errorOutput", "stderr", "stderrExcerpt"]);
+        EvidenceValue diagnostic = ReadEvidenceValue(
+            build,
+            failure,
+            data,
+            ["diagnosticEvidenceId", "outputEvidenceId"],
+            ["diagnosticOutput", "output", "error"]);
+        bool? freshnessProven = FirstBoolean(data, build, failure, "loadedArtifactFreshnessProven");
+        string? deploymentDecision = FirstString(
+            data,
+            "deploymentDecision") ?? FirstString(build, "deploymentDecision");
+        string? command = FirstString(data, "command", "commandText") ??
+            FirstString(build, "command") ??
+            FirstString(failure, "command");
+        return new AgentDiagnosticBuildEvidence(
+            eventRecord.Id,
+            FirstString(data, "project") ?? FirstString(build, "project"),
+            FirstString(data, "sourceProject") ?? FirstString(build, "sourceProject"),
+            FirstString(data, "configuration") ?? FirstString(build, "configuration"),
+            string.IsNullOrWhiteSpace(command)
+                ? null
+                : AgentObservabilityData.SanitizeCommand(
+                    command,
+                    options.MaximumBundleOutputCharacters),
+            FirstString(data, "workingDirectory", "workingContext", "cwd") ??
+                FirstString(build, "workingDirectory", "workingContext", "cwd"),
+            FirstInt32(data, build, failure, "exitCode"),
+            FirstBoolean(data, build, failure, "timedOut") ??
+                eventRecord.Type.EndsWith("timeout", StringComparison.OrdinalIgnoreCase),
+            FirstBoolean(data, build, failure, "cancelled") ?? false,
+            output.Text,
+            errorOutput.Text,
+            diagnostic.Text,
+            output.Truncated || AgentObservabilityData.GetBoolean(data, "outputTruncated"),
+            errorOutput.Truncated || AgentObservabilityData.GetBoolean(data, "stderrTruncated"),
+            diagnostic.Truncated || AgentObservabilityData.GetBoolean(data, "diagnosticOutputTruncated"),
+            FirstString(data, "transactionId", "transaction") ??
+                FirstString(build, "transactionId", "transaction") ??
+                FirstString(failure, "transactionId", "transaction"),
+            FirstString(data, "workflowId", "workflow") ??
+                FirstString(build, "workflowId", "workflow") ??
+                FirstString(failure, "workflowId", "workflow"),
+            FirstString(data, "sourceFingerprint") ?? FirstString(build, "sourceFingerprint"),
+            FirstString(data, "builtSha256", "builtArtifactSha256") ??
+                FirstString(build, "builtSha256", "builtArtifactSha256"),
+            FirstString(data, "deployedSha256", "deployedArtifactSha256") ??
+                FirstString(build, "deployedSha256", "deployedArtifactSha256"),
+            deploymentDecision,
+            FirstString(data, "stagingPath") ?? FirstString(build, "stagingPath"),
+            freshnessProven,
+            FirstString(data, "freshnessState", "deploymentState") ??
+                deploymentDecision,
+            FirstString(data, "errorCode") ?? FirstString(failure, "errorCode"),
+            FirstString(data, "failureMessage", "message") ??
+                FirstString(failure, "message", "error"));
+    }
+
+    private static AgentDiagnosticToolOperationEvidence? ToToolOperationEvidence(
+        AgentEvent eventRecord)
+    {
+        JsonElement? data = eventRecord.Data;
+        string? tool = AgentObservabilityData.GetString(data, "toolName") ??
+            AgentObservabilityData.GetString(data, "tool");
+        bool isToolEvent = eventRecord.Type.Contains("tool", StringComparison.OrdinalIgnoreCase) ||
+            tool is not null;
+        if (!isToolEvent)
+        {
+            return null;
+        }
+
+        return new AgentDiagnosticToolOperationEvidence(
+            eventRecord.Id,
+            AgentObservabilityData.BoundIdentifier(tool, 256),
+            string.IsNullOrWhiteSpace(EventOperationKey(eventRecord))
+                ? null
+                : AgentObservabilityData.SanitizeCommand(
+                    EventOperationKey(eventRecord),
+                    2_048),
+            AgentObservabilityData.GetString(data, "operationType"),
+            AgentObservabilityData.GetString(data, "outcome"),
+            AgentObservabilityData.GetString(data, "errorCode"),
+            eventRecord.Summary,
+            AgentObservabilityData.GetString(data, "transactionId"),
+            AgentObservabilityData.GetString(data, "workflowId"));
+    }
+
+    private EvidenceValue ReadEvidenceValue(
+        JsonElement? first,
+        JsonElement? second,
+        JsonElement? third,
+        IReadOnlyList<string> evidenceNames,
+        IReadOnlyList<string> valueNames)
+    {
+        foreach (JsonElement? source in new[] { first, second, third })
+        {
+            foreach (string evidenceName in evidenceNames)
+            {
+                string? evidenceId = AgentObservabilityData.GetString(source, evidenceName);
+                if (string.IsNullOrWhiteSpace(evidenceId))
+                {
+                    continue;
+                }
+
+                AgentDiagnosticEvidence? stored = GetEvidence(evidenceId);
+                return stored is null
+                    ? new EvidenceValue(null, true)
+                    : new EvidenceValue(
+                        AgentObservabilityData.BoundText(
+                            stored.Content,
+                            options.MaximumBundleOutputCharacters),
+                        stored.Truncated || stored.Content.Length > options.MaximumBundleOutputCharacters);
+            }
+
+            foreach (string valueName in valueNames)
+            {
+                string? value = AgentObservabilityData.GetString(source, valueName);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return new EvidenceValue(
+                        AgentObservabilityData.BoundText(
+                            value,
+                            options.MaximumBundleOutputCharacters),
+                        value.Length > options.MaximumBundleOutputCharacters);
+                }
+            }
+        }
+
+        return new EvidenceValue(null, false);
+    }
+
+    private static AgentDiagnosticCorrelation[] BuildCorrelations(
+        IReadOnlyList<AgentEvent> supportingEvents)
+    {
+        var values = new Dictionary<(string Kind, string Value), HashSet<string>>();
+        void Add(string kind, string? value, string eventId)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            string safeValue = kind == "operation"
+                ? AgentObservabilityData.SanitizeCommand(value, 256)
+                : AgentObservabilityData.BoundIdentifier(value, 256)!;
+            (string Kind, string Value) key = (kind, safeValue);
+            if (!values.TryGetValue(key, out HashSet<string>? ids))
+            {
+                ids = new HashSet<string>(StringComparer.Ordinal);
+                values[key] = ids;
+            }
+            ids.Add(eventId);
+        }
+
+        foreach (AgentEvent eventRecord in supportingEvents)
+        {
+            Add("run", eventRecord.RunId, eventRecord.Id);
+            Add("agent", eventRecord.AgentId, eventRecord.Id);
+            Add("mod", eventRecord.ModId, eventRecord.Id);
+            Add("trace", eventRecord.TraceId, eventRecord.Id);
+            Add("span", eventRecord.SpanId, eventRecord.Id);
+            Add("operation", EventOperationKey(eventRecord), eventRecord.Id);
+            Add("transaction", FirstString(eventRecord.Data, "transactionId", "transaction"), eventRecord.Id);
+            Add("workflow", FirstString(eventRecord.Data, "workflowId", "workflow"), eventRecord.Id);
+        }
+
+        return values
+            .OrderBy(static pair => pair.Key.Kind, StringComparer.Ordinal)
+            .ThenBy(static pair => pair.Key.Value, StringComparer.Ordinal)
+            .Select(pair => new AgentDiagnosticCorrelation(
+                pair.Key.Kind,
+                pair.Key.Value,
+                pair.Value.OrderBy(static value => value, StringComparer.Ordinal).ToArray()))
+            .ToArray();
+    }
+
+    private static AgentDiagnosticRepositoryState? BuildRepositoryState(
+        IReadOnlyList<AgentEvent> supportingEvents,
+        IReadOnlyList<AgentDiagnosticBuildEvidence> builds)
+    {
+        string? repositoryRoot = FirstEventString(supportingEvents, "repositoryRoot", "repoRoot");
+        string? project = FirstEventString(supportingEvents, "project") ??
+            builds.Select(static value => value.Project).FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        string? sourceProject = FirstEventString(supportingEvents, "sourceProject") ??
+            builds.Select(static value => value.SourceProject).FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        string? configuration = FirstEventString(supportingEvents, "configuration") ??
+            builds.Select(static value => value.Configuration).FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        string? sourceFingerprint = FirstEventString(supportingEvents, "sourceFingerprint") ??
+            builds.Select(static value => value.SourceFingerprint).FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        string? branch = FirstEventString(supportingEvents, "branch", "gitBranch");
+        string? commitSha = FirstEventString(supportingEvents, "commitSha", "commit", "headSha");
+        var changedFiles = new HashSet<string>(StringComparer.Ordinal);
+        foreach (AgentEvent eventRecord in supportingEvents)
+        {
+            AddDataStrings(eventRecord.Data, changedFiles, "changedFiles");
+            AddDataStrings(eventRecord.Data, changedFiles, "changedPaths");
+        }
+
+        if (repositoryRoot is null && project is null && sourceProject is null &&
+            configuration is null && sourceFingerprint is null && branch is null &&
+            commitSha is null && changedFiles.Count == 0)
+        {
+            return null;
+        }
+
+        return new AgentDiagnosticRepositoryState(
+            AgentObservabilityData.BoundText(repositoryRoot, 1024),
+            AgentObservabilityData.BoundText(project, 512),
+            AgentObservabilityData.BoundText(sourceProject, 1024),
+            AgentObservabilityData.BoundText(configuration, 128),
+            AgentObservabilityData.BoundIdentifier(sourceFingerprint, 256),
+            AgentObservabilityData.BoundText(branch, 256),
+            AgentObservabilityData.BoundIdentifier(commitSha, 256),
+            changedFiles
+                .Select(value => AgentObservabilityData.BoundText(value, 1024))
+                .OrderBy(static value => value, StringComparer.Ordinal)
+                .Take(512)
+                .ToArray());
+    }
+
+    private static AgentDiagnosticEnvironmentState? BuildEnvironmentState(
+        IReadOnlyList<AgentEvent> supportingEvents)
+    {
+        string[] valueNames =
+        [
+            "osDescription",
+            "runtimeVersion",
+            "dotnetVersion",
+            "rimWorldVersion",
+            "powerShellVersion",
+            "devBridgeVersion"
+        ];
+        string[] toolNames = ["toolVersion", "devBridgeVersion", "rimliaisonVersion"];
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var toolVersions = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (AgentEvent eventRecord in supportingEvents)
+        {
+            foreach (string name in valueNames)
+            {
+                string? value = AgentObservabilityData.GetString(eventRecord.Data, name);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    values[name] = AgentObservabilityData.BoundText(value, 512);
+                }
+            }
+
+            foreach (string name in toolNames)
+            {
+                string? value = AgentObservabilityData.GetString(eventRecord.Data, name);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    toolVersions[name] = AgentObservabilityData.BoundText(value, 512);
+                }
+            }
+
+            JsonElement? environment = GetObject(eventRecord.Data, "environment");
+            if (environment is { ValueKind: JsonValueKind.Object } environmentObject)
+            {
+                foreach (JsonProperty property in environmentObject.EnumerateObject().Take(32))
+                {
+                    if (property.Value.ValueKind == JsonValueKind.String &&
+                        !property.Name.Contains("password", StringComparison.OrdinalIgnoreCase) &&
+                        !property.Name.Contains("secret", StringComparison.OrdinalIgnoreCase) &&
+                        !property.Name.Contains("token", StringComparison.OrdinalIgnoreCase) &&
+                        !property.Name.Contains("key", StringComparison.OrdinalIgnoreCase))
+                    {
+                        values[property.Name] = AgentObservabilityData.BoundText(
+                            property.Value.GetString(),
+                            512);
+                    }
+                }
+            }
+        }
+
+        return values.Count == 0 && toolVersions.Count == 0
+            ? null
+            : new AgentDiagnosticEnvironmentState(values, toolVersions);
+    }
+
+    private AgentDiagnosticCompleteness BuildCompleteness(
+        IReadOnlyList<string> requestedIds,
+        IReadOnlyList<AgentIssue> selectedIssues,
+        IEnumerable<AgentIssue> correlatedIssues,
+        IReadOnlySet<string> missingEventIds,
+        IReadOnlyList<AgentEvent> supportingEvents,
+        IReadOnlyList<AgentDiagnosticCommandEvidence> commandEvidence,
+        IReadOnlyList<AgentDiagnosticBuildEvidence> buildEvidence)
+    {
+        var missing = new HashSet<string>(StringComparer.Ordinal);
+        if (selectedIssues.Count == 0 || requestedIds.Any(id =>
+                selectedIssues.All(issue => !string.Equals(issue.Id, id, StringComparison.Ordinal))))
+        {
+            missing.Add("selectedIssues");
+        }
+
+        if (missingEventIds.Count > 0)
+        {
+            missing.Add("supportingEvents");
+        }
+
+        bool buildFailure = supportingEvents.Any(eventRecord =>
+                eventRecord.Type == AgentEventTypes.BuildFailed ||
+                eventRecord.Type == AgentEventTypes.BuildDiagnostics) ||
+            buildEvidence.Any(value => value.ExitCode is not null and not 0);
+        bool hasCommand = commandEvidence.Any(value => !string.IsNullOrWhiteSpace(value.Command)) ||
+            buildEvidence.Any(value => !string.IsNullOrWhiteSpace(value.Command));
+        bool hasMeaningfulBuildDiagnostics = buildEvidence.Any(value =>
+            !string.IsNullOrWhiteSpace(value.Output) ||
+            !string.IsNullOrWhiteSpace(value.ErrorOutput) ||
+            !string.IsNullOrWhiteSpace(value.DiagnosticOutput));
+        if (buildFailure)
+        {
+            if (!hasCommand)
+            {
+                missing.Add("commands");
+            }
+            if (buildEvidence.Count == 0)
+            {
+                missing.Add("build");
+            }
+            if (!hasMeaningfulBuildDiagnostics)
+            {
+                missing.Add("build.diagnostics");
+            }
+        }
+
+        bool commandFailure = commandEvidence.Any(value =>
+            value.ExitCode is not null and not 0 || value.TimedOut || value.Cancelled);
+        if (commandFailure && !hasCommand)
+        {
+            missing.Add("commands");
+        }
+        if (commandFailure && commandEvidence.All(value =>
+                string.IsNullOrWhiteSpace(value.Stdout) &&
+                string.IsNullOrWhiteSpace(value.Stderr) &&
+                string.IsNullOrWhiteSpace(value.DiagnosticOutput)))
+        {
+            missing.Add("command.output");
+        }
+
+        if (correlatedIssues.Any() && supportingEvents.Count == 0)
+        {
+            missing.Add("correlatedEvidence");
+        }
+
+        string[] missingValues = missing
+            .OrderBy(static value => value, StringComparer.Ordinal)
+            .ToArray();
+        return new AgentDiagnosticCompleteness(
+            missingValues.Length == 0
+                ? AgentDiagnosticCompletenessStatuses.Complete
+                : AgentDiagnosticCompletenessStatuses.Incomplete,
+            missingValues);
+    }
+
+    private static string? FirstEventString(
+        IReadOnlyList<AgentEvent> events,
+        params string[] names) =>
+        events.Select(eventRecord => FirstString(eventRecord.Data, names))
+            .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+
+    private static string? FirstString(JsonElement? data, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            string? value = AgentObservabilityData.GetString(data, name);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static long? FirstInt64(JsonElement? data, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            long? value = AgentObservabilityData.GetInt64(data, name);
+            if (value is not null)
+            {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static int? FirstInt32(
+        JsonElement? first,
+        JsonElement? second,
+        JsonElement? third,
+        string name)
+    {
+        long? value = FirstInt64(first, name) ??
+            FirstInt64(second, name) ??
+            FirstInt64(third, name);
+        return value is >= int.MinValue and <= int.MaxValue
+            ? (int)value.Value
+            : null;
+    }
+
+    private static int? ToInt32(long? value) =>
+        value is >= int.MinValue and <= int.MaxValue
+            ? (int)value.Value
+            : null;
+
+    private static bool? FirstBoolean(
+        JsonElement? first,
+        JsonElement? second,
+        JsonElement? third,
+        string name)
+    {
+        foreach (JsonElement? source in new[] { first, second, third })
+        {
+            bool? value = AgentObservabilityData.GetNullableBoolean(source, name);
+            if (value is not null)
+            {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static JsonElement? GetObject(JsonElement? data, string name)
+    {
+        if (data is not { ValueKind: JsonValueKind.Object } element ||
+            !element.TryGetProperty(name, out JsonElement value) ||
+            value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return value;
+    }
+
+    private readonly record struct EvidenceValue(string? Text, bool Truncated);
 
     public IDisposable Subscribe(Action<AgentObservabilityNotification> handler)
     {
@@ -966,6 +1962,141 @@ public sealed class AgentObservabilityStore :
         {
             // Persistence is deliberately best effort. The in-memory product
             // state remains authoritative for the active run.
+        }
+    }
+
+    private void PersistEvidenceFile(AgentDiagnosticEvidence value)
+    {
+        if (evidenceDirectory is null)
+        {
+            return;
+        }
+
+        string? temporaryPath = null;
+        try
+        {
+            Directory.CreateDirectory(evidenceDirectory);
+            string path = Path.Combine(evidenceDirectory, value.Id + ".json");
+            temporaryPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+            string json = JsonSerializer.Serialize(value, AgentObservabilityJson.Options);
+            File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
+            File.Move(temporaryPath, path, true);
+            temporaryPath = null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            NotSupportedException or JsonException)
+        {
+            // Evidence is an enhancement to observability. A read-only or
+            // unavailable evidence root must never fail the command that was
+            // being observed.
+        }
+        finally
+        {
+            if (temporaryPath is not null)
+            {
+                try
+                {
+                    if (File.Exists(temporaryPath))
+                    {
+                        File.Delete(temporaryPath);
+                    }
+                }
+                catch (IOException)
+                {
+                }
+            }
+        }
+    }
+
+    private AgentDiagnosticEvidence? ReadEvidenceFile(string evidenceId)
+    {
+        if (evidenceDirectory is null ||
+            !evidenceId.StartsWith("evd-", StringComparison.Ordinal) ||
+            evidenceId.Any(char.IsControl) ||
+            evidenceId.Contains(Path.DirectorySeparatorChar) ||
+            evidenceId.Contains(Path.AltDirectorySeparatorChar))
+        {
+            return null;
+        }
+
+        try
+        {
+            string path = Path.Combine(evidenceDirectory, evidenceId + ".json");
+            if (!File.Exists(path) ||
+                new FileInfo(path).Length > options.MaximumEvidenceBytes * 2L)
+            {
+                return null;
+            }
+
+            AgentDiagnosticEvidence? value = JsonSerializer.Deserialize<AgentDiagnosticEvidence>(
+                File.ReadAllText(path),
+                AgentObservabilityJson.Options);
+            if (value is null ||
+                !string.Equals(value.Id, evidenceId, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            string content = AgentObservabilityData.BoundText(
+                value.Content,
+                options.MaximumEvidenceBytes);
+            return value with
+            {
+                Kind = AgentObservabilityData.BoundIdentifier(value.Kind, 128) ?? "diagnostic",
+                Content = content,
+                Truncated = value.Truncated ||
+                    Encoding.UTF8.GetByteCount(value.Content ?? string.Empty) >
+                        options.MaximumEvidenceBytes
+            };
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            NotSupportedException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private void TrimEvidence()
+    {
+        if (evidence.Count > options.MaximumEvidenceEntries)
+        {
+            foreach (string id in evidence.Keys
+                         .Take(evidence.Count - options.MaximumEvidenceEntries)
+                         .ToArray())
+            {
+                evidence.Remove(id);
+            }
+        }
+
+        if (evidenceDirectory is null)
+        {
+            return;
+        }
+
+        try
+        {
+            FileInfo[] files = new DirectoryInfo(evidenceDirectory)
+                .GetFiles("evd-*.json")
+                .OrderByDescending(static file => file.LastWriteTimeUtc)
+                .ThenByDescending(static file => file.Name, StringComparer.Ordinal)
+                .ToArray();
+            foreach (FileInfo file in files.Skip(options.MaximumEvidenceEntries))
+            {
+                try
+                {
+                    file.Delete();
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+            NotSupportedException)
+        {
         }
     }
 
@@ -1474,13 +2605,21 @@ public static class AgentObservabilityData
 
     public static string BoundText(string? value, int maximum)
     {
+        if (maximum <= 0)
+        {
+            return string.Empty;
+        }
+
         string text = RedactText(value?.Trim() ?? string.Empty);
         if (text.Length <= maximum)
         {
             return text;
         }
 
-        return text[..Math.Max(0, maximum - 13)] + "...[truncated]";
+        const string suffix = "...[truncated]";
+        return maximum <= suffix.Length
+            ? suffix[..maximum]
+            : text[..(maximum - suffix.Length)] + suffix;
     }
 
     private static string RedactText(string value)
@@ -1527,6 +2666,18 @@ public static class AgentObservabilityData
         element.TryGetProperty(name, out JsonElement value) &&
         value.ValueKind == JsonValueKind.True &&
         value.GetBoolean();
+
+    public static bool? GetNullableBoolean(JsonElement? data, string name)
+    {
+        if (data is not { ValueKind: JsonValueKind.Object } element ||
+            !element.TryGetProperty(name, out JsonElement value) ||
+            value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return null;
+        }
+
+        return value.GetBoolean();
+    }
 
     public static IReadOnlyList<string> GetStrings(JsonElement? data, string name)
     {

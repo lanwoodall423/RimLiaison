@@ -38,6 +38,7 @@ public sealed class ObservabilityMainForm : Form
     private readonly Button exportBundleButton;
     private TabControl agentDetailTabs = null!;
     private string? bundleJson;
+    private string? bundleStatusMessage;
     private string? renderedNavigationSignature;
     private bool suppressIssueSelection;
     private bool suppressActivitySelection;
@@ -128,9 +129,9 @@ public sealed class ObservabilityMainForm : Form
         issueDetails = CreateDetailsBox();
         viewActivityButton = CreateButton("View activity", OnViewIssueActivity);
         issueDetailsButton = CreateButton("Details", OnViewIssueDetails);
-        prepareAssessmentButton = CreateButton("Prepare assessment", OnPrepareAssessment);
-        copyBundleButton = CreateButton("Copy bundle", OnCopyBundle);
-        exportBundleButton = CreateButton("Export bundle", OnExportBundle);
+        prepareAssessmentButton = CreateButton("Preview assessment", OnPrepareAssessment);
+        copyBundleButton = CreateButton("Copy diagnostic bundle", OnCopyBundle);
+        exportBundleButton = CreateButton("Export diagnostic bundle", OnExportBundle);
         copyBundleButton.Enabled = false;
         exportBundleButton.Enabled = false;
         issuesPanel = BuildIssuesPanel();
@@ -354,9 +355,10 @@ public sealed class ObservabilityMainForm : Form
         }
 
         RefreshNavigation(snapshot);
-        streamStatus.Text = snapshot.Stream.Delayed
+        string liveStatus = snapshot.Stream.Delayed
             ? "Live stream delayed" + (snapshot.Stream.Message is null ? string.Empty : ": " + snapshot.Stream.Message)
             : $"Live · revision {snapshot.Stream.Revision} · sequence {snapshot.Stream.LatestSequence?.ToString() ?? "—"}";
+        streamStatus.Text = bundleStatusMessage ?? liveStatus;
 
         allPanel.Visible = snapshot.View == AgentObservabilityUiView.All;
         issuesPanel.Visible = snapshot.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue;
@@ -583,6 +585,7 @@ public sealed class ObservabilityMainForm : Form
                     WriteIndented = true
                 });
             issueDetails.Text = bundleJson;
+            bundleStatusMessage = FormatBundleStatus(snapshot.Assessment);
             copyBundleButton.Enabled = true;
             exportBundleButton.Enabled = true;
         }
@@ -590,14 +593,16 @@ public sealed class ObservabilityMainForm : Form
         {
             bundleJson = null;
             issueDetails.Text = FormatIssueDetail(detail);
-            copyBundleButton.Enabled = false;
-            exportBundleButton.Enabled = false;
+            bool hasCheckedIssues = snapshot.SelectedIssueIds.Count > 0;
+            copyBundleButton.Enabled = hasCheckedIssues;
+            exportBundleButton.Enabled = hasCheckedIssues;
         }
         else
         {
             bundleJson = null;
-            copyBundleButton.Enabled = false;
-            exportBundleButton.Enabled = false;
+            bool hasCheckedIssues = snapshot.SelectedIssueIds.Count > 0;
+            copyBundleButton.Enabled = hasCheckedIssues;
+            exportBundleButton.Enabled = hasCheckedIssues;
             issueDetails.Text = view.EmptyState ?? "Select an issue to inspect supporting evidence.";
         }
     }
@@ -829,6 +834,8 @@ public sealed class ObservabilityMainForm : Form
             .Select(item => ((AgentIssue)item.Tag!).Id)
             .ToArray();
         observabilityUi.SelectIssues(ids);
+        bundleJson = null;
+        bundleStatusMessage = null;
         AgentObservabilityUiSnapshot snapshot = observabilityUi.Snapshot;
         if (snapshot.Issues is not null)
         {
@@ -846,6 +853,8 @@ public sealed class ObservabilityMainForm : Form
         }
 
         observabilityUi.SelectIssue(issue.Id);
+        bundleJson = null;
+        bundleStatusMessage = null;
         AgentObservabilityUiSnapshot snapshot = observabilityUi.Snapshot;
         if (snapshot.Issues is not null)
         {
@@ -884,17 +893,13 @@ public sealed class ObservabilityMainForm : Form
     {
         try
         {
-            string[] ids = issueList.Items.Cast<ListViewItem>()
-                .Where(item => item.Checked && item.Tag is AgentIssue)
-                .Select(item => ((AgentIssue)item.Tag!).Id)
-                .ToArray();
-            observabilityUi.SelectIssues(ids);
-            observabilityUi.PrepareAssessment();
+            PrepareFreshBundle();
             RefreshFromSnapshot(observabilityUi.Snapshot);
         }
         catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException)
         {
             issueDetails.Text = exception.Message;
+            bundleStatusMessage = exception.Message;
             copyBundleButton.Enabled = false;
             exportBundleButton.Enabled = false;
         }
@@ -947,33 +952,47 @@ public sealed class ObservabilityMainForm : Form
 
     private void OnCopyBundle(object? sender, EventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(bundleJson))
-        {
-            return;
-        }
-
         try
         {
-            Clipboard.SetText(bundleJson);
-            streamStatus.Text = "Assessment bundle copied to the clipboard.";
+            string json = PrepareFreshBundle();
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+            Clipboard.SetText(json);
+            streamStatus.Text = "Diagnostic bundle copied to the clipboard. " +
+                bundleStatusMessage;
         }
         catch (ExternalException)
         {
-            streamStatus.Text = "The assessment bundle could not be copied.";
+            streamStatus.Text = "The diagnostic bundle could not be copied.";
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException)
+        {
+            bundleStatusMessage = exception.Message;
+            streamStatus.Text = exception.Message;
         }
     }
 
     private void OnExportBundle(object? sender, EventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(bundleJson))
+        string json;
+        try
         {
+            // Export is intentionally one action: checked issues are read at
+            // click time, the bundle is rebuilt, and only then is the Save
+            // dialog shown.
+            json = PrepareFreshBundle();
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException)
+        {
+            bundleStatusMessage = exception.Message;
+            streamStatus.Text = exception.Message;
             return;
         }
 
         using var dialog = new SaveFileDialog
         {
             Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
-            FileName = "rimliaison-assessment.json",
+            FileName = "rimliaison-diagnostic-bundle.json",
             AddExtension = true,
             DefaultExt = "json"
         };
@@ -984,13 +1003,44 @@ public sealed class ObservabilityMainForm : Form
 
         try
         {
-            File.WriteAllText(dialog.FileName, bundleJson, Encoding.UTF8);
-            streamStatus.Text = "Assessment bundle exported.";
+            File.WriteAllText(dialog.FileName, json, Encoding.UTF8);
+            streamStatus.Text = "Diagnostic bundle exported. " + bundleStatusMessage;
         }
         catch (IOException exception)
         {
             streamStatus.Text = "Export failed: " + exception.Message;
         }
+    }
+
+    private string PrepareFreshBundle()
+    {
+        string[] ids = issueList.Items.Cast<ListViewItem>()
+            .Where(item => item.Checked && item.Tag is AgentIssue)
+            .Select(item => ((AgentIssue)item.Tag!).Id)
+            .ToArray();
+        observabilityUi.SelectIssues(ids);
+        AgentDiagnosticBundle bundle = observabilityUi.PrepareAssessment();
+        bundleJson = JsonSerializer.Serialize(
+            bundle,
+            new JsonSerializerOptions(AgentObservabilityJson.Options)
+            {
+                WriteIndented = true
+            });
+        bundleStatusMessage = FormatBundleStatus(bundle);
+        return bundleJson;
+    }
+
+    private static string FormatBundleStatus(AgentDiagnosticBundle bundle)
+    {
+        if (bundle.Completeness.IsComplete)
+        {
+            return "Diagnostic bundle: complete.";
+        }
+
+        string missing = bundle.Completeness.MissingEvidence.Count == 0
+            ? "unspecified evidence gap"
+            : string.Join(", ", bundle.Completeness.MissingEvidence);
+        return "Diagnostic bundle: incomplete (missing " + missing + ").";
     }
 
     private AgentIssue? SelectedIssue() =>
