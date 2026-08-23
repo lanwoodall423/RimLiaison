@@ -243,6 +243,8 @@ internal static class Program
         ("desktop All is the default view", DesktopObservabilityTests.AllIsDefault),
         ("desktop multiple agents appear", DesktopObservabilityTests.MultipleConcurrentAgentsAppear),
         ("desktop concurrent runs remain visible", DesktopObservabilityTests.MultipleConcurrentRunsRemainVisible),
+        ("desktop repeated runs for one mod share a tab", DesktopObservabilityTests.RepeatedRunsForSameModShareOneTab),
+        ("desktop repeated finished runs dismiss as one tab", DesktopObservabilityTests.RepeatedFinishedRunsDismissAsOneTab),
         ("desktop bounded navigation prioritizes active agents", DesktopObservabilityTests.ActiveAgentsArePrioritizedInBoundedNavigation),
         ("desktop interleaved activity is chronological", DesktopObservabilityTests.InterleavedEventsRemainChronological),
         ("desktop individual agent filters correctly", DesktopObservabilityTests.IndividualAgentViewFiltersCorrectly),
