@@ -58,6 +58,13 @@ compaction, and a bounded file watcher refresh. A desktop process therefore
 hydrates the same persisted records written by a runtime process and receives
 cross-process updates without a local service or telemetry backend.
 
+An unscoped desktop view aggregates agents from all runs in that shared store,
+including runs that arrive while the window is open. A newer run therefore
+does not replace tabs for agents that are still being monitored. Callers that
+need a single-run history view can construct `AgentObservabilityUi` with an
+explicit `runId`; that scope is preserved for both initial hydration and live
+updates.
+
 ## Desktop surface
 
 `RimLiaison.Desktop` is the graphical consumer of the store. It is a native

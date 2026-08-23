@@ -257,7 +257,7 @@ internal static class ObservabilityIsolationTests
             }
 
             using var reader = new AgentObservabilityStore(directory);
-            using var ui = new AgentObservabilityUi(reader);
+            using var ui = new AgentObservabilityUi(reader, runId: "run-current");
             AgentObservabilityUiNavigationItem[] agents = ui.Snapshot.Navigation.Items
                 .Where(static item => item.Kind == "agent")
                 .ToArray();
@@ -273,14 +273,16 @@ internal static class ObservabilityIsolationTests
         }
     }
 
-    public static void UnscopedUiFollowsNewRunAfterHistoricalStartup()
+    public static void UnscopedUiRetainsConcurrentRuns()
     {
         string directory = CreateTemporaryDirectory("rimliaison-observability-live-rollover-");
+        const string historicalRunId = "run-live-rollover-history";
+        const string currentRunId = "run-live-rollover-current";
         try
         {
             using var store = new AgentObservabilityStore(directory);
             using (var historicalRun = new AgentObservabilityRun(
-                       "run-live-rollover-history",
+                       historicalRunId,
                        store,
                        new NoopAgentObservabilityTelemetry()))
             using (AgentObservabilitySession historical = historicalRun.CreateAgent(
@@ -292,11 +294,11 @@ internal static class ObservabilityIsolationTests
             }
 
             using var ui = new AgentObservabilityUi(store);
-            AssertEqual("run-live-rollover-history", ui.ActiveRunId);
+            AssertEqual(null, ui.ActiveRunId);
 
             Thread.Sleep(5);
             using var currentRun = new AgentObservabilityRun(
-                "run-live-rollover-current",
+                currentRunId,
                 store,
                 new NoopAgentObservabilityTelemetry());
             using AgentObservabilitySession current = currentRun.CreateAgent(
@@ -310,19 +312,19 @@ internal static class ObservabilityIsolationTests
                 "Current live activity.",
                 new { filePath = "Source/Current.cs" });
 
-            AssertEqual(currentRun.RunId, ui.ActiveRunId);
+            AssertEqual(null, ui.ActiveRunId);
             AgentObservabilityUiSnapshot snapshot = ui.Snapshot;
             AgentObservabilityUiNavigationItem[] agents = snapshot.Navigation.Items
                 .Where(static item => item.Kind == "agent")
                 .ToArray();
-            AssertEqual(1, agents.Length);
-            AssertEqual(current.AgentId, agents[0].AgentId);
-            AssertEqual(currentRun.RunId, agents[0].RunId);
+            AssertEqual(2, agents.Length);
+            Assert(agents.Any(value => value.RunId == historicalRunId));
+            Assert(agents.Any(value => value.RunId == currentRunId));
             Assert(snapshot.All!.Activity.Any(
-                value => value.Event?.RunId == currentRun.RunId &&
+                value => value.Event?.RunId == currentRunId &&
                     value.Event.AgentId == current.AgentId));
-            Assert(snapshot.All.Activity.All(
-                value => value.Event is null || value.Event.RunId == currentRun.RunId));
+            Assert(snapshot.All.Activity.Any(
+                value => value.Event?.RunId == historicalRunId));
         }
         finally
         {
