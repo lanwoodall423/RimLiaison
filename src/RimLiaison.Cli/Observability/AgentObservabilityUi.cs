@@ -387,20 +387,6 @@ public sealed class AgentObservabilityUi : IDisposable
             runId: explicitRunId,
             issuesOnly: false,
             limit: this.options.MaximumIndexedEvents);
-        if (activeRunId is null)
-        {
-            activeRunId = InferRunId(initial);
-            if (activeRunId is not null)
-            {
-                // An unscoped desktop session follows the newest run present
-                // at startup. Historical runs remain in the store, but do not
-                // leak into the active navigation.
-                initial = store.Query(
-                    runId: activeRunId,
-                    issuesOnly: false,
-                    limit: this.options.MaximumIndexedEvents);
-            }
-        }
         lock (gate)
         {
             foreach (AgentSnapshot agent in initial.Agents)
@@ -912,21 +898,10 @@ public sealed class AgentObservabilityUi : IDisposable
                 return;
             }
 
-            if (!TryAdoptIncomingRunLocked(notification))
-            {
-                string? notificationRunId = notification.Agent?.RunId ??
-                    notification.Event?.RunId ??
-                    notification.Issue?.RunId;
-                if (notificationRunId is not null && !MatchesRun(notificationRunId))
-                {
-                    return;
-                }
-            }
-
-            if (
-                (notification.Event is not null && !MatchesRun(notification.Event.RunId)) ||
-                (notification.Issue is not null && !MatchesRun(notification.Issue.RunId)) ||
-                (notification.Agent is not null && !MatchesRun(notification.Agent.RunId)))
+            string? notificationRunId = notification.Agent?.RunId ??
+                notification.Event?.RunId ??
+                notification.Issue?.RunId;
+            if (notificationRunId is not null && !MatchesRun(notificationRunId))
             {
                 return;
             }
@@ -970,95 +945,6 @@ public sealed class AgentObservabilityUi : IDisposable
         }
 
         Notify(handlers, update);
-    }
-
-    private bool TryAdoptIncomingRunLocked(AgentObservabilityNotification notification)
-    {
-        if (HasExplicitRunScope)
-        {
-            return false;
-        }
-
-        string? incomingRunId = notification.Agent?.RunId ??
-            notification.Event?.RunId ??
-            notification.Issue?.RunId;
-        if (string.IsNullOrWhiteSpace(incomingRunId))
-        {
-            return false;
-        }
-
-        if (activeRunId is null ||
-            string.Equals(activeRunId, incomingRunId, StringComparison.Ordinal))
-        {
-            activeRunId = incomingRunId;
-            return true;
-        }
-
-        AgentSnapshot? incomingAgent = notification.Agent;
-        if (incomingAgent is null)
-        {
-            incomingAgent = store.GetAgents(
-                    runId: incomingRunId,
-                    limit: options.MaximumIndexedAgents)
-                .OrderByDescending(static agent => agent.StartTime)
-                .FirstOrDefault();
-        }
-
-        long incomingStart = incomingAgent?.StartTime ??
-            notification.Event?.Timestamp ??
-            notification.Issue?.Timestamp ??
-            0;
-        long activeStart = agents.Values
-            .Where(agent => string.Equals(agent.RunId, activeRunId, StringComparison.Ordinal))
-            .Select(static agent => agent.StartTime)
-            .DefaultIfEmpty(0)
-            .Max();
-        if (incomingStart <= activeStart)
-        {
-            return false;
-        }
-
-        // An unscoped desktop follows the newest live run. Drop the prior
-        // run's presentation cache before hydrating the complete candidate
-        // run, otherwise historical agents can remain visible beside the
-        // current agent after a desktop starts before the runtime process.
-        activeRunId = incomingRunId;
-        route = new AgentObservabilityUiRoute(AgentObservabilityUiView.All);
-        selectedIssueIds.Clear();
-        selectedIssueId = null;
-        selectedEventId = null;
-        assessment = null;
-        issueMode = AgentObservabilityIssueMode.Details;
-        agentDetailTab = AgentObservabilityAgentDetailTab.Event;
-        agents.Clear();
-        events.Clear();
-        eventsById.Clear();
-        eventsByOperation.Clear();
-        hydratedOperations.Clear();
-        issues.Clear();
-        issueIdsByEvent.Clear();
-        dismissedFinishedAgents.Clear();
-
-        AgentObservabilityView initial = store.Query(
-            runId: activeRunId,
-            issuesOnly: false,
-            limit: options.MaximumIndexedEvents);
-        foreach (AgentSnapshot agent in initial.Agents)
-        {
-            UpsertAgentLocked(agent);
-        }
-
-        foreach (AgentEvent eventRecord in initial.Events)
-        {
-            UpsertEventLocked(eventRecord);
-        }
-
-        foreach (AgentIssue issue in initial.Issues)
-        {
-            UpsertIssueLocked(issue);
-        }
-
-        return true;
     }
 
     private AgentObservabilityUiSnapshot BuildSnapshotLocked()
@@ -1167,7 +1053,11 @@ public sealed class AgentObservabilityUi : IDisposable
         IEnumerable<AgentSnapshot> modAgents = agents.Values
             .Where(agent => MatchesRun(agent.RunId))
             .Where(agent => !IsDismissedFinishedAgent(agent))
-            .OrderBy(static agent => AgentDisplayName(agent), StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static agent => agent.Status is AgentStatus.Completed or AgentStatus.Failed
+                ? 1
+                : 0)
+            .ThenByDescending(static agent => agent.StartTime)
+            .ThenBy(static agent => AgentDisplayName(agent), StringComparer.OrdinalIgnoreCase)
             .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal)
             .Take(options.MaximumNavigationAgents);
         foreach (AgentSnapshot agent in modAgents)
@@ -1786,8 +1676,6 @@ public sealed class AgentObservabilityUi : IDisposable
         string.IsNullOrWhiteSpace(expected) ||
         string.Equals(expected, value, StringComparison.Ordinal);
 
-    private bool HasExplicitRunScope => explicitRunId is not null;
-
     private static AgentObservabilityAgentIdentity AgentIdentity(AgentSnapshot agent) =>
         new(agent.RunId, agent.AgentId);
 
@@ -1941,34 +1829,6 @@ public sealed class AgentObservabilityUi : IDisposable
                 issueIdsByEvent.Remove(eventId);
             }
         }
-    }
-
-    private static string? InferRunId(AgentObservabilityView initial)
-    {
-        AgentEvent? latestEvent = initial.Events
-            .OrderByDescending(static value => value.Sequence)
-            .ThenBy(static value => value.Id, StringComparer.Ordinal)
-            .FirstOrDefault();
-        if (latestEvent is not null)
-        {
-            return latestEvent.RunId;
-        }
-
-        AgentSnapshot? latestAgent = initial.Agents
-            .OrderByDescending(static value => value.StartTime)
-            .ThenByDescending(static value => value.CompletedAt ?? 0)
-            .ThenBy(static value => value.AgentId, StringComparer.Ordinal)
-            .FirstOrDefault();
-        if (latestAgent is not null)
-        {
-            return latestAgent.RunId;
-        }
-
-        return initial.Issues
-            .OrderByDescending(static value => value.Timestamp)
-            .ThenBy(static value => value.Id, StringComparer.Ordinal)
-            .Select(static value => value.RunId)
-            .FirstOrDefault();
     }
 
     private string? ResolveFocusEventLocked(
