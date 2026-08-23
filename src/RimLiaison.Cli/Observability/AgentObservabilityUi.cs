@@ -315,6 +315,11 @@ public sealed class AgentObservabilityUiOptions
 /// </summary>
 public sealed class AgentObservabilityUi : IDisposable
 {
+    private sealed record NavigationAgentGroup(
+        string Key,
+        AgentSnapshot Representative,
+        bool CanDismiss);
+
     private static readonly DevelopmentStage[] LifecycleStages =
     [
         DevelopmentStage.Analysis,
@@ -625,15 +630,36 @@ public sealed class AgentObservabilityUi : IDisposable
         {
             ThrowIfDisposedLocked();
             AgentSnapshot? agent = FindAgentLocked(agentId.Trim(), requestedRunId);
-            if (agent is null || agent.Status is not (AgentStatus.Completed or AgentStatus.Failed))
+            if (agent is null)
             {
                 return false;
             }
 
-            dismissedFinishedAgents.Add(AgentIdentity(agent));
-            if (route.View == AgentObservabilityUiView.Agent &&
-                string.Equals(route.AgentId, agent.AgentId, StringComparison.Ordinal) &&
-                string.Equals(route.RunId, agent.RunId, StringComparison.Ordinal))
+            string groupKey = AgentGroupKey(agent);
+            AgentSnapshot[] groupAgents = agents.Values
+                .Where(value => MatchesRun(value.RunId) &&
+                    string.Equals(AgentGroupKey(value), groupKey, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (groupAgents.Any(static value =>
+                    value.Status is not (AgentStatus.Completed or AgentStatus.Failed)))
+            {
+                return false;
+            }
+
+            foreach (AgentSnapshot groupAgent in groupAgents)
+            {
+                dismissedFinishedAgents.Add(AgentIdentity(groupAgent));
+            }
+
+            AgentSnapshot? selectedAgent = route.View == AgentObservabilityUiView.Agent &&
+                route.AgentId is not null
+                    ? FindAgentLocked(route.AgentId, route.RunId)
+                    : null;
+            if (selectedAgent is not null &&
+                string.Equals(
+                    AgentGroupKey(selectedAgent),
+                    groupKey,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 route = new AgentObservabilityUiRoute(AgentObservabilityUiView.All);
                 selectedEventId = null;
@@ -1050,33 +1076,55 @@ public sealed class AgentObservabilityUi : IDisposable
                 route.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue)
         };
 
-        IEnumerable<AgentSnapshot> modAgents = agents.Values
+        AgentSnapshot? selectedAgent = route.View == AgentObservabilityUiView.Agent &&
+            route.AgentId is not null
+                ? FindAgentLocked(route.AgentId, route.RunId)
+                : null;
+        string? selectedGroupKey = selectedAgent is null
+            ? null
+            : AgentGroupKey(selectedAgent);
+        IEnumerable<NavigationAgentGroup> modAgents = agents.Values
             .Where(agent => MatchesRun(agent.RunId))
-            .Where(agent => !IsDismissedFinishedAgent(agent))
-            .OrderBy(static agent => agent.Status is AgentStatus.Completed or AgentStatus.Failed
+            .GroupBy(AgentGroupKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                AgentSnapshot[] visible = group
+                    .Where(agent => !IsDismissedFinishedAgent(agent))
+                    .ToArray();
+                return visible.Length == 0
+                    ? null
+                    : new NavigationAgentGroup(
+                        group.Key,
+                        PreferredAgent(visible),
+                        group.All(static agent =>
+                            agent.Status is AgentStatus.Completed or AgentStatus.Failed));
+            })
+            .Where(static group => group is not null)
+            .Select(static group => group!)
+            .OrderBy(static group => group.Representative.Status is AgentStatus.Completed or AgentStatus.Failed
                 ? 1
                 : 0)
-            .ThenByDescending(static agent => agent.StartTime)
-            .ThenBy(static agent => AgentDisplayName(agent), StringComparer.OrdinalIgnoreCase)
-            .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal)
+            .ThenByDescending(static group => group.Representative.StartTime)
+            .ThenBy(static group => AgentDisplayName(group.Representative), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static group => group.Key, StringComparer.OrdinalIgnoreCase)
             .Take(options.MaximumNavigationAgents);
-        foreach (AgentSnapshot agent in modAgents)
+        foreach (NavigationAgentGroup group in modAgents)
         {
+            AgentSnapshot agent = group.Representative;
             string fullLabel = AgentDisplayName(agent);
             string label = ShortLabel(fullLabel);
             items.Add(new AgentObservabilityUiNavigationItem(
-                "agent:" + AgentIdentity(agent).Key,
+                "agent-group:" + group.Key,
                 "agent",
                 label,
                 fullLabel,
                 route.View == AgentObservabilityUiView.Agent &&
-                    string.Equals(route.AgentId, agent.AgentId, StringComparison.Ordinal) &&
-                    string.Equals(route.RunId, agent.RunId, StringComparison.Ordinal),
+                    string.Equals(selectedGroupKey, group.Key, StringComparison.OrdinalIgnoreCase),
                 agent.AgentId,
                 agent.ModId,
                 agent.Status,
                 agent.RunId,
-                agent.Status is AgentStatus.Completed or AgentStatus.Failed));
+                group.CanDismiss));
         }
 
         return new AgentObservabilityUiNavigationModel(route.View, items);
@@ -1681,6 +1729,21 @@ public sealed class AgentObservabilityUi : IDisposable
 
     private static AgentObservabilityAgentIdentity AgentIdentity(AgentEvent eventRecord) =>
         new(eventRecord.RunId, eventRecord.AgentId);
+
+    private static string AgentGroupKey(AgentSnapshot agent) =>
+        string.IsNullOrWhiteSpace(agent.ModId)
+            ? agent.AgentId
+            : agent.ModId.Trim();
+
+    private static AgentSnapshot PreferredAgent(IEnumerable<AgentSnapshot> candidates) =>
+        candidates
+            .OrderBy(static agent => agent.Status is AgentStatus.Completed or AgentStatus.Failed
+                ? 1
+                : 0)
+            .ThenByDescending(static agent => agent.StartTime)
+            .ThenByDescending(static agent => agent.CompletedAt ?? 0)
+            .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal)
+            .First();
 
     private bool IsDismissedFinishedAgent(AgentSnapshot agent) =>
         agent.Status is AgentStatus.Completed or AgentStatus.Failed &&

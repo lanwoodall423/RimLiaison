@@ -59,11 +59,12 @@ hydrates the same persisted records written by a runtime process and receives
 cross-process updates without a local service or telemetry backend.
 
 An unscoped desktop view aggregates agents from all runs in that shared store,
-including runs that arrive while the window is open. A newer run therefore
-does not replace tabs for agents that are still being monitored. Callers that
-need a single-run history view can construct `AgentObservabilityUi` with an
-explicit `runId`; that scope is preserved for both initial hydration and live
-updates.
+including runs that arrive while the window is open. Navigation groups those
+invocations by stable mod identity, so repeated commands for `Wildlife`, for
+example, remain one tab. The tab represents the newest active invocation, or
+the newest finished invocation when none remain active. Callers that need a
+single-run history view can construct `AgentObservabilityUi` with an explicit
+`runId`; that scope is preserved for both initial hydration and live updates.
 
 ## Desktop surface
 
