@@ -231,8 +231,19 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             Directory.CreateDirectory(parent);
             if (descriptorExists && options.PreserveDescriptorBackup)
             {
-                backupPath = fullDescriptorPath +
-                    ".recovery-backup-" + Guid.NewGuid().ToString("N") + ".json";
+                // Recovery copies are generated owner state, not sibling
+                // project configuration. DevBridge2 already owns and ignores
+                // its artifacts directory, which keeps recovery safe without
+                // making DevelopmentProjects appear meaningfully dirty.
+                string backupDirectory = Path.Combine(
+                    options.RootPath,
+                    "artifacts",
+                    "descriptor-recovery");
+                Directory.CreateDirectory(backupDirectory);
+                backupPath = Path.Combine(
+                    backupDirectory,
+                    Path.GetFileName(fullDescriptorPath) +
+                    ".recovery-backup-" + Guid.NewGuid().ToString("N") + ".json");
                 File.Copy(fullDescriptorPath, backupPath, overwrite: false);
             }
 

@@ -13,6 +13,7 @@ public sealed record CliRequest(
     bool Json,
     bool Compact,
     bool Human,
+    bool Verbose,
     int Limit,
     int? MaxBytes,
     int Depth,
@@ -32,6 +33,7 @@ public static class CliCommands
     public const string Harmony = "harmony";
     public const string File = "file";
     public const string Summary = "summary";
+    public const string Context = "context";
 
     public static readonly string[] All =
     [
@@ -43,6 +45,7 @@ public static class CliCommands
         Harmony,
         File,
         Summary,
+        Context,
         Version
     ];
 

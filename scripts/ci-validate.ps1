@@ -86,7 +86,7 @@ function Invoke-ValidationProcess {
         $completed = $process.WaitForExit($TimeoutMilliseconds)
         if (-not $completed) {
             try { $process.Kill($true) } catch { try { $process.Kill() } catch { } }
-            try { $process.WaitForExit(5000) } catch { }
+            try { [void]$process.WaitForExit(5000) } catch { }
         }
 
         $stdout = $stdoutTask.GetAwaiter().GetResult()
@@ -233,12 +233,13 @@ function Get-ValidationStageCommands {
 
     [void]$commands.Add((New-ValidationCommand 'dotnet' @(
                 'build', $testProject, '--configuration', 'Release', '--no-restore', '--nologo') $Root 900000))
+    $testTimeoutMilliseconds = if ($StageId -eq 'rimliaison') { 1800000 } else { 900000 }
     if ($testMode -eq 'test') {
         [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                    'test', $testProject, '--configuration', 'Release', '--no-build', '--no-restore', '--nologo') $Root 900000))
+                    'test', $testProject, '--configuration', 'Release', '--no-build', '--no-restore', '--nologo') $Root $testTimeoutMilliseconds))
     } else {
         [void]$commands.Add((New-ValidationCommand 'dotnet' @(
-                    'run', '--project', $testProject, '--configuration', 'Release', '--no-build', '--no-restore') $Root 900000))
+                    'run', '--project', $testProject, '--configuration', 'Release', '--no-build', '--no-restore') $Root $testTimeoutMilliseconds))
     }
 
     return $commands.ToArray()

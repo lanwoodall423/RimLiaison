@@ -1,4 +1,5 @@
 using RimLiaison.Stack;
+using RimLiaison.RimDev;
 
 namespace RimLiaison;
 
@@ -19,12 +20,20 @@ internal enum CliCommand
     UiTargets,
     UiScreenshot,
     Doctor,
-    Init
+    Init,
+    Context,
+    PublishCheck,
+    Benchmarks,
+    RimDev
 }
 
 internal sealed record CliRequest(
     CliCommand Command,
     string? Id,
+    RimDevOperation? RimDevOperation,
+    string? RimDevRootPath,
+    bool RimDevConfirm,
+    bool RimDevJson,
     string CatalogPath,
     string? RecipeListPath,
     string? DevBridgePath,
@@ -52,6 +61,7 @@ internal sealed record CliRequest(
     string? UiLeaseId,
     bool UiInputCheck,
     bool Explain,
+    bool ContextVerbose,
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
     bool RunSelected,
@@ -111,6 +121,7 @@ internal static class CliParser
         string? uiLeaseId = null;
         bool uiInputCheck = false;
         bool explain = false;
+        bool contextVerbose = false;
         string? affectedBase = null;
         bool depthSpecified = false;
         bool limitSpecified = false;
@@ -118,6 +129,10 @@ internal static class CliParser
         bool failFast = false;
         bool initForce = false;
         bool initManifestOnly = false;
+        RimDevOperation? rimDevOperation = null;
+        string? rimDevRootPath = null;
+        bool rimDevConfirm = false;
+        bool rimDevJson = false;
         bool helpRequested = false;
         var positionals = new List<string>();
 
@@ -223,6 +238,9 @@ internal static class CliParser
                 case "--explain":
                     explain = true;
                     break;
+                case "--verbose":
+                    contextVerbose = true;
+                    break;
                 case "--base":
                     affectedBase = ReadOptionValue(args, ref index, argument);
                     if (affectedBase.StartsWith("-", StringComparison.Ordinal))
@@ -244,9 +262,17 @@ internal static class CliParser
                 case "--manifest-only":
                     initManifestOnly = true;
                     break;
+                case "--root":
+                    rimDevRootPath = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--yes":
+                case "--confirm":
+                    rimDevConfirm = true;
+                    break;
                 case "--json":
                     // RimLiaison's machine-readable contract is the default;
                     // accept the explicit agent-facing spelling as a no-op.
+                    rimDevJson = true;
                     break;
                 case "--help":
                 case "-h":
@@ -268,6 +294,10 @@ internal static class CliParser
             return new CliRequest(
                 CliCommand.List,
                 null,
+                null,
+                rimDevRootPath,
+                rimDevConfirm,
+                rimDevJson,
                 catalogPath ??
                     (stackManifest.Manifest is not null
                         ? StackManifestResolver.CatalogPath(stackManifest)
@@ -300,6 +330,7 @@ internal static class CliParser
                 uiLeaseId,
                 uiInputCheck,
                 explain,
+                contextVerbose,
                 null,
                 [],
                 false,
@@ -345,6 +376,24 @@ internal static class CliParser
             case "doctor" when positionals.Count == 1:
                 command = CliCommand.Doctor;
                 break;
+            case "context" when positionals.Count == 1:
+                command = CliCommand.Context;
+                break;
+            case "publish" when positionals.Count == 2 &&
+                string.Equals(positionals[1], "check", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.PublishCheck;
+                break;
+            case "benchmarks" when positionals.Count == 1:
+                command = CliCommand.Benchmarks;
+                break;
+            case "rimdev" when positionals.Count == 1:
+                command = CliCommand.RimDev;
+                rimDevOperation = RimDevOperation.Menu;
+                break;
+            case "rimdev" when positionals.Count == 2:
+                command = CliCommand.RimDev;
+                rimDevOperation = ParseRimDevOperation(positionals[1]);
+                break;
             case "capabilities" when positionals.Count == 1:
                 command = CliCommand.Capabilities;
                 break;
@@ -388,6 +437,10 @@ internal static class CliParser
             case "test":
             case "affected":
             case "doctor":
+            case "context":
+            case "publish":
+            case "benchmarks":
+            case "rimdev":
             case "capabilities":
             case "ui":
             case "init":
@@ -397,21 +450,36 @@ internal static class CliParser
         }
 
         if (fallbackSuite is null &&
-            command is (CliCommand.Affected or CliCommand.Doctor or CliCommand.Init))
+            command is (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context or CliCommand.Init))
         {
             fallbackSuite = stackManifest.Manifest?.FallbackSuite;
         }
 
-        if (command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Capabilities or CliCommand.Init) &&
-            (fallbackSuiteExplicit ||
-             explain ||
-             depthSpecified ||
-             limitSpecified ||
-             affectedBase is not null ||
-             runSelected))
+        if (command is not (CliCommand.Affected or CliCommand.Doctor or
+                CliCommand.Capabilities or CliCommand.Init) &&
+            (explain || depthSpecified || limitSpecified || runSelected))
         {
             throw new CliParseException(
                 "RimContext selection options are only valid for affected.");
+        }
+
+        if (affectedBase is not null &&
+            command is not (CliCommand.Affected or CliCommand.PublishCheck))
+        {
+            throw new CliParseException(
+                "Option --base is only valid for affected or publish check.");
+        }
+
+        if (fallbackSuiteExplicit &&
+            command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context or CliCommand.Init))
+        {
+            throw new CliParseException(
+                "Option --fallback-suite is only valid for affected, doctor, or context.");
+        }
+
+        if (contextVerbose && command != CliCommand.Context)
+        {
+            throw new CliParseException("Option --verbose is only valid for context.");
         }
 
         if (failFast && command is not (CliCommand.Affected or CliCommand.SuiteRun))
@@ -512,13 +580,29 @@ internal static class CliParser
             throw new CliParseException("--manifest-only is only valid for init.");
         }
 
-        if (command is not (CliCommand.Affected or CliCommand.Doctor) &&
+        if (command != CliCommand.RimDev &&
+            (rimDevRootPath is not null || rimDevConfirm))
+        {
+            throw new CliParseException("--root, --yes, and --confirm are only valid for rimdev.");
+        }
+
+        if (command == CliCommand.RimDev && rimDevOperation is null)
+        {
+            throw new CliParseException("rimdev requires a command such as status, all, deploy, push, merge, or help.");
+        }
+
+        if (command == CliCommand.RimDev && rimDevConfirm && rimDevOperation != RimDevOperation.Merge)
+        {
+            throw new CliParseException("--yes/--confirm is only valid for rimdev merge.");
+        }
+
+        if (command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context) &&
             (rimContextPath is not null ||
              rimContextRootPath is not null ||
              rimContextStorePath is not null))
         {
             throw new CliParseException(
-                "RimContext configuration options are only valid for affected or doctor.");
+                "RimContext configuration options are only valid for affected, doctor, or context.");
         }
 
         if (catalogPath is null)
@@ -544,6 +628,10 @@ internal static class CliParser
         return new CliRequest(
             command,
             id,
+            rimDevOperation,
+            rimDevRootPath,
+            rimDevConfirm,
+            rimDevJson,
             catalogPath,
             recipeListPath,
             devBridgePath,
@@ -571,6 +659,7 @@ internal static class CliParser
             uiLeaseId,
             uiInputCheck,
             explain,
+            contextVerbose,
             affectedBase,
             positionals
                 .Skip(1)
@@ -606,6 +695,10 @@ internal static class CliParser
                 "ui targets",
                 "ui screenshot",
                 "doctor",
+                "context",
+                "publish check",
+                "benchmarks",
+                "rimdev [status|sync|build|test|deploy|push|merge|all|help]",
                 "init",
                 "recipe show <recipe>",
                 "recipe plan <recipe>",
@@ -639,12 +732,15 @@ internal static class CliParser
                 "--lease <lease-id> (with transactional ui screenshot; omit to acquire one)",
                 "--check-input (with ui screenshot; uses semantic live input state when registered)",
                 "--explain",
-                "--base <git-ref> (with affected)",
+                "--verbose (with context)",
+                "--base <git-ref> (with affected or publish check)",
                 "--json (default output)",
                 "--run (with affected)",
                 "--fail-fast (with affected --run or suite run)",
                 "--force/--update (with init)",
-                "--manifest-only (with init)"
+                "--manifest-only (with init)",
+                "--root <workspace-root> (with rimdev)",
+                "--yes/--confirm (with rimdev merge)"
             }
         };
 
@@ -660,6 +756,24 @@ internal static class CliParser
             "run" => CliCommand.RecipeRun,
             _ => throw new CliParseException(
                 $"Unknown recipe operation: {operation}.")
+        };
+    }
+
+    private static RimDevOperation ParseRimDevOperation(string operation)
+    {
+        return operation.Trim().ToLowerInvariant() switch
+        {
+            "status" => RimDevOperation.Status,
+            "sync" => RimDevOperation.Sync,
+            "build" => RimDevOperation.Build,
+            "test" => RimDevOperation.Test,
+            "deploy" => RimDevOperation.Deploy,
+            "push" => RimDevOperation.Push,
+            "merge" => RimDevOperation.Merge,
+            "all" => RimDevOperation.All,
+            "help" => RimDevOperation.Help,
+            _ => throw new CliParseException(
+                $"Unknown rimdev operation: {operation}. Use status, sync, build, test, deploy, push, merge, all, or help.")
         };
     }
 

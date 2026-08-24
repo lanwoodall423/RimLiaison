@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
 
@@ -137,13 +138,20 @@ public sealed class DevBridgeFreshGenerationAdapter : IDevBridgeFreshGenerationA
                 : null;
             if (!success)
             {
+                string effectiveErrorCode = errorCode ?? "DEVBRIDGE_RESTART_FAILED";
+                DevBridgeIdentityMismatch? identityMismatch =
+                    DevBridgeIdentityMismatchParser.Parse(
+                        root,
+                        options.RootPath,
+                        effectiveErrorCode);
                 return Failure(
-                    errorCode ?? "DEVBRIDGE_RESTART_FAILED",
+                    effectiveErrorCode,
                     error ?? Bound(process.Stderr),
                     process.ExitCode is > 0
                         ? DevBridgeOutcomeKind.DevBridgeRefusal
                         : DevBridgeOutcomeKind.InfrastructureFailure,
-                    process);
+                    process,
+                    identityMismatch: identityMismatch);
             }
 
             if (!TryGetString(root, "state", out string? state) ||
@@ -339,7 +347,8 @@ public sealed class DevBridgeFreshGenerationAdapter : IDevBridgeFreshGenerationA
         string? error,
         DevBridgeOutcomeKind outcome = DevBridgeOutcomeKind.InfrastructureFailure,
         DevBridgeProcessResult? process = null,
-        int? generation = null) =>
+        int? generation = null,
+        DevBridgeIdentityMismatch? identityMismatch = null) =>
         new(
             new DevBridgeAdapterStatus(
                 outcome,
@@ -347,7 +356,8 @@ public sealed class DevBridgeFreshGenerationAdapter : IDevBridgeFreshGenerationA
                 Bound(error),
                 process?.ExitCode,
                 Bound(process?.Stderr),
-                "devbridge-command/v1"),
+                "devbridge-command/v1",
+                IdentityMismatch: identityMismatch),
             generation);
 
     private static DevBridgeAdapterStatus SuccessStatus(DevBridgeProcessResult process) =>

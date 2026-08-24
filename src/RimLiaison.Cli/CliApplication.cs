@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using System.Xml;
 using System.Xml.Linq;
+using RimContext.Core.Context;
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Doctor;
@@ -14,6 +15,9 @@ using RimLiaison.Results;
 using RimLiaison.Stack;
 using RimLiaison.Profiling;
 using RimLiaison.Observability;
+using RimLiaison.Provenance;
+using RimLiaison.Benchmarking;
+using RimLiaison.RimDev;
 
 namespace RimLiaison;
 
@@ -91,7 +95,8 @@ public static class CliApplication
         IDevBridgeViewportAdapter? viewportAdapter = null,
         IDevBridgeLeaseAdapter? leaseAdapter = null,
         IAgentObservabilityStore? observabilityStore = null,
-        IAgentObservabilityTelemetry? observabilityTelemetry = null)
+        IAgentObservabilityTelemetry? observabilityTelemetry = null,
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
     {
         EfficiencyProfiler profiler = EfficiencyProfiler.Start();
         long started = Stopwatch.GetTimestamp();
@@ -179,6 +184,75 @@ public static class CliApplication
                 return exitCode;
             }
 
+            if (request.Command == CliCommand.Context)
+            {
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.context",
+                        "command",
+                        () => ExecuteContextCommandAsync(
+                            request,
+                            stdout,
+                            processTransport,
+                            eventStore,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "context")
+                    .ConfigureAwait(false);
+                return exitCode;
+            }
+
+            if (request.Command == CliCommand.PublishCheck)
+            {
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.publish-check",
+                        "publication",
+                        () => ExecutePublishCheckCommandAsync(
+                            request,
+                            stdout,
+                            eventStore,
+                            gitChangeProvider,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "publish-check")
+                    .ConfigureAwait(false);
+                return exitCode;
+            }
+
+            if (request.Command == CliCommand.Benchmarks)
+            {
+                GoldenWorkflowBenchmarkReport report = GoldenWorkflowBenchmarkRunner.RunMeasured();
+                WriteJson(stdout, report);
+                exitCode = report.RegressionCount == 0 &&
+                    report.PassedScenarioCount == report.Scenarios.Count
+                    ? CliExitCodes.Success
+                    : CliExitCodes.TestFailure;
+                return exitCode;
+            }
+
+            if (request.Command == CliCommand.RimDev)
+            {
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.rimdev",
+                        "rimdev",
+                        () => new RimDevWorkflow().RunAsync(
+                            new RimDevRunOptions(
+                                request.RimDevOperation ?? throw new InvalidOperationException("rimdev operation is missing"),
+                                request.RimDevRootPath,
+                                request.RimDevConfirm,
+                                request.RimDevJson,
+                                Input: Console.In),
+                            stdout,
+                            stderr,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: request.RimDevOperation?.ToString() ?? "unknown")
+                    .ConfigureAwait(false);
+                return exitCode;
+            }
+
             if (request.Command == CliCommand.Capabilities)
             {
                 exitCode = await ProfilerActivity.ObserveAsync(
@@ -252,7 +326,8 @@ public static class CliApplication
                         cancellationToken,
                         started,
                         workflowId,
-                        developmentAdapter),
+                        developmentAdapter,
+                        freshGenerationRecoveryAdapter),
                     AnnotateExit,
                     phase: "command",
                     scope: request.Command.ToString())
@@ -465,7 +540,6 @@ public static class CliApplication
                 throw new InvalidOperationException("Unknown recipe command.");
         }
     }
-
     private static async Task<int> ExecuteCatalogCommandAsync(
         CliRequest request,
         TextWriter stdout,
@@ -479,7 +553,8 @@ public static class CliApplication
         CancellationToken cancellationToken,
         long started,
         string? workflowId,
-        IDevBridgeModDevelopmentAdapter? developmentAdapter)
+        IDevBridgeModDevelopmentAdapter? developmentAdapter,
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter)
     {
         CatalogLoadResult loaded = CatalogLoader.Load(request.CatalogPath);
         if (loaded.Catalog is null)
@@ -726,6 +801,32 @@ public static class CliApplication
                         };
                     }
 
+                    AgentObservabilityRuntime.Record(
+                        DevelopmentStage.Analysis,
+                        "test.selection.decision",
+                        "Affected-test selection decision recorded.",
+                        new
+                        {
+                            decision = "affected-test-selection",
+                            action = selection.Status is "ok" or "conservative"
+                                ? RimContextDecisionActions.Run
+                                : selection.Status == "blocked"
+                                    ? RimContextDecisionActions.Block
+                                    : RimContextDecisionActions.Skip,
+                            reasonCode = selection.ErrorCode ?? "AFFECTED_SELECTION_PROVEN",
+                            explanation = selection.Status == "conservative"
+                                ? "RimContext selected a conservative validation set."
+                                : selection.Status == "blocked"
+                                    ? "RimLiaison blocked execution because affected-test selection was not trustworthy."
+                                    : "RimContext selected the affected validation set.",
+                            changedInputs = changedPaths,
+                            tests = selection.Tests,
+                            selectedSuites = new[] { request.FallbackSuite ?? "affected" },
+                            fallbackSuite = request.FallbackSuite,
+                            selectionStatus = selection.Status,
+                            owner = "RimTest/RimLiaison"
+                        });
+
                     if (request.RunSelected && selection.Tests.Count == 0)
                     {
                         if (selection.Status == "blocked")
@@ -769,7 +870,10 @@ public static class CliApplication
                                 workflowId,
                                 developmentAdapter,
                                 freshnessRequest,
-                                SelectionRecovery(selection))
+                                SelectionRecovery(selection),
+                                validationChangedPaths: changedPaths,
+                                protectRepositoryWorktree: gitChanges is not null,
+                                freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter)
                             .ConfigureAwait(false);
                     }
 
@@ -830,6 +934,45 @@ public static class CliApplication
         Environment.GetEnvironmentVariable("RIMCONTEXT_ROOT") ??
         Environment.CurrentDirectory;
 
+    private static IReadOnlyDictionary<string, string>? DiscoverContextRelatedRepositoryRoots(
+        string rootPath)
+    {
+        try
+        {
+            RimDevWorkspaceDiscovery discovery = RimDevWorkspaceDiscoverer.Discover(
+                explicitRoot: null,
+                startDirectory: rootPath);
+            if (!discovery.Succeeded)
+            {
+                return null;
+            }
+
+            var roots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (RimDevRepository repository in discovery.Repositories
+                         .OrderBy(static value => value.Name, StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(static value => value.Path, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!Directory.Exists(repository.Path))
+                {
+                    continue;
+                }
+
+                string name = repository.Name;
+                if (!roots.TryAdd(name, repository.Path))
+                {
+                    roots.TryAdd(name + ":" + repository.Path, repository.Path);
+                }
+            }
+
+            return roots.Count == 0 ? null : roots;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
     private static async Task<int> ExecuteDoctorCommandAsync(
         CliRequest request,
         TextWriter stdout,
@@ -846,6 +989,383 @@ public static class CliApplication
         WriteJson(stdout, result.Output);
         return result.ExitCode;
     }
+
+    private static async Task<int> ExecuteContextCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        IDevBridgeProcessTransport? processTransport,
+        IAgentObservabilityStore observabilityStore,
+        CancellationToken cancellationToken)
+    {
+        string rootPath = AffectedGitRoot(request);
+        IReadOnlyDictionary<string, string>? relatedRepositoryRoots =
+            DiscoverContextRelatedRepositoryRoots(rootPath);
+        (string modId, string modName) = ResolveObservabilityMod(request);
+        var provider = new RimLiaisonContextBundleProvider(
+            new RimLiaisonContextProviderOptions
+            {
+                RootPath = rootPath,
+                CatalogPath = request.CatalogPath,
+                Project = request.StackManifest.Manifest?.Project,
+                ObservabilityModName = modName,
+                RimContextStorePath = request.RimContextStorePath,
+                DevBridgePath = request.DevBridgePath,
+                DevBridgeRootPath = request.DevBridgeRootPath,
+                DevBridgeProject = request.DevBridgeProject,
+                RimErrorPath = request.RimErrorPath,
+                RimErrorLogPath = request.RimErrorLogPath,
+                RimErrorStorePath = request.RimErrorStorePath,
+                FallbackSuite = request.FallbackSuite,
+                StackManifestPath = request.StackManifest.ManifestPath,
+                ObservabilityModId = modId,
+                RelatedRepositoryRoots = relatedRepositoryRoots,
+                ProcessTransport = processTransport,
+                ObservabilityStore = observabilityStore
+            });
+        RimContextBundle bundle = await RimContextBundleBuilder.BuildAsync(
+                new RimContextBundleRequest(
+                    RootPath: rootPath,
+                    StorePath: request.RimContextStorePath,
+                    Verbose: request.ContextVerbose,
+                    MaxDecisions: request.ContextVerbose ? 32 : 8,
+                    MaxRecentExecutions: request.ContextVerbose ? 32 : 8,
+                    MaxFailures: request.ContextVerbose ? 32 : 8,
+                    MaxExtensions: request.ContextVerbose ? 32 : 12),
+                [provider],
+                cancellationToken)
+            .ConfigureAwait(false);
+        stdout.WriteLine(RimContextBundleJson.Serialize(bundle, request.ContextVerbose));
+        return CliExitCodes.Success;
+    }
+
+    private static async Task<int> ExecutePublishCheckCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        IAgentObservabilityStore observabilityStore,
+        IGitChangeProvider? suppliedChangeProvider,
+        CancellationToken cancellationToken)
+    {
+        string rootPath = AffectedGitRoot(request);
+        GitRepositoryStateResult repositoryResult = await new SystemGitRepositoryStateProvider()
+            .ReadAsync(rootPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!repositoryResult.Resolved || repositoryResult.State is null)
+        {
+            var blocked = new
+            {
+                schemaVersion = "rimliaison-publication-check/v1",
+                status = "blocked",
+                safeToPublish = false,
+                publicationAction = "block",
+                reasonCode = repositoryResult.ErrorCode ?? "GIT_STATE_UNAVAILABLE",
+                nextAction = "git status --short"
+            };
+            RecordPublicationCheck(blocked);
+            WriteJson(stdout, blocked);
+            return CliExitCodes.ConservativeSelection;
+        }
+
+        GitRepositoryStateSnapshot repository = repositoryResult.State;
+        IReadOnlyList<GitRepositoryChange> changes;
+        if (request.AffectedBase is null)
+        {
+            changes = repository.Changes;
+        }
+        else
+        {
+            IGitChangeProvider changeProvider = suppliedChangeProvider ?? new SystemGitChangeProvider();
+            GitChangeDiscoveryResult discovered = await changeProvider
+                .DiscoverAsync(rootPath, request.AffectedBase, cancellationToken)
+                .ConfigureAwait(false);
+            if (!discovered.Resolved)
+            {
+                var blocked = new
+                {
+                    schemaVersion = "rimliaison-publication-check/v1",
+                    status = "blocked",
+                    safeToPublish = false,
+                    publicationAction = "block",
+                    reasonCode = discovered.ErrorCode ?? "GIT_DISCOVERY_FAILED",
+                    nextAction = "git status --short"
+                };
+                RecordPublicationCheck(blocked);
+                WriteJson(stdout, blocked);
+                return CliExitCodes.ConservativeSelection;
+            }
+
+            changes = discovered.Changes
+                .Select(change => new GitRepositoryChange(
+                    change.Path,
+                    change.Status,
+                    change.Status.Contains("?", StringComparison.Ordinal),
+                    ValidationChangeAnalyzer.IsGeneratedPath(change.Path),
+                    change.OriginalPath))
+                .ToArray();
+        }
+
+        ValidationChangeAnalysis analysis = ValidationChangeAnalyzer.Analyze(changes);
+        string? contentFingerprint = null;
+        if (analysis.MeaningfulPaths.Count > 0 &&
+            WorktreeFingerprint.TryCompute(
+                rootPath,
+                analysis.MeaningfulPaths,
+                out string computedFingerprint,
+                out _))
+        {
+            contentFingerprint = computedFingerprint;
+        }
+
+        (string modId, _) = ResolveObservabilityMod(request);
+        AgentEvent[] events = observabilityStore
+            .GetEvents(modId: modId, limit: 512)
+            .ToArray();
+        ValidationEvidenceRecord[] evidence = events
+            .Select(record => ValidationEvidenceParser.TryParse(record, out ValidationEvidenceRecord? parsed)
+                ? parsed
+                : null)
+            .Where(static record => record is not null)
+            .Select(static record => record!)
+            .OrderByDescending(static record => record.RecordedAtUtc)
+            .ThenByDescending(static record => record.EvidenceId, StringComparer.Ordinal)
+            .ToArray();
+        RuntimeEvidenceInputs runtime = LatestRuntimeEvidence(events);
+        string[] selectedTestIds = LatestSelectedTestIds(events);
+        ValidationEvidenceIdentity current = ValidationEvidenceFactory.CurrentIdentity(
+            repository,
+            analysis.MeaningfulPaths,
+            analysis.RequiredKinds,
+            testIds: selectedTestIds.Length == 0 ? null : selectedTestIds,
+            toolVersions: ValidationEvidenceFactory.DefaultToolVersions(),
+            configuration: ValidationConfiguration(request),
+            environmentFingerprint: ValidationEvidenceFactory.DefaultEnvironmentFingerprint(),
+            deploymentCorrespondence: runtime.DeploymentCorrespondence,
+            runtimeGeneration: runtime.Generation,
+            buildArtifactSha256: runtime.BuildArtifactSha256,
+            deploymentArtifactSha256: runtime.DeploymentArtifactSha256,
+            contentFingerprint: contentFingerprint);
+        ValidationPublicationResult result = ValidationPublicationGate.Evaluate(
+            analysis,
+            current,
+            evidence,
+            DateTimeOffset.UtcNow);
+        var output = new
+        {
+            schemaVersion = "rimliaison-publication-check/v1",
+            status = result.Status,
+            safeToPublish = result.SafeToPublish,
+            publicationAction = result.PublicationAction,
+            action = result.SafeToPublish
+                ? RimContextDecisionActions.Reuse
+                : RimContextDecisionActions.Block,
+            decision = "publication-evidence",
+            reasonCode = analysis.ReasonCode,
+            owner = "RimTest/RimLiaison",
+            changeCategory = analysis.Category,
+            meaningfulChangedInputs = analysis.MeaningfulPaths,
+            generatedChangedInputs = analysis.GeneratedPaths,
+            requiredValidation = result.RequiredValidation,
+            reusedEvidence = result.ReusedEvidence,
+            invalidatedEvidence = result.InvalidatedEvidence,
+            reusedEvidenceCount = result.ReusedEvidenceCount,
+            invalidatedEvidenceCount = result.InvalidatedEvidenceCount,
+            newValidationCount = result.NewValidationCount,
+            decisions = result.Decisions,
+            nextAction = result.NextAction,
+            evidenceCount = evidence.Length
+        };
+        RecordPublicationCheck(output);
+        WriteJson(stdout, output);
+        return result.SafeToPublish
+            ? CliExitCodes.Success
+            : CliExitCodes.ConservativeSelection;
+
+        void RecordPublicationCheck(object value)
+        {
+            AgentObservabilityRuntime.Record(
+                DevelopmentStage.Analysis,
+                AgentEventTypes.PublicationChecked,
+                "Git publication evidence check recorded.",
+                value);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string> ValidationConfiguration(
+        CliRequest request) =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["catalog"] = Path.GetFullPath(request.CatalogPath),
+            ["devBridgeProject"] = request.DevBridgeProject ?? "unknown",
+            ["fallbackSuite"] = request.FallbackSuite ?? "unknown"
+        };
+
+    private static void RecordValidationEvidence(
+        RimTestSuiteResult result,
+        IReadOnlyList<string> selectedTestIds,
+        CliRequest request,
+        ArtifactFreshnessTransactionRequest? freshnessRequest,
+        IReadOnlyList<string>? validationChangedPaths)
+    {
+        IReadOnlyList<string> sourceInputs = validationChangedPaths ??
+            freshnessRequest?.ChangedPaths ??
+            [];
+        string? contentFingerprint = result.ArtifactFreshness?.SourceFingerprint;
+        if (contentFingerprint is null && sourceInputs.Count > 0 &&
+            WorktreeFingerprint.TryCompute(
+                AffectedGitRoot(request),
+                sourceInputs,
+                out string computedFingerprint,
+                out _))
+        {
+            contentFingerprint = computedFingerprint;
+        }
+
+        ValidationEvidenceRecord evidence = ValidationEvidenceFactory.FromSuiteResult(
+            ValidationEvidenceFactory.RepositoryIdentity(AffectedGitRoot(request)),
+            commitSha: null,
+            contentFingerprint,
+            sourceInputs,
+            result.Suite,
+            selectedTestIds,
+            result,
+            DateTimeOffset.UtcNow,
+            toolVersions: ValidationEvidenceFactory.DefaultToolVersions(),
+            configuration: ValidationConfiguration(request),
+            environmentFingerprint: ValidationEvidenceFactory.DefaultEnvironmentFingerprint());
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ValidationEvidenceRecorded,
+            "Immutable validation evidence recorded.",
+            new
+            {
+                evidenceId = evidence.EvidenceId,
+                validationEvidence = evidence,
+                validationKind = evidence.Identity.ValidationKind,
+                result = evidence.Result,
+                reusable = evidence.Reusable,
+                sourceFingerprint = evidence.Identity.ContentFingerprint,
+                suiteId = evidence.Identity.SuiteId,
+                testIds = evidence.Identity.TestIds,
+                owner = "RimTest/RimLiaison"
+            });
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ValidationEvidenceDecision,
+            "Validation evidence decision recorded after suite execution.",
+            new
+            {
+                decision = "validation-evidence",
+                action = evidence.Reusable
+                    ? RimContextDecisionActions.Run
+                    : RimContextDecisionActions.Block,
+                reasonCode = evidence.Reusable
+                    ? ValidationDecisionReasonCodes.EvidenceRecorded
+                    : ValidationDecisionReasonCodes.EvidenceResultNotPass,
+                explanation = evidence.Reusable
+                    ? "The selected validation ran and produced reusable evidence."
+                    : "The validation result is not safe for publication reuse.",
+                evidenceReused = Array.Empty<object>(),
+                evidenceInvalidated = Array.Empty<object>(),
+                owner = "RimTest/RimLiaison",
+                evidenceId = evidence.EvidenceId,
+                durationMs = result.DurationMs
+            });
+    }
+
+    private static RuntimeEvidenceInputs LatestRuntimeEvidence(
+        IReadOnlyList<AgentEvent> events)
+    {
+        foreach (AgentEvent record in events
+                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted)
+                     .OrderByDescending(static value => value.Timestamp)
+                     .ThenByDescending(static value => value.Sequence))
+        {
+            if (record.Data is not JsonElement data ||
+                data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty("artifactFreshness", out JsonElement freshness) ||
+                freshness.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string? built = JsonString(freshness, "builtArtifactSha256");
+            string? deployed = JsonString(freshness, "deployedArtifactSha256");
+            string? evaluation = JsonString(freshness, "evaluationStatus");
+            string? correspondence = evaluation is not null
+                ? evaluation.Equals("FRESH", StringComparison.OrdinalIgnoreCase)
+                    ? "synchronized"
+                    : "mismatch"
+                : built is not null && deployed is not null
+                    ? string.Equals(built, deployed, StringComparison.OrdinalIgnoreCase)
+                        ? "synchronized"
+                        : "mismatch"
+                    : null;
+            return new RuntimeEvidenceInputs(
+                JsonInt(freshness, "generation") ?? JsonInt(freshness, "generationAfter"),
+                built,
+                deployed,
+                correspondence);
+        }
+
+        return new RuntimeEvidenceInputs(null, null, null, null);
+    }
+
+    private static string[] LatestSelectedTestIds(IReadOnlyList<AgentEvent> events)
+    {
+        foreach (AgentEvent record in events
+                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted ||
+                         value.Type == AgentEventTypes.ValidationEvidenceDecision ||
+                         value.Type == "test.selection.decision")
+                     .OrderByDescending(static value => value.Timestamp)
+                     .ThenByDescending(static value => value.Sequence))
+        {
+            if (record.Data is not JsonElement data || data.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            foreach (string propertyName in new[] { "selectedTests", "tests" })
+            {
+                if (!data.TryGetProperty(propertyName, out JsonElement values) ||
+                    values.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                string[] result = values.EnumerateArray()
+                    .Where(static value => value.ValueKind == JsonValueKind.String)
+                    .Select(static value => value.GetString()!)
+                    .Where(static value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(static value => value, StringComparer.Ordinal)
+                    .ToArray();
+                if (result.Length > 0)
+                {
+                    return result;
+                }
+            }
+        }
+
+        return [];
+    }
+
+    private static string? JsonString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out JsonElement value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int? JsonInt(JsonElement element, string name) =>
+        element.TryGetProperty(name, out JsonElement value) &&
+        value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt32(out int result)
+            ? result
+            : null;
+
+    private sealed record RuntimeEvidenceInputs(
+        int? Generation,
+        string? BuildArtifactSha256,
+        string? DeploymentArtifactSha256,
+        string? DeploymentCorrespondence);
 
     private static async Task<int> ExecuteCapabilitiesCommandAsync(
         CliRequest request,
@@ -2139,7 +2659,10 @@ public static class CliApplication
         string? workflowId = null,
         IDevBridgeModDevelopmentAdapter? developmentAdapter = null,
         ArtifactFreshnessTransactionRequest? freshnessRequest = null,
-        RimTestPrerequisiteRecovery? selectionRecovery = null)
+        RimTestPrerequisiteRecovery? selectionRecovery = null,
+        IReadOnlyList<string>? validationChangedPaths = null,
+        bool protectRepositoryWorktree = false,
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
     {
         bool ownsRecipeAdapter = recipeAdapter is null;
         bool needsBridgeTransport = ownsRecipeAdapter || freshnessRequest is not null;
@@ -2166,10 +2689,12 @@ public static class CliApplication
             ? new DevBridgeLeaseAdapter(bridgeTransport, bridgeOptions)
             : null;
         IDevBridgeFixtureResetAdapter? resetAdapter = adapter as IDevBridgeFixtureResetAdapter;
-        IDevBridgeFreshGenerationAdapter? freshGenerationAdapter = ownsRecipeAdapter &&
-            bridgeOptions is not null && bridgeTransport is not null
-            ? new DevBridgeFreshGenerationAdapter(adapter, bridgeTransport, bridgeOptions)
-            : null;
+        IDevBridgeFreshGenerationAdapter? freshGenerationAdapter =
+            freshGenerationRecoveryAdapter ??
+            ((ownsRecipeAdapter || freshnessRequest is not null) &&
+             bridgeOptions is not null && bridgeTransport is not null
+                ? new DevBridgeFreshGenerationAdapter(adapter, bridgeTransport, bridgeOptions)
+                : null);
         var runner = new CatalogSuiteRunner(
             adapter,
             executor,
@@ -2188,7 +2713,10 @@ public static class CliApplication
                     () => new ArtifactFreshnessTransaction(
                             owner,
                             leaseAdapter,
-                            freshGenerationAdapter)
+                            freshGenerationAdapter,
+                            protectRepositoryWorktree
+                                ? new SystemGitRepositoryStateProvider()
+                                : null)
                         .PrepareAsync(freshnessRequest, cancellationToken),
                     (activity, value) =>
                     {
@@ -2276,7 +2804,9 @@ public static class CliApplication
             RimTestPrerequisiteRecovery recovery =
                 PrerequisiteRecoveryProjection.FromStatus(
                     "artifact-freshness",
-                    freshnessTransaction.Status);
+                    freshnessTransaction.Status,
+                    freshnessTransaction.Freshness.WorkflowId,
+                    freshnessTransaction.Freshness.Generation);
             execution = execution with
             {
                 PrerequisiteRecovery = (execution.PrerequisiteRecovery ?? [])
@@ -2325,8 +2855,119 @@ public static class CliApplication
             artifactFreshness,
             freshnessTransaction?.Status,
             freshnessRequest is not null);
+        RecordSuiteCompletion(
+            execution,
+            result,
+            testIds,
+            selectionStatus,
+            selectionErrorCode,
+            fallbackSuite,
+            workflowId);
+        RecordValidationEvidence(
+            result,
+            testIds,
+            request,
+            freshnessRequest,
+            validationChangedPaths);
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
+    }
+
+    private static void RecordSuiteCompletion(
+        CatalogSuiteExecutionResult execution,
+        RimTestSuiteResult result,
+        IReadOnlyList<string> selectedTestIds,
+        string? selectionStatus,
+        string? selectionErrorCode,
+        string? fallbackSuite,
+        string? workflowId)
+    {
+        string[] executedTests = execution.Tests
+            .Select(static test => test.Test)
+            .Where(static test => !string.IsNullOrWhiteSpace(test))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static test => test, StringComparer.Ordinal)
+            .ToArray();
+        string[] selectedTests = selectedTestIds
+            .Where(static test => !string.IsNullOrWhiteSpace(test))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static test => test, StringComparer.Ordinal)
+            .ToArray();
+        string[] skippedTests = selectedTests
+            .Except(executedTests, StringComparer.Ordinal)
+            .ToArray();
+        RimTestArtifactFreshness? freshness = result.ArtifactFreshness;
+        RimTestOrchestrationFailure? failure = result.Orchestration?.Failure;
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.SuiteCompleted,
+            "RimTest suite result recorded.",
+            new
+            {
+                operationKey = "suite:" + execution.SuiteId,
+                suiteId = execution.SuiteId,
+                selectedSuites = new[] { execution.SuiteId },
+                executedSuites = executedTests.Length > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
+                reusedSuites = execution.Reuse?.GroupsUsed > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
+                skippedSuites = execution.Skipped > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
+                selectedTests,
+                executedTests,
+                reusedTests = Array.Empty<string>(),
+                skippedTests,
+                skippedTestCount = execution.Skipped,
+                result = result.Status,
+                status = result.Status,
+                durationMs = result.DurationMs,
+                passed = result.Passed,
+                failed = result.Failed,
+                cancelled = result.Cancelled,
+                selectionStatus,
+                selectionErrorCode,
+                fallbackSuite,
+                workflowId,
+                reuseStatus = execution.Reuse?.Status,
+                reuseInvalidationReason = execution.Reuse?.ReuseInvalidationReason,
+                reuseFallbackReason = execution.Reuse?.FallbackReason,
+                reuseGroupsUsed = execution.Reuse?.GroupsUsed,
+                reuseGenerationsUsed = execution.Reuse?.GenerationsUsed,
+                artifactFreshness = freshness is null
+                    ? null
+                    : new
+                    {
+                        sourceFingerprint = freshness.SourceFingerprint,
+                        builtArtifactSha256 = freshness.BuiltArtifactSha256,
+                        deployedArtifactSha256 = freshness.DeployedArtifactSha256,
+                        deploymentDecision = freshness.DeploymentDecision,
+                        evaluationStatus = freshness.EvaluationStatus,
+                        generation = freshness.Generation,
+                        generationBefore = freshness.GenerationBefore,
+                        generationAfter = freshness.GenerationAfter,
+                        transactionId = freshness.TransactionId,
+                        workflowId = freshness.WorkflowId,
+                        leaseId = freshness.LeaseId,
+                        evidenceId = freshness.Proof,
+                        errorCode = freshness.ErrorCode,
+                        loadedArtifactFreshnessProven = freshness.LoadedArtifactFreshnessProven
+                    },
+                overall = result.Orchestration?.Overall,
+                sourceBuild = result.Orchestration?.SourceBuild,
+                staticTests = result.Orchestration?.StaticTests,
+                deployment = result.Orchestration?.Deployment,
+                runtimeValidation = result.Orchestration?.RuntimeValidation,
+                infrastructure = result.Orchestration?.Infrastructure,
+                failureKind = failure?.Stage ?? (result.Status switch
+                {
+                    "fail" => "test",
+                    "infrastructure" => "infrastructure",
+                    "cancelled" => "cancelled",
+                    _ => null
+                }),
+                owner = failure?.Owner,
+                errorCode = failure?.ErrorCode,
+                nextAction = failure?.NextAction,
+                retryable = failure?.RetrySafe,
+                infrastructureFailure = result.Status == "infrastructure"
+            });
     }
 
     private static ArtifactFreshnessTransactionRequest? CreateArtifactFreshnessRequest(
@@ -2771,6 +3412,11 @@ public static class CliApplication
                 output["recoveryAction"] = status.RecoveryAction;
             }
         }
+
+        if (status.IdentityMismatch is not null)
+        {
+            output["identityMismatch"] = status.IdentityMismatch;
+        }
     }
 
     private static string OutcomeName(DevBridgeOutcomeKind outcome)
@@ -2854,7 +3500,8 @@ public static class CliApplication
             CliCommand.Affected => DevelopmentStage.Testing,
             CliCommand.Capabilities or CliCommand.UiTargets => DevelopmentStage.Research,
             CliCommand.UiScreenshot => DevelopmentStage.Testing,
-            CliCommand.Init or CliCommand.Doctor => DevelopmentStage.Analysis,
+            CliCommand.Init or CliCommand.Doctor or CliCommand.Context or
+            CliCommand.PublishCheck or CliCommand.Benchmarks => DevelopmentStage.Analysis,
             _ => DevelopmentStage.Analysis
         };
 

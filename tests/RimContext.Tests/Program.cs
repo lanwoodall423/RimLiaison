@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using RimContext.Cli;
 using RimContext.Core;
 using RimContext.Core.Configuration;
+using RimContext.Core.Context;
 using RimContext.Core.Contracts;
 using RimContext.Core.Discovery;
 using RimContext.Core.Model;
@@ -20,6 +21,14 @@ internal static class Program
         var tests = new (string Name, Action Body)[]
         {
             ("cli startup and version", CliStartupAndVersion),
+            ("context bundle schema and serialization", ContextBundleSchemaAndSerialization),
+            ("context bundle unavailable sections", ContextBundleUnavailableSections),
+            ("context bundle generated repository state", ContextBundleGeneratedRepositoryState),
+            ("context bundle agent summary and correspondence", ContextBundleAgentSummaryAndCorrespondence),
+            ("context bundle stale runtime and failure taxonomy", ContextBundleStaleRuntimeAndFailureTaxonomy),
+            ("context bundle decision provenance", ContextBundleDecisionProvenance),
+            ("context bundle stale ordering", ContextBundleStaleOrdering),
+            ("context bundle provider failure", ContextBundleProviderFailure),
             ("json-only stdout and stderr logging", JsonOnlyStdout),
             ("typed Core facade", TypedCoreFacade),
             ("unknown command and invalid input", InvalidInput),
@@ -153,6 +162,292 @@ internal static class Program
         Assert(
             affected.Direct.Any(item => item.Name == "ThingDef/MyWeapon"),
             "Core facade affected result contains the changed Def");
+    }
+
+    private static void ContextBundleSchemaAndSerialization()
+    {
+        var bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [CompleteContextSnapshot()]);
+
+        AssertEqual("complete", bundle.SnapshotStatus, "complete context snapshot status");
+        AssertEqual(false, bundle.Stale, "complete context snapshot stale state");
+        string compact = RimContextBundleJson.Serialize(bundle);
+        string compactAgain = RimContextBundleJson.Serialize(bundle);
+        string verbose = RimContextBundleJson.Serialize(bundle, verbose: true);
+        AssertEqual(compact, compactAgain, "context compact serialization determinism");
+        Assert(compact.Length < verbose.Length, "verbose context output should include formatting");
+        Assert(verbose.Contains(Environment.NewLine, StringComparison.Ordinal), "verbose context output should be indented");
+
+        using var document = ParseJson(compact);
+        AssertEqual(RimContextBundleSchema.Current, document.RootElement.GetProperty("schemaVersion").GetString(), "context bundle schema");
+        AssertEqual("complete", document.RootElement.GetProperty("snapshotStatus").GetString(), "serialized context status");
+        Assert(document.RootElement.GetProperty("ownership").GetArrayLength() > 0, "context ownership contract");
+
+        using var cliDocument = ParseJson(Run("context", "--root", Path.GetTempPath(), "--json").Stdout);
+        AssertEqual(RimContextBundleSchema.Current, cliDocument.RootElement.GetProperty("schemaVersion").GetString(), "direct context command schema");
+        Assert(cliDocument.RootElement.TryGetProperty("repository", out _), "direct context command repository section");
+        AssertEqual(
+            RimContextBundleStatuses.Unknown,
+            cliDocument.RootElement.GetProperty("environment").GetProperty("value")
+                .GetProperty("rimWorldVersion").GetString(),
+            "direct static context reports unknown RimWorld version explicitly");
+
+        var limited = Run("context", "--root", Path.GetTempPath(), "--max-bytes", "256", "--json");
+        Assert(Encoding.UTF8.GetByteCount(limited.Stdout.TrimEnd()) <= 256, "context max-bytes output should be bounded");
+        using var limitedDocument = ParseJson(limited.Stdout);
+        AssertEqual(true, limitedDocument.RootElement.GetProperty("truncated").GetBoolean(), "context max-bytes truncation");
+    }
+
+    private static void ContextBundleUnavailableSections()
+    {
+        var bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            Array.Empty<RimContextProviderSnapshot>());
+
+        AssertEqual("partial", bundle.SnapshotStatus, "unavailable context snapshot status");
+        AssertEqual(false, bundle.Stale, "unavailable context snapshot is not stale");
+        AssertEqual("unknown", bundle.Repository.Status, "unavailable repository status");
+        AssertEqual("CONTEXT_PROVIDER_UNAVAILABLE", bundle.Repository.ReasonCode, "unavailable repository reason");
+        Assert(bundle.Repository.Value is null, "unavailable repository has no fabricated value");
+        AssertEqual("unknown", bundle.Runtime.Status, "unavailable runtime status");
+        AssertEqual("unknown", bundle.Efficiency.Status, "unavailable efficiency status");
+    }
+
+    private static void ContextBundleGeneratedRepositoryState()
+    {
+        var repository = new RimContextRepositoryState
+        {
+            Identity = "git:fixture",
+            Dirty = true,
+            ChangedFiles =
+            [
+                new RimContextChangedFile { Path = "Source/Changed.cs", Status = " M", Category = "source" }
+            ],
+            GeneratedFiles =
+            [
+                new RimContextChangedFile { Path = "obj/Debug/generated.dll", Status = "??", Category = "generated", Untracked = true }
+            ]
+        };
+        var snapshot = CompleteContextSnapshot() with
+        {
+            Repository = AvailableSection(repository)
+        };
+        var bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [snapshot]);
+
+        using var document = ParseJson(RimContextBundleJson.Serialize(bundle));
+        var value = document.RootElement.GetProperty("repository").GetProperty("value");
+        AssertEqual(1, value.GetProperty("changedFiles").GetArrayLength(), "meaningful changed repository files");
+        AssertEqual(1, value.GetProperty("generatedFiles").GetArrayLength(), "generated repository files are explicit");
+        AssertEqual("obj/Debug/generated.dll", value.GetProperty("generatedFiles")[0].GetProperty("path").GetString(), "generated file path");
+    }
+
+    private static void ContextBundleAgentSummaryAndCorrespondence()
+    {
+        var snapshot = CompleteContextSnapshot() with
+        {
+            Repository = AvailableSection(new RimContextRepositoryState
+            {
+                Identity = "git:fixture",
+                Dirty = false,
+                SourceFingerprint = "source-1",
+                ChangedFiles = []
+            }),
+            Deployment = AvailableSection(new RimContextDeploymentState
+            {
+                SourceFingerprint = "source-1",
+                BuildArtifactFingerprint = "built-1",
+                DeployedArtifactFingerprint = "deployed-1",
+                Correspondence = "mismatch",
+                BuildDeploymentCorrespondence = "mismatch"
+            }),
+            Runtime = AvailableSection(new RimContextRuntimeState
+            {
+                Generation = 7,
+                RuntimeArtifactFingerprint = "deployed-1",
+                BridgeStatus = "ready"
+            }),
+            Testing = AvailableSection(new RimContextTestingState
+            {
+                AvailableSuites = ["smoke"],
+                AvailableTests = ["smoke.test"],
+                LatestEvidence = [new RimContextEvidenceReference { Id = "proof-1", Status = "available" }]
+            })
+        };
+        RimContextBundle bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [snapshot]);
+
+        AssertEqual("action-required", bundle.AgentSummary.Status, "mismatch summary status");
+        Assert(bundle.AgentSummary.ActionRequired.Count > 0, "mismatch summary includes an action");
+        Assert(bundle.AgentSummary.ReusableEvidence.SequenceEqual(["proof-1"]), "summary retains reusable evidence");
+        AssertEqual("mismatch", bundle.AgentSummary.DeploymentCorrespondence, "summary retains deployment mismatch");
+        using JsonDocument document = ParseJson(RimContextBundleJson.Serialize(bundle));
+        Assert(document.RootElement.TryGetProperty("agentSummary", out JsonElement summary), "agent summary is canonical JSON");
+        Assert(summary.GetProperty("status").GetString() == "action-required", "serialized summary status");
+    }
+
+    private static void ContextBundleStaleRuntimeAndFailureTaxonomy()
+    {
+        DateTimeOffset old = FixedTime.AddMinutes(-10);
+        var snapshot = CompleteContextSnapshot(old) with
+        {
+            Runtime = AvailableSection(new RimContextRuntimeState
+            {
+                Generation = 3,
+                CurrentGenerationTrust = "stale",
+                FailureCode = "RUNTIME_GENERATION_STALE"
+            }),
+            Failures =
+            [
+                new RimContextFailure
+                {
+                    SignatureCode = "DEVBRIDGE_LEASE_CONTENDED",
+                    OriginatingComponent = "DevBridge2",
+                    Classification = "infrastructure",
+                    RootCause = "Another owner holds the lease.",
+                    RecommendedAction = "wait-for-lease",
+                    RetryAppropriate = true,
+                    RetryAfterStateChange = true,
+                    InfrastructureOnly = true,
+                    EvidenceInvalidationEffect = "reuse-invalidated",
+                    ObservedAtUtc = old
+                }
+            ]
+        };
+        RimContextBundle bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [snapshot]);
+
+        AssertEqual("stale", bundle.Runtime.Status, "runtime stale status");
+        Assert(bundle.StaleReasons?.Contains("runtime", StringComparer.Ordinal) == true, "runtime stale reason");
+        using JsonDocument document = ParseJson(RimContextBundleJson.Serialize(bundle));
+        JsonElement failure = document.RootElement.GetProperty("failures")[0];
+        AssertEqual(true, failure.GetProperty("retryAfterStateChange").GetBoolean(), "failure retry taxonomy");
+        AssertEqual(true, failure.GetProperty("infrastructureOnly").GetBoolean(), "failure infrastructure taxonomy");
+        AssertEqual("reuse-invalidated", failure.GetProperty("evidenceInvalidationEffect").GetString(), "failure evidence taxonomy");
+    }
+
+    private static void ContextBundleDecisionProvenance()
+    {
+        var decision = new RimContextDecision
+        {
+            Decision = "affected-test-selection",
+            Action = RimContextDecisionActions.Reuse,
+            ReasonCode = "SOURCE_FINGERPRINT_MATCH",
+            Explanation = "The current source fingerprint matches reusable evidence.",
+            RelevantChangedInputs = ["Source/Changed.cs"],
+            PreviousEvidence = [new RimContextEvidenceReference { Id = "proof-1", Kind = "validation-proof" }],
+            EvidenceReused = [new RimContextEvidenceReference { Id = "proof-1", Status = "reused" }],
+            EvidenceInvalidated = [new RimContextEvidenceReference { Id = "proof-old", Status = "invalidated" }],
+            Owner = "RimTest/RimLiaison",
+            ObservedAtUtc = FixedTime
+        };
+        var bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [CompleteContextSnapshot() with { Decisions = [decision] }]);
+
+        using var document = ParseJson(RimContextBundleJson.Serialize(bundle));
+        var serialized = document.RootElement.GetProperty("decisions")[0];
+        AssertEqual("REUSE", serialized.GetProperty("action").GetString(), "decision action provenance");
+        AssertEqual("SOURCE_FINGERPRINT_MATCH", serialized.GetProperty("reasonCode").GetString(), "decision reason provenance");
+        AssertEqual("RimTest/RimLiaison", serialized.GetProperty("owner").GetString(), "decision owner provenance");
+        AssertEqual("proof-1", serialized.GetProperty("evidenceReused")[0].GetProperty("id").GetString(), "reused evidence provenance");
+        AssertEqual("proof-old", serialized.GetProperty("evidenceInvalidated")[0].GetProperty("id").GetString(), "invalidated evidence provenance");
+        Assert(!bundle.AgentSummary.ReusableEvidence.Contains("proof-old", StringComparer.Ordinal), "invalidated evidence is not reusable");
+    }
+
+    private static void ContextBundleStaleOrdering()
+    {
+        var old = CompleteContextSnapshot(FixedTime.AddMinutes(-10)) with
+        {
+            Decisions =
+            [
+                new RimContextDecision
+                {
+                    Decision = "z-decision",
+                    Action = RimContextDecisionActions.Run,
+                    ReasonCode = "Z",
+                    Owner = "fixture",
+                    ObservedAtUtc = FixedTime.AddMinutes(-9)
+                },
+                new RimContextDecision
+                {
+                    Decision = "a-decision",
+                    Action = RimContextDecisionActions.Skip,
+                    ReasonCode = "A",
+                    Owner = "fixture",
+                    ObservedAtUtc = FixedTime.AddMinutes(-8)
+                }
+            ],
+            Extensions =
+            [
+                Extension("fixture", "z", "2"),
+                Extension("fixture", "a", "1")
+            ]
+        };
+        var bundle = RimContextBundleBuilder.Build(
+            new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+            FixedTime,
+            [old]);
+
+        AssertEqual("stale", bundle.Repository.Status, "stale repository status");
+        AssertEqual(true, bundle.Repository.Stale, "stale repository marker");
+        Assert(bundle.StaleReasons?.Contains("repository", StringComparer.Ordinal) == true, "stale repository reason");
+        AssertEqual("a-decision", bundle.Decisions[0].Decision, "decision deterministic ordering");
+        AssertEqual("a", bundle.Extensions![0].Key, "extension deterministic ordering");
+    }
+
+    private static void ContextBundleProviderFailure()
+    {
+        var bundle = RimContextBundleBuilder.BuildAsync(
+                new RimContextBundleRequest(RootPath: "fixture", NowUtc: FixedTime),
+                [new ThrowingContextProvider()])
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual("CONTEXT_PROVIDER_FAILED", bundle.Failures.Single().SignatureCode, "provider failure signature");
+        AssertEqual("fixture-provider", bundle.Failures.Single().OriginatingComponent, "provider failure owner");
+        AssertEqual("unknown", bundle.Topology.Status, "provider failure topology status");
+    }
+
+    private static RimContextProviderSnapshot CompleteContextSnapshot(DateTimeOffset? observedAtUtc = null)
+    {
+        DateTimeOffset observed = observedAtUtc ?? FixedTime;
+        return new RimContextProviderSnapshot(
+            "fixture",
+            observed,
+            Topology: AvailableSection(new RimContextTopology
+            {
+                Components = [new RimContextComponent { Name = "fixture", Role = "test provider" }]
+            }),
+            Repository: AvailableSection(new RimContextRepositoryState { Identity = "git:fixture", Dirty = false }),
+            Environment: AvailableSection(new RimContextEnvironmentState { Os = "test", Runtime = ".NET", SecretsExcluded = true }),
+            Deployment: AvailableSection(new RimContextDeploymentState { SourceFingerprint = "source-1" }),
+            Runtime: AvailableSection(new RimContextRuntimeState { RimWorldRunning = false, BridgeStatus = "available" }),
+            Testing: AvailableSection(new RimContextTestingState { AvailableSuites = ["smoke"], AvailableTests = ["test"] }),
+            Efficiency: AvailableSection(new RimContextEfficiencyMetrics { TotalWorkflowMs = 10 }));
+    }
+
+    private static RimContextSection<T> AvailableSection<T>(T value, string provider = "fixture") => new()
+    {
+        Status = RimContextBundleStatuses.Available,
+        Value = value,
+        Provider = provider
+    };
+
+    private static RimContextExtension Extension(string provider, string key, string value)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(value));
+        return new RimContextExtension { Provider = provider, Key = key, Value = document.RootElement.Clone() };
     }
 
     private static void CompactQueryOutput()
@@ -1513,6 +1808,16 @@ internal static class Program
         }
 
         throw new DirectoryNotFoundException($"Fixture '{name}' was not found from '{AppContext.BaseDirectory}'.");
+    }
+
+    private sealed class ThrowingContextProvider : IRimContextBundleProvider
+    {
+        public string Id => "fixture-provider";
+
+        public ValueTask<RimContextProviderSnapshot> CollectAsync(
+            RimContextProviderRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("fixture provider failure");
     }
 
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);

@@ -1,4 +1,5 @@
 using RimContext.Core.Configuration;
+using RimContext.Core.Context;
 using RimContext.Core.Contracts;
 using RimContext.Core.Logging;
 using RimContext.Core.Model;
@@ -112,6 +113,20 @@ public sealed class RimContextService
             entities.LongCount(item => item.Kind == "harmony_patch"),
             diagnosticCounts.Error,
             diagnosticCounts.Warning);
+    }
+
+    public Task<RimContextBundle> ContextBundleAsync(
+        RimContextBundleRequest? request = null,
+        IEnumerable<IRimContextBundleProvider>? providers = null,
+        CancellationToken cancellationToken = default)
+    {
+        RimContextBundleRequest selected = request ?? new RimContextBundleRequest();
+        IEnumerable<IRimContextBundleProvider> selectedProviders = providers ??
+            [new RimContextWorkspaceProvider()];
+        return RimContextBundleBuilder.BuildAsync(
+            selected,
+            selectedProviders,
+            cancellationToken);
     }
 
     private static (long Error, long Warning) CountDiagnostics(

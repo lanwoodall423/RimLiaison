@@ -46,6 +46,11 @@ public sealed record DevBridgeBuildDiagnostics(
     string? ErrorCode = null,
     bool? OutputTruncated = null);
 
+public sealed record DevBridgeBuildOutputEvidence(
+    string RepositoryPath,
+    string Sha256,
+    string? TransactionId);
+
 public sealed record DevBridgeModDevelopmentResult(
     string Project,
     DevBridgeAdapterStatus Status,
@@ -55,7 +60,8 @@ public sealed record DevBridgeModDevelopmentResult(
     int? Generation,
     string? LeaseId,
     DevBridgeArtifactFreshness? Freshness,
-    DevBridgeBuildDiagnostics? Build = null);
+    DevBridgeBuildDiagnostics? Build = null,
+    IReadOnlyList<DevBridgeBuildOutputEvidence>? BuildOutputs = null);
 
 public sealed record DevBridgeModDevelopmentExecutionContext(
     string? LeaseId = null);

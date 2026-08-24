@@ -98,6 +98,10 @@ public sealed class RimTestOrchestrationFailure
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Generation { get; init; }
 
+    [JsonPropertyName("identityMismatch")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DevBridgeIdentityMismatch? IdentityMismatch { get; init; }
+
     [JsonPropertyName("evidenceId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? EvidenceId { get; init; }
@@ -156,16 +160,22 @@ internal static class RimTestOrchestrationProjector
             "recoveryFailed",
             "recoveryRequired",
             "unavailable",
-            "contended") ||
+            "contended",
+            "transitionRecoveryExhausted") ||
             freshnessStatus?.RecoveryState is
                 PrerequisiteRecoveryState.RecoveryFailed or
                 PrerequisiteRecoveryState.RecoveryRequired or
                 PrerequisiteRecoveryState.Unavailable or
-                PrerequisiteRecoveryState.Contended;
+                PrerequisiteRecoveryState.Contended or
+                PrerequisiteRecoveryState.TransitionRecoveryExhausted;
         bool recovered = HasRecoveryState(
             execution.PrerequisiteRecovery,
             "recovered") ||
             freshnessStatus?.RecoveryState == PrerequisiteRecoveryState.Recovered;
+        bool transitionRecoveryExhausted = HasRecoveryState(
+            execution.PrerequisiteRecovery,
+            "transitionRecoveryExhausted") ||
+            freshnessStatus?.RecoveryState == PrerequisiteRecoveryState.TransitionRecoveryExhausted;
         bool contended = HasRecoveryState(execution.PrerequisiteRecovery, "contended") ||
             freshnessStatus?.RecoveryState == PrerequisiteRecoveryState.Contended;
         bool sourceBuildFailure = IsSourceBuildFailure(freshnessErrorCode);
@@ -202,6 +212,8 @@ internal static class RimTestOrchestrationProjector
 
         string infrastructure = contended
             ? "CONTENDED"
+            : transitionRecoveryExhausted
+                ? "TRANSITION_RECOVERY_EXHAUSTED"
             : recoveryFailed || cleanupFailed
                 ? "RECOVERY_FAILED"
                 : unresolvedInfrastructure
@@ -266,6 +278,11 @@ internal static class RimTestOrchestrationProjector
         string? testErrorCode = execution.Tests
             .Select(static test => test.ErrorCode)
             .FirstOrDefault(static code => !string.IsNullOrWhiteSpace(code));
+        DevBridgeIdentityMismatch? identityMismatch =
+            freshnessStatus?.IdentityMismatch ??
+            execution.PrerequisiteRecovery?
+                .Select(static recovery => recovery.IdentityMismatch)
+                .FirstOrDefault(static value => value is not null);
         string? errorCode = hasSelectionFailure
             ? selectionErrorCode
             : hasTestFailure
@@ -313,6 +330,7 @@ internal static class RimTestOrchestrationProjector
             LeaseId = freshness?.LeaseId,
             RunId = freshness?.RunId ?? child?.RunId,
             Generation = freshness?.Generation ?? child?.Generation,
+            IdentityMismatch = identityMismatch,
             EvidenceId = child?.EvidenceId
         };
     }
@@ -376,7 +394,14 @@ internal static class RimTestOrchestrationProjector
 
         if (errorCode.Contains("READINESS", StringComparison.OrdinalIgnoreCase) ||
             errorCode is "PROCESS_EXITED" or "PROCESS_STOPPED" ||
-            errorCode.StartsWith("GENERATION_", StringComparison.Ordinal))
+            errorCode.StartsWith("GENERATION_", StringComparison.Ordinal) ||
+            errorCode.Contains("ENDPOINT", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("PROCESS_", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("COMPANION", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("PROTOCOL", StringComparison.OrdinalIgnoreCase) ||
+            errorCode is "DEVBRIDGE_NO_STRUCTURED_RESPONSE" or
+                "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_MISSING" or
+                "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID")
         {
             return "readiness";
         }
@@ -409,6 +434,13 @@ internal static class RimTestOrchestrationProjector
             return "failed";
         }
 
+        if (freshnessStatus?.RecoveryState ==
+                PrerequisiteRecoveryState.TransitionRecoveryExhausted ||
+            HasRecoveryState(recoveries, "transitionRecoveryExhausted"))
+        {
+            return "exhausted";
+        }
+
         return "recovered";
     }
 
@@ -419,7 +451,7 @@ internal static class RimTestOrchestrationProjector
         !errorCode.Contains("AMBIGUOUS", StringComparison.OrdinalIgnoreCase);
 
     private static bool ManualInterventionFor(string errorCode, string recoveryResult) =>
-        recoveryResult is "failed" or "contended" &&
+        (recoveryResult is "failed" or "exhausted" or "contended") &&
         (errorCode.Contains("AMBIGUOUS", StringComparison.OrdinalIgnoreCase) ||
          errorCode.Contains("MANUAL", StringComparison.OrdinalIgnoreCase) ||
          errorCode.Contains("CREDENTIAL", StringComparison.OrdinalIgnoreCase));

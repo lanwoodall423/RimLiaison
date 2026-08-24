@@ -1,0 +1,79 @@
+# RimDev human workflow
+
+`rimdev` is the small, guarded command surface for routine work across the RimWorld
+repositories. The canonical invocation is:
+
+```text
+rimliaison rimdev <operation>
+```
+
+On Windows, `rimdev.cmd` is a thin convenience alias for the same command. It does not
+implement a second workflow.
+
+For a novice-friendly start, double-click **Open RimDev Terminal.cmd** at the repository root.
+It opens a terminal in the correct folder, enables the repository-local command for that
+session only, and prints the common commands. Type `rimdev` for a quick menu or
+`rimdev help` for plain-language help. See [HUMAN_WORKFLOW.md](HUMAN_WORKFLOW.md) for the
+short normal workflow.
+
+## Workspace discovery
+
+RimDev uses each repository's existing `.rimdev/stack.json` manifest. Starting in a managed
+repository, it discovers the parent workspace and its direct managed children. A workspace can
+make the set and deployment metadata explicit with `.rimdev/workspace.json`:
+
+```json
+{
+  "schemaVersion": "rimdev-workspace/v1",
+  "deploymentRoot": "..\\1.6\\Mods",
+  "repositories": [
+    {
+      "path": "Frontier",
+      "dependsOn": [],
+      "deploymentTarget": "Frontier\\Assemblies\\Frontier.dll",
+      "buildProject": "Source\\Frontier.csproj",
+      "configuration": "Release"
+    }
+  ]
+}
+```
+
+Repository paths are relative to the workspace. `deploymentRoot` and `deploymentTarget` are
+configuration, not personal hard-coded defaults; the existing DevBridge development descriptor
+is used when those fields are omitted. Use `--root <workspace-root>` when discovery should start
+from a particular workspace.
+
+## Operations
+
+| Command | Behavior |
+| --- | --- |
+| `rimdev status` | Read-only table of repository paths, branches, worktree state, ahead/behind, build/deployment cache state, and PR readiness when GitHub information is available. |
+| `rimdev sync` | Fetches remotes and performs only safe `--ff-only` updates. Dirty-behind, detached, missing-upstream, and diverged repositories are reported without changing them. |
+| `rimdev build` | Builds only repositories with affected build inputs, plus downstream repositories whose configured dependencies changed, in dependency order; source/output identity is recorded outside the worktree. |
+| `rimdev test` | Delegates affected selection and execution to `rimliaison affected --run --json`, including downstream consumers of changed workspace dependencies; a proven unchanged source identity can reuse a prior RimTest result. |
+| `rimdev deploy` | Replaces only a configured target after current source identity and output hash checks pass. It reports every deployed target. |
+| `rimdev push` | Fetches first, then pushes committed ahead work without force-push. Dirty files are left alone and explained. |
+| `rimdev merge` | Finds one open, non-draft, mergeable PR with passing checks and matching source/target identities. If several candidates exist, it asks for the exact PR number. It prints a compact plan and asks for explicit confirmation; Enter means No. `--yes` is available for a deliberate scripted confirmation. |
+| `rimdev all` | Runs sync, affected test, affected build, deployment, and safe push, then reports PR readiness. It never merges; run `rimdev merge` separately. |
+
+The default output is concise and human-readable. Add `--json` for the versioned
+`rimdev-result/v1` envelope. `--yes`/`--confirm` is accepted only by `rimdev merge`.
+
+Exit code `0` means the requested operation completed safely, `1` means a build/test/deploy/merge
+operation failed, and `3` means a repository or infrastructure condition blocked or partially
+completed the operation. A blocked DevBridge lease/readiness result is infrastructure evidence,
+not proof that source code failed; follow the reported next action, normally
+`rimliaison doctor --json`.
+
+## Safety and state
+
+RimDev never runs `git reset --hard`, force-pushes, auto-commits, auto-stashes, invents conflict
+resolutions, or silently checks out another branch. One blocked repository does not prevent safe
+read-only processing of the others. Multi-repository mutating commands return a partial summary so
+successful repositories and blockers remain visible together.
+
+Build/test evidence is stored outside repositories under the local RimDev state directory. Set
+`RIMDEV_STATE_ROOT` to choose that location. Generated RimLiaison/RimTest observability, profile,
+index, and proof files remain governed by their existing owner and ignore rules. A worktree with
+only provider-classified generated changes is not treated as user-dirty; mixed or unclassified
+changes remain conservative and require attention.

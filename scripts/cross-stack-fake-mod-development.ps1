@@ -237,6 +237,26 @@ try {
         throw 'cross-stack fake deployment hash did not match the staged artifact'
     }
 
+    # The integration gate can opt into one controlled concurrent mutation.
+    # Keep this hook fixture-only and bounded to the disposable development
+    # root so it cannot touch a user's real mod worktree.
+    $mutationPathValue = $env:RIMLIAISON_CROSS_STACK_MUTATION_PATH
+    if (-not [string]::IsNullOrWhiteSpace($mutationPathValue)) {
+        $mutationPath = [IO.Path]::GetFullPath($mutationPathValue)
+        $developmentRoot = [IO.Path]::GetFullPath($developmentRoots[0])
+        $developmentPrefix = [IO.Path]::TrimEndingDirectorySeparator($developmentRoot) +
+            [IO.Path]::DirectorySeparatorChar
+        if (-not $mutationPath.StartsWith($developmentPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $mutationPath -PathType Leaf)) {
+            throw 'controlled mutation path must name an existing file in the fixture development root'
+        }
+
+        [IO.File]::AppendAllText(
+            $mutationPath,
+            "`r`n// unexpected transaction-time source mutation`r`n",
+            [Text.UTF8Encoding]::new($false))
+    }
+
     $leaseId = 'lease-11111111111111111111111111111111'
     $runId = 'run-cross-stack-contract-v1'
     $operationId = 'op-cross-stack-contract-v1'

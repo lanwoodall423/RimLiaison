@@ -89,6 +89,10 @@ public static class AgentEventTypes
     public const string TestStarted = "test.started";
     public const string TestPassed = "test.passed";
     public const string TestFailed = "test.failed";
+    public const string SuiteCompleted = "test.suite.completed";
+    public const string ValidationEvidenceRecorded = "test.evidence.recorded";
+    public const string ValidationEvidenceDecision = "test.evidence.decision";
+    public const string PublicationChecked = "git.publication.checked";
     public const string PackagingStarted = "packaging.started";
     public const string PackagingCompleted = "packaging.completed";
     public const string AgentWaiting = "agent.waiting";

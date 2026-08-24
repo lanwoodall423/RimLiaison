@@ -735,4 +735,12 @@ internal static class DesktopObservabilityTests
             throw new InvalidOperationException($"Expected {expected}, got {actual}.");
         }
     }
+
+    private static void AssertEqual<T>(T expected, T actual, string message)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected, actual))
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
 }
