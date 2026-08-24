@@ -8,16 +8,14 @@ pushd "%RIMLIAISON_ROOT%" >nul 2>&1
 if errorlevel 1 goto startup_failed
 
 title RimLiaison Observability UI
-if exist "%OBSERVABILITY_EXE%" goto run_compiled
-
 where dotnet >nul 2>&1
 if errorlevel 1 goto dotnet_missing
 
-echo Release observability UI not found; building it with the .NET 8 SDK...
-dotnet run --project "%OBSERVABILITY_PROJECT%" --configuration Release
-set "OBSERVABILITY_EXIT=%ERRORLEVEL%"
-popd
-endlocal & exit /b %OBSERVABILITY_EXIT%
+echo Ensuring the Release observability UI matches current source...
+dotnet build "%OBSERVABILITY_PROJECT%" --configuration Release
+if errorlevel 1 goto build_failed
+if not exist "%OBSERVABILITY_EXE%" goto startup_failed
+goto run_compiled
 
 :run_compiled
 "%OBSERVABILITY_EXE%"
@@ -28,6 +26,12 @@ endlocal & exit /b %OBSERVABILITY_EXIT%
 :dotnet_missing
 echo The observability UI is not built and the .NET 8 SDK was not found.
 echo Install the .NET 8 SDK, then run this launcher again.
+set "OBSERVABILITY_EXIT=1"
+popd
+goto finish_with_pause
+
+:build_failed
+echo The current Release observability UI could not be built.
 set "OBSERVABILITY_EXIT=1"
 popd
 goto finish_with_pause

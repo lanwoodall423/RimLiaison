@@ -422,63 +422,110 @@ public sealed class ObservabilityMainForm : Form
         }
 
         renderedNavigationSignature = navigationSignature;
-        string? selectedKey = snapshot.Navigation.Items
-            .FirstOrDefault(item => item.Selected)?.Key;
+        HashSet<string> desiredKeys = snapshot.Navigation.Items
+            .Select(static item => item.Key)
+            .ToHashSet(StringComparer.Ordinal);
         navigationPanel.SuspendLayout();
         try
         {
-            navigationPanel.Controls.Clear();
-            foreach (AgentObservabilityUiNavigationItem item in snapshot.Navigation.Items)
+            for (int index = navigationPanel.Controls.Count - 1; index >= 0; index--)
             {
-                string statusMarker = item.NavigationStatus switch
+                if (navigationPanel.Controls[index].Tag is not string key ||
+                    !desiredKeys.Contains(key))
                 {
-                    AgentObservabilityAgentNavigationStatus.NeedsAttention => "! ",
-                    AgentObservabilityAgentNavigationStatus.Failed => "x ",
-                    AgentObservabilityAgentNavigationStatus.Working => "> ",
-                    _ => string.Empty
-                };
-                string displayLabel = statusMarker + item.Label;
-                int fullWidth = Math.Min(240, Math.Max(96, displayLabel.Length * 9 + 28));
-                var container = new Panel
+                    navigationPanel.Controls.RemoveAt(index);
+                }
+            }
+
+            for (int index = 0; index < snapshot.Navigation.Items.Count; index++)
+            {
+                AgentObservabilityUiNavigationItem item = snapshot.Navigation.Items[index];
+                Panel? container = navigationPanel.Controls
+                    .Cast<Control>()
+                    .FirstOrDefault(control =>
+                        string.Equals(control.Tag as string, item.Key, StringComparison.Ordinal)) as Panel;
+                if (container is null)
                 {
-                    Width = fullWidth,
-                    Height = 30,
-                    Margin = new Padding(0, 0, 6, 0)
-                };
-                var button = new Button
+                    container = CreateNavigationItem(item);
+                    navigationPanel.Controls.Add(container);
+                    navigationPanel.Controls.SetChildIndex(container, index);
+                }
+                else
                 {
-                    Text = displayLabel,
-                    Tag = item,
-                    AutoSize = false,
-                    Width = fullWidth,
-                    Height = 30,
-                    Margin = Padding.Empty,
-                    FlatStyle = FlatStyle.System,
-                    AccessibleName = item.FullLabel + " · " + item.NavigationStatus,
-                    UseMnemonic = false
-                };
-                toolTip.SetToolTip(button, item.FullLabel + " · " + item.NavigationStatus);
-                button.BackColor = item.Key == selectedKey
-                    ? SystemColors.Highlight
-                    : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.NeedsAttention
-                        ? Color.MistyRose
-                        : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Failed
-                            ? Color.LightSalmon
-                            : SystemColors.Control;
-                button.ForeColor = item.Key == selectedKey
-                    ? SystemColors.HighlightText
-                    : item.NavigationStatus is AgentObservabilityAgentNavigationStatus.NeedsAttention or AgentObservabilityAgentNavigationStatus.Failed
-                        ? Color.DarkRed
-                        : SystemColors.ControlText;
-                button.Click += OnNavigationClick;
-                container.Controls.Add(button);
-                navigationPanel.Controls.Add(container);
+                    UpdateNavigationItem(container, item);
+                    int currentIndex = navigationPanel.Controls.GetChildIndex(container);
+                    if (currentIndex != index)
+                    {
+                        navigationPanel.Controls.SetChildIndex(container, index);
+                    }
+                }
             }
         }
         finally
         {
             navigationPanel.ResumeLayout();
         }
+    }
+
+    private Panel CreateNavigationItem(AgentObservabilityUiNavigationItem item)
+    {
+        var container = new Panel
+        {
+            Tag = item.Key,
+            Height = 30,
+            Margin = new Padding(0, 0, 6, 0)
+        };
+        var button = new Button
+        {
+            Tag = item,
+            AutoSize = false,
+            Height = 30,
+            Margin = Padding.Empty,
+            FlatStyle = FlatStyle.System,
+            UseMnemonic = false
+        };
+        button.Click += OnNavigationClick;
+        container.Controls.Add(button);
+        UpdateNavigationItem(container, item);
+        return container;
+    }
+
+    private void UpdateNavigationItem(
+        Panel container,
+        AgentObservabilityUiNavigationItem item)
+    {
+        if (container.Controls.OfType<Button>().FirstOrDefault() is not Button button)
+        {
+            return;
+        }
+
+        string statusMarker = item.NavigationStatus switch
+        {
+            AgentObservabilityAgentNavigationStatus.NeedsAttention => "! ",
+            AgentObservabilityAgentNavigationStatus.Failed => "x ",
+            AgentObservabilityAgentNavigationStatus.Working => "> ",
+            _ => string.Empty
+        };
+        string displayLabel = statusMarker + item.Label;
+        int fullWidth = Math.Min(240, Math.Max(96, displayLabel.Length * 9 + 28));
+        container.Width = fullWidth;
+        button.Text = displayLabel;
+        button.Width = fullWidth;
+        button.Tag = item;
+        button.AccessibleName = item.FullLabel + " · " + item.NavigationStatus;
+        toolTip.SetToolTip(button, item.FullLabel + " · " + item.NavigationStatus);
+        button.BackColor = item.Selected
+            ? SystemColors.Highlight
+            : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.NeedsAttention
+                ? Color.MistyRose
+                : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Failed
+                    ? Color.LightSalmon
+                    : SystemColors.Control;
+        button.ForeColor = item.Selected
+            ? SystemColors.HighlightText
+            : item.NavigationStatus is AgentObservabilityAgentNavigationStatus.NeedsAttention or AgentObservabilityAgentNavigationStatus.Failed
+                ? Color.DarkRed
+                : SystemColors.ControlText;
     }
 
     private readonly ToolTip toolTip = new();
