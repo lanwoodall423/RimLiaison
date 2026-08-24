@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
@@ -55,6 +56,28 @@ public enum DevBridgeOutcomeKind
     IncompatibleSchema
 }
 
+public static class DevBridgeIdentityMismatchClassifications
+{
+    public const string InstallationRootOwner = "installationRootOwner";
+    public const string CoordinatorIdentity = "coordinatorIdentity";
+    public const string RuntimeGeneration = "runtimeGeneration";
+    public const string RimWorldProcessIdentity = "rimWorldProcessIdentity";
+    public const string StaleDescriptorProfileRegistration =
+        "staleDescriptorProfileRegistration";
+    public const string ProtocolSchema = "protocolSchema";
+    public const string Unknown = "unknown";
+}
+
+public sealed record DevBridgeIdentityMismatch(
+    [property: JsonPropertyName("field")] string Field,
+    [property: JsonPropertyName("expected")] string? Expected,
+    [property: JsonPropertyName("actual")] string? Actual,
+    [property: JsonPropertyName("classification")] string Classification,
+    [property: JsonPropertyName("recoverable")] bool Recoverable,
+    [property: JsonPropertyName("authoritativeRoot")] string? AuthoritativeRoot = null,
+    [property: JsonPropertyName("actualRoot")] string? ActualRoot = null,
+    [property: JsonPropertyName("resolution")] string? Resolution = null);
+
 public enum DevBridgeDiagnosticSourceOutcome
 {
     Available,
@@ -106,7 +129,8 @@ public sealed record DevBridgeAdapterStatus(
     string? ResponseSchema = null,
     PrerequisiteRecoveryState RecoveryState = PrerequisiteRecoveryState.Ready,
     int RecoveryAttempts = 0,
-    string? RecoveryAction = null)
+    string? RecoveryAction = null,
+    DevBridgeIdentityMismatch? IdentityMismatch = null)
 {
     public bool IsSuccess => Outcome == DevBridgeOutcomeKind.Success;
 }

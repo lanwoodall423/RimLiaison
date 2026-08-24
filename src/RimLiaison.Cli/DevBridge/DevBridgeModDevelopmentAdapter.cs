@@ -71,6 +71,7 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         }
 
         string descriptorPath = ResolveDescriptorPath(project);
+        DevBridgeDevelopmentDescriptor? developmentDescriptor = null;
         PrerequisiteRecoveryState descriptorRecoveryState =
             PrerequisiteRecoveryState.Ready;
         int descriptorRecoveryAttempts = 0;
@@ -102,6 +103,7 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             // DevBridge2 transaction.  ResolveDeploymentRoot reads the
             // reconciled file, preserving the existing deployment ownership.
             descriptorPath = reconciliation.DescriptorPath;
+            developmentDescriptor = reconciliation.Descriptor;
             descriptorRecoveryState = reconciliation.State;
             descriptorRecoveryAttempts = reconciliation.Attempts;
             descriptorRecoveryAction = reconciliation.Action;
@@ -438,6 +440,13 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             TryGetNullableInt(root, "generation", out int? generation);
             DevBridgeArtifactFreshness? freshness = ParseFreshness(root);
             DevBridgeBuildDiagnostics? build = ParseBuild(root);
+            IReadOnlyList<DevBridgeBuildOutputEvidence> buildOutputs =
+                ResolveBuildOutputs(
+                    fullRepositoryRoot,
+                    deploymentRoot,
+                    developmentDescriptor,
+                    freshness,
+                    transactionId);
             RecordBuildDiagnostics(
                 project,
                 sourceFingerprint,
@@ -466,7 +475,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     generation,
                     leaseId,
                     freshness,
-                    build);
+                    build,
+                    buildOutputs);
             }
 
             if (success &&
@@ -488,13 +498,19 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     generation,
                     leaseId,
                     freshness,
-                    build);
+                    build,
+                    buildOutputs);
             }
 
             if (!success)
             {
                 string errorCode = ReadFailureCode(root) ??
                     "DEVELOPMENT_TRANSACTION_FAILED";
+                DevBridgeIdentityMismatch? identityMismatch =
+                    DevBridgeIdentityMismatchParser.Parse(
+                        root,
+                        options.RootPath,
+                        errorCode);
                 return new DevBridgeModDevelopmentResult(
                     project,
                     new DevBridgeAdapterStatus(
@@ -506,14 +522,16 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                         schema,
                         descriptorRecoveryState,
                         descriptorRecoveryAttempts,
-                        descriptorRecoveryAction),
+                        descriptorRecoveryAction,
+                        identityMismatch),
                     false,
                     transactionId,
                     responseWorkflowId ?? workflowId,
                     generation,
                     leaseId,
                     freshness,
-                    build);
+                    build,
+                    buildOutputs);
             }
 
             return new DevBridgeModDevelopmentResult(
@@ -534,7 +552,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                 generation,
                 leaseId,
                 freshness,
-                build);
+                build,
+                buildOutputs);
         }
     }
 
@@ -625,6 +644,52 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             workflowId,
             leaseId,
             errorCode);
+    }
+
+    private static IReadOnlyList<DevBridgeBuildOutputEvidence> ResolveBuildOutputs(
+        string repositoryRoot,
+        string deploymentRoot,
+        DevBridgeDevelopmentDescriptor? descriptor,
+        DevBridgeArtifactFreshness? freshness,
+        string? transactionId)
+    {
+        if (descriptor is null ||
+            string.IsNullOrWhiteSpace(freshness?.BuiltArtifactSha256) ||
+            !string.Equals(
+                freshness.BuiltArtifactSha256,
+                freshness.DeployedArtifactSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        try
+        {
+            string root = Path.GetFullPath(repositoryRoot);
+            string target = Path.GetFullPath(Path.Combine(
+                deploymentRoot,
+                descriptor.DeploymentTarget.Replace('/', Path.DirectorySeparatorChar)));
+            string relative = Path.GetRelativePath(root, target).Replace('\\', '/');
+            if (Path.IsPathRooted(relative) ||
+                relative.Equals("..", StringComparison.Ordinal) ||
+                relative.StartsWith("../", StringComparison.Ordinal))
+            {
+                return [];
+            }
+
+            return
+            [
+                new DevBridgeBuildOutputEvidence(
+                    relative,
+                    freshness.BuiltArtifactSha256!,
+                    transactionId ?? freshness.TransactionId)
+            ];
+        }
+        catch (Exception exception) when (exception is ArgumentException or
+            IOException or NotSupportedException)
+        {
+            return [];
+        }
     }
 
     private static DevBridgeBuildDiagnostics? ParseBuild(JsonElement root)

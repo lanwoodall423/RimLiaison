@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimContext.Core;
 using RimContext.Core.Configuration;
+using RimContext.Core.Context;
 using RimContext.Core.Contracts;
 using RimContext.Core.Logging;
 using RimContext.Core.Model;
@@ -28,7 +29,18 @@ public static class CliApplication
             command = request.Command;
             outputOptions = new JsonOutputOptions(request.Compact, request.MaxBytes, request.Human);
             var envelope = Execute(request, logger);
-            JsonOutput.Write(stdout, envelope, outputOptions);
+            if (request.Command == CliCommands.Context && envelope.Data is RimContextBundle bundle)
+            {
+                stdout.WriteLine(RimContextBundleJson.Serialize(
+                    bundle,
+                    verbose: request.Verbose || request.Human,
+                    maxBytes: request.MaxBytes));
+            }
+            else
+            {
+                JsonOutput.Write(stdout, envelope, outputOptions);
+            }
+
             return 0;
         }
         catch (RimContextException ex)
@@ -57,6 +69,7 @@ public static class CliApplication
             IndexConstants.SchemaVersionText)),
         CliCommands.Index => ExecuteIndex(request, logger),
         CliCommands.Summary => ExecuteSummary(request),
+        CliCommands.Context => ExecuteContext(request),
         CliCommands.Find => ExecuteFind(request),
         CliCommands.Definition => ExecuteDefinition(request),
         CliCommands.Refs => ExecuteRefs(request),
@@ -131,6 +144,24 @@ public static class CliApplication
             summary.Defs,
             summary.HarmonyPatches,
             new DiagnosticCounts(summary.DiagnosticErrors, summary.DiagnosticWarnings)));
+    }
+
+    private static JsonEnvelope ExecuteContext(CliRequest request)
+    {
+        var bundle = new RimContextService().ContextBundleAsync(
+                new RimContextBundleRequest(
+                    request.Root,
+                    request.Store,
+                    request.AssemblyRoots,
+                    request.Verbose))
+            .GetAwaiter()
+            .GetResult();
+        return new JsonEnvelope
+        {
+            SchemaVersion = RimContextBundleSchema.Current,
+            Command = CliCommands.Context,
+            Data = bundle
+        };
     }
 
     private static JsonEnvelope ExecuteFind(CliRequest request)

@@ -40,6 +40,14 @@ RimLiaison hot path uses the shared Core APIs in-process:
    direct RimError CLI for compatibility coverage; the normal RimLiaison diagnostic path calls
    RimError.Core directly and the resulting diagnostic is checked for run and operation correlation.
 
+The fixture repository starts with an old tracked deployment DLL and exactly one source edit. Its
+runtime path uses one Git-discovered `rimliaison affected --run --json` invocation and requires the
+new DLL bytes, descriptor-derived output path, DevBridge transaction ID, deployment decision, and
+built/deployed SHA-256 to agree before treating the DLL mutation as build-owned. This is a per-output
+provenance rule, not a DLL or directory exemption. A separate integration probe mutates source during
+an active transaction and must still fail with `RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION` before
+runtime validation can be claimed.
+
 The merged `.github/workflows/ci.yml` composition job checks out DevBridge2 at the exact manifest
 SHA. It derives an exact binary-cache identity from that SHA, the runner/runtime assumptions, and
 the source/project/build-import/package-lock closure. A cache hit reuses only the Coordinator,

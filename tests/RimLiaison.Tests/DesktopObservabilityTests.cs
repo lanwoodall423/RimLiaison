@@ -39,6 +39,39 @@ internal static class DesktopObservabilityTests
             "each mod must have one navigation item");
     }
 
+    public static void MultipleConcurrentRunsRemainVisible()
+    {
+        using var store = new AgentObservabilityStore();
+        using var ui = new AgentObservabilityUi(store);
+        using var firstRun = new AgentObservabilityRun(
+            "ui-run-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using var secondRun = new AgentObservabilityRun(
+            "ui-run-second",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "mod.first",
+            "First");
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "mod.second",
+            "Second");
+
+        first.Start();
+        second.Start();
+
+        AgentObservabilityUiNavigationItem[] navigationAgents = ui.Snapshot.Navigation.Items
+            .Where(static item => item.Kind == "agent")
+            .ToArray();
+        AssertEqual(2, navigationAgents.Length,
+            "concurrent runs must keep both agent tabs visible");
+        Assert(navigationAgents.Any(item => item.FullLabel == "First"));
+        Assert(navigationAgents.Any(item => item.FullLabel == "Second"));
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count,
+            "All activity must retain agents from concurrent runs");
+    }
+
     public static void InterleavedEventsRemainChronological()
     {
         using var store = new AgentObservabilityStore();
@@ -353,7 +386,7 @@ internal static class DesktopObservabilityTests
         Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(2), "bounded volume view should remain responsive");
     }
 
-    public static void AgentNavigationIsRunScopedAndDismissalIsStable()
+    public static void AgentNavigationIdentityAndDismissalAreStable()
     {
         using var store = new AgentObservabilityStore();
         using (var historicalRun = new AgentObservabilityRun(
@@ -387,20 +420,27 @@ internal static class DesktopObservabilityTests
         AgentObservabilityUiNavigationItem[] navigationAgents = ui.Snapshot.Navigation.Items
             .Where(item => item.Kind == "agent")
             .ToArray();
-        AssertEqual(1, navigationAgents.Length);
-        AssertEqual("Current Mod", navigationAgents[0].FullLabel);
-        Assert(navigationAgents[0].Key.Contains("ui-current-run", StringComparison.Ordinal));
-        Assert(ui.Snapshot.All!.Agents.All(agent => agent.RunId == "ui-current-run"));
+        AssertEqual(2, navigationAgents.Length);
+        Assert(navigationAgents.Any(item => item.FullLabel == "Current Mod" &&
+            item.Key.Contains("ui-current-run", StringComparison.Ordinal)));
+        Assert(navigationAgents.Any(item => item.FullLabel == "Historical Mod" &&
+            item.Key.Contains("ui-history-run", StringComparison.Ordinal)));
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count);
 
         Assert(!ui.DismissAgent(current.AgentId, current.RunId),
             "active agents must not be dismissed");
         current.Complete();
         Assert(ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId && item.CanDismiss));
+            item.AgentId == current.AgentId &&
+            item.RunId == current.RunId &&
+            item.CanDismiss));
 
         Assert(ui.DismissAgent(current.AgentId, current.RunId));
         Assert(!ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId));
+            item.AgentId == current.AgentId &&
+            item.RunId == current.RunId));
+        Assert(ui.Snapshot.Navigation.Items.Any(item =>
+            item.FullLabel == "Historical Mod"));
         Assert(ui.Snapshot.All!.Agents.Any(agent => agent.AgentId == current.AgentId),
             "dismissal must not remove authoritative agent history");
         Assert(store.GetEvents(runId: current.RunId, agentId: current.AgentId).Count > 0,
@@ -409,7 +449,8 @@ internal static class DesktopObservabilityTests
         AgentSnapshot lateUpdate = current.Snapshot with { CurrentActivity = "late refresh" };
         store.UpdateAgent(lateUpdate);
         Assert(!ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId),
+            item.AgentId == current.AgentId &&
+            item.RunId == current.RunId),
             "a late store refresh must not recreate a dismissed tab");
 
         AgentObservabilityUi oldRunUi = new(store, runId: "ui-history-run");
@@ -574,6 +615,14 @@ internal static class DesktopObservabilityTests
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"Expected {expected}, got {actual}.");
+        }
+    }
+
+    private static void AssertEqual<T>(T expected, T actual, string message)
+    {
+        if (!EqualityComparer<T>.Default.Equals(expected, actual))
+        {
+            throw new InvalidOperationException(message);
         }
     }
 }

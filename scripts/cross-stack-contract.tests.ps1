@@ -15,6 +15,7 @@ $DevBridgeRoot = if ([string]::IsNullOrWhiteSpace($DevBridgeRoot)) { Join-Path $
 $manifestPath = Join-Path $RimLiaisonRoot 'contracts\cross-stack-compatibility.json'
 $manifest = $null
 $workspaceRoot = $null
+$auxiliaryRoot = $null
 $report = $null
 $exitCode = 0
 
@@ -223,19 +224,45 @@ try {
     $fixtureSource = Join-Path $RimLiaisonRoot 'tests\fixtures\cross-stack'
     Require-Path $fixtureSource 'cross-stack fixture' -Directory
     $workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-cross-stack-' + [Guid]::NewGuid().ToString('N'))
+    $auxiliaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('rimliaison-cross-stack-state-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $auxiliaryRoot | Out-Null
     Copy-Item -Path (Join-Path $fixtureSource '*') -Destination $workspaceRoot -Recurse -Force
     $catalogPath = Join-Path $workspaceRoot 'catalog.json'
     $changedPath = 'FixtureMod/Source/FixtureMarker.cs'
     $sourcePath = Join-Path $workspaceRoot ($changedPath.Replace('/', '\'))
+    $trackedArtifactPath = 'deployed/CrossStack.Fixture.dll'
+    $trackedArtifactFullPath = Join-Path $workspaceRoot ($trackedArtifactPath.Replace('/', '\'))
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $trackedArtifactFullPath) | Out-Null
+    [IO.File]::WriteAllBytes(
+        $trackedArtifactFullPath,
+        [Text.Encoding]::UTF8.GetBytes('cross-stack-old-tracked-artifact/v1'))
+    & git -C $workspaceRoot init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_INIT_FAILED' }
+    & git -C $workspaceRoot config user.name 'RimLiaison Cross-Stack Fixture'
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_CONFIG_FAILED' }
+    & git -C $workspaceRoot config user.email 'rimliaison-fixture.invalid@example.invalid'
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_CONFIG_FAILED' }
+    & git -C $workspaceRoot add --all
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_ADD_FAILED' }
+    & git -C $workspaceRoot commit --quiet -m 'cross-stack fixture baseline'
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_COMMIT_FAILED' }
+    $startingHead = ([string](& git -C $workspaceRoot rev-parse HEAD)).Trim()
+    $startingArtifactSha256 = (Get-FileHash -LiteralPath $trackedArtifactFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $activeTransactionBefore = Test-Path -LiteralPath (Join-Path $workspaceRoot '.rimtest-transaction')
+    Assert-True (-not $activeTransactionBefore) 'no unrelated active transaction owns the fixture target'
     $sourceText = [IO.File]::ReadAllText($sourcePath)
     Assert-True ($sourceText.Contains('cross-stack-fixture/v1', [StringComparison]::Ordinal)) 'fixture source has deterministic initial marker'
     [IO.File]::WriteAllText(
         $sourcePath,
         $sourceText.Replace('cross-stack-fixture/v1', 'cross-stack-fixture/v2', [StringComparison]::Ordinal),
         [Text.UTF8Encoding]::new($false))
+    $startingSourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $startingStatus = @(& git -C $workspaceRoot status --short)
+    Assert-Equal $startingStatus.Count 1 'controlled source edit is the only starting worktree mutation'
+    Assert-True ([string]$startingStatus[0] -match 'FixtureMod/Source/FixtureMarker\.cs$') 'starting worktree mutation is the controlled source edit'
 
-    $rimctxStore = Join-Path $workspaceRoot '.rimctx\index.sqlite'
+    $rimctxStore = Join-Path $auxiliaryRoot 'rimctx\index.sqlite'
     $index = Invoke-JsonProcess $rimctxExe @('index', '--root', $workspaceRoot, '--store', $rimctxStore, '--json') $RimLiaisonRoot 'RimContext index'
     Assert-Equal $index.status 'ok' 'RimContext index status'
     $affected = Invoke-JsonProcess $rimctxExe @('affected', $changedPath, '--root', $workspaceRoot, '--store', $rimctxStore, '--json', '--max-bytes', '4096') $RimLiaisonRoot 'RimContext affected'
@@ -261,7 +288,7 @@ try {
     $legacySelection = Convert-ProcessJson $legacyWrapper 'rimtest affected compatibility wrapper'
     Assert-Equal ($canonicalSelection | ConvertTo-Json -Depth 40 -Compress) ($legacySelection | ConvertTo-Json -Depth 40 -Compress) 'canonical and legacy affected wrappers produce equivalent JSON'
 
-    $fakeRoot = Join-Path $workspaceRoot '.fake-devbridge'
+    $fakeRoot = Join-Path $auxiliaryRoot 'fake-devbridge'
     New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'scripts'), (Join-Path $fakeRoot 'DevelopmentProjects') | Out-Null
     Copy-Item -LiteralPath (Join-Path $RimLiaisonRoot 'scripts\cross-stack-fake-mod-development.ps1') -Destination (Join-Path $fakeRoot 'scripts\mod-test.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $RimLiaisonRoot 'scripts\cross-stack-fake-devbridge.ps1') -Destination (Join-Path $fakeRoot 'scripts\cross-stack-fake-devbridge.ps1') -Force
@@ -276,7 +303,6 @@ try {
         testRecipe = 'cross-stack-fixture'
     }
     Copy-JsonFile (Join-Path $fakeRoot 'DevelopmentProjects\frontier.json') $descriptor
-    New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot 'deployed') | Out-Null
 
     $show = Invoke-JsonProcess (Join-Path $fakeRoot 'DevBridge.cmd') @('--root', $fakeRoot, 'test', 'recipe', 'show', 'cross-stack-fixture', '--json') $fakeRoot 'DevBridge recipe show'
     Assert-Equal $show.schemaVersion $manifest.contracts.devBridgeRecipeRun.schemaVersion.Replace('run', 'show') 'DevBridge show schema'
@@ -293,7 +319,7 @@ try {
     Assert-True (@($capabilityResult.result.tools).Count -eq 1) 'DevBridge capability response contains one fixture tool'
 
     $rimliaison = Invoke-ProcessBounded $rimliaisonExe @(
-        'affected', $changedPath, '--run', '--json',
+        'affected', '--run', '--json',
         '--catalog', $catalogPath,
         '--rimcontext', $rimctxExe,
         '--rimcontext-root', $workspaceRoot,
@@ -332,11 +358,23 @@ try {
     Assert-True ([bool]$freshness.loadedArtifactFreshnessProven) 'RimLiaison requires proven artifact freshness'
     Assert-True ([string]$freshness.builtArtifactSha256 -match '^[0-9a-fA-F]{64}$') 'built artifact SHA-256 is present'
     Assert-Equal $freshness.builtArtifactSha256 $freshness.deployedArtifactSha256 'built and deployed artifact hashes agree'
-    Assert-True ([string]$freshness.deploymentDecision -in @('deployed', 'unchanged')) 'deployment decision is explicit'
+    Assert-Equal $freshness.deploymentDecision 'deployed' 'the controlled source edit deploys a new tracked artifact'
+    Assert-True ([bool]$freshness.sourceInputsStable) 'source inputs remain stable while the owner updates the tracked artifact'
+    Assert-Equal @($freshness.buildOwnedOutputChanges).Count 1 'one tracked output mutation is classified as build-owned'
+    Assert-Equal $freshness.buildOwnedOutputChanges[0].path $trackedArtifactPath 'build-owned output path comes from the validated descriptor'
+    Assert-Equal $freshness.buildOwnedOutputChanges[0].sha256 $freshness.builtArtifactSha256 'build-owned output bytes match the owner build hash'
+    Assert-True ([string]::IsNullOrWhiteSpace([string]$freshness.errorCode)) 'the owned tracked output does not emit a transaction-integrity error'
     Assert-True ([int]$freshness.generation -gt 0) 'generation identity is present'
     Assert-Equal $freshness.workflowId $workflowId 'workflow identity reaches artifact freshness'
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$freshness.runId)) 'run identity reaches artifact freshness'
     Assert-True (@($freshness.operationIds).Count -gt 0) 'operation identity reaches artifact freshness'
+    $deployedArtifactSha256 = (Get-FileHash -LiteralPath $trackedArtifactFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Equal $deployedArtifactSha256 $freshness.builtArtifactSha256 'tracked worktree artifact matches the built and deployed hash'
+    Assert-True ($startingArtifactSha256 -ne $deployedArtifactSha256) 'the canonical invocation produced new artifact bytes'
+    $acceptedStatus = @(& git -C $workspaceRoot status --short)
+    Assert-Equal @($acceptedStatus).Count 2 'the final worktree contains the source edit and its tracked output'
+    Assert-True (@($acceptedStatus | Where-Object { [string]$_ -match 'FixtureMod/Source/FixtureMarker\.cs$' }).Count -eq 1) 'the controlled source edit remains present'
+    Assert-True (@($acceptedStatus | Where-Object { [string]$_ -match 'deployed/CrossStack\.Fixture\.dll$' }).Count -eq 1) 'the owner-produced tracked artifact mutation remains present'
 
     $logsQuery = Invoke-JsonProcess (Join-Path $fakeRoot 'DevBridge.cmd') @(
         '--root', $fakeRoot, 'logs', 'query',
@@ -346,6 +384,43 @@ try {
     Assert-Contract $logsQuery 'DevBridge logs query' $manifest.contracts.devBridgeLogsQuery
     Assert-Equal $logsQuery.generation $freshness.generation 'logs query generation identity'
     Assert-True ([bool]$logsQuery.available) 'bounded logs query is available for the fake generation'
+
+    # A distinct negative transaction uses the same canonical Git-discovered
+    # entrypoint but asks the fake build owner to mutate a source file after
+    # the transaction snapshot. The output mutation remains owner-proven; the
+    # source mutation must still reject the transaction.
+    & git -C $workspaceRoot add --all
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_NEGATIVE_BASELINE_ADD_FAILED' }
+    & git -C $workspaceRoot commit --quiet -m 'accepted tracked artifact baseline'
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_NEGATIVE_BASELINE_COMMIT_FAILED' }
+    $negativeBaselineHead = ([string](& git -C $workspaceRoot rev-parse HEAD)).Trim()
+    $sourceV2 = [IO.File]::ReadAllText($sourcePath)
+    [IO.File]::WriteAllText(
+        $sourcePath,
+        $sourceV2.Replace('cross-stack-fixture/v2', 'cross-stack-fixture/v3', [StringComparison]::Ordinal),
+        [Text.UTF8Encoding]::new($false))
+    $previousMutationPath = $env:RIMLIAISON_CROSS_STACK_MUTATION_PATH
+    try {
+        $env:RIMLIAISON_CROSS_STACK_MUTATION_PATH = $sourcePath
+        $negativeProcess = Invoke-ProcessBounded $rimliaisonExe @(
+            'affected', '--run', '--json',
+            '--catalog', $catalogPath,
+            '--rimcontext', $rimctxExe,
+            '--rimcontext-root', $workspaceRoot,
+            '--rimcontext-store', $rimctxStore,
+            '--devbridge', (Join-Path $fakeRoot 'DevBridge.cmd'),
+            '--devbridge-root', $fakeRoot,
+            '--devbridge-project', 'frontier'
+        ) $RimLiaisonRoot
+    } finally {
+        $env:RIMLIAISON_CROSS_STACK_MUTATION_PATH = $previousMutationPath
+    }
+    $negativeSuite = Convert-ProcessJson $negativeProcess 'RimLiaison unexpected source mutation' 10
+    Assert-Equal $negativeSuite.status 'infrastructure' 'unexpected source mutation is an infrastructure integrity failure'
+    Assert-Equal $negativeSuite.failures[0].errorCode 'RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION' 'unexpected source mutation retains the transaction-integrity error'
+    Assert-Equal $negativeSuite.artifactFreshness.errorCode 'RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION' 'negative freshness evidence retains the transaction-integrity error'
+    Assert-True (-not [bool]$negativeSuite.artifactFreshness.loadedArtifactFreshnessProven) 'rejected source mutation cannot claim runtime freshness'
+    Assert-Equal $negativeSuite.orchestration.runtimeValidation 'BLOCKED' 'runtime validation is blocked after the rejected mutation'
 
     $capabilityFixturePath = Join-Path $fakeRoot '.cross-stack-capabilities.json'
     Require-Path $capabilityFixturePath 'DevBridge capability response fixture'
@@ -526,6 +601,23 @@ try {
             builtArtifactSha256 = [string]$freshness.builtArtifactSha256
             deployedArtifactSha256 = [string]$freshness.deployedArtifactSha256
             loadedArtifactFreshnessProven = [bool]$freshness.loadedArtifactFreshnessProven
+            sourceInputsStable = [bool]$freshness.sourceInputsStable
+            buildOwnedOutputChanges = @($freshness.buildOwnedOutputChanges)
+        }
+        trackedArtifactTransaction = [ordered]@{
+            startingHead = $startingHead
+            startingSourceSha256 = $startingSourceSha256
+            startingArtifactSha256 = $startingArtifactSha256
+            finalArtifactSha256 = $deployedArtifactSha256
+            activeTransactionBefore = $activeTransactionBefore
+            startingStatus = @($startingStatus)
+            finalAcceptedStatus = @($acceptedStatus)
+            canonicalInvocationCount = 1
+            automaticSecondRun = $false
+            priorRequiredInvocationCount = 2
+            mutationClassification = 'build-owned-output'
+            negativeBaselineHead = $negativeBaselineHead
+            negativeErrorCode = [string]$negativeSuite.failures[0].errorCode
         }
         diagnostic = [ordered]@{
             id = $diagnosticId
@@ -576,6 +668,9 @@ catch {
 finally {
     if (-not $KeepWorkspace -and $null -ne $workspaceRoot -and (Test-Path -LiteralPath $workspaceRoot)) {
         Remove-Item -LiteralPath $workspaceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $KeepWorkspace -and $null -ne $auxiliaryRoot -and (Test-Path -LiteralPath $auxiliaryRoot)) {
+        Remove-Item -LiteralPath $auxiliaryRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

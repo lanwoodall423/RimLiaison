@@ -3,6 +3,15 @@ using RimLiaison.DevBridge;
 
 namespace RimLiaison.Results;
 
+public sealed record RimTestBuildOwnedOutputChange
+{
+    [JsonPropertyName("path")]
+    public required string Path { get; init; }
+
+    [JsonPropertyName("sha256")]
+    public required string Sha256 { get; init; }
+}
+
 /// <summary>
 /// The compact, conservative proof that an affected source run used the
 /// artifact identity established by DevBridge2. It intentionally does not
@@ -72,6 +81,14 @@ public sealed record RimTestArtifactFreshness
     [JsonPropertyName("proof")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Proof { get; init; }
+
+    [JsonPropertyName("sourceInputsStable")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SourceInputsStable { get; init; }
+
+    [JsonPropertyName("buildOwnedOutputChanges")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RimTestBuildOwnedOutputChange>? BuildOwnedOutputChanges { get; init; }
 
     [JsonPropertyName("errorCode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

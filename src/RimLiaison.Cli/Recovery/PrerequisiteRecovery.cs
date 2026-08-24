@@ -16,7 +16,8 @@ public enum PrerequisiteRecoveryState
     RecoveryRequired,
     Contended,
     Unavailable,
-    RecoveryFailed
+    RecoveryFailed,
+    TransitionRecoveryExhausted
 }
 
 public static class PrerequisiteRecoveryStateNames
@@ -29,6 +30,7 @@ public static class PrerequisiteRecoveryStateNames
         PrerequisiteRecoveryState.Contended => "contended",
         PrerequisiteRecoveryState.Unavailable => "unavailable",
         PrerequisiteRecoveryState.RecoveryFailed => "recoveryFailed",
+        PrerequisiteRecoveryState.TransitionRecoveryExhausted => "transitionRecoveryExhausted",
         _ => "unavailable"
     };
 
@@ -36,7 +38,8 @@ public static class PrerequisiteRecoveryStateNames
         state is PrerequisiteRecoveryState.RecoveryRequired or
             PrerequisiteRecoveryState.Contended or
             PrerequisiteRecoveryState.Unavailable or
-            PrerequisiteRecoveryState.RecoveryFailed;
+            PrerequisiteRecoveryState.RecoveryFailed or
+            PrerequisiteRecoveryState.TransitionRecoveryExhausted;
 }
 
 /// <summary>
@@ -48,17 +51,25 @@ public sealed record RimTestPrerequisiteRecovery(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("attempts")] int Attempts,
     [property: JsonPropertyName("errorCode")] string? ErrorCode = null,
-    [property: JsonPropertyName("action")] string? Action = null);
+    [property: JsonPropertyName("action")] string? Action = null,
+    [property: JsonPropertyName("workflowId")] string? WorkflowId = null,
+    [property: JsonPropertyName("generation")] int? Generation = null,
+    [property: JsonPropertyName("identityMismatch")]
+    DevBridgeIdentityMismatch? IdentityMismatch = null);
 
 public static class PrerequisiteRecoveryProjection
 {
     public static RimTestPrerequisiteRecovery FromStatus(
         string component,
-        DevBridgeAdapterStatus status) =>
+        DevBridgeAdapterStatus status,
+        string? workflowId = null,
+        int? generation = null) =>
         new(
             component,
             status.RecoveryState.ToWireName(),
             Math.Max(0, status.RecoveryAttempts),
             status.ErrorCode,
-            status.RecoveryAction);
+            status.RecoveryAction,
+            workflowId,
+            generation);
 }

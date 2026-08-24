@@ -5,6 +5,7 @@ using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.RimContext;
 using RimLiaison.RimError;
+using RimLiaison.Recovery;
 
 namespace RimLiaison.Doctor;
 
@@ -168,7 +169,8 @@ internal sealed class RimTestDoctorRunner
             return Blocked(
                 "devbridge",
                 devBridgeProbe.Code!,
-                devBridgeProbe.NextAction);
+                devBridgeProbe.NextAction,
+                devBridgeProbe.IdentityMismatch);
         }
 
         ProbeResult projectProbe = await ProbeDevBridgeProjectAsync(
@@ -316,7 +318,6 @@ internal sealed class RimTestDoctorRunner
             {
                 return Failure("DEVBRIDGE_RESPONSE_INVALID", DevBridgeDoctorNextAction);
             }
-
             string? integrationStatus = ReadRimBridgeStatus(root);
             if (healthy && process.ExitCode is not > 0)
             {
@@ -326,7 +327,13 @@ internal sealed class RimTestDoctorRunner
             string code = TryGetString(root, "errorCode", out string? errorCode)
                 ? errorCode!
                 : FirstDoctorFindingCode(root) ?? "DEVBRIDGE_REFUSAL";
-            return Failure(code, DevBridgeDoctorNextAction, integrationStatus);
+            DevBridgeIdentityMismatch? identityMismatch =
+                DevBridgeIdentityMismatchParser.Parse(root, options.RootPath, code);
+            return Failure(
+                code,
+                DevBridgeDoctorNextAction,
+                integrationStatus,
+                identityMismatch);
         }
         catch (JsonException)
         {
@@ -587,7 +594,8 @@ internal sealed class RimTestDoctorRunner
     private static DoctorRunResult Blocked(
         string component,
         string code,
-        string? nextAction = null)
+        string? nextAction = null,
+        DevBridgeIdentityMismatch? identityMismatch = null)
     {
         var output = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -601,6 +609,11 @@ internal sealed class RimTestDoctorRunner
             output["nextAction"] = nextAction;
         }
 
+        if (identityMismatch is not null)
+        {
+            output["identityMismatch"] = identityMismatch;
+        }
+
         return new DoctorRunResult(3, output);
     }
 
@@ -610,8 +623,9 @@ internal sealed class RimTestDoctorRunner
     private static ProbeResult Failure(
         string code,
         string? nextAction = null,
-        string? integrationStatus = null) =>
-        new(false, code, nextAction, integrationStatus);
+        string? integrationStatus = null,
+        DevBridgeIdentityMismatch? identityMismatch = null) =>
+        new(false, code, nextAction, integrationStatus, identityMismatch);
 
     private static string FirstErrorCode(
         IReadOnlyList<CatalogIssue> errors,
@@ -784,7 +798,8 @@ internal sealed class RimTestDoctorRunner
         bool Ready,
         string? Code,
         string? NextAction,
-        string? IntegrationStatus = null);
+        string? IntegrationStatus = null,
+        DevBridgeIdentityMismatch? IdentityMismatch = null);
 }
 
 internal sealed record DoctorRunResult(

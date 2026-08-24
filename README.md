@@ -17,6 +17,27 @@ unknown, and follow its `nextAction`. `rimliaison init`, `capabilities`, `ui`, `
 catalog/recipe commands retain their existing names and semantics. `rimtest.cmd` remains a thin,
 silent compatibility alias for old automation; it forwards every argument to `rimliaison.cmd`.
 
+Use `rimliaison context --json` for a read-only, versioned cross-stack snapshot. It reports
+topology, Git state, environment, testing, deployment/runtime evidence, recent execution, failures,
+efficiency, and explicit selection decisions without launching RimWorld or writing generated state
+into the repository. The direct `rimctx context --json` command is available for static-context
+debugging. See [docs/context-bundle.md](docs/context-bundle.md) for the `rimctx-bundle/v1` contract.
+
+Use `rimliaison publish check --json` to query whether a Git publication can reuse matching
+validation evidence; it does not rerun tests or perform publication. Use `rimliaison benchmarks
+--json` for the deterministic A–H golden workflow baseline. See
+[docs/validation-provenance.md](docs/validation-provenance.md) for evidence identity, decision
+codes, and reviewed failure knowledge.
+
+For routine human multi-repository Git/build/test/deploy/push work, use the guarded `rimdev`
+workflow. See [docs/rimdev.md](docs/rimdev.md) for workspace discovery, command semantics, safety
+rules, exit codes, and the explicit merge confirmation flow.
+
+## For the repository owner
+
+Double-click [Open RimDev Terminal.cmd](Open%20RimDev%20Terminal.cmd), then start with
+`rimdev status`. The short beginner guide is [docs/HUMAN_WORKFLOW.md](docs/HUMAN_WORKFLOW.md).
+
 ## Ownership
 
 ```text
@@ -44,8 +65,10 @@ capture the whole screen when a smaller semantic target is available.
 The graphical frontend is `RimLiaison.Desktop`, a small WinForms `net8.0-windows` executable.
 WinForms is the lowest-complexity fit here: the repository is already C#/.NET, the target
 environment is Windows, and it adds no web server, browser runtime, or third-party UI framework.
-Launch it with `dotnet run --project src/RimLiaison.Desktop/RimLiaison.Desktop.csproj`. The
-`RimLiaison.Cli` executable and wrapper remain available for automation and diagnostics. The
+For a double-click entrypoint, use [Open Observability UI.cmd](Open%20Observability%20UI.cmd);
+it launches the Release executable when available and otherwise builds it with the .NET 8 SDK.
+You can also launch it with `dotnet run --project src/RimLiaison.Desktop/RimLiaison.Desktop.csproj`.
+The `RimLiaison.Cli` executable and wrapper remain available for automation and diagnostics. The
   desktop form consumes the shared application-level structured observability store directly;
   that runtime state lives outside mod worktrees. It does not call an LLM or require OpenTelemetry
   to render, filter, update, or prepare issue bundles. The solution is

@@ -3,10 +3,12 @@ using System.Text.Json.Serialization;
 using System.Security.Cryptography;
 using RimError.Core;
 using RimContext.Core;
+using RimContext.Core.Context;
 using RimContext.Core.Semantics;
 using RimContext.Core.Storage;
 using RimLiaison;
 using RimLiaison.Catalog;
+using RimLiaison.Benchmarking;
 using RimLiaison.DevBridge;
 using RimLiaison.Execution;
 using RimLiaison.Git;
@@ -15,6 +17,7 @@ using RimLiaison.RimError;
 using RimLiaison.RimContext;
 using RimLiaison.Recovery;
 using RimLiaison.Results;
+using RimLiaison.Provenance;
 
 namespace RimLiaison.Tests;
 
@@ -23,6 +26,17 @@ internal static class Program
     private static readonly (string Name, Action Test)[] Tests =
     [
         ("valid catalog", ValidCatalogLoads),
+        ("context uses canonical stack discovery", ContextUsesCanonicalStackDiscovery),
+        ("git context separates descriptor recovery state", GitContextSeparatesDescriptorRecoveryState),
+        ("context provider projects owner state", ContextProviderProjectsOwnerState),
+        ("context keeps unavailable providers scoped", ContextKeepsUnavailableProvidersScoped),
+        ("context projects RimError structured store", ContextProjectsRimErrorStructuredStore),
+        ("context provider projects synchronized owner evidence", ContextProviderProjectsSynchronizedOwnerEvidence),
+        ("validation evidence identity is immutable and relevant", ValidationEvidenceIdentityIsImmutableAndRelevant),
+        ("publication gate separates reuse and invalidation", PublicationGateSeparatesReuseAndInvalidation),
+        ("golden workflow benchmark matches baseline", GoldenWorkflowBenchmarkMatchesBaseline),
+        ("failure knowledge matches generated state", FailureKnowledgeMatchesGeneratedState),
+        ("context exposes provenance benchmarks and failure knowledge", ContextExposesProvenanceBenchmarksAndFailureKnowledge),
         ("isolation metadata validates safe defaults", IsolationMetadataValidatesSafeDefaults),
         ("duplicate ids fail", DuplicateIdsFail),
         ("missing references fail", MissingReferencesFail),
@@ -154,7 +168,7 @@ internal static class Program
         ("ui output is compact", UiOutputIsCompact),
         ("canonical UI guidance is generated", CanonicalUiGuidanceIsGenerated),
         ("doctor healthy output is compact", DoctorHealthyOutputIsCompact),
-        ("doctor reads DevBridge RimBridge status shape", DoctorReadsDevBridgeRimBridgeStatusShape),
+        ("doctor preserves identity mismatch details", DoctorPreservesIdentityMismatchDetails),
         ("doctor reports blocked component", DoctorReportsBlockedComponent),
         ("stack manifest defaults are used", StackManifestDefaultsAreUsed),
         ("explicit CLI overrides beat manifest", ExplicitCliOverridesBeatManifest),
@@ -180,15 +194,33 @@ internal static class Program
         ("fail-fast affected run still proves freshness", FailFastAffectedRunStillProvesFreshness),
         ("affected companion recipe may use a later generation", AffectedCompanionRecipeMayUseLaterGeneration),
         ("affected identical artifact uses no-deploy proof", AffectedIdenticalArtifactUsesNoDeployProof),
+        ("tracked build-owned artifact mutation continues", TrackedBuildOwnedArtifactMutationContinues),
+        ("source mutation during artifact transaction is rejected", SourceMutationDuringArtifactTransactionIsRejected),
+        ("unrelated tracked mutation during artifact transaction is rejected", UnrelatedTrackedMutationDuringArtifactTransactionIsRejected),
+        ("artifact mutation without build provenance is rejected", ArtifactMutationWithoutBuildProvenanceIsRejected),
+        ("artifact mutation with unexpected bytes is rejected", ArtifactMutationWithUnexpectedBytesIsRejected),
+        ("multiple build-owned artifact mutations are classified per output", MultipleBuildOwnedArtifactMutationsAreClassifiedPerOutput),
         ("affected build failure blocks pass", AffectedBuildFailureBlocksPass),
         ("affected deployment failure blocks pass", AffectedDeploymentFailureBlocksPass),
         ("affected readiness failure blocks pass", AffectedReadinessFailureBlocksPass),
         ("affected run recovers readiness once", AffectedRunRecoversReadinessOnce),
+        ("identity generation mismatch recovers", IdentityGenerationMismatchRecovers),
+        ("identity process mismatch recovers", IdentityProcessMismatchRecovers),
+        ("identity root mismatch refuses recovery", IdentityRootMismatchRefusesRecovery),
+        ("identity recovery exhaustion is structured", IdentityRecoveryExhaustionIsStructured),
+        ("canonical affected identity exhaustion is JSON", CanonicalAffectedIdentityExhaustionIsJson),
+        ("canonical affected identity recovery continues", CanonicalAffectedIdentityRecoveryContinues),
+        ("identity parser classifies fields", IdentityParserClassifiesFields),
+        ("shared runtime transitions recover on a fresh generation", SharedRuntimeTransitionsRecoverOnFreshGeneration),
+        ("repeated shared transition protocol failure is exhausted", RepeatedSharedTransitionProtocolFailureIsExhausted),
+        ("stale generation proof is rejected after transition recovery", StaleGenerationProofIsRejectedAfterTransitionRecovery),
+        ("source failure does not enter transition recovery", SourceFailureDoesNotEnterTransitionRecovery),
         ("affected generation mismatch blocks pass", AffectedGenerationMismatchBlocksPass),
         ("affected unknown freshness blocks pass", AffectedUnknownFreshnessBlocksPass),
         ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
+        ("mod-development adapter binds descriptor output provenance", ModDevelopmentAdapterBindsDescriptorOutputProvenance),
         ("mod-development build failure exports compiler diagnostics", ModDevelopmentBuildFailureExportsCompilerDiagnostics),
         ("pinned DevBridge build diagnostics cross the real wire boundary", PinnedDevBridgeBuildDiagnosticsCrossWireBoundary),
         ("valid development descriptor is preserved", ValidDevelopmentDescriptorIsPreserved),
@@ -232,7 +264,7 @@ internal static class Program
         ("observability shared store hydrates across processes", ObservabilityIsolationTests.SharedStoreHydratesAndPublishesAcrossProcesses),
         ("observability concurrent stores preserve identity boundaries", ObservabilityIsolationTests.ConcurrentStoresShareSequencesAndAgentIdentityBoundaries),
         ("observability historical runs do not duplicate live agents", ObservabilityIsolationTests.HistoricalRunsDoNotCreateDuplicateLiveAgents),
-        ("observability desktop follows a newer live run", ObservabilityIsolationTests.UnscopedUiFollowsNewRunAfterHistoricalStartup),
+        ("observability desktop retains concurrent runs", ObservabilityIsolationTests.UnscopedUiRetainsConcurrentRuns),
         ("prompt 3 multi-agent lifecycle and bundle audit", Prompt3AuditTests.MultiAgentLifecycleAndBundleAudit),
         ("prompt 3 redaction and issue bounds audit", Prompt3AuditTests.RedactionAndIssueBoundsAudit),
         ("prompt 3 abandoned agents become terminal", Prompt3AuditTests.AbandonedAgentBecomesTerminal),
@@ -242,6 +274,7 @@ internal static class Program
         ("prompt 3 persisted records remain bounded", Prompt3AuditTests.PersistedRecordsRemainBounded),
         ("desktop All is the default view", DesktopObservabilityTests.AllIsDefault),
         ("desktop multiple agents appear", DesktopObservabilityTests.MultipleConcurrentAgentsAppear),
+        ("desktop concurrent runs remain visible", DesktopObservabilityTests.MultipleConcurrentRunsRemainVisible),
         ("desktop interleaved activity is chronological", DesktopObservabilityTests.InterleavedEventsRemainChronological),
         ("desktop individual agent filters correctly", DesktopObservabilityTests.IndividualAgentViewFiltersCorrectly),
         ("desktop Issues contains only issues", DesktopObservabilityTests.IssuesViewContainsOnlyStructuredIssues),
@@ -257,7 +290,7 @@ internal static class Program
         ("desktop bundle preparation is local", DesktopObservabilityTests.BundlePreparationIsLocalAndDoesNotCallModels),
         ("desktop works with OTel disabled", DesktopObservabilityTests.OTelDisabledDoesNotAffectDesktopViews),
         ("desktop large volume remains bounded", DesktopObservabilityTests.LargeVolumeViewsRemainBounded),
-        ("desktop agent navigation is run-scoped and dismissal is stable", DesktopObservabilityTests.AgentNavigationIsRunScopedAndDismissalIsStable),
+        ("desktop agent navigation identity and dismissal are stable", DesktopObservabilityTests.AgentNavigationIdentityAndDismissalAreStable),
         ("desktop issue selection and assessment survive live updates", DesktopObservabilityTests.IssueSelectionAndAssessmentSurviveLiveUpdates),
         ("desktop activity selection resolves related details", DesktopObservabilityTests.ActivitySelectionResolvesRelatedDetailsAndSurvivesLiveEvents),
         ("desktop preserves existing CLI UI", DesktopObservabilityTests.ExistingCliUiRemainsAvailable),
@@ -272,7 +305,37 @@ internal static class Program
         ("efficiency profiler preserves overflow totals", ProfilerTests.PreservesOverflowTotals),
         ("efficiency profiler failures do not alter command results", ProfilerTests.FailuresDoNotAlterCommandResults),
         ("efficiency profiler preserves CLI output contracts", ProfilerTests.PreservesCliOutputContracts),
-        ("efficiency profiler emits success and failure profiles", ProfilerTests.EmitsSuccessAndFailureProfiles)
+        ("efficiency profiler emits success and failure profiles", ProfilerTests.EmitsSuccessAndFailureProfiles),
+        ("rimdev clean up-to-date repo", RimDevTests.CleanUpToDateRepo),
+        ("rimdev ahead-only repo", RimDevTests.AheadOnlyRepo),
+        ("rimdev behind-only fast-forward repo", RimDevTests.BehindOnlyFastForwardRepo),
+        ("rimdev diverged repo", RimDevTests.DivergedRepo),
+        ("rimdev dirty repo", RimDevTests.DirtyRepo),
+        ("rimdev no upstream", RimDevTests.NoUpstream),
+        ("rimdev generated state is ignored", RimDevTests.GeneratedStateIsIgnored),
+        ("rimdev generated-only worktree is not reported dirty", RimDevTests.GeneratedOnlyWorktreeIsNotReportedDirty),
+        ("rimdev build failure", RimDevTests.BuildFailure),
+        ("rimdev test failure", RimDevTests.TestFailure),
+        ("rimdev deployment failure", RimDevTests.DeploymentFailure),
+        ("rimdev safe push", RimDevTests.SafePush),
+        ("rimdev rejects non-fast-forward push", RimDevTests.RejectedNonFastForwardPush),
+        ("rimdev merge candidate with passing checks", RimDevTests.MergeCandidateWithPassingChecks),
+        ("rimdev rejects failing or pending merge checks", RimDevTests.RejectedMergeChecks),
+        ("rimdev all never merges", RimDevTests.AllNeverMerges),
+        ("rimdev all no changes avoids unnecessary work", RimDevTests.NoChangesAllAvoidsUnnecessaryWork),
+        ("rimdev failed human summary uses canonical status", RimDevTests.FailedHumanSummaryUsesCanonicalStatus),
+        ("rimdev merge requires exact source identity", RimDevTests.MergeRequiresExactSourceIdentity),
+        ("rimdev partial multi-repository failure", RimDevTests.PartialMultiRepositoryFailure),
+        ("rimdev affected-only build and test selection", RimDevTests.AffectedOnlyBuildAndTestSelection),
+        ("rimdev dependency changes select downstream in order", RimDevTests.DependencyChangesSelectDownstreamInOrder),
+        ("rimdev one changed leaf selects only that repository", RimDevTests.OneChangedLeafSelectsOnlyThatRepository),
+        ("rimdev dirty sync preserves work and continues", RimDevTests.DirtySyncPreservesWorkAndContinues),
+        ("rimdev all failure blocks only failed deployment", RimDevTests.AllFailureBlocksOnlyFailedDeployment),
+        ("rimdev reuses trustworthy test evidence", RimDevTests.TrustworthyTestEvidenceIsReused),
+        ("rimdev merge confirmation defaults to no", RimDevTests.MergeConfirmationDefaultsToNo),
+        ("rimdev multiple merge candidates require selection", RimDevTests.MultipleMergeCandidatesRequireExplicitSelection),
+        ("rimdev no-argument menu and help are beginner friendly", RimDevTests.CliNoArgumentAndHelpAreBeginnerFriendly),
+        ("rimdev wrapper forwards arguments from another folder", RimDevTests.WindowsWrapperForwardsArgumentsFromAnotherFolder)
     ];
 
     public static int Main(string[] args)
@@ -460,6 +523,947 @@ internal static class Program
         AssertEqual(CliExitCodes.Success, result.ExitCode);
         Assert(string.IsNullOrEmpty(result.Stderr), "List should not write diagnostics.");
     }
+
+    private static void ContextProviderProjectsOwnerState()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var git = new FixedGitRepositoryStateProvider(
+                new GitRepositoryStateResult(
+                    true,
+                    new GitRepositoryStateSnapshot(
+                        directory,
+                        "git:fixture",
+                        "main",
+                        "head-1",
+                        "upstream-1",
+                        1,
+                        0,
+                        true,
+                        [
+                            new GitRepositoryChange("Source/Changed.cs", " M", false, false),
+                            new GitRepositoryChange("obj/generated.dll", "??", true, true)
+                        ])));
+            var transport = new FakeTransport((request, cancellationToken) =>
+            {
+                Assert(
+                    request.Arguments.Contains("doctor", StringComparer.Ordinal) ||
+                    request.Arguments.Contains("snapshot", StringComparer.Ordinal),
+                    "context runtime probe must use read-only DevBridge state commands");
+                Assert(
+                    !request.Arguments.Contains("start", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("restart", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("stop", StringComparer.Ordinal),
+                    "context runtime probe must not mutate lifecycle state");
+                string output = request.Arguments.Contains("snapshot", StringComparer.Ordinal)
+                    ? "{\"generation\":7,\"phase\":\"READY\",\"quicktest\":{\"state\":\"idle\"},\"rimBridgeEndpoint\":{\"state\":\"ready\"}}"
+                    : "{\"healthy\":true,\"generation\":7,\"processId\":123,\"lifecycleState\":\"READY\"}";
+                return new DevBridgeProcessResult(
+                    0,
+                    output,
+                    string.Empty);
+            });
+            var provider = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = directory,
+                    CatalogPath = catalogPath,
+                    DevBridgePath = Path.Combine(directory, "DevBridge.cmd"),
+                    DevBridgeRootPath = directory,
+                    Project = "FixtureProject",
+                    ObservabilityModId = "fixture.mod",
+                    ObservabilityModName = "Fixture Mod",
+                    GitProvider = git,
+                    ProcessTransport = transport
+                });
+
+            DateTimeOffset observed = new(2026, 8, 16, 12, 0, 0, TimeSpan.Zero);
+            RimContextProviderSnapshot snapshot = provider.CollectAsync(
+                    new RimContextProviderRequest(
+                        directory,
+                        null,
+                        [],
+                        false,
+                        observed,
+                        16,
+                        16,
+                        16,
+                        16))
+                .GetAwaiter()
+                .GetResult();
+            RimContextBundle bundle = RimContextBundleBuilder.Build(
+                new RimContextBundleRequest(RootPath: directory, NowUtc: observed),
+                observed,
+                [snapshot]);
+
+            AssertEqual("available", bundle.Repository.Status);
+            AssertEqual("main", bundle.Repository.Value!.Branch);
+            AssertEqual(1, bundle.Repository.Value.ChangedFiles.Count);
+            AssertEqual(1, bundle.Repository.Value.GeneratedFiles.Count);
+            AssertEqual("generated", bundle.Repository.Value.GeneratedFiles[0].Category);
+            AssertEqual("available", bundle.Runtime.Status);
+            AssertEqual(7, bundle.Runtime.Value!.Generation);
+            AssertEqual("available", bundle.Testing.Status);
+            Assert(
+                bundle.Testing.Value!.AdditionalValidationRequired is null,
+                "Git dirtiness without a RimTest decision must remain unknown test policy.");
+            AssertEqual(
+                RimContextBundleStatuses.Unknown,
+                bundle.Environment.Value!.RimWorldVersion);
+            string[] componentNames = bundle.Topology.Value!.Components
+                .Select(static component => component.Name)
+                .ToArray();
+            Assert(
+                componentNames.Contains("RimTest", StringComparer.Ordinal),
+                "topology must include the RimTest owner node");
+            Assert(
+                componentNames.Contains("RimBridgeServer", StringComparer.Ordinal),
+                "topology must include the RimBridgeServer dependency node");
+            Assert(bundle.Topology.Value.Dependencies.All(dependency =>
+                componentNames.Contains(dependency.From, StringComparer.Ordinal) &&
+                componentNames.Contains(dependency.To, StringComparer.Ordinal)),
+                "every topology dependency must resolve to a component node");
+            Assert(transport.Requests.Count == 2, "context provider performs bounded doctor and agent snapshot probes");
+
+            JsonElement configuration = snapshot.Extensions!
+                .Single(extension => extension.Key == "configuration")
+                .Value;
+            AssertEqual("FixtureProject", configuration.GetProperty("project").GetString());
+            AssertEqual("fixture.mod", configuration.GetProperty("modId").GetString());
+            AssertEqual("Fixture Mod", configuration.GetProperty("modName").GetString());
+
+            JsonElement stateHygiene = snapshot.Extensions!
+                .Single(extension => extension.Key == "stateHygiene")
+                .Value;
+            Assert(
+                !stateHygiene.TryGetProperty("canonicalObservability", out _),
+                "compact context must omit routine absolute observability paths");
+            Assert(
+                snapshot.Topology!.Value!.Components.All(component => component.LocalPath is null),
+                "compact context must omit component absolute paths");
+            Assert(
+                snapshot.Repository!.Value!.LocalPath is null,
+                "compact context must omit repository absolute paths");
+            Assert(
+                snapshot.Environment!.Value!.Configuration.All(setting => !setting.Value.Contains(directory, StringComparison.OrdinalIgnoreCase)),
+                "compact context must omit environment absolute paths");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void ContextUsesCanonicalStackDiscovery()
+    {
+        string ecosystem = CreateTempDirectory();
+        string root = Path.Combine(ecosystem, "RimLiaison");
+        string devBridgeRoot = Path.Combine(ecosystem, "DevBridge2");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(devBridgeRoot);
+        try
+        {
+            string catalogPath = Path.Combine(root, "catalog.json");
+            string commandPath = Path.Combine(devBridgeRoot, "DevBridge.cmd");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            File.WriteAllText(commandPath, "@echo off");
+            var git = new PathGitRepositoryStateProvider(new Dictionary<string, GitRepositoryStateResult>(
+                StringComparer.OrdinalIgnoreCase)
+            {
+                [Path.GetFullPath(root)] = new GitRepositoryStateResult(
+                    true,
+                    new GitRepositoryStateSnapshot(
+                        root,
+                        "github:lanwoodall423/RimLiaison",
+                        "main",
+                        "liaison-head",
+                        "liaison-upstream",
+                        0,
+                        0,
+                        false,
+                        [])),
+                [Path.GetFullPath(devBridgeRoot)] = new GitRepositoryStateResult(
+                    true,
+                    new GitRepositoryStateSnapshot(
+                        devBridgeRoot,
+                        "github:lanwoodall423/DevBridge2",
+                        "main",
+                        "devbridge-head",
+                        "devbridge-upstream",
+                        1,
+                        0,
+                        true,
+                        [new GitRepositoryChange("DevelopmentProjects/frontier.json", " M", false, false)]))
+            });
+            var transport = new FakeTransport((request, _) =>
+            {
+                AssertEqual(Path.GetFullPath(commandPath), request.FileName);
+                AssertEqual(Path.GetFullPath(devBridgeRoot), request.WorkingDirectory);
+                Assert(
+                    !request.Arguments.Contains("start", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("restart", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("stop", StringComparer.Ordinal),
+                    "canonical context discovery must remain read-only");
+                string output = request.Arguments.Contains("snapshot", StringComparer.Ordinal)
+                    ? "{\"generation\":9,\"quicktest\":{\"state\":\"idle\"},\"rimBridgeEndpoint\":{\"state\":\"ready\"},\"componentBuilds\":{\"mod\":{\"artifactSha256\":\"artifact-9\",\"loadedStatus\":\"loaded\"}}}"
+                    : "{\"healthy\":true,\"generation\":9,\"processId\":456,\"lifecycleState\":\"READY\",\"rimWorldVersion\":\"1.6.1234\",\"components\":{\"coordinatorVersion\":\"3.0.0\",\"coordinatorBuild\":{\"sourceRevision\":\"devbridge-head\"}},\"rimBridge\":{\"lifecycleState\":\"READY\",\"version\":\"2.2.0\"}}";
+                return new DevBridgeProcessResult(0, output, string.Empty);
+            });
+            var provider = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = root,
+                    CatalogPath = catalogPath,
+                    ObservabilityModId = "fixture.discovery",
+                    GitProvider = git,
+                    ProcessTransport = transport
+                });
+
+            RimContextProviderSnapshot snapshot = WithCurrentDirectory(
+                root,
+                () => provider.CollectAsync(new RimContextProviderRequest(
+                        root,
+                        null,
+                        [],
+                        false,
+                        new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero),
+                        16,
+                        16,
+                        16,
+                        16))
+                    .GetAwaiter()
+                    .GetResult());
+
+            AssertEqual(RimContextBundleStatuses.Available, snapshot.Runtime!.Status);
+            AssertEqual(9, snapshot.Runtime.Value!.Generation);
+            AssertEqual("1.6.1234", snapshot.Environment!.Value!.RimWorldVersion);
+            RimContextRepositoryState related = snapshot.RelatedRepositories!.Single();
+            AssertEqual("DevBridge2", related.Component);
+            AssertEqual("devbridge-head", related.HeadSha);
+            AssertEqual(1, related.Ahead);
+            RimContextComponent component = snapshot.Topology!.Value!.Components
+                .Single(value => value.Name == "DevBridge2");
+            AssertEqual("github:lanwoodall423/DevBridge2", component.Repository);
+            AssertEqual("devbridge-head", component.Commit);
+            AssertEqual("3.0.0", component.Version);
+            Assert(snapshot.Topology.Value.Components.Any(value =>
+                value.Name == "RimBridgeServer" && value.Version == "2.2.0"),
+                "owner component versions must flow into stack topology");
+            JsonElement hygiene = snapshot.Extensions!
+                .Single(extension => extension.Key == "stateHygiene")
+                .Value;
+            JsonElement devBridgeOwner = hygiene.GetProperty("externalOwnerState")
+                .EnumerateArray()
+                .Single(value => value.GetProperty("owner").GetString() == "DevBridge2");
+            Assert(devBridgeOwner.GetProperty("configured").GetBoolean(),
+                "canonical discovery must be reflected in state hygiene");
+            AssertEqual(2, transport.Requests.Count);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(ecosystem);
+        }
+    }
+
+    private static void GitContextSeparatesDescriptorRecoveryState()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "DevelopmentProjects"));
+            Directory.CreateDirectory(Path.Combine(directory, "Source"));
+            string descriptor = Path.Combine(directory, "DevelopmentProjects", "frontier.json");
+            string source = Path.Combine(directory, "Source", "Thing.cs");
+            File.WriteAllText(descriptor, "{}");
+            File.WriteAllText(source, "internal sealed class Thing {}");
+            RunGit(directory, "init");
+            RunGit(directory, "config", "user.email", "fixture@example.invalid");
+            RunGit(directory, "config", "user.name", "Fixture");
+            RunGit(directory, "add", ".");
+            RunGit(directory, "commit", "-m", "fixture");
+
+            string identity = "0123456789abcdef0123456789abcdef";
+            File.WriteAllText(
+                descriptor + ".recovery-backup-" + identity + ".json",
+                "{\"backup\":true}");
+            File.WriteAllText(
+                descriptor + ".recovery-" + identity + ".tmp",
+                "temporary");
+
+            var provider = new SystemGitRepositoryStateProvider();
+            GitRepositoryStateResult generatedOnly = provider.ReadAsync(directory)
+                .GetAwaiter()
+                .GetResult();
+            Assert(generatedOnly.Resolved, "generated-only Git state should resolve");
+            AssertEqual(2, generatedOnly.State!.Changes.Count);
+            Assert(generatedOnly.State.Changes.All(static change => change.Generated),
+                "legacy descriptor recovery state must be classified as generated");
+            Assert(generatedOnly.State.SourceFingerprint is null,
+                "generated-only dirtiness must not create a meaningful source fingerprint");
+
+            File.AppendAllText(source, Environment.NewLine + "// meaningful edit");
+            GitRepositoryStateResult meaningful = provider.ReadAsync(directory)
+                .GetAwaiter()
+                .GetResult();
+            AssertEqual(1, meaningful.State!.Changes.Count(static change => !change.Generated));
+            AssertEqual(2, meaningful.State.Changes.Count(static change => change.Generated));
+            Assert(!string.IsNullOrWhiteSpace(meaningful.State.SourceFingerprint),
+                "meaningful source dirtiness must retain a source fingerprint");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void ContextKeepsUnavailableProvidersScoped()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var git = new FixedGitRepositoryStateProvider(new GitRepositoryStateResult(
+                false,
+                ErrorCode: "GIT_FIXTURE_UNAVAILABLE",
+                Error: "fixture Git provider unavailable"));
+            var transport = new FakeTransport((request, _) => new DevBridgeProcessResult(
+                0,
+                request.Arguments.Contains("snapshot", StringComparer.Ordinal)
+                    ? "{\"generation\":4,\"rimBridgeEndpoint\":{\"state\":\"ready\"}}"
+                    : "{\"healthy\":true,\"generation\":4,\"processId\":44,\"lifecycleState\":\"READY\"}",
+                string.Empty));
+            using var store = new AgentObservabilityStore();
+            RimContextProviderSnapshot snapshot = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = directory,
+                    CatalogPath = catalogPath,
+                    DevBridgePath = Path.Combine(directory, "DevBridge.cmd"),
+                    DevBridgeRootPath = directory,
+                    ObservabilityModId = "fixture.unavailable",
+                    GitProvider = git,
+                    ProcessTransport = transport,
+                    ObservabilityStore = store
+                }).CollectAsync(new RimContextProviderRequest(
+                    directory,
+                    null,
+                    [],
+                    false,
+                    DateTimeOffset.UtcNow,
+                    16,
+                    16,
+                    16,
+                    16)).GetAwaiter().GetResult();
+
+            AssertEqual(RimContextBundleStatuses.Unavailable, snapshot.Repository!.Status);
+            AssertEqual("GIT_FIXTURE_UNAVAILABLE", snapshot.Repository.ReasonCode);
+            Assert(snapshot.Repository.Value is null, "unavailable Git must not fabricate repository state");
+            AssertEqual(RimContextBundleStatuses.Available, snapshot.Runtime!.Status);
+            AssertEqual(4, snapshot.Runtime.Value!.Generation);
+            AssertEqual(RimContextBundleStatuses.Available, snapshot.Testing!.Status);
+            AssertEqual(RimContextBundleStatuses.Available, snapshot.Environment!.Status);
+            AssertEqual(RimContextBundleStatuses.Unknown, snapshot.Deployment!.Status);
+            AssertEqual(2, transport.Requests.Count);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void ContextProjectsRimErrorStructuredStore()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            string storePath = Path.Combine(directory, "rimerror", "latest.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            DateTimeOffset observed = new(2026, 8, 23, 13, 0, 0, TimeSpan.Zero);
+            new JsonFileDiagnosticStore(storePath).WriteAsync(new DiagnosticStoreSnapshot
+            {
+                CapturedAt = observed,
+                Items =
+                [
+                    new DiagnosticRecord
+                    {
+                        Id = "diag-runtime-1",
+                        Severity = DiagnosticSeverity.Error,
+                        Category = "runtime_null_reference",
+                        Message = "System.NullReferenceException in Fixture.Tick",
+                        NormalizedMessage = "NullReferenceException in Fixture.Tick",
+                        ExceptionType = "System.NullReferenceException",
+                        OriginatingAssembly = "Fixture.Mod",
+                        OriginatingType = "Fixture.Component",
+                        OriginatingMethod = "Tick",
+                        LastOccurrence = observed,
+                        OccurrenceCount = 3
+                    }
+                ]
+            }).GetAwaiter().GetResult();
+            var git = new FixedGitRepositoryStateProvider(new GitRepositoryStateResult(
+                true,
+                new GitRepositoryStateSnapshot(
+                    directory,
+                    "git:fixture",
+                    "main",
+                    "head",
+                    "upstream",
+                    0,
+                    0,
+                    false,
+                    [])));
+            var transport = new FakeTransport((request, _) => new DevBridgeProcessResult(
+                0,
+                request.Arguments.Contains("snapshot", StringComparer.Ordinal)
+                    ? "{\"generation\":4,\"rimBridgeEndpoint\":{\"state\":\"ready\"}}"
+                    : "{\"healthy\":true,\"generation\":4,\"processId\":44,\"lifecycleState\":\"READY\"}",
+                string.Empty));
+            using var observability = new AgentObservabilityStore();
+            RimContextProviderSnapshot snapshot = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = directory,
+                    CatalogPath = catalogPath,
+                    DevBridgePath = Path.Combine(directory, "DevBridge.cmd"),
+                    DevBridgeRootPath = directory,
+                    RimErrorStorePath = storePath,
+                    ObservabilityModId = "fixture.rimerror",
+                    GitProvider = git,
+                    ProcessTransport = transport,
+                    ObservabilityStore = observability
+                }).CollectAsync(new RimContextProviderRequest(
+                    directory,
+                    null,
+                    [],
+                    false,
+                    observed,
+                    16,
+                    16,
+                    16,
+                    16)).GetAwaiter().GetResult();
+
+            RimContextFailure failure = snapshot.Failures!.Single();
+            AssertEqual("diag-runtime-1", failure.SignatureCode);
+            AssertEqual("Fixture.Mod", failure.OriginatingComponent);
+            AssertEqual("runtime_null_reference", failure.Classification);
+            Assert(failure.RootCause?.Contains("NullReferenceException", StringComparison.Ordinal) == true,
+                "RimError's structured root-cause summary must be retained");
+            AssertEqual("diag-runtime-1", failure.EvidenceId);
+            AssertEqual("inspect-rimerror-diagnostic", failure.RecommendedAction);
+            JsonElement status = snapshot.Extensions!
+                .Single(extension => extension.Key == "providerStatus")
+                .Value;
+            AssertEqual("available", status.GetProperty("rimError").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void ContextProviderProjectsSynchronizedOwnerEvidence()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var git = new FixedGitRepositoryStateProvider(
+                new GitRepositoryStateResult(
+                    true,
+                    new GitRepositoryStateSnapshot(
+                        directory,
+                        "git:fixture",
+                        "main",
+                        "head-1",
+                        "upstream-1",
+                        0,
+                        0,
+                        false,
+                        [],
+                        "source-1")));
+            bool staleRuntime = false;
+            var transport = new FakeTransport((request, _) =>
+            {
+                Assert(
+                    request.Arguments.Contains("doctor", StringComparer.Ordinal) ||
+                    request.Arguments.Contains("snapshot", StringComparer.Ordinal),
+                    "owner evidence uses read-only state probes");
+                Assert(
+                    !request.Arguments.Contains("start", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("restart", StringComparer.Ordinal) &&
+                    !request.Arguments.Contains("stop", StringComparer.Ordinal),
+                    "owner evidence never launches or restarts RimWorld");
+                string output = request.Arguments.Contains("snapshot", StringComparer.Ordinal)
+                    ? staleRuntime
+                        ? "{\"generation\":6,\"phase\":\"READY\",\"currentGenerationTrust\":\"stale\",\"quicktest\":{\"state\":\"unknown\"},\"rimBridgeEndpoint\":{\"state\":\"stale\"},\"componentBuilds\":{\"mod\":{\"artifactSha256\":\"artifact-old\",\"loadedStatus\":\"stale\"}}}"
+                        : "{\"generation\":7,\"phase\":\"READY\",\"currentGenerationTrust\":\"trusted\",\"quicktest\":{\"state\":\"passed\",\"evidence\":\"quick-1\"},\"rimBridgeEndpoint\":{\"state\":\"ready\",\"mode\":\"via-devbridge\"},\"requestingAgentLease\":{\"state\":\"held\",\"leaseId\":\"lease-1\",\"agentId\":\"agent-1\"},\"maintenance\":{\"ready\":true},\"componentBuilds\":{\"mod\":{\"artifactSha256\":\"artifact-1\",\"loadedStatus\":\"loaded\"}}}"
+                    : staleRuntime
+                        ? "{\"healthy\":false,\"generation\":6,\"processId\":123,\"lifecycleState\":\"READY\",\"operationalState\":{\"processRunning\":true,\"currentGenerationTrust\":\"stale\"},\"rimBridge\":{\"lifecycleState\":\"STALE\"}}"
+                        : "{\"healthy\":true,\"generation\":7,\"processId\":123,\"lifecycleState\":\"READY\",\"operationalState\":{\"processRunning\":true,\"maintenanceReady\":true,\"currentGenerationTrust\":\"trusted\"},\"rimBridge\":{\"lifecycleState\":\"READY\"},\"components\":{\"coordinatorVersion\":\"2.1.0\"}}";
+                return new DevBridgeProcessResult(0, output, string.Empty);
+            });
+            using var store = new AgentObservabilityStore();
+            using var run = new AgentObservabilityRun(
+                "run-context-evidence",
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession agent = run.CreateAgent(
+                "mod.context-evidence",
+                "Context Evidence");
+            agent.Start();
+            using IDisposable activation = agent.Activate();
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.SuiteCompleted,
+                "authoritative suite completed",
+                new
+                {
+                    operationKey = "suite:smoke",
+                    suiteId = "smoke",
+                    selectedSuites = new[] { "smoke" },
+                    executedSuites = new[] { "smoke" },
+                    selectedTests = new[] { "assembler-smoke" },
+                    executedTests = new[] { "assembler-smoke" },
+                    result = "pass",
+                    status = "pass",
+                    durationMs = 42,
+                    reuseStatus = "used",
+                    artifactFreshness = new
+                    {
+                        sourceFingerprint = "source-1",
+                        builtArtifactSha256 = "artifact-1",
+                        deployedArtifactSha256 = "artifact-1",
+                        deploymentDecision = "unchanged",
+                        evaluationStatus = "FRESH",
+                        generation = 7,
+                        transactionId = "tx-1",
+                        proof = "proof-1"
+                    }
+                });
+
+            var provider = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = directory,
+                    CatalogPath = catalogPath,
+                    DevBridgePath = Path.Combine(directory, "DevBridge.cmd"),
+                    DevBridgeRootPath = directory,
+                    ObservabilityModId = "mod.context-evidence",
+                    GitProvider = git,
+                    ProcessTransport = transport,
+                    ObservabilityStore = store
+                });
+            RimContextProviderSnapshot snapshot = provider.CollectAsync(new RimContextProviderRequest(
+                    directory,
+                    null,
+                    [],
+                    false,
+                    DateTimeOffset.UtcNow,
+                    16,
+                    16,
+                    16,
+                    16))
+                .GetAwaiter()
+                .GetResult();
+            RimContextBundle bundle = RimContextBundleBuilder.Build(
+                new RimContextBundleRequest(RootPath: directory, NowUtc: DateTimeOffset.UtcNow),
+                DateTimeOffset.UtcNow,
+                [snapshot]);
+
+            AssertEqual("available", bundle.Runtime.Status);
+            AssertEqual(7, bundle.Runtime.Value!.Generation);
+            AssertEqual("passed", bundle.Runtime.Value.QuicktestState);
+            AssertEqual("lease-1", bundle.Runtime.Value.LeaseId);
+            AssertEqual("loaded", bundle.Runtime.Value.RuntimeArtifactStatus);
+            AssertEqual("smoke", bundle.Testing.Value!.ExecutedSuites.Single());
+            AssertEqual("hit", bundle.Testing.Value.CacheStatus);
+            AssertEqual(false, bundle.Testing.Value.AdditionalValidationRequired);
+            AssertEqual("synchronized", bundle.Deployment.Value!.Correspondence);
+            AssertEqual("healthy", bundle.AgentSummary.Status);
+            Assert(bundle.AgentSummary.ReusableEvidence.Contains("proof-1", StringComparer.Ordinal), "valid proof is reusable");
+            AssertEqual(2, transport.Requests.Count);
+
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.SuiteCompleted,
+                "authoritative suite blocked by infrastructure",
+                new
+                {
+                    operationKey = "suite:smoke",
+                    suiteId = "smoke",
+                    selectedSuites = new[] { "smoke" },
+                    executedSuites = new[] { "smoke" },
+                    selectedTests = new[] { "assembler-smoke" },
+                    executedTests = Array.Empty<string>(),
+                    result = "infrastructure",
+                    status = "infrastructure",
+                    durationMs = 17,
+                    reuseStatus = "invalidated",
+                    reuseInvalidationReason = "RUNTIME_GENERATION_STALE",
+                    infrastructureFailure = true,
+                    retryable = true,
+                    artifactFreshness = new
+                    {
+                        sourceFingerprint = "source-1",
+                        builtArtifactSha256 = "artifact-2",
+                        deployedArtifactSha256 = "artifact-2",
+                        deploymentDecision = "deployed",
+                        evaluationStatus = "STALE",
+                        generation = 7,
+                        transactionId = "tx-2",
+                        proof = "proof-invalid"
+                    }
+                });
+            staleRuntime = true;
+            DateTimeOffset degradedNow = DateTimeOffset.UtcNow;
+            RimContextProviderSnapshot degradedSnapshot = provider.CollectAsync(
+                    new RimContextProviderRequest(
+                        directory,
+                        null,
+                        [],
+                        false,
+                        degradedNow,
+                        16,
+                        16,
+                        16,
+                        16))
+                .GetAwaiter()
+                .GetResult();
+            RimContextBundle degraded = RimContextBundleBuilder.Build(
+                new RimContextBundleRequest(RootPath: directory, NowUtc: degradedNow),
+                degradedNow,
+                [degradedSnapshot]);
+
+            AssertEqual(RimContextBundleStatuses.Stale, degraded.Runtime.Status);
+            AssertEqual("runtime-mismatch", degraded.Deployment.Value!.Correspondence);
+            AssertEqual("mismatch", degraded.Deployment.Value.DeploymentRuntimeCorrespondence);
+            AssertEqual(true, degraded.Testing.Value!.InfrastructureFailure);
+            AssertEqual(true, degraded.Testing.Value.Retryable);
+            AssertEqual(true, degraded.Testing.Value.AdditionalValidationRequired);
+            AssertEqual("RUNTIME_GENERATION_STALE", degraded.Testing.Value.InvalidationReason);
+            Assert(degraded.Testing.Value.InvalidatedEvidence.Any(evidence =>
+                evidence.Id == "proof-invalid" && evidence.Status == "invalidated"),
+                "owner invalidation evidence must remain explicit");
+            AssertEqual("blocked", degraded.AgentSummary.Status);
+            AssertEqual(4, transport.Requests.Count);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void ValidationEvidenceIdentityIsImmutableAndRelevant()
+    {
+        ValidationEvidenceIdentity identity = CreateValidationIdentity(
+            "content-1",
+            ["Source/Thing.cs"],
+            ["compile", "quicktest"],
+            runtimeGeneration: 4,
+            build: "build-1",
+            deployment: "deploy-1");
+        ValidationEvidenceRecord first = ValidationEvidenceRecord.Create(
+            identity,
+            "pass",
+            new DateTimeOffset(2026, 8, 22, 1, 2, 3, TimeSpan.Zero));
+        ValidationEvidenceRecord later = ValidationEvidenceRecord.Create(
+            identity,
+            "pass",
+            new DateTimeOffset(2026, 8, 22, 4, 5, 6, TimeSpan.Zero));
+
+        Assert(first.IsSelfConsistent, "fresh evidence should be self-consistent");
+        Assert(first.Reusable, "complete passing evidence should be reusable");
+        Assert(
+            first.EvidenceId == later.EvidenceId,
+            "timestamps must not change identity");
+        Assert(
+            first.EvidenceId != ValidationEvidenceRecord.Create(
+                    identity with { ContentFingerprint = "content-2" },
+                    "pass",
+                    first.RecordedAtUtc)
+                .EvidenceId,
+            "relevant source content must change identity");
+        Assert(
+            first.EvidenceId != ValidationEvidenceRecord.Create(
+                    identity with { TestIds = ["compile", "different-test"] },
+                    "pass",
+                    first.RecordedAtUtc)
+                .EvidenceId,
+            "test identity must change evidence identity");
+        Assert(
+            first.EvidenceId != ValidationEvidenceRecord.Create(
+                    identity with { DeploymentArtifactSha256 = "deploy-2" },
+                    "pass",
+                    first.RecordedAtUtc)
+                .EvidenceId,
+            "runtime artifact identity must change evidence identity");
+    }
+
+    private static void PublicationGateSeparatesReuseAndInvalidation()
+    {
+        ValidationChangeAnalysis documentation = ValidationChangeAnalyzer.Analyze(
+            [new GitRepositoryChange("docs/README.md", "M", false, false)]);
+        ValidationPublicationResult documentationResult = ValidationPublicationGate.Evaluate(
+            documentation,
+            CreateValidationIdentity("docs", ["docs/README.md"], []),
+            [],
+            DateTimeOffset.UtcNow);
+        Assert(documentationResult.SafeToPublish, "documentation changes should skip safely");
+        AssertEqual("skip", documentationResult.PublicationAction);
+
+        ValidationChangeAnalysis runtime = ValidationChangeAnalyzer.Analyze(
+            [new GitRepositoryChange("Source/Thing.cs", "M", false, false)]);
+        ValidationEvidenceIdentity staticIdentity = CreateValidationIdentity(
+            "source-1",
+            ["Source/Thing.cs"],
+            ["compile"]);
+        ValidationEvidenceIdentity staleRuntimeIdentity = CreateValidationIdentity(
+            "source-1",
+            ["Source/Thing.cs"],
+            ["quicktest"],
+            runtimeGeneration: 1,
+            build: "build-old",
+            deployment: "deploy-old");
+        ValidationEvidenceRecord[] evidence =
+        [
+            ValidationEvidenceRecord.Create(staticIdentity, "pass", DateTimeOffset.UtcNow),
+            ValidationEvidenceRecord.Create(staleRuntimeIdentity, "pass", DateTimeOffset.UtcNow.AddSeconds(1))
+        ];
+        ValidationPublicationResult result = ValidationPublicationGate.Evaluate(
+            runtime,
+            CreateValidationIdentity(
+                "source-1",
+                ["Source/Thing.cs"],
+                [],
+                runtimeGeneration: 2,
+                build: "build-current",
+                deployment: "deploy-current"),
+            evidence,
+            DateTimeOffset.UtcNow);
+        Assert(!result.SafeToPublish, "stale runtime evidence must block publication");
+        AssertEqual(1, result.ReusedEvidenceCount);
+        AssertEqual(1, result.InvalidatedEvidenceCount);
+        Assert(
+            result.Decisions.Any(decision =>
+                decision.Action == RimContextDecisionActions.Invalidate &&
+                decision.ReasonCode == ValidationDecisionReasonCodes.EvidenceDeploymentMismatch),
+            "deployment mismatch should invalidate runtime evidence specifically");
+        Assert(
+            result.Decisions.Any(decision =>
+                decision.Action == RimContextDecisionActions.Reuse &&
+                decision.ValidationKind == ValidationEvidenceKinds.Static),
+            "static evidence should remain reusable across deployment mismatch");
+    }
+
+    private static void GoldenWorkflowBenchmarkMatchesBaseline()
+    {
+        GoldenWorkflowBenchmarkReport first = GoldenWorkflowBenchmarkRunner.Run();
+        GoldenWorkflowBenchmarkReport second = GoldenWorkflowBenchmarkRunner.Run();
+        AssertEqual(8, first.PassedScenarioCount);
+        AssertEqual(0, first.RegressionCount);
+        AssertEqual(8, first.Scenarios.Count);
+        Assert(
+            JsonSerializer.Serialize(first) == JsonSerializer.Serialize(second),
+            "golden benchmark output must be deterministic");
+        Assert(
+            first.Scenarios.Single(scenario => scenario.ScenarioId == GoldenWorkflowScenarioIds.GeneratedState)
+                .ExpensiveOperationCount == 0,
+            "generated observability state must not become expensive validation");
+
+        AssertEqual("current-implementation", first.BaselineSource);
+        AssertEqual("operation-counts", first.BaselineComparison);
+        Assert(
+            first.Scenarios.All(scenario => scenario.DurationBasis == "deterministic-cost-envelope-v1"),
+            "deterministic benchmark scenarios must declare their duration basis");
+
+        GoldenWorkflowBenchmarkReport measured = GoldenWorkflowBenchmarkRunner.RunMeasured();
+        Assert(measured.MeasuredDurationMs is >= 0, "measured benchmark duration should be non-negative");
+        Assert(
+            measured.Scenarios.All(scenario => scenario.MeasuredDurationMs is >= 0),
+            "measured benchmark scenarios should expose non-negative durations");
+    }
+
+    private static void FailureKnowledgeMatchesGeneratedState()
+    {
+        FailureKnowledgeMatch? exact = FailureKnowledgeCatalog.Match(
+            FailureKnowledgeCatalog.GeneratedStateTransactionFailure,
+            "transaction failed",
+            "development-transaction");
+        Assert(exact is not null, "reviewed signature should match");
+        AssertEqual("reviewed", exact!.Entry.Confidence);
+        Assert(exact.Entry.InappropriateActions.Count > 0, "knowledge should include unsafe actions");
+
+        FailureKnowledgeMatch? generalized = FailureKnowledgeCatalog.Match(
+            "UNKNOWN",
+            "generated observability state caused a worktree change transaction failure",
+            "infrastructure",
+            [".rimdev/observability/events.json"]);
+        Assert(generalized is not null, "generated state terms should use generalized knowledge");
+        AssertEqual("generated-state-path", generalized!.MatchReason);
+        Assert(
+            generalized.Entry.EvidenceImpact.Contains("does not invalidate", StringComparison.OrdinalIgnoreCase),
+            "knowledge should describe evidence impact");
+    }
+
+    private static void ContextExposesProvenanceBenchmarksAndFailureKnowledge()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var git = new FixedGitRepositoryStateProvider(
+                new GitRepositoryStateResult(
+                    true,
+                    new GitRepositoryStateSnapshot(
+                        directory,
+                        "git:fixture",
+                        "main",
+                        "head-1",
+                        null,
+                        0,
+                        0,
+                        false,
+                        [])));
+            using var store = new AgentObservabilityStore();
+            using var run = new AgentObservabilityRun(
+                "run-provenance-context",
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession agent = run.CreateAgent(
+                "mod.provenance-context",
+                "Provenance Context");
+            agent.Start();
+            using IDisposable activation = agent.Activate();
+            ValidationEvidenceRecord evidence = ValidationEvidenceRecord.Create(
+                CreateValidationIdentity("content-1", ["Source/Thing.cs"], ["compile"]),
+                "pass",
+                DateTimeOffset.UtcNow);
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.ValidationEvidenceRecorded,
+                "validation evidence recorded",
+                new { validationEvidence = evidence });
+            agent.Record(
+                DevelopmentStage.Analysis,
+                AgentEventTypes.IntegrationFailed,
+                "generated observability state caused a worktree change transaction failure",
+                new
+                {
+                    operationKey = FailureKnowledgeCatalog.GeneratedStateTransactionFailure,
+                    classification = "development-transaction",
+                    relatedFiles = new[] { ".rimdev/observability/events.json" },
+                    retryable = true,
+                    infrastructureOnly = true
+                });
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandFailed,
+                "unclassified command failure without an established cause",
+                new
+                {
+                    operationKey = "UNCLASSIFIED_COMMAND_FAILURE",
+                    classification = "application"
+                });
+            RimContextProviderSnapshot snapshot = new RimLiaisonContextBundleProvider(
+                new RimLiaisonContextProviderOptions
+                {
+                    RootPath = directory,
+                    CatalogPath = catalogPath,
+                    ObservabilityModId = "mod.provenance-context",
+                    GitProvider = git,
+                    ObservabilityStore = store
+                })
+                .CollectAsync(new RimContextProviderRequest(
+                    directory,
+                    null,
+                    [],
+                    false,
+                    DateTimeOffset.UtcNow,
+                    16,
+                    16,
+                    16,
+                    16))
+                .GetAwaiter()
+                .GetResult();
+            RimContextBundle bundle = RimContextBundleBuilder.Build(
+                new RimContextBundleRequest(RootPath: directory, NowUtc: DateTimeOffset.UtcNow),
+                DateTimeOffset.UtcNow,
+                [snapshot]);
+
+            Assert(
+                bundle.Testing.Value!.LatestEvidence.Any(reference => reference.Id == evidence.EvidenceId),
+                "context should expose immutable evidence identity");
+            AssertEqual(8, bundle.Testing.Value.BenchmarkSummary!.ScenarioCount);
+            Assert(
+                bundle.Failures.Any(failure => failure.Knowledge?.SignatureCode ==
+                    FailureKnowledgeCatalog.GeneratedStateTransactionFailure),
+                "context should consume reviewed failure knowledge");
+            Assert(
+                bundle.Failures.Any(failure => failure.Knowledge?.RecommendedAction.Contains(
+                    "owning RimLiaison", StringComparison.OrdinalIgnoreCase) == true),
+                "context should expose the reviewed knowledge action");
+            RimContextFailure reviewed = bundle.Failures.First(failure =>
+                failure.SignatureCode == FailureKnowledgeCatalog.GeneratedStateTransactionFailure);
+            AssertEqual(reviewed.Knowledge!.KnownCause, reviewed.RootCause);
+            RimContextFailure[] unclassified = bundle.Failures.Where(failure =>
+                    failure.SignatureCode == "UNCLASSIFIED_COMMAND_FAILURE")
+                .ToArray();
+            Assert(
+                unclassified.Length > 0 && unclassified.All(static failure => failure.RootCause is null),
+                "an issue summary must not be promoted to an established root cause");
+            Assert(
+                unclassified.All(static failure => failure.RetryAppropriate is null),
+                "retry policy must remain unknown without owner or reviewed knowledge evidence");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static ValidationEvidenceIdentity CreateValidationIdentity(
+        string content,
+        IReadOnlyList<string> sourceInputs,
+        IReadOnlyList<string> testIds,
+        int? runtimeGeneration = null,
+        string? build = null,
+        string? deployment = null) =>
+        new()
+        {
+            Repository = "git:fixture",
+            ContentFingerprint = content,
+            SelectedSourceInputs = sourceInputs,
+            DependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal),
+            BuildArtifactSha256 = build,
+            DeploymentArtifactSha256 = deployment,
+            ValidationKind = runtimeGeneration.HasValue
+                ? ValidationEvidenceKinds.Runtime
+                : ValidationEvidenceKinds.Static,
+            CoveredKinds = runtimeGeneration.HasValue
+                ? [ValidationEvidenceKinds.Static, ValidationEvidenceKinds.Runtime]
+                : [ValidationEvidenceKinds.Static],
+            SuiteId = "fixture-suite",
+            TestIds = testIds,
+            ToolVersions = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["rimliaison"] = "fixture"
+            },
+            Configuration = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["profile"] = "fixture"
+            },
+            EnvironmentFingerprint = "fixture-environment",
+            RuntimeGeneration = runtimeGeneration,
+            RequiresRuntimeGeneration = runtimeGeneration.HasValue,
+            DeploymentCorrespondence = runtimeGeneration.HasValue ? "synchronized" : null
+        };
 
     private static void EnvironmentFallbackLeavesListUsable()
     {
@@ -4853,6 +5857,24 @@ internal static class Program
             "Healthy doctor output should not write diagnostics.");
     }
 
+    private static void DoctorPreservesIdentityMismatchDetails()
+    {
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            identityMismatch: true);
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("blocked", root.GetProperty("status").GetString());
+        AssertEqual("READINESS_IDENTITY_MISMATCH", root.GetProperty("code").GetString());
+        JsonElement mismatch = root.GetProperty("identityMismatch");
+        AssertEqual("runtimeGeneration", mismatch.GetProperty("field").GetString());
+        Assert(mismatch.GetProperty("recoverable").GetBoolean(),
+            "Doctor must preserve recoverability for generation churn.");
+        AssertEqual("DevBridge.cmd doctor --json", root.GetProperty("nextAction").GetString());
+    }
+
     private static void DoctorReportsBlockedComponent()
     {
         CliResult result = RunDoctorFixture(contextAvailable: false);
@@ -5556,6 +6578,76 @@ internal static class Program
         AssertEqual(1, result.RecipeCalls.Count);
     }
 
+    private static void TrackedBuildOwnedArtifactMutationContinues()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.BuildOwnedArtifact);
+
+        Assert(result.Success, "A descriptor-derived tracked artifact with matching owner bytes should continue.");
+        AssertEqual(true, result.Freshness.SourceInputsStable);
+        AssertEqual(1, result.Freshness.BuildOwnedOutputChanges!.Count);
+        AssertEqual(
+            "1.6/Assemblies/Fixture.dll",
+            result.Freshness.BuildOwnedOutputChanges[0].Path);
+        AssertEqual(
+            result.Freshness.BuiltArtifactSha256,
+            result.Freshness.BuildOwnedOutputChanges[0].Sha256);
+    }
+
+    private static void SourceMutationDuringArtifactTransactionIsRejected()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.Source);
+
+        Assert(!result.Success, "A source mutation after the protected transaction begins must fail.");
+        AssertEqual("RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION", result.Status.ErrorCode);
+    }
+
+    private static void UnrelatedTrackedMutationDuringArtifactTransactionIsRejected()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.UnrelatedTracked);
+
+        Assert(!result.Success, "An unrelated tracked mutation must fail the transaction.");
+        AssertEqual("RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION", result.Status.ErrorCode);
+    }
+
+    private static void ArtifactMutationWithoutBuildProvenanceIsRejected()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.ArtifactWithoutProvenance);
+
+        Assert(!result.Success, "An output-looking mutation without owner evidence must fail.");
+        AssertEqual("RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION", result.Status.ErrorCode);
+    }
+
+    private static void ArtifactMutationWithUnexpectedBytesIsRejected()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.ArtifactUnexpectedBytes);
+
+        Assert(!result.Success, "An expected artifact path with bytes that differ from the owner hash must fail.");
+        AssertEqual("RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION", result.Status.ErrorCode);
+    }
+
+    private static void MultipleBuildOwnedArtifactMutationsAreClassifiedPerOutput()
+    {
+        ArtifactFreshnessTransactionResult result = RunWorktreeMutationScenario(
+            WorktreeMutationScenario.MultipleBuildOwnedArtifacts);
+
+        Assert(result.Success, "Every independently proven build output should be accepted.");
+        AssertEqual(2, result.Freshness.BuildOwnedOutputChanges!.Count);
+        AssertSequence(
+            ["1.6/Assemblies/Fixture.dll", "1.6/Assemblies/Fixture.Support.dll"],
+            result.Freshness.BuildOwnedOutputChanges.Select(change => change.Path).ToArray());
+        AssertEqual(
+            2,
+            result.Freshness.BuildOwnedOutputChanges
+                .Select(change => change.Sha256)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
+    }
+
     private static void AffectedBuildFailureBlocksPass()
     {
         AffectedScenarioResult result = RunAffectedSourceScenario(
@@ -5598,7 +6690,7 @@ internal static class Program
             {
                 Factory = (sourceFingerprint, workflowId) => calls++ == 0
                     ? FailedDevelopmentResult(workflowId, "PROCESS_EXITED")
-                    : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged")
+                    : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged", generation: 8)
             };
             var readiness = new FakeFreshGenerationAdapter(8);
             ArtifactFreshnessTransactionResult result =
@@ -5626,6 +6718,379 @@ internal static class Program
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }
+
+    private static void IdentityGenerationMismatchRecovers()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+                directory,
+                directory,
+                "runtimeGeneration",
+                DevBridgeIdentityMismatchClassifications.RuntimeGeneration,
+                recoverable: true);
+            ArtifactFreshnessTransactionResult result =
+                RunIdentityTransaction(mismatch);
+
+            Assert(result.Success, "A new runtime generation should recover.");
+            AssertEqual(2, result.RecoveryEvents!.Count);
+            AssertEqual("recovered", result.RecoveryEvents[1].State);
+            AssertEqual(1, result.Status.RecoveryAttempts);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void IdentityProcessMismatchRecovers()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+                directory,
+                directory,
+                "rimWorldProcessIdentity",
+                DevBridgeIdentityMismatchClassifications.RimWorldProcessIdentity,
+                recoverable: true);
+            ArtifactFreshnessTransactionResult result =
+                RunIdentityTransaction(mismatch);
+
+            Assert(result.Success, "A new RimWorld process should recover.");
+            AssertEqual(8, result.Freshness.Generation);
+            Assert(result.Freshness.LoadedArtifactFreshnessProven,
+                "Recovery must retain only final-generation freshness.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void IdentityRootMismatchRefusesRecovery()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+                directory,
+                Path.Combine(directory, "other-owner"),
+                "installationRoot",
+                DevBridgeIdentityMismatchClassifications.InstallationRootOwner,
+                recoverable: false);
+            ArtifactFreshnessTransactionResult result =
+                RunIdentityTransaction(mismatch);
+
+            Assert(!result.Success, "A different DevBridge root must remain a hard failure.");
+            AssertEqual(0, result.RecoveryEvents?.Count ?? 0);
+            AssertEqual(PrerequisiteRecoveryState.RecoveryFailed, result.Status.RecoveryState);
+            AssertEqual(false, result.Status.IdentityMismatch!.Recoverable);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void IdentityRecoveryExhaustionIsStructured()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+                directory,
+                directory,
+                "runtimeGeneration",
+                DevBridgeIdentityMismatchClassifications.RuntimeGeneration,
+                recoverable: true);
+            ArtifactFreshnessTransactionResult result =
+                RunIdentityTransaction(mismatch, persistent: true);
+
+            Assert(!result.Success, "Persistent identity churn must be bounded.");
+            AssertEqual(3, result.Status.RecoveryAttempts);
+            AssertEqual(
+                PrerequisiteRecoveryState.TransitionRecoveryExhausted,
+                result.Status.RecoveryState);
+            Assert(!result.Freshness.LoadedArtifactFreshnessProven,
+                "Exhaustion cannot expose a freshness proof.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void CanonicalAffectedIdentityExhaustionIsJson()
+    {
+        int calls = 0;
+        DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+            "C:/DevBridge",
+            "C:/DevBridge",
+            "runtimeGeneration",
+            DevBridgeIdentityMismatchClassifications.RuntimeGeneration,
+            recoverable: true);
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) =>
+            {
+                calls++;
+                DevBridgeModDevelopmentResult failed =
+                    SuccessfulDevelopmentResult(
+                        sourceFingerprint,
+                        workflowId,
+                        "unchanged",
+                        generation: 7);
+                return failed with
+                {
+                    Status = new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        "READINESS_IDENTITY_MISMATCH",
+                        "persistent identity churn",
+                        IdentityMismatch: mismatch),
+                    Success = false
+                };
+            },
+            scenarioCatalog: new CatalogDocument
+            {
+                SchemaVersion = CatalogSchema.Current,
+                Tests =
+                [
+                    new CatalogTest
+                    {
+                        Id = "assembler-smoke",
+                        Recipe = "assembler-fixture",
+                        ArtifactFreshnessAnchor = true,
+                        Covers =
+                        [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                    }
+                ],
+                Suites = []
+            },
+            freshGenerationRecoveryAdapter: new FakeFreshGenerationAdapter(8, 9, 10));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual(
+            "INFRASTRUCTURE_FAILURE",
+            root.GetProperty("orchestration").GetProperty("overall").GetString());
+        AssertEqual(
+            "READINESS_IDENTITY_MISMATCH",
+            root.GetProperty("orchestration")
+                .GetProperty("failure")
+                .GetProperty("errorCode")
+                .GetString());
+        Assert(
+            root.GetProperty("orchestration")
+                .GetProperty("failure")
+                .GetProperty("identityMismatch")
+                .GetProperty("recoverable")
+                .GetBoolean(),
+            "Terminal identity mismatch output must retain structured details.");
+        AssertEqual(3, result.FreshGenerationCalls);
+    }
+
+    private static void CanonicalAffectedIdentityRecoveryContinues()
+    {
+        int calls = 0;
+        DevBridgeIdentityMismatch mismatch = IdentityMismatch(
+            "C:/DevBridge",
+            "C:/DevBridge",
+            "rimWorldProcessIdentity",
+            DevBridgeIdentityMismatchClassifications.RimWorldProcessIdentity,
+            recoverable: true);
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (sourceFingerprint, workflowId) =>
+            {
+                calls++;
+                if (calls == 1)
+                {
+                    DevBridgeModDevelopmentResult failed =
+                        SuccessfulDevelopmentResult(
+                            sourceFingerprint,
+                            workflowId,
+                            "unchanged",
+                            generation: 7);
+                    return failed with
+                    {
+                        Status = new DevBridgeAdapterStatus(
+                            DevBridgeOutcomeKind.InfrastructureFailure,
+                            "READINESS_IDENTITY_MISMATCH",
+                            "stale RimWorld process identity",
+                            IdentityMismatch: mismatch),
+                        Success = false
+                    };
+                }
+
+                return SuccessfulDevelopmentResult(
+                    sourceFingerprint,
+                    workflowId,
+                    "unchanged",
+                    generation: 8);
+            },
+            recipeRun: PassRunWithGeneration("assembler-fixture", 8),
+            scenarioCatalog: new CatalogDocument
+            {
+                SchemaVersion = CatalogSchema.Current,
+                Tests =
+                [
+                    new CatalogTest
+                    {
+                        Id = "assembler-smoke",
+                        Recipe = "assembler-fixture",
+                        ArtifactFreshnessAnchor = true,
+                        Covers =
+                        [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                    }
+                ],
+                Suites = []
+            },
+            freshGenerationRecoveryAdapter: new FakeFreshGenerationAdapter(8));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("pass", root.GetProperty("status").GetString());
+        AssertEqual("PASS", root.GetProperty("orchestration").GetProperty("overall").GetString());
+        AssertEqual("RECOVERED",
+            root.GetProperty("orchestration").GetProperty("infrastructure").GetString());
+        AssertEqual(2, result.DevelopmentCalls.Count);
+        AssertEqual(1, result.FreshGenerationCalls);
+        AssertEqual(1, result.RecipeCalls.Count);
+        AssertEqual(8, root.GetProperty("artifactFreshness").GetProperty("generation").GetInt32());
+        AssertEqual(
+            "recovered",
+            root.GetProperty("prerequisiteRecovery")[
+                root.GetProperty("prerequisiteRecovery").GetArrayLength() - 1]
+                .GetProperty("state")
+                .GetString());
+    }
+
+    private static void IdentityParserClassifiesFields()
+    {
+        const string root = "C:/DevBridge";
+        string[] fields =
+        [
+            "installationRoot",
+            "coordinatorIdentity",
+            "runtimeGeneration",
+            "rimWorldProcessIdentity",
+            "descriptorProfileRegistration",
+            "protocolSchema"
+        ];
+        string[] classifications =
+        [
+            DevBridgeIdentityMismatchClassifications.InstallationRootOwner,
+            DevBridgeIdentityMismatchClassifications.CoordinatorIdentity,
+            DevBridgeIdentityMismatchClassifications.RuntimeGeneration,
+            DevBridgeIdentityMismatchClassifications.RimWorldProcessIdentity,
+            DevBridgeIdentityMismatchClassifications.StaleDescriptorProfileRegistration,
+            DevBridgeIdentityMismatchClassifications.ProtocolSchema
+        ];
+
+        for (int index = 0; index < fields.Length; index++)
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                JsonSerializer.Serialize(new
+                {
+                    identityMismatch = new
+                    {
+                        field = fields[index],
+                        expected = "old",
+                        actual = "new",
+                        recoverable = true,
+                        actualRoot = root
+                    }
+                }));
+            DevBridgeIdentityMismatch mismatch =
+                DevBridgeIdentityMismatchParser.Parse(
+                    document.RootElement,
+                    root,
+                    "READINESS_IDENTITY_MISMATCH")!;
+
+            AssertEqual(classifications[index], mismatch.Classification);
+            AssertEqual(
+                index is 0 or 5 ? false : true,
+                mismatch.Recoverable);
+        }
+    }
+
+    private static ArtifactFreshnessTransactionResult RunIdentityTransaction(
+        DevBridgeIdentityMismatch mismatch,
+        bool persistent = false)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string fingerprint = Convert.ToHexString(
+                SHA256.HashData([])).ToLowerInvariant();
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) =>
+                {
+                    calls++;
+                    if (persistent || calls == 1)
+                    {
+                        DevBridgeModDevelopmentResult failed =
+                            SuccessfulDevelopmentResult(
+                                sourceFingerprint,
+                                workflowId,
+                                "unchanged",
+                                generation: 7);
+                        return failed with
+                        {
+                            Status = new DevBridgeAdapterStatus(
+                                DevBridgeOutcomeKind.InfrastructureFailure,
+                                "READINESS_IDENTITY_MISMATCH",
+                                "simulated identity mismatch",
+                                IdentityMismatch: mismatch),
+                            Success = false
+                        };
+                    }
+
+                    return SuccessfulDevelopmentResult(
+                        sourceFingerprint,
+                        workflowId,
+                        "unchanged",
+                        generation: 8);
+                }
+            };
+            var readiness = new FakeFreshGenerationAdapter(8, 9, 10);
+            return new ArtifactFreshnessTransaction(
+                    development,
+                    readinessAdapter: readiness)
+                .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                    "fixture",
+                    directory,
+                    [],
+                    fingerprint,
+                    "wf-identity",
+                    TestRecipe: "recipe-identity"))
+                .GetAwaiter()
+                .GetResult();
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static DevBridgeIdentityMismatch IdentityMismatch(
+        string expectedRoot,
+        string actualRoot,
+        string field,
+        string classification,
+        bool recoverable) =>
+        new(
+            field,
+            expectedRoot,
+            actualRoot,
+            classification,
+            recoverable,
+            expectedRoot,
+            actualRoot,
+            "configured --devbridge-root");
 
     private static void AffectedGenerationMismatchBlocksPass()
     {
@@ -5797,6 +7262,277 @@ internal static class Program
             transport.Requests[0].Arguments[developmentRootIndex + 1]);
         AssertEqual("DevBridgeRoot", transport.Requests[0].Arguments[additionalRootIndex + 1]);
         AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
+    }
+
+    private static void ModDevelopmentAdapterBindsDescriptorOutputProvenance()
+    {
+        (string repository, string coordinator) = CreateDescriptorFixture();
+        try
+        {
+            const string workflowId = "wf-output-provenance";
+            const string transactionId = "tx-output-provenance";
+            string sourceFingerprint = new string('a', 64);
+            string artifactHash = new string('b', 64);
+            string descriptorPath = Path.Combine(
+                coordinator,
+                "DevelopmentProjects",
+                "fixture.json");
+            File.WriteAllText(
+                descriptorPath,
+                """
+                {
+                  "schemaVersion": "devbridge-mod-development/v1",
+                  "project": "fixture",
+                  "sourceProject": "Source/Fixture.csproj",
+                  "configuration": "Release",
+                  "expectedAssembly": "Fixture.dll",
+                  "deploymentTarget": "1.6/Assemblies/Fixture.dll",
+                  "testRecipe": "fixture-development"
+                }
+                """);
+            string response = JsonSerializer.Serialize(new
+            {
+                schemaVersion = DevBridgeModDevelopmentSchemas.Current,
+                project = "fixture",
+                success = true,
+                transactionId,
+                workflowId,
+                generation = 7,
+                leaseId = "lease-00000000000000000000000000000001",
+                artifactFreshness = new
+                {
+                    sourceFingerprint,
+                    builtArtifactSha256 = artifactHash,
+                    deployedArtifactSha256 = artifactHash,
+                    deploymentDecision = "deployed",
+                    generationBefore = 6,
+                    generationAfter = 7,
+                    generation = 7,
+                    transactionId,
+                    workflowId,
+                    leaseId = "lease-00000000000000000000000000000001",
+                    loadedArtifactFreshnessProven = true,
+                    proof = "deployment-hash-plus-new-owned-generation"
+                }
+            });
+            var adapter = new DevBridgeModDevelopmentAdapter(
+                new FakeTransport((_, _) => ProcessResult(response)),
+                DescriptorOptions(coordinator) with
+                {
+                    DescriptorPath = descriptorPath,
+                    DeploymentRoot = repository
+                });
+
+            DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                    "fixture",
+                    repository,
+                    sourceFingerprint,
+                    workflowId)
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(result.Status.IsSuccess, "The owner response should remain successful.");
+            AssertEqual(1, result.BuildOutputs!.Count);
+            AssertEqual("1.6/Assemblies/Fixture.dll", result.BuildOutputs[0].RepositoryPath);
+            AssertEqual(artifactHash, result.BuildOutputs[0].Sha256);
+            AssertEqual(transactionId, result.BuildOutputs[0].TransactionId);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+            DeleteDirectoryIncludingReadOnlyFiles(coordinator);
+        }
+    }
+
+    private static void SharedRuntimeTransitionsRecoverOnFreshGeneration()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            string[] transitionCodes =
+            [
+                "RIMBRIDGE_ENDPOINT_STALE",
+                "RIMBRIDGE_PROCESS_IDENTITY_MISMATCH",
+                "RIMBRIDGE_COMPANION_UNAVAILABLE",
+                "ENDPOINT_UNAVAILABLE",
+                "RIMBRIDGE_PROTOCOL_ERROR",
+                "DEVBRIDGE_NO_STRUCTURED_RESPONSE",
+                "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_MISSING",
+                "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID"
+            ];
+
+            foreach (string transitionCode in transitionCodes)
+            {
+                int calls = 0;
+                var development = new FakeModDevelopmentAdapter
+                {
+                    Factory = (sourceFingerprint, workflowId) => calls++ == 0
+                        ? FailedTransitionResult(
+                            sourceFingerprint,
+                            workflowId,
+                            transitionCode,
+                            generation: 7)
+                        : SuccessfulDevelopmentResult(
+                            sourceFingerprint,
+                            workflowId,
+                            "unchanged",
+                            generation: 8)
+                };
+                var readiness = new FakeFreshGenerationAdapter(8);
+                ArtifactFreshnessTransactionResult result =
+                    new ArtifactFreshnessTransaction(development, readinessAdapter: readiness)
+                        .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                            "fixture",
+                            directory,
+                            [],
+                            fingerprint,
+                            "wf-transition-" + transitionCode,
+                            TestRecipe: "recipe-transition"))
+                        .GetAwaiter()
+                        .GetResult();
+
+                Assert(result.Success, transitionCode + " should recover once.");
+                AssertEqual(2, calls);
+                AssertEqual(1, readiness.Calls.Count);
+                AssertEqual(PrerequisiteRecoveryState.Recovered, result.Status.RecoveryState);
+                AssertEqual(2, result.RecoveryEvents!.Count);
+                AssertEqual("recovering", result.RecoveryEvents[0].State);
+                AssertEqual("recovered", result.RecoveryEvents[1].State);
+                AssertEqual(8, result.RecoveryEvents[1].Generation);
+                AssertEqual("wf-transition-" + transitionCode, result.RecoveryEvents[1].WorkflowId);
+                AssertEqual(8, result.Freshness.Generation);
+                Assert(result.Freshness.LoadedArtifactFreshnessProven,
+                    "A recovered transition must finish with independent freshness proof.");
+            }
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void RepeatedSharedTransitionProtocolFailureIsExhausted()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) =>
+                {
+                    calls++;
+                    return FailedTransitionResult(
+                        sourceFingerprint,
+                        workflowId,
+                        "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+                        generation: calls == 1 ? 7 : 8);
+                }
+            };
+            var readiness = new FakeFreshGenerationAdapter(8);
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, readinessAdapter: readiness)
+                    .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                        "fixture",
+                        directory,
+                        [],
+                        fingerprint,
+                        "wf-transition-exhausted",
+                        TestRecipe: "recipe-transition"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "A persistent protocol failure must remain terminal.");
+            AssertEqual(2, calls);
+            AssertEqual(1, readiness.Calls.Count);
+            AssertEqual("DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID", result.Status.ErrorCode);
+            AssertEqual(PrerequisiteRecoveryState.TransitionRecoveryExhausted, result.Status.RecoveryState);
+            AssertEqual("shared-runtime-transition-recovery-exhausted", result.Status.RecoveryAction);
+            AssertEqual("transitionRecoveryExhausted", result.RecoveryEvents!.Last().State);
+            Assert(!result.Freshness.LoadedArtifactFreshnessProven,
+                "An exhausted transition must not expose a freshness proof.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void StaleGenerationProofIsRejectedAfterTransitionRecovery()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            int calls = 0;
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (sourceFingerprint, workflowId) => calls++ == 0
+                    ? FailedTransitionResult(sourceFingerprint, workflowId, "RIMBRIDGE_PROCESS_MISMATCH", 7)
+                    : SuccessfulDevelopmentResult(sourceFingerprint, workflowId, "unchanged", generation: 7)
+            };
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(
+                        development,
+                        readinessAdapter: new FakeFreshGenerationAdapter(8))
+                    .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                        "fixture",
+                        directory,
+                        [],
+                        fingerprint,
+                        "wf-stale-proof",
+                        TestRecipe: "recipe-transition"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "The old generation proof must be rejected.");
+            AssertEqual("RIMTEST_ARTIFACT_GENERATION_MISMATCH", result.Status.ErrorCode);
+            AssertEqual(null, result.Freshness.Generation);
+            Assert(!result.Freshness.LoadedArtifactFreshnessProven,
+                "A rejected stale-generation result cannot prove freshness.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static void SourceFailureDoesNotEnterTransitionRecovery()
+    {
+        string fingerprint = Convert.ToHexString(SHA256.HashData([])).ToLowerInvariant();
+        string directory = CreateTempDirectory();
+        try
+        {
+            var development = new FakeModDevelopmentAdapter
+            {
+                Result = FailedDevelopmentResult(null, "DEVELOPMENT_BUILD_FAILED")
+            };
+            var readiness = new FakeFreshGenerationAdapter(8);
+            ArtifactFreshnessTransactionResult result =
+                new ArtifactFreshnessTransaction(development, readinessAdapter: readiness)
+                    .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                        "fixture",
+                        directory,
+                        [],
+                        fingerprint,
+                        "wf-build-failure",
+                        TestRecipe: "recipe-transition"))
+                    .GetAwaiter()
+                    .GetResult();
+
+            Assert(!result.Success, "A source failure must remain terminal.");
+            AssertEqual("DEVELOPMENT_BUILD_FAILED", result.Status.ErrorCode);
+            AssertEqual(1, development.Calls.Count);
+            AssertEqual(0, readiness.Calls.Count);
+            Assert(result.RecoveryEvents is null,
+                "A source failure must not produce transition recovery events.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
     }
 
     private static void ModDevelopmentBuildFailureExportsCompilerDiagnostics()
@@ -6133,9 +7869,15 @@ internal static class Program
 
             Assert(result.CanProceed, "Malformed descriptor JSON should be safely reconstructed.");
             AssertEqual(PrerequisiteRecoveryState.Recovered, result.State);
-            Assert(!string.IsNullOrWhiteSpace(result.BackupPath) &&
-                File.Exists(result.BackupPath),
+            string malformedBackup = result.BackupPath ?? string.Empty;
+            Assert(!string.IsNullOrWhiteSpace(malformedBackup) &&
+                File.Exists(malformedBackup),
                 "The malformed input should remain recoverable through its backup.");
+            Assert(malformedBackup.StartsWith(
+                    Path.Combine(coordinator, "artifacts", "descriptor-recovery") +
+                    Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "descriptor recovery state must stay in the generated artifacts area");
             using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptorPath));
             AssertEqual("fixture", document.RootElement.GetProperty("project").GetString());
             AssertEqual("fixture-development", document.RootElement.GetProperty("testRecipe").GetString());
@@ -6183,9 +7925,15 @@ internal static class Program
 
             Assert(result.CanProceed, "A stale descriptor with canonical replacement metadata should recover.");
             AssertEqual(PrerequisiteRecoveryState.Recovered, result.State);
-            Assert(!string.IsNullOrWhiteSpace(result.BackupPath) &&
-                File.Exists(result.BackupPath),
+            string staleBackup = result.BackupPath ?? string.Empty;
+            Assert(!string.IsNullOrWhiteSpace(staleBackup) &&
+                File.Exists(staleBackup),
                 "Reconciliation should preserve the stale descriptor as a bounded backup.");
+            Assert(staleBackup.StartsWith(
+                    Path.Combine(coordinator, "artifacts", "descriptor-recovery") +
+                    Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "stale descriptor backups must not dirty DevelopmentProjects");
             using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptorPath));
             AssertEqual("Source/Fixture.csproj", document.RootElement.GetProperty("sourceProject").GetString());
             AssertEqual("Fixture.dll", document.RootElement.GetProperty("expectedAssembly").GetString());
@@ -7040,7 +8788,8 @@ internal static class Program
     private static CliResult RunDoctorFixture(
         bool contextAvailable,
         bool useExplicitOverrides = false,
-        bool usePascalRimBridgeFields = false)
+        bool usePascalRimBridgeFields = false,
+        bool identityMismatch = false)
     {
         string directory = CreateTempDirectory();
         try
@@ -7068,6 +8817,10 @@ internal static class Program
             string rimBridge = usePascalRimBridgeFields
                 ? "{\"ConfiguredMode\":\"required\",\"LifecycleState\":\"READY\"}"
                 : "{\"configuredMode\":\"optional\",\"lifecycleState\":\"READY\"}";
+            string identityRoot = JsonSerializer.Serialize(directory);
+            string devBridgeResult = identityMismatch
+                ? $"{{\"success\":false,\"healthy\":false,\"errorCode\":\"READINESS_IDENTITY_MISMATCH\",\"field\":\"runtimeGeneration\",\"expected\":\"8\",\"actual\":\"7\",\"classification\":\"runtimeGeneration\",\"recoverable\":true,\"authoritativeRoot\":{identityRoot},\"actualRoot\":{identityRoot},\"rimBridge\":{rimBridge}}}"
+                : $"{{\"success\":true,\"healthy\":true,\"rimBridge\":{rimBridge}}}";
             File.WriteAllText(rimContextPath, "fixture");
             File.WriteAllText(devBridgePath, "fixture");
             File.WriteAllText(rimErrorPath, "fixture");
@@ -7078,8 +8831,7 @@ internal static class Program
                         : "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"error\",\"command\":\"summary\",\"code\":\"INDEX_NOT_FOUND\",\"message\":\"missing\"}")
                     : request.Arguments.Contains("project")
                         ? ProcessResult($"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}")
-                    : ProcessResult(
-                        $"{{\"success\":true,\"healthy\":true,\"rimBridge\":{rimBridge}}}"));
+                    : ProcessResult(devBridgeResult));
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             var arguments = new List<string>
@@ -7362,8 +9114,11 @@ internal static class Program
         string deploymentDecision,
         int generation = 7,
         bool loadedArtifactFreshnessProven = true,
-        string? errorCode = null)
+        string? errorCode = null,
+        string? artifactSha256 = null,
+        IReadOnlyList<DevBridgeBuildOutputEvidence>? buildOutputs = null)
     {
+        string artifactHash = artifactSha256 ?? new string('b', 64);
         int generationBefore = deploymentDecision == "unchanged"
             ? generation
             : Math.Max(0, generation - 1);
@@ -7379,8 +9134,8 @@ internal static class Program
             "lease-00000000000000000000000000000001",
             new DevBridgeArtifactFreshness(
                 sourceFingerprint,
-                new string('b', 64),
-                new string('b', 64),
+                artifactHash,
+                artifactHash,
                 deploymentDecision,
                 generationBefore,
                 generation,
@@ -7392,7 +9147,181 @@ internal static class Program
                 "tx-1",
                 workflowId,
                 "lease-00000000000000000000000000000001",
-                errorCode));
+                errorCode),
+            BuildOutputs: buildOutputs);
+    }
+
+    private static ArtifactFreshnessTransactionResult RunWorktreeMutationScenario(
+        WorktreeMutationScenario scenario)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string sourceRelative = "Source/Changed.cs";
+            string artifactRelative = "1.6/Assemblies/Fixture.dll";
+            string secondArtifactRelative = "1.6/Assemblies/Fixture.Support.dll";
+            string unrelatedRelative = "README.md";
+            string source = Path.Combine(directory, sourceRelative.Replace('/', Path.DirectorySeparatorChar));
+            string artifact = Path.Combine(directory, artifactRelative.Replace('/', Path.DirectorySeparatorChar));
+            string secondArtifact = Path.Combine(directory, secondArtifactRelative.Replace('/', Path.DirectorySeparatorChar));
+            string unrelated = Path.Combine(directory, unrelatedRelative);
+            Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(artifact)!);
+            File.WriteAllText(source, "class Changed { int Value = 2; }\n");
+            File.WriteAllBytes(artifact, "old-primary"u8.ToArray());
+            File.WriteAllBytes(secondArtifact, "old-secondary"u8.ToArray());
+            File.WriteAllText(unrelated, "stable\n");
+
+            byte[] primaryBytes = "built-primary"u8.ToArray();
+            byte[] secondaryBytes = "built-secondary"u8.ToArray();
+            string primaryHash = Convert.ToHexString(SHA256.HashData(primaryBytes)).ToLowerInvariant();
+            string secondaryHash = Convert.ToHexString(SHA256.HashData(secondaryBytes)).ToLowerInvariant();
+            string sourceFingerprint = ComputeWorktreeFingerprint(directory, [sourceRelative]);
+            GitRepositoryChange[] beforeChanges =
+            [
+                new GitRepositoryChange(sourceRelative, " M", false, false)
+            ];
+            var afterChanges = new List<GitRepositoryChange>(beforeChanges);
+            switch (scenario)
+            {
+                case WorktreeMutationScenario.BuildOwnedArtifact:
+                case WorktreeMutationScenario.ArtifactWithoutProvenance:
+                case WorktreeMutationScenario.ArtifactUnexpectedBytes:
+                    afterChanges.Add(new GitRepositoryChange(artifactRelative, " M", false, true));
+                    break;
+                case WorktreeMutationScenario.Source:
+                    break;
+                case WorktreeMutationScenario.UnrelatedTracked:
+                    afterChanges.Add(new GitRepositoryChange(unrelatedRelative, " M", false, false));
+                    break;
+                case WorktreeMutationScenario.MultipleBuildOwnedArtifacts:
+                    afterChanges.Add(new GitRepositoryChange(artifactRelative, " M", false, true));
+                    afterChanges.Add(new GitRepositoryChange(secondArtifactRelative, " M", false, true));
+                    break;
+            }
+
+            var repositoryState = new SequencedGitRepositoryStateProvider(
+                WorktreeState(directory, beforeChanges),
+                WorktreeState(directory, afterChanges.ToArray()));
+            var development = new FakeModDevelopmentAdapter
+            {
+                Factory = (fingerprint, workflowId) =>
+                {
+                    switch (scenario)
+                    {
+                        case WorktreeMutationScenario.Source:
+                            File.AppendAllText(source, "// concurrent source edit\n");
+                            break;
+                        case WorktreeMutationScenario.UnrelatedTracked:
+                            File.AppendAllText(unrelated, "concurrent\n");
+                            break;
+                        case WorktreeMutationScenario.ArtifactUnexpectedBytes:
+                            File.WriteAllBytes(artifact, "unexpected"u8.ToArray());
+                            break;
+                        case WorktreeMutationScenario.MultipleBuildOwnedArtifacts:
+                            File.WriteAllBytes(artifact, primaryBytes);
+                            File.WriteAllBytes(secondArtifact, secondaryBytes);
+                            break;
+                        default:
+                            File.WriteAllBytes(artifact, primaryBytes);
+                            break;
+                    }
+
+                    IReadOnlyList<DevBridgeBuildOutputEvidence>? outputs = scenario switch
+                    {
+                        WorktreeMutationScenario.BuildOwnedArtifact or
+                        WorktreeMutationScenario.ArtifactUnexpectedBytes =>
+                        [new DevBridgeBuildOutputEvidence(artifactRelative, primaryHash, "tx-1")],
+                        WorktreeMutationScenario.MultipleBuildOwnedArtifacts =>
+                        [
+                            new DevBridgeBuildOutputEvidence(artifactRelative, primaryHash, "tx-1"),
+                            new DevBridgeBuildOutputEvidence(secondArtifactRelative, secondaryHash, "tx-1")
+                        ],
+                        _ => null
+                    };
+                    string decision = scenario is WorktreeMutationScenario.Source or
+                        WorktreeMutationScenario.UnrelatedTracked
+                        ? "unchanged"
+                        : "deployed";
+                    return SuccessfulDevelopmentResult(
+                        fingerprint,
+                        workflowId,
+                        decision,
+                        artifactSha256: primaryHash,
+                        buildOutputs: outputs);
+                }
+            };
+
+            return new ArtifactFreshnessTransaction(
+                    development,
+                    repositoryStateProvider: repositoryState)
+                .PrepareAsync(new ArtifactFreshnessTransactionRequest(
+                    "fixture",
+                    directory,
+                    [sourceRelative],
+                    sourceFingerprint,
+                    "wf-worktree-integrity"))
+                .GetAwaiter()
+                .GetResult();
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
+    private static GitRepositoryStateResult WorktreeState(
+        string directory,
+        params GitRepositoryChange[] changes) =>
+        new(
+            true,
+            new GitRepositoryStateSnapshot(
+                directory,
+                "git:fixture",
+                null,
+                "head-1",
+                null,
+                null,
+                null,
+                changes.Length > 0,
+                changes));
+
+    private static string ComputeWorktreeFingerprint(
+        string directory,
+        IReadOnlyList<string> paths)
+    {
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (string path in paths
+                     .Select(value => value.Replace('\\', '/'))
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+        {
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes(path));
+            string fullPath = Path.Combine(
+                directory,
+                path.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(fullPath))
+            {
+                hash.AppendData(System.Text.Encoding.UTF8.GetBytes("\0missing\0"));
+                continue;
+            }
+
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes("\0file\0"));
+            hash.AppendData(File.ReadAllBytes(fullPath));
+            hash.AppendData(System.Text.Encoding.UTF8.GetBytes("\0end\0"));
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private enum WorktreeMutationScenario
+    {
+        BuildOwnedArtifact,
+        Source,
+        UnrelatedTracked,
+        ArtifactWithoutProvenance,
+        ArtifactUnexpectedBytes,
+        MultipleBuildOwnedArtifacts
     }
 
     private static DevBridgeModDevelopmentResult FailedDevelopmentResult(
@@ -7411,12 +9340,31 @@ internal static class Program
             null,
             null);
 
+    private static DevBridgeModDevelopmentResult FailedTransitionResult(
+        string sourceFingerprint,
+        string? workflowId,
+        string errorCode,
+        int generation) =>
+        SuccessfulDevelopmentResult(
+            sourceFingerprint,
+            workflowId,
+            "unchanged",
+            generation: generation) with
+        {
+            Status = new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                errorCode,
+                "simulated shared runtime transition"),
+            Success = false
+        };
+
     private static AffectedScenarioResult RunAffectedSourceScenario(
         Func<string, string?, DevBridgeModDevelopmentResult>? resultFactory = null,
         DevBridgeRecipeRunResult? recipeRun = null,
         bool failFast = false,
         CatalogDocument? scenarioCatalog = null,
-        Func<string, int, DevBridgeRecipeRunResult>? recipeRunFactory = null)
+        Func<string, int, DevBridgeRecipeRunResult>? recipeRunFactory = null,
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
     {
         string directory = CreateTempDirectory();
         try
@@ -7481,7 +9429,8 @@ internal static class Program
                         stderr,
                         recipeAdapter,
                         impactAdapter: impactAdapter,
-                        developmentAdapter: developmentAdapter)
+                        developmentAdapter: developmentAdapter,
+                        freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter)
                     .GetAwaiter()
                     .GetResult());
 
@@ -7490,7 +9439,10 @@ internal static class Program
                 stdout.ToString(),
                 stderr.ToString(),
                 developmentAdapter.Calls.ToArray(),
-                recipeAdapter.RunCalls.ToArray());
+                recipeAdapter.RunCalls.ToArray(),
+                freshGenerationRecoveryAdapter is FakeFreshGenerationAdapter fakeRecovery
+                    ? fakeRecovery.Calls.Count
+                    : 0);
         }
         finally
         {
@@ -8211,13 +10163,13 @@ internal static class Program
                         "lease-00000000000000000000000000000001")));
         }
     }
-
     private sealed record AffectedScenarioResult(
         int ExitCode,
         string Stdout,
         string Stderr,
         IReadOnlyList<(string Project, string SourceFingerprint, string? WorkflowId)> DevelopmentCalls,
-        IReadOnlyList<string> RecipeCalls);
+        IReadOnlyList<string> RecipeCalls,
+        int FreshGenerationCalls);
 
     private sealed class FakeImpactAdapter : IRimContextImpactAdapter
     {
@@ -8261,6 +10213,72 @@ internal static class Program
         {
             Calls.Add((rootPath, baseReference));
             return Task.FromResult(result);
+        }
+    }
+
+    private sealed class FixedGitRepositoryStateProvider : IGitRepositoryStateProvider
+    {
+        private readonly GitRepositoryStateResult result;
+
+        public FixedGitRepositoryStateProvider(GitRepositoryStateResult result)
+        {
+            this.result = result;
+        }
+
+        public Task<GitRepositoryStateResult> ReadAsync(
+            string rootPath,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(result);
+    }
+
+    private sealed class PathGitRepositoryStateProvider : IGitRepositoryStateProvider
+    {
+        private readonly IReadOnlyDictionary<string, GitRepositoryStateResult> results;
+
+        public PathGitRepositoryStateProvider(
+            IReadOnlyDictionary<string, GitRepositoryStateResult> results)
+        {
+            this.results = results;
+        }
+
+        public Task<GitRepositoryStateResult> ReadAsync(
+            string rootPath,
+            CancellationToken cancellationToken = default)
+        {
+            string fullPath = Path.GetFullPath(rootPath);
+            return Task.FromResult(results.TryGetValue(fullPath, out GitRepositoryStateResult? result)
+                ? result
+                : new GitRepositoryStateResult(
+                    false,
+                    ErrorCode: "GIT_FIXTURE_NOT_CONFIGURED",
+                    Error: "No Git fixture was configured for the requested root."));
+        }
+    }
+
+    private sealed class SequencedGitRepositoryStateProvider : IGitRepositoryStateProvider
+    {
+        private readonly Queue<GitRepositoryStateResult> results;
+
+        public SequencedGitRepositoryStateProvider(params GitRepositoryStateResult[] results)
+        {
+            this.results = new Queue<GitRepositoryStateResult>(results);
+        }
+
+        public Task<GitRepositoryStateResult> ReadAsync(
+            string rootPath,
+            CancellationToken cancellationToken = default) =>
+            ReadWorktreeAsync(rootPath, cancellationToken);
+
+        public Task<GitRepositoryStateResult> ReadWorktreeAsync(
+            string rootPath,
+            CancellationToken cancellationToken = default)
+        {
+            if (results.Count == 0)
+            {
+                throw new InvalidOperationException("No worktree snapshot remains.");
+            }
+
+            return Task.FromResult(results.Dequeue());
         }
     }
 

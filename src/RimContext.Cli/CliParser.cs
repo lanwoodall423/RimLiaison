@@ -56,6 +56,7 @@ public static class CliParser
         var json = false;
         var compact = true;
         var human = false;
+        var verbose = false;
         var limit = IndexConstants.DefaultLimit;
         int? maxBytes = null;
         var depth = IndexConstants.DefaultAffectedDepth;
@@ -99,6 +100,14 @@ public static class CliParser
                     }
 
                     human = true;
+                    break;
+                case "--verbose":
+                    if (inlineValue is not null)
+                    {
+                        throw ErrorFactory.InvalidArgument("The --verbose option does not accept a value.");
+                    }
+
+                    verbose = true;
                     break;
                 case "--force":
                     if (inlineValue is not null)
@@ -152,7 +161,7 @@ public static class CliParser
             throw ErrorFactory.InvalidArgument("--json and --human cannot be combined.");
         }
 
-        ValidateCommandOptions(command, positionals, force, assemblyRoots, kind, direction, depth, file);
+        ValidateCommandOptions(command, positionals, force, assemblyRoots, kind, direction, depth, file, verbose);
         var subject = command == CliCommands.Find
             ? string.Join(' ', positionals)
             : positionals.Count == 1 ? positionals[0] : null;
@@ -168,6 +177,7 @@ public static class CliParser
             json,
             compact,
             human,
+            verbose,
             limit,
             maxBytes,
             depth,
@@ -179,7 +189,7 @@ public static class CliParser
     private static CliRequest HelpRequest() => Request(CliCommands.Help);
 
     private static CliRequest Request(string command) =>
-        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, true, false, IndexConstants.DefaultLimit, null, IndexConstants.DefaultAffectedDepth, "both", null, null);
+        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, true, false, false, IndexConstants.DefaultLimit, null, IndexConstants.DefaultAffectedDepth, "both", null, null);
 
     private static string ReadValue(IReadOnlyList<string> args, ref int index, string option, string? inlineValue)
     {
@@ -250,7 +260,8 @@ public static class CliParser
         string? kind,
         string direction,
         int depth,
-        string? file)
+        string? file,
+        bool verbose)
     {
         if (command == CliCommands.Index && positionals.Count > 0)
         {
@@ -301,6 +312,16 @@ public static class CliParser
         if (file is not null && command != CliCommands.Harmony)
         {
             throw ErrorFactory.InvalidArgument("--file is only valid for harmony.");
+        }
+
+        if (verbose && command != CliCommands.Context)
+        {
+            throw ErrorFactory.InvalidArgument("--verbose is only valid for context.");
+        }
+
+        if (command == CliCommands.Context && positionals.Count > 0)
+        {
+            throw ErrorFactory.InvalidArgument("The context command does not accept positional arguments.");
         }
     }
 }

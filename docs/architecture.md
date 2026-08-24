@@ -30,6 +30,32 @@ returns bounded domain results directly, so the normal path does not spawn `rimc
 temporary JSON handoff. The direct `rimctx` executable remains a narrow drill-down/debugging
 surface over that same Core API and retains the versioned `rimctx/v1` contract.
 
+## Context Bundle foundation
+
+`rimctx-bundle/v1` is the cross-stack context snapshot consumed by agents and diagnostics. It is
+available through `rimliaison context --json` (the maintained aggregator) and `rimctx context --json`
+(the direct Core surface). The bundle has explicit topology, repository, environment, deployment,
+runtime, testing, execution, failure, efficiency, decision, and extension fields. Each core section
+has an availability/freshness status, so an absent lower-layer answer remains `unknown` or
+`unavailable` instead of being guessed.
+
+RimContext owns aggregation and static facts, while Git, RimTest/RimLiaison, DevBridge2,
+RimBridgeServer, and RimError retain their existing authority for repository, selection, deployment,
+runtime, and failure state. RimLiaison's provider reads those owner surfaces and the canonical
+observability store; it does not create a second state database. `context` is read-only, does not
+launch RimWorld, and never writes generated state into the repository. See
+[docs/context-bundle.md](context-bundle.md) for the schema, provenance, provider, and compatibility
+contract.
+
+The maintained provider also projects the latest structured affected-selection and suite-completion
+events: selected/executed/reused/skipped suites and tests, evidence/cache invalidation, transaction
+and generation identity, fingerprints, bounded durations, and infrastructure/test failure taxonomy.
+DevBridge2 state comes from read-only `doctor --json` plus `agent snapshot --json`; absent or stale
+runtime identity remains explicit. The compact `agentSummary` is derived from those sections, while
+the full canonical arrays remain available for diagnostics. Repository-local generated state is
+audited separately from meaningful `.rimdev/stack.json` configuration; unclassified transaction,
+report, cache, temp, or diagnostic paths are surfaced for owner review rather than blindly ignored.
+
 ## Runtime, layout, and entrypoint
 
 The consolidated solution targets `net8.0`; the root `global.json` pins SDK `8.0.424` with
@@ -87,10 +113,12 @@ rimctx harmony [TARGET] [--file PATH]
 rimctx file PATH_OR_ID
 rimctx summary
 rimctx version
+rimctx context
 ```
 
 Common options are `--root`, `--store`, `--assembly-root` (repeatable for indexing), `--force`,
-`--json`, `--compact`, `--human`, `--limit`, and `--max-bytes`. `refs` accepts `--direction in|out|both`;
+`--json`, `--compact`, `--human`, `--limit`, and `--max-bytes`; `context` also accepts `--verbose`.
+`refs` accepts `--direction in|out|both`;
 `affected` accepts `--depth 1..8`; `find` accepts `--kind`. The parser defaults to compact agent
 output. `--json` is accepted for explicit agent command lines; output is JSON for every command.
 
@@ -154,7 +182,7 @@ the existing suite-result fields. Its dimensions are:
 | `staticTests` | `PASS`, `FAIL`, `NOT_RUN` |
 | `deployment` | `FRESH`, `STALE`, `NOT_EVALUATED`, `FAILED` |
 | `runtimeValidation` | `PASS`, `FAIL`, `NOT_RUN`, `BLOCKED` |
-| `infrastructure` | `READY`, `RECOVERED`, `CONTENDED`, `UNAVAILABLE`, `RECOVERY_FAILED` |
+| `infrastructure` | `READY`, `RECOVERED`, `CONTENDED`, `UNAVAILABLE`, `RECOVERY_FAILED`, `TRANSITION_RECOVERY_EXHAUSTED` |
 
 `artifactFreshness.evaluationStatus` is explicit. A missing proof caused by an aborted preflight is
 `NOT_EVALUATED`; it is not inferred to be a stale artifact from
