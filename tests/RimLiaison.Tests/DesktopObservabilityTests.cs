@@ -102,38 +102,53 @@ internal static class DesktopObservabilityTests
         AssertEqual(active.AgentId, wildlifeTabs[0].AgentId);
         AssertEqual(AgentStatus.Running, wildlifeTabs[0].Status);
         AssertEqual(2, ui.Snapshot.All!.Agents.Count);
+        AgentObservabilityAgentView activeView = ui.ShowAgent("Wildlife").Agent!;
+        AssertEqual(active.RunId, activeView.CurrentSession.RunId);
+        AssertEqual(1, activeView.PastSessions.Count);
+        AgentObservabilitySessionSummary past = activeView.PastSessions.Single();
+        AgentObservabilityAgentView pastView = ui.ShowAgent(past.AgentId, past.RunId).Agent!;
+        AssertEqual(past.RunId, pastView.Agent.RunId);
+        AssertEqual(active.RunId, pastView.CurrentSession.RunId);
     }
 
-    public static void RepeatedFinishedRunsDismissAsOneTab()
+    public static void CompletedRunsRemainVisibleWithoutDismissal()
     {
         using var store = new AgentObservabilityStore();
         using var firstRun = new AgentObservabilityRun(
-            "ui-dismiss-first",
+            "ui-persistent-first",
             store,
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession first = firstRun.CreateAgent(
-            "Wildlife",
-            "Wildlife");
+            "Aquaculture",
+            "Aquaculture");
         first.Start();
         first.Complete();
 
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem firstTab = ui.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent" && item.ModId == "Aquaculture");
+        Assert(!firstTab.CanDismiss, "completed agents must not expose dismiss in monitoring navigation");
+
         using var secondRun = new AgentObservabilityRun(
-            "ui-dismiss-second",
+            "ui-persistent-second",
             store,
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession second = secondRun.CreateAgent(
-            "Wildlife",
-            "Wildlife");
+            "Aquaculture",
+            "Aquaculture");
         second.Start();
-        second.Complete();
 
-        using var ui = new AgentObservabilityUi(store);
-        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
-            .Single(item => item.Kind == "agent" && item.ModId == "Wildlife");
-        Assert(tab.CanDismiss);
-        Assert(ui.DismissAgent(tab.AgentId!, tab.RunId));
-        Assert(!ui.Snapshot.Navigation.Items.Any(item =>
-            item.Kind == "agent" && item.ModId == "Wildlife"));
+        AgentObservabilityUiNavigationItem activeTab = ui.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent" && item.ModId == "Aquaculture");
+        AssertEqual(1, ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
+        AssertEqual(second.RunId, activeTab.RunId);
+        AssertEqual(AgentStatus.Running, activeTab.Status);
+        AssertEqual(AgentObservabilityAgentNavigationStatus.Working, activeTab.NavigationStatus);
+        Assert(ui.Snapshot.All!.Agents.Count(agent => agent.ModId == "Aquaculture") == 2);
+        using var restartedUi = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem restartedTab = restartedUi.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent" && item.ModId == "Aquaculture");
+        AssertEqual(second.RunId, restartedTab.RunId);
     }
 
     public static void ActiveAgentsArePrioritizedInBoundedNavigation()
@@ -502,7 +517,7 @@ internal static class DesktopObservabilityTests
         Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(2), "bounded volume view should remain responsive");
     }
 
-    public static void AgentNavigationIdentityAndDismissalAreStable()
+    public static void AgentNavigationIdentityAndHistoryAreStable()
     {
         using var store = new AgentObservabilityStore();
         using (var historicalRun = new AgentObservabilityRun(
@@ -528,55 +543,93 @@ internal static class DesktopObservabilityTests
             "shared-agent");
         current.Start();
         current.Record(
-            DevelopmentStage.Implementation,
-            AgentEventTypes.FileModified,
-            "Current activity.");
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestFailed,
+            "Current blocking failure.",
+            new { operationKey = "test:current", exitCode = 1 });
 
         using var ui = new AgentObservabilityUi(store);
         AgentObservabilityUiNavigationItem[] navigationAgents = ui.Snapshot.Navigation.Items
             .Where(item => item.Kind == "agent")
             .ToArray();
         AssertEqual(2, navigationAgents.Length);
-        Assert(navigationAgents.Any(item => item.FullLabel == "Current Mod" &&
-            item.RunId == "ui-current-run" &&
-            item.Key == "agent-group:mod.current"));
-        Assert(navigationAgents.Any(item => item.FullLabel == "Historical Mod" &&
-            item.RunId == "ui-history-run" &&
-            item.Key == "agent-group:mod.history"));
+        AgentObservabilityUiNavigationItem currentTab = navigationAgents
+            .Single(item => item.ModId == "mod.current");
+        AssertEqual("ui-current-run", currentTab.RunId);
+        Assert(currentTab.HasUnresolvedError);
+        AssertEqual(
+            AgentObservabilityAgentNavigationStatus.NeedsAttention,
+            currentTab.NavigationStatus);
         AssertEqual(2, ui.Snapshot.All!.Agents.Count);
 
-        Assert(!ui.DismissAgent(current.AgentId, current.RunId),
-            "active agents must not be dismissed");
         current.Complete();
         Assert(ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId &&
+            item.ModId == "mod.current" &&
             item.RunId == current.RunId &&
-            item.CanDismiss));
-
-        Assert(ui.DismissAgent(current.AgentId, current.RunId));
-        Assert(!ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId &&
-            item.RunId == current.RunId));
-        Assert(ui.Snapshot.Navigation.Items.Any(item =>
-            item.FullLabel == "Historical Mod"));
+            item.NavigationStatus == AgentObservabilityAgentNavigationStatus.NeedsAttention));
         Assert(ui.Snapshot.All!.Agents.Any(agent => agent.AgentId == current.AgentId),
-            "dismissal must not remove authoritative agent history");
+            "completion must not remove authoritative agent history");
         Assert(store.GetEvents(runId: current.RunId, agentId: current.AgentId).Count > 0,
-            "dismissal must preserve events");
+            "completion must preserve events");
 
-        AgentSnapshot lateUpdate = current.Snapshot with { CurrentActivity = "late refresh" };
-        store.UpdateAgent(lateUpdate);
-        Assert(!ui.Snapshot.Navigation.Items.Any(item =>
-            item.AgentId == current.AgentId &&
-            item.RunId == current.RunId),
-            "a late store refresh must not recreate a dismissed tab");
+        using var oldRunUi = new AgentObservabilityUi(store, runId: "ui-history-run");
+        Assert(oldRunUi.Snapshot.Navigation.Items.Any(item =>
+            item.FullLabel == "Historical Mod"));
+    }
+    public static void ActivityRefreshPlanIsIncremental()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-activity-reconcile",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.reconcile", "Reconcile");
+        agent.Start();
+        agent.Record(DevelopmentStage.Analysis, AgentEventTypes.FileInspected, "First.");
+        agent.Record(DevelopmentStage.Analysis, AgentEventTypes.FileInspected, "Second.");
 
-        AgentObservabilityUi oldRunUi = new(store, runId: "ui-history-run");
-        using (oldRunUi)
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityActivityRow[] existingRows = ui.Snapshot.All!.Activity.ToArray();
+        AgentObservabilityActivityRow newest = new(
+            new AgentEvent
+            {
+                Id = "event-newest",
+                RunId = run.RunId,
+                AgentId = agent.AgentId,
+                ModId = agent.ModId,
+                Timestamp = existingRows[^1].Event.Timestamp + 1,
+                Sequence = existingRows[^1].Event.Sequence + 1,
+                Stage = DevelopmentStage.Analysis,
+                Type = AgentEventTypes.FileInspected,
+                Summary = "Newest."
+            },
+            "Reconcile",
+            AgentStatus.Running,
+            false,
+            []);
+        var current = existingRows
+            .Select(row => new AgentObservabilityActivityListItem(row.Event.Id, row))
+            .ToArray();
+
+        AgentObservabilityActivityReconciliationPlan unchanged =
+            AgentObservabilityActivityReconciliation.Plan(current, existingRows);
+        Assert(!unchanged.HasChanges, "unchanged refresh must perform no row operations");
+
+        AgentObservabilityActivityRow[] newestFirst = [newest, ..existingRows];
+        AgentObservabilityActivityReconciliationPlan inserted =
+            AgentObservabilityActivityReconciliation.Plan(current, newestFirst);
+        Assert(inserted.InsertedEventIds.SequenceEqual(["event-newest"]));
+        AssertEqual(0, inserted.MovedEventIds.Count);
+        AssertEqual(0, inserted.RemovedEventIds.Count);
+        Assert(!inserted.UpdatedEventIds.Contains(existingRows[0].Event.Id));
+        AgentObservabilityActivityRow[] changedRows = existingRows.ToArray();
+        changedRows[0] = changedRows[0] with
         {
-            Assert(oldRunUi.Snapshot.Navigation.Items.Any(item =>
-                item.FullLabel == "Historical Mod"));
-        }
+            Event = changedRows[0].Event with { Summary = "Changed." }
+        };
+        AgentObservabilityActivityReconciliationPlan changed =
+            AgentObservabilityActivityReconciliation.Plan(current, changedRows);
+        Assert(changed.UpdatedEventIds.SequenceEqual([existingRows[0].Event.Id]));
     }
 
     public static void IssueSelectionAndAssessmentSurviveLiveUpdates()
@@ -703,6 +756,186 @@ internal static class DesktopObservabilityTests
             other.Id == afterLiveEvent.SelectedEventId,
             "incoming events must not overwrite an explicit historical selection");
         AssertEqual(other.Id, afterLiveEvent.Agent!.SelectedEvent!.Event.Id);
+    }
+
+    public static void IssueTriageClassifiesOwnersConservatively()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-triage-owners",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession devBridge = run.CreateAgent("mod.devbridge", "DevBridge Mod");
+        using AgentObservabilitySession compiler = run.CreateAgent("mod.compiler", "Compiler Mod");
+        using AgentObservabilitySession ambiguous = run.CreateAgent("mod.ambiguous", "Ambiguous Mod");
+        devBridge.Start();
+        compiler.Start();
+        ambiguous.Start();
+        devBridge.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Readiness identity mismatch occurred.",
+            new
+            {
+                operationKey = "readiness:lease",
+                toolName = "DevBridge2",
+                command = "readiness check",
+                errorCode = "READINESS_IDENTITY_MISMATCH",
+                exitCode = 1
+            });
+        compiler.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildFailed,
+            "Compiler reported CS0246.",
+            new
+            {
+                operationKey = "build:compiler",
+                toolName = "compiler",
+                command = "dotnet build Source/Compiler.csproj",
+                filePath = "Source/Compiler.cs",
+                errorCode = "CS0246",
+                diagnosticOutput = "error CS0246: missing type",
+                exitCode = 1
+            });
+        ambiguous.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Operation failed.",
+            new { operationKey = "command:ambiguous", exitCode = 1 });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentIssue[] issues = store.GetIssues().ToArray();
+        AgentObservabilityIssueTriage devBridgeTriage = ui.ShowIssue(
+            issues.Single(issue => issue.AgentId == devBridge.AgentId).Id).Issue!.Triage!;
+        AgentObservabilityIssueTriage compilerTriage = ui.ShowIssue(
+            issues.Single(issue => issue.AgentId == compiler.AgentId).Id).Issue!.Triage!;
+        AgentObservabilityIssueTriage ambiguousTriage = ui.ShowIssue(
+            issues.Single(issue => issue.AgentId == ambiguous.AgentId).Id).Issue!.Triage!;
+        AssertEqual("DevBridge2", devBridgeTriage.ProbableOwner.Owner);
+        AssertEqual("high", devBridgeTriage.ProbableOwner.Confidence);
+        AssertEqual("Mod / project", compilerTriage.ProbableOwner.Owner);
+        AssertEqual("high", compilerTriage.ProbableOwner.Confidence);
+        AssertEqual("Unknown", ambiguousTriage.ProbableOwner.Owner);
+        AssertEqual("low", ambiguousTriage.ProbableOwner.Confidence);
+    }
+
+    public static void SharedToolingHintsAvoidUnrelatedFailures()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-shared-tooling",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent("mod.first", "First");
+        using AgentObservabilitySession second = run.CreateAgent("mod.second", "Second");
+        using AgentObservabilitySession unrelated = run.CreateAgent("mod.unrelated", "Unrelated");
+        first.Start();
+        second.Start();
+        unrelated.Start();
+        RecordReadinessFailure(first, "shared-1");
+        RecordReadinessFailure(second, "shared-2");
+        unrelated.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Different infrastructure failure.",
+            new
+            {
+                operationKey = "readiness:different",
+                toolName = "DevBridge2",
+                errorCode = "READINESS_TIMEOUT",
+                exitCode = 1
+            });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityIssuesView issues = ui.ShowIssues().Issues!;
+        AgentObservabilityIssueRow shared = issues.Issues.Single(row => row.ModName == "First");
+        AssertEqual(2, shared.SharedAgentCount);
+        AssertEqual("READINESS_IDENTITY_MISMATCH", shared.SharedTooling!.FailureCode);
+        Assert(issues.Issues.All(row => row.Issue.AgentId != unrelated.AgentId ||
+            row.SharedAgentCount == 0));
+
+        first.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.RecoveryCompleted,
+            "Readiness recovered.",
+            new { operationKey = "readiness:shared-1", recovered = true });
+        AgentObservabilityIssuesView ordered = ui.ShowIssues().Issues!;
+        Assert(!ordered.Issues[0].Issue.Recovered,
+            "unresolved issue must outrank recovered shared-tooling history");
+    }
+
+    public static void ChatPacketContainsBoundedTriageAndMissingEvidence()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-chat-packet",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.chat", "Chat Mod");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.BuildFailed,
+            "Build failed for Chat Mod.",
+            new
+            {
+                operationKey = "build:chat",
+                toolName = "compiler",
+                command = "dotnet build Source/Chat.csproj",
+                errorCode = "CS0246",
+                exitCode = 1,
+                transactionId = "tx-chat",
+                workflowId = "wf-chat",
+                project = "Chat.csproj",
+                branch = "feature/chat",
+                commitSha = "commit-chat"
+            });
+        using var unrelatedRun = new AgentObservabilityRun(
+            "ui-chat-unrelated",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession unrelated = unrelatedRun.CreateAgent(
+            "mod.unrelated-chat",
+            "Unrelated Chat");
+        unrelated.Start();
+        unrelated.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Unrelated history must not be copied.",
+            new { operationKey = "command:unrelated", errorCode = "OTHER_FAILURE", exitCode = 1 });
+
+        AgentIssue issue = store.GetIssues(agentId: agent.AgentId).Single();
+        using var ui = new AgentObservabilityUi(store, runId: run.RunId);
+        string packet = ui.CreateChatPacket(issue.Id);
+        Assert(packet.Contains("Agent/mod: Chat Mod", StringComparison.Ordinal));
+        Assert(packet.Contains("run=ui-chat-packet", StringComparison.Ordinal));
+        Assert(packet.Contains("Issue: " + issue.Id, StringComparison.Ordinal));
+        Assert(packet.Contains("Failure event:", StringComparison.Ordinal));
+        Assert(packet.Contains("Command: dotnet build Source/Chat.csproj", StringComparison.Ordinal));
+        Assert(packet.Contains("tx-chat", StringComparison.Ordinal));
+        Assert(packet.Contains("wf-chat", StringComparison.Ordinal));
+        Assert(packet.Contains("Evidence: Incomplete", StringComparison.Ordinal));
+        Assert(packet.Contains("Missing evidence:", StringComparison.Ordinal));
+        Assert(!packet.Contains("Unrelated history must not be copied", StringComparison.Ordinal));
+        Assert(packet.Length <= 8_000);
+    }
+
+    private static void RecordReadinessFailure(
+        AgentObservabilitySession agent,
+        string operationKey)
+    {
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Readiness identity mismatch occurred.",
+            new
+            {
+                operationKey = "readiness:" + operationKey,
+                toolName = "DevBridge2",
+                command = "readiness check",
+                errorCode = "READINESS_IDENTITY_MISMATCH",
+                exitCode = 1
+            });
     }
 
     public static void ExistingCliUiRemainsAvailable()
