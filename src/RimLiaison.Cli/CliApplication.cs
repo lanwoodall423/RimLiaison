@@ -100,10 +100,12 @@ public static class CliApplication
     {
         EfficiencyProfiler profiler = EfficiencyProfiler.Start();
         long started = Stopwatch.GetTimestamp();
+        string? commandName = null;
         string? workflowId = null;
         int exitCode = CliExitCodes.InternalError;
         AgentObservabilityRun? observabilityRun = null;
         AgentObservabilitySession? observabilityAgent = null;
+        IAgentObservabilityStore? eventStore = null;
         IDisposable? observabilityActivation = null;
         try
         {
@@ -115,9 +117,9 @@ public static class CliApplication
                 exitCode = CliExitCodes.Success;
                 return exitCode;
             }
-
+            commandName = request.Command.ToString().ToLowerInvariant();
             profiler.SetCommand(request.Command.ToString());
-            IAgentObservabilityStore eventStore = observabilityStore ??
+            eventStore = observabilityStore ??
                 AgentObservabilityStore.CreateDefault();
             observabilityRun = new AgentObservabilityRun(
                 profiler.RunId,
@@ -236,7 +238,7 @@ public static class CliApplication
                 exitCode = await ProfilerActivity.ObserveAsync(
                         "command.rimdev",
                         "rimdev",
-                        () => new RimDevWorkflow().RunAsync(
+                        () => new RimDevWorkflow(observabilityStore: eventStore).RunAsync(
                             new RimDevRunOptions(
                                 request.RimDevOperation ?? throw new InvalidOperationException("rimdev operation is missing"),
                                 request.RimDevRootPath,
@@ -410,6 +412,9 @@ public static class CliApplication
             {
                 try
                 {
+                    AgentWorkflowTelemetrySummary telemetry =
+                        AgentWorkflowTelemetrySummary.FromEvents(
+                            eventStore?.GetEvents(runId: profiler.RunId, limit: 4096) ?? []);
                     observabilityAgent.Record(
                         observabilityAgent.Snapshot.CurrentStage,
                         AgentEventTypes.CommandCompleted,
@@ -417,13 +422,16 @@ public static class CliApplication
                         new
                         {
                             operationKey = "cli",
+                            command = commandName,
                             workflowId,
                             exitCode,
+                            durationMs = ElapsedMilliseconds(started),
                             outcome = exitCode == CliExitCodes.Success
                                 ? "success"
                                 : exitCode == CliExitCodes.Cancelled
                                     ? "cancelled"
-                                    : "failure"
+                                    : "failure",
+                            telemetry
                         });
                     if (exitCode == CliExitCodes.Success)
                     {
@@ -1103,51 +1111,15 @@ public static class CliApplication
                 .ToArray();
         }
 
-        ValidationChangeAnalysis analysis = ValidationChangeAnalyzer.Analyze(changes);
-        string? contentFingerprint = null;
-        if (analysis.MeaningfulPaths.Count > 0 &&
-            WorktreeFingerprint.TryCompute(
-                rootPath,
-                analysis.MeaningfulPaths,
-                out string computedFingerprint,
-                out _))
-        {
-            contentFingerprint = computedFingerprint;
-        }
-
-        (string modId, _) = ResolveObservabilityMod(request);
-        AgentEvent[] events = observabilityStore
-            .GetEvents(modId: modId, limit: 512)
-            .ToArray();
-        ValidationEvidenceRecord[] evidence = events
-            .Select(record => ValidationEvidenceParser.TryParse(record, out ValidationEvidenceRecord? parsed)
-                ? parsed
-                : null)
-            .Where(static record => record is not null)
-            .Select(static record => record!)
-            .OrderByDescending(static record => record.RecordedAtUtc)
-            .ThenByDescending(static record => record.EvidenceId, StringComparer.Ordinal)
-            .ToArray();
-        RuntimeEvidenceInputs runtime = LatestRuntimeEvidence(events);
-        string[] selectedTestIds = LatestSelectedTestIds(events);
-        ValidationEvidenceIdentity current = ValidationEvidenceFactory.CurrentIdentity(
+        ValidationPublicationCheck publication = ValidationPublicationChecker.Evaluate(
             repository,
-            analysis.MeaningfulPaths,
-            analysis.RequiredKinds,
-            testIds: selectedTestIds.Length == 0 ? null : selectedTestIds,
-            toolVersions: ValidationEvidenceFactory.DefaultToolVersions(),
-            configuration: ValidationConfiguration(request),
-            environmentFingerprint: ValidationEvidenceFactory.DefaultEnvironmentFingerprint(),
-            deploymentCorrespondence: runtime.DeploymentCorrespondence,
-            runtimeGeneration: runtime.Generation,
-            buildArtifactSha256: runtime.BuildArtifactSha256,
-            deploymentArtifactSha256: runtime.DeploymentArtifactSha256,
-            contentFingerprint: contentFingerprint);
-        ValidationPublicationResult result = ValidationPublicationGate.Evaluate(
-            analysis,
-            current,
-            evidence,
-            DateTimeOffset.UtcNow);
+            changes,
+            observabilityStore,
+            ResolveObservabilityMod(request).ModId,
+            ValidationConfiguration(request),
+            dependencyFingerprints: request.DependencyFingerprints);
+        ValidationChangeAnalysis analysis = publication.Analysis;
+        ValidationPublicationResult result = publication.Result;
         var output = new
         {
             schemaVersion = "rimliaison-publication-check/v1",
@@ -1171,7 +1143,7 @@ public static class CliApplication
             newValidationCount = result.NewValidationCount,
             decisions = result.Decisions,
             nextAction = result.NextAction,
-            evidenceCount = evidence.Length
+            evidenceCount = publication.EvidenceCount
         };
         RecordPublicationCheck(output);
         WriteJson(stdout, output);
@@ -1228,6 +1200,7 @@ public static class CliApplication
             selectedTestIds,
             result,
             DateTimeOffset.UtcNow,
+            dependencyFingerprints: request.DependencyFingerprints,
             toolVersions: ValidationEvidenceFactory.DefaultToolVersions(),
             configuration: ValidationConfiguration(request),
             environmentFingerprint: ValidationEvidenceFactory.DefaultEnvironmentFingerprint());
@@ -1271,101 +1244,6 @@ public static class CliApplication
             });
     }
 
-    private static RuntimeEvidenceInputs LatestRuntimeEvidence(
-        IReadOnlyList<AgentEvent> events)
-    {
-        foreach (AgentEvent record in events
-                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted)
-                     .OrderByDescending(static value => value.Timestamp)
-                     .ThenByDescending(static value => value.Sequence))
-        {
-            if (record.Data is not JsonElement data ||
-                data.ValueKind != JsonValueKind.Object ||
-                !data.TryGetProperty("artifactFreshness", out JsonElement freshness) ||
-                freshness.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-
-            string? built = JsonString(freshness, "builtArtifactSha256");
-            string? deployed = JsonString(freshness, "deployedArtifactSha256");
-            string? evaluation = JsonString(freshness, "evaluationStatus");
-            string? correspondence = evaluation is not null
-                ? evaluation.Equals("FRESH", StringComparison.OrdinalIgnoreCase)
-                    ? "synchronized"
-                    : "mismatch"
-                : built is not null && deployed is not null
-                    ? string.Equals(built, deployed, StringComparison.OrdinalIgnoreCase)
-                        ? "synchronized"
-                        : "mismatch"
-                    : null;
-            return new RuntimeEvidenceInputs(
-                JsonInt(freshness, "generation") ?? JsonInt(freshness, "generationAfter"),
-                built,
-                deployed,
-                correspondence);
-        }
-
-        return new RuntimeEvidenceInputs(null, null, null, null);
-    }
-
-    private static string[] LatestSelectedTestIds(IReadOnlyList<AgentEvent> events)
-    {
-        foreach (AgentEvent record in events
-                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted ||
-                         value.Type == AgentEventTypes.ValidationEvidenceDecision ||
-                         value.Type == "test.selection.decision")
-                     .OrderByDescending(static value => value.Timestamp)
-                     .ThenByDescending(static value => value.Sequence))
-        {
-            if (record.Data is not JsonElement data || data.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-
-            foreach (string propertyName in new[] { "selectedTests", "tests" })
-            {
-                if (!data.TryGetProperty(propertyName, out JsonElement values) ||
-                    values.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                string[] result = values.EnumerateArray()
-                    .Where(static value => value.ValueKind == JsonValueKind.String)
-                    .Select(static value => value.GetString()!)
-                    .Where(static value => !string.IsNullOrWhiteSpace(value))
-                    .Distinct(StringComparer.Ordinal)
-                    .OrderBy(static value => value, StringComparer.Ordinal)
-                    .ToArray();
-                if (result.Length > 0)
-                {
-                    return result;
-                }
-            }
-        }
-
-        return [];
-    }
-
-    private static string? JsonString(JsonElement element, string name) =>
-        element.TryGetProperty(name, out JsonElement value) &&
-        value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-
-    private static int? JsonInt(JsonElement element, string name) =>
-        element.TryGetProperty(name, out JsonElement value) &&
-        value.ValueKind == JsonValueKind.Number &&
-        value.TryGetInt32(out int result)
-            ? result
-            : null;
-
-    private sealed record RuntimeEvidenceInputs(
-        int? Generation,
-        string? BuildArtifactSha256,
-        string? DeploymentArtifactSha256,
-        string? DeploymentCorrespondence);
 
     private static async Task<int> ExecuteCapabilitiesCommandAsync(
         CliRequest request,

@@ -807,10 +807,51 @@ public sealed record RimContextEfficiencyMetrics
     [JsonPropertyName("expensiveOperationCount")]
     public int? ExpensiveOperationCount { get; init; }
 
+    [JsonPropertyName("observedPerformance")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimContextObservedPerformanceSummary? ObservedPerformance { get; init; }
+
     [JsonPropertyName("benchmarkSummary")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RimContextBenchmarkSummary? BenchmarkSummary { get; init; }
 }
+public sealed record RimContextObservedPerformanceSummary
+{
+    [JsonPropertyName("status")]
+    public required string Status { get; init; }
+
+    [JsonPropertyName("sampleCount")]
+    public int SampleCount { get; init; }
+
+    [JsonPropertyName("medianWorkflowDurationMs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? MedianWorkflowDurationMs { get; init; }
+
+    [JsonPropertyName("p90WorkflowDurationMs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? P90WorkflowDurationMs { get; init; }
+
+    [JsonPropertyName("validationReuseRate")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? ValidationReuseRate { get; init; }
+
+    [JsonPropertyName("averageExpensiveOperations")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? AverageExpensiveOperations { get; init; }
+
+    [JsonPropertyName("runtimeLaunchesPerRuntimeWorkflow")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? RuntimeLaunchesPerRuntimeWorkflow { get; init; }
+
+    [JsonPropertyName("infrastructureRetryRate")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? InfrastructureRetryRate { get; init; }
+
+    [JsonPropertyName("topFailureClassification")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TopFailureClassification { get; init; }
+}
+
 
 public sealed record RimContextBenchmarkSummary
 {

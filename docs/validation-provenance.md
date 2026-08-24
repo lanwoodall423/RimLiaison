@@ -31,6 +31,18 @@ evidence returns a conservative `block` result with a bounded `nextAction`.
 The usual next action is `rimliaison affected --run --json`, which records new
 evidence before the query is repeated.
 
+## Ownership boundary
+
+Canonical `ValidationEvidenceRecord` and `ValidationPublicationGate` are the only authority
+for test validity, evidence reuse, invalidation, and publication readiness. Their identity
+includes selected inputs, dependency fingerprints, test IDs, tool/configuration inputs,
+environment, and runtime/deployment correspondence where required. RimDev does not
+reuse its former local test-evidence files; it forwards dependency identities to
+`rimliaison affected --run` and retains only build evidence for build/deploy artifact
+lookup and hash/source freshness checks. Build evidence alone never authorizes test reuse
+or publication. DevBridge2 remains authoritative for build, deployment, and runtime
+correspondence.
+
 ## Golden workflows
 
 Run the deterministic operation-count benchmark with:

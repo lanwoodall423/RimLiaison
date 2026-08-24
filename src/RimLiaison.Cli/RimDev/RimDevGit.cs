@@ -278,8 +278,12 @@ public sealed class RimDevGitReader
                 cancellationToken)
             .ConfigureAwait(false);
 
+        var ownership = new RepositoryChangeClassificationContext(
+            buildOwnedPaths: repository.DeploymentTarget is null
+                ? []
+                : [repository.DeploymentTarget]);
         string[] meaningful = changedPaths
-            .Where(path => !IsGeneratedPath(path))
+            .Where(path => !RepositoryChangeClassificationPolicy.Classify(path, ownership).IsGenerated)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         string[] buildPaths = meaningful
@@ -343,32 +347,13 @@ public sealed class RimDevGitReader
         }
     }
 
-    public static bool IsGeneratedPath(string path)
-    {
-        string normalized = path.Replace('\\', '/').TrimStart('/');
-        string lower = normalized.ToLowerInvariant();
-        return lower.StartsWith(".git/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimctx/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimdev/observability/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimdev/profiles/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimdev/validation-proofs/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimerror/", StringComparison.Ordinal) ||
-            lower.StartsWith(".vs/", StringComparison.Ordinal) ||
-            lower.StartsWith("coverage/", StringComparison.Ordinal) ||
-            lower.StartsWith("testresults/", StringComparison.Ordinal) ||
-            lower.Contains("/bin/", StringComparison.Ordinal) ||
-            lower.Contains("/obj/", StringComparison.Ordinal) ||
-            lower.StartsWith("bin/", StringComparison.Ordinal) ||
-            lower.StartsWith("obj/", StringComparison.Ordinal) ||
-            lower.StartsWith("artifacts/", StringComparison.Ordinal) ||
-            lower.EndsWith(".dll", StringComparison.Ordinal) ||
-            lower.EndsWith(".pdb", StringComparison.Ordinal) ||
-            lower.EndsWith(".g.cs", StringComparison.Ordinal) ||
-            lower.EndsWith(".generated.cs", StringComparison.Ordinal) ||
-            lower.EndsWith(".designer.cs", StringComparison.Ordinal) ||
-            lower.EndsWith(".deps.json", StringComparison.Ordinal) ||
-            lower.EndsWith(".runtimeconfig.json", StringComparison.Ordinal);
-    }
+    public static RepositoryChangeClassification ClassifyPath(
+        string path,
+        RepositoryChangeClassificationContext? context = null) =>
+        RepositoryChangeClassificationPolicy.Classify(path, context);
+
+    public static bool IsGeneratedPath(string path) =>
+        ClassifyPath(path).IsGenerated;
 
     private static bool IsTestRelevant(string path)
     {

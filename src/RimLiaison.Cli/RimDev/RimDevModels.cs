@@ -213,12 +213,3 @@ public sealed record RimDevTestExecutionResult(
     IReadOnlyList<string> Deployed = null!,
     string? ErrorCode = null,
     string? Output = null);
-
-public sealed record RimDevTestEvidence(
-    string RepositoryPath,
-    string? HeadSha,
-    string SourceIdentity,
-    IReadOnlyList<string> Deployed,
-    DateTimeOffset RecordedAtUtc,
-    string SchemaVersion = "rimdev-test-evidence/v1",
-    string? DependencyFingerprint = null);

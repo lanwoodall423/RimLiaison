@@ -9,9 +9,11 @@ using RimContext.Core.Contracts;
 using RimContext.Core.Semantics;
 using RimLiaison.DevBridge;
 using RimLiaison.Git;
+using RimLiaison.Observability;
+using RimLiaison.Provenance;
+
 
 namespace RimLiaison.RimDev;
-
 public sealed class RimDevWorkflow
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -26,7 +28,7 @@ public sealed class RimDevWorkflow
     private readonly IRimDevPullRequestProvider pullRequests;
     private readonly RimDevGitReader reader;
     private readonly RimDevBuildEvidenceStore evidenceStore;
-    private readonly RimDevTestEvidenceStore testEvidenceStore;
+    private readonly IAgentObservabilityStore observabilityStore;
     private readonly Dictionary<string, RimDevRepositoryObservation> cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> fetched = new(StringComparer.OrdinalIgnoreCase);
 
@@ -35,14 +37,15 @@ public sealed class RimDevWorkflow
         IRimDevProcessRunner? processRunner = null,
         IRimDevPullRequestProvider? pullRequests = null,
         IGitRepositoryStateProvider? stateProvider = null,
-        string? stateDirectory = null)
+        string? stateDirectory = null,
+        IAgentObservabilityStore? observabilityStore = null)
     {
         this.processRunner = processRunner ?? new SystemRimDevProcessRunner();
         this.git = git ?? new SystemRimDevGitClient(this.processRunner);
         this.pullRequests = pullRequests ?? new SystemRimDevPullRequestProvider(this.processRunner);
         reader = new RimDevGitReader(this.git, stateProvider);
         evidenceStore = new RimDevBuildEvidenceStore(stateDirectory);
-        testEvidenceStore = new RimDevTestEvidenceStore(stateDirectory);
+        this.observabilityStore = observabilityStore ?? AgentObservabilityStore.CreateDefault();
     }
 
     public async Task<int> RunAsync(
@@ -88,7 +91,7 @@ public sealed class RimDevWorkflow
                 RimDevOperation.Build => await BuildAsync(workspace, null, false, cancellationToken).ConfigureAwait(false),
                 RimDevOperation.Test => await TestAsync(workspace, null, cancellationToken).ConfigureAwait(false),
                 RimDevOperation.Deploy => await DeployAsync(workspace, null, false, cancellationToken).ConfigureAwait(false),
-                RimDevOperation.Push => await PushAsync(workspace, cancellationToken).ConfigureAwait(false),
+                RimDevOperation.Push => await PushAsync(workspace, null, cancellationToken).ConfigureAwait(false),
                 RimDevOperation.Merge => await MergeAsync(
                         workspace,
                         options.Confirm,
@@ -390,55 +393,97 @@ public sealed class RimDevWorkflow
                 continue;
             }
 
-            string? dependencyFingerprint = ComputeDependencyFingerprint(repository, observations);
-            if (TryReuseTestEvidence(repository, observation, dependencyFingerprint, out RimDevTestExecutionResult? reused))
+            IReadOnlyDictionary<string, string>? dependencyFingerprints =
+                ComputeDependencyFingerprints(repository, observations);
+            ValidationPublicationCheck canonical = ValidationPublicationChecker.Evaluate(
+                observation.State,
+                ToPublicationChanges(observation.ChangedPaths),
+                observabilityStore,
+                repository.Manifest.Project ?? repository.Name,
+                PublicationConfiguration(repository),
+                dependencyFingerprints: dependencyFingerprints);
+            if (canonical.Result.SafeToPublish && canonical.Result.ReusedEvidenceCount > 0)
             {
+                bool runtime = canonical.Analysis.RequiresRuntime;
+                RimDevTestExecutionResult canonicalReuse = new(
+                    true,
+                    runtime ? "reused" : "skip",
+                    "reused canonical RimTest publication evidence",
+                    runtime,
+                    runtime ? ["canonical validation evidence"] : []);
                 if (context is not null)
                 {
-                    context.TestResults[repository.Path] = reused;
+                    context.TestResults[repository.Path] = canonicalReuse;
                 }
 
-                RimDevRepositoryResult reusedResult = Success(repository, "reused", reused.Summary, observation.State);
-                results.Add(reusedResult);
-                completed[repository.Name] = reusedResult;
+                RimDevRepositoryResult canonicalResult = Success(
+                    repository,
+                    canonicalReuse.Status,
+                    canonicalReuse.Summary,
+                    observation.State);
+                results.Add(canonicalResult);
+                completed[repository.Name] = canonicalResult;
                 continue;
             }
 
             string command = ResolveRimLiaisonCommand(out IReadOnlyList<string> prefix);
+            var validationArguments = new List<string>(prefix.Count + 3 + (dependencyFingerprints?.Count ?? 0) * 2);
+            validationArguments.AddRange(prefix);
+            validationArguments.Add("affected");
+            validationArguments.Add("--run");
+            validationArguments.Add("--json");
+            if (dependencyFingerprints is not null)
+            {
+                foreach (KeyValuePair<string, string> pair in dependencyFingerprints.OrderBy(value => value.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    validationArguments.Add("--dependency-fingerprint");
+                    validationArguments.Add(pair.Key + "=" + pair.Value);
+                }
+            }
             RimDevProcessResult process = await processRunner.RunAsync(
                     repository.Path,
                     command,
-                    prefix.Concat(["affected", "--run", "--json"]).ToArray(),
+                    validationArguments,
                     TimeSpan.FromMinutes(30),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (observabilityStore is IAgentObservabilityLiveStore liveStore)
+            {
+                liveStore.Refresh();
+            }
+
             RimDevTestExecutionResult execution = ParseTestResult(process);
+            if (execution.Succeeded && observation.State is not null)
+            {
+                ValidationPublicationCheck completedCanonical = ValidationPublicationChecker.Evaluate(
+                    observation.State,
+                    ToPublicationChanges(observation.ChangedPaths),
+                    observabilityStore,
+                    repository.Manifest.Project ?? repository.Name,
+                    PublicationConfiguration(repository),
+                    dependencyFingerprints: dependencyFingerprints);
+                if (!completedCanonical.Result.SafeToPublish)
+                {
+                    execution = new(
+                        false,
+                        "blocked",
+                        "RimTest completed without reusable canonical validation evidence.",
+                        false,
+                        [],
+                        "RIMDEV_CANONICAL_TEST_EVIDENCE_MISSING");
+                }
+            }
             if (context is not null)
             {
                 context.TestResults[repository.Path] = execution;
             }
 
-            if (execution.Succeeded && execution.ArtifactFreshnessProven && observation.State is not null)
-            {
-                string? identity = RimDevSourceIdentity.Compute(
-                    repository.Path,
-                    observation.State,
-                    observation.MeaningfulPaths);
-                if (identity is not null)
-                {
-                    testEvidenceStore.Write(new RimDevTestEvidence(
-                        repository.Path,
-                        observation.State.HeadSha,
-                        identity,
-                        execution.Deployed,
-                        DateTimeOffset.UtcNow,
-                        DependencyFingerprint: dependencyFingerprint));
-                }
-            }
 
             RimDevRepositoryResult executionResult = execution.Succeeded
                 ? Success(repository, "pass", execution.Summary, observation.State)
-                : Failed(repository, execution.ErrorCode ?? "RIMDEV_TEST_FAILED", execution.Summary, observation.State);
+                : execution.Status is "blocked" or "infrastructure"
+                    ? Blocked(repository, execution.ErrorCode ?? "RIMDEV_TEST_INFRASTRUCTURE", execution.Summary, observation.State)
+                    : Failed(repository, execution.ErrorCode ?? "RIMDEV_TEST_FAILED", execution.Summary, observation.State);
             results.Add(executionResult);
             completed[repository.Name] = executionResult;
         }
@@ -468,7 +513,14 @@ public sealed class RimDevWorkflow
             {
                 if (requireTestSuccess && !test.Succeeded)
                 {
-                    results.Add(Blocked(repository, "RIMDEV_DEPLOY_TEST_FAILED", "Deployment was skipped because affected tests did not pass.", observation.State));
+                    bool infrastructure = test.Status is "blocked" or "infrastructure";
+                    results.Add(Blocked(
+                        repository,
+                        infrastructure ? "RIMDEV_DEPLOY_TEST_BLOCKED" : "RIMDEV_DEPLOY_TEST_FAILED",
+                        infrastructure
+                            ? "Deployment was skipped because infrastructure did not prove affected validation."
+                            : "Deployment was skipped because affected tests did not pass.",
+                        observation.State));
                     continue;
                 }
 
@@ -514,19 +566,61 @@ public sealed class RimDevWorkflow
         }
 
         return Aggregate("deploy", results);
-    }
 
+    }
     private async Task<RimDevResult> PushAsync(
         RimDevWorkspaceDiscovery workspace,
+        RimDevInvocationContext? context,
         CancellationToken cancellationToken)
     {
         var results = new List<RimDevRepositoryResult>();
-        foreach (RimDevRepository repository in workspace.Repositories.OrderBy(value => value.Name, StringComparer.OrdinalIgnoreCase))
+        var observations = new Dictionary<string, RimDevRepositoryObservation>(
+            await ObserveAllAsync(workspace, cancellationToken).ConfigureAwait(false),
+            StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<RimDevRepository> ordered = OrderRepositories(workspace.Repositories, out HashSet<string> cycles);
+        var completed = new Dictionary<string, RimDevRepositoryResult>(StringComparer.OrdinalIgnoreCase);
+        foreach (RimDevRepository repository in ordered)
         {
+            if (cycles.Contains(repository.Name))
+            {
+                RimDevRepositoryResult cycle = Blocked(repository, "RIMDEV_DEPENDENCY_CYCLE", "Repository publication dependencies contain a cycle.");
+                results.Add(cycle);
+                completed[repository.Name] = cycle;
+                continue;
+            }
+
+            if (repository.Dependencies.Any(dependency =>
+                    completed.TryGetValue(dependency, out RimDevRepositoryResult? dependencyResult) &&
+                    dependencyResult.Status is "blocked" or "fail"))
+            {
+                RimDevRepositoryResult dependencyBlocked = Blocked(
+                    repository,
+                    "RIMDEV_DEPENDENCY_BLOCKED",
+                    "A required repository did not pass its publication gate; push was not attempted.");
+                results.Add(dependencyBlocked);
+                completed[repository.Name] = dependencyBlocked;
+                continue;
+            }
+
             RimDevRepositoryObservation observation = await ObserveAsync(repository, cancellationToken).ConfigureAwait(false);
             if (observation.State is null || observation.ErrorCode is not null)
             {
-                results.Add(Blocked(repository, observation.ErrorCode ?? "GIT_STATE_UNAVAILABLE", observation.Error, observation.State));
+                RimDevRepositoryResult unavailable = Blocked(repository, observation.ErrorCode ?? "GIT_STATE_UNAVAILABLE", observation.Error, observation.State);
+                results.Add(unavailable);
+                completed[repository.Name] = unavailable;
+                continue;
+            }
+
+            if (context?.PhaseResults.TryGetValue(repository.Path, out List<RimDevRepositoryResult>? phases) == true &&
+                phases.Any(value => value.Status is "blocked" or "fail"))
+            {
+                RimDevRepositoryResult phaseBlocked = Blocked(
+                    repository,
+                    PublicationPhaseErrorCode(phases),
+                    PublicationPhaseSummary(phases),
+                    observation.State);
+                results.Add(phaseBlocked);
+                completed[repository.Name] = phaseBlocked;
                 continue;
             }
 
@@ -535,15 +629,19 @@ public sealed class RimDevWorkflow
             if (fetchFailure is not null)
             {
                 results.Add(fetchFailure);
+                completed[repository.Name] = fetchFailure;
                 continue;
             }
 
             if (!alreadyFetched)
             {
                 observation = await RefreshAsync(repository, cancellationToken).ConfigureAwait(false);
+                observations[repository.Name] = observation;
                 if (observation.State is null || observation.ErrorCode is not null)
                 {
-                    results.Add(Blocked(repository, observation.ErrorCode ?? "GIT_STATE_UNAVAILABLE", observation.Error, observation.State));
+                    RimDevRepositoryResult refreshFailure = Blocked(repository, observation.ErrorCode ?? "GIT_STATE_UNAVAILABLE", observation.Error, observation.State);
+                    results.Add(refreshFailure);
+                    completed[repository.Name] = refreshFailure;
                     continue;
                 }
             }
@@ -551,24 +649,51 @@ public sealed class RimDevWorkflow
             RimDevPolicyDecision decision = RimDevGitPolicy.DecidePush(observation.State);
             if (!decision.Allowed)
             {
-                results.Add(Blocked(repository, decision.ErrorCode!, decision.Explanation, observation.State));
+                RimDevRepositoryResult gitBlocked = Blocked(repository, decision.ErrorCode!, decision.Explanation, observation.State);
+                results.Add(gitBlocked);
+                completed[repository.Name] = gitBlocked;
+                continue;
+            }
+
+            ValidationPublicationCheck publication = ValidationPublicationChecker.Evaluate(
+                observation.State,
+                ToPublicationChanges(observation.ChangedPaths),
+                observabilityStore,
+                repository.Manifest.Project ?? repository.Name,
+                PublicationConfiguration(repository),
+                dependencyFingerprints: ComputeDependencyFingerprints(repository, observations));
+            if (!publication.Result.SafeToPublish)
+            {
+                string code = PublicationErrorCode(publication.Result);
+                RimDevRepositoryResult publicationBlocked = Blocked(
+                    repository,
+                    code,
+                    "Publication evidence blocked push: " + code + ": " + PublicationExplanation(publication.Result),
+                    observation.State,
+                    publication.Result.NextAction);
+                results.Add(publicationBlocked);
+                completed[repository.Name] = publicationBlocked;
                 continue;
             }
 
             if (decision.Action == "current")
             {
-                results.Add(Success(repository, "skip", observation.State.Dirty
+                RimDevRepositoryResult current = Success(repository, "skip", observation.State.Dirty
                     ? "nothing to push; uncommitted files were left untouched"
-                    : "nothing to push", observation.State));
+                    : "nothing to push", observation.State);
+                results.Add(current);
+                completed[repository.Name] = current;
                 continue;
             }
 
             RimDevGitResult push = await git.RunAsync(repository.Path, ["push"], cancellationToken).ConfigureAwait(false);
-            results.Add(push.Succeeded
+            RimDevRepositoryResult result = push.Succeeded
                 ? Success(repository, "pushed", observation.State.Dirty
                     ? "pushed committed work; uncommitted files were left untouched"
                     : "pushed committed work", observation.State)
-                : Blocked(repository, "GIT_PUSH_REJECTED", "The push was rejected without force-push or local file changes.", observation.State));
+                : Blocked(repository, "GIT_PUSH_REJECTED", "The push was rejected without force-push or local file changes.", observation.State);
+            results.Add(result);
+            completed[repository.Name] = result;
         }
 
         return Aggregate("push", results);
@@ -753,10 +878,14 @@ public sealed class RimDevWorkflow
     {
         var context = new RimDevInvocationContext();
         RimDevResult sync = await SyncAsync(workspace, cancellationToken).ConfigureAwait(false);
+        RecordPhase(context, sync);
         RimDevResult test = await TestAsync(workspace, context, cancellationToken).ConfigureAwait(false);
+        RecordPhase(context, test);
         RimDevResult build = await BuildAsync(workspace, context, true, cancellationToken).ConfigureAwait(false);
+        RecordPhase(context, build);
         RimDevResult deploy = await DeployAsync(workspace, context, true, cancellationToken).ConfigureAwait(false);
-        RimDevResult push = await PushAsync(workspace, cancellationToken).ConfigureAwait(false);
+        RecordPhase(context, deploy);
+        RimDevResult push = await PushAsync(workspace, context, cancellationToken).ConfigureAwait(false);
         var results = new List<RimDevRepositoryResult>();
         foreach (RimDevRepository repository in workspace.Repositories)
         {
@@ -809,6 +938,81 @@ public sealed class RimDevWorkflow
             nextActions.Distinct(StringComparer.Ordinal).ToArray(),
             MergePerformed: false);
     }
+
+    private static void RecordPhase(RimDevInvocationContext context, RimDevResult phase)
+    {
+        foreach (RimDevRepositoryResult result in phase.Repositories)
+        {
+            if (!context.PhaseResults.TryGetValue(result.Path, out List<RimDevRepositoryResult>? phases))
+            {
+                phases = [];
+                context.PhaseResults[result.Path] = phases;
+            }
+
+            phases.Add(result);
+        }
+    }
+
+    private static IReadOnlyList<GitRepositoryChange> ToPublicationChanges(
+        IReadOnlyList<string> paths) =>
+        paths.Select(path => new GitRepositoryChange(
+                path,
+                "M",
+                false,
+                RimDevGitReader.IsGeneratedPath(path)))
+            .ToArray();
+
+    private static IReadOnlyDictionary<string, string> PublicationConfiguration(
+        RimDevRepository repository) =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["catalog"] = ConfigurationPath(repository.Path, repository.Manifest.Catalog),
+            ["devBridgeProject"] = repository.Manifest.DevBridgeProject ?? "unknown",
+            ["fallbackSuite"] = repository.Manifest.FallbackSuite ?? "unknown"
+        };
+
+    private static string ConfigurationPath(string repositoryPath, string? configured)
+    {
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return "unknown";
+        }
+
+        try
+        {
+            return Path.GetFullPath(Path.IsPathRooted(configured)
+                ? configured
+                : Path.Combine(repositoryPath, configured));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return "invalid";
+        }
+    }
+
+    private static string PublicationErrorCode(ValidationPublicationResult result) =>
+        result.Decisions
+            .Where(decision => decision.ValidationKind is not null &&
+                decision.Action is global::RimContext.Core.Context.RimContextDecisionActions.Block or
+                    global::RimContext.Core.Context.RimContextDecisionActions.Invalidate)
+            .Select(static decision => decision.ReasonCode)
+            .FirstOrDefault() ?? ValidationDecisionReasonCodes.PublicationValidationRequired;
+
+    private static string PublicationExplanation(ValidationPublicationResult result) =>
+        string.Join(
+            "; ",
+            result.Decisions
+                .Where(decision => decision.Action is global::RimContext.Core.Context.RimContextDecisionActions.Block or
+                    global::RimContext.Core.Context.RimContextDecisionActions.Invalidate)
+                .Select(static decision => decision.ReasonCode + ": " + decision.Explanation));
+
+    private static string PublicationPhaseErrorCode(IReadOnlyList<RimDevRepositoryResult> phases) =>
+        phases.First(value => value.Status is "blocked" or "fail").ErrorCode ??
+        ValidationDecisionReasonCodes.PublicationValidationRequired;
+
+    private static string PublicationPhaseSummary(IReadOnlyList<RimDevRepositoryResult> phases) =>
+        "Publication was blocked because " +
+        phases.First(value => value.Status is "blocked" or "fail").Summary;
 
     private async Task<RimDevRepositoryObservation> ObserveAsync(RimDevRepository repository, CancellationToken cancellationToken)
     {
@@ -868,7 +1072,7 @@ public sealed class RimDevWorkflow
         return downstream;
     }
 
-    private static string? ComputeDependencyFingerprint(
+    private static IReadOnlyDictionary<string, string>? ComputeDependencyFingerprints(
         RimDevRepository repository,
         IReadOnlyDictionary<string, RimDevRepositoryObservation> observations)
     {
@@ -899,10 +1103,14 @@ public sealed class RimDevWorkflow
         Visit(repository);
         if (dependencyNames.Count == 0 || unavailable)
         {
-            return null;
+            return dependencyNames.Count == 0
+                ? new Dictionary<string, string>(StringComparer.Ordinal)
+                : null;
         }
 
-        var identities = new List<string>(dependencyNames.Count);
+        var fingerprints = new Dictionary<string, string>(
+            dependencyNames.Count,
+            StringComparer.Ordinal);
         foreach (string dependency in dependencyNames.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
         {
             RimDevRepositoryObservation observation = observations[dependency];
@@ -915,10 +1123,29 @@ public sealed class RimDevWorkflow
                 return null;
             }
 
-            identities.Add(dependency + "\0" + identity);
+            fingerprints[dependency] = identity;
         }
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities)))).ToLowerInvariant();
+        return fingerprints;
+    }
+
+    private static string? ComputeDependencyFingerprint(
+        RimDevRepository repository,
+        IReadOnlyDictionary<string, RimDevRepositoryObservation> observations)
+    {
+        IReadOnlyDictionary<string, string>? fingerprints = ComputeDependencyFingerprints(repository, observations);
+        if (fingerprints is null || fingerprints.Count == 0)
+        {
+            return null;
+        }
+
+        string[] identities = fingerprints
+            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => pair.Key + "\0" + pair.Value)
+            .ToArray();
+        return Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", identities))))
+            .ToLowerInvariant();
     }
 
     private async Task<RimDevRepositoryObservation> RefreshAsync(RimDevRepository repository, CancellationToken cancellationToken)
@@ -1370,7 +1597,21 @@ public sealed class RimDevWorkflow
             artifact.ValueKind == JsonValueKind.Object &&
             artifact.TryGetProperty("loadedArtifactFreshnessProven", out JsonElement proven) &&
             proven.ValueKind == JsonValueKind.True;
-        return new(passed, status, passed ? "affected tests passed" : status == "fail" ? "affected tests failed" : "affected tests are blocked", freshness, freshness ? ["validated RimTest artifact"] : [], passed ? null : "RIMDEV_TEST_FAILED", Bound(process.Stdout));
+        string? errorCode = passed
+            ? null
+            : status == "fail"
+                ? "RIMDEV_TEST_FAILED"
+                : status == "blocked"
+                    ? "RIMDEV_TEST_BLOCKED"
+                    : process.TimedOut
+                        ? "RIMDEV_TEST_TIMEOUT"
+                        : "RIMDEV_TEST_INFRASTRUCTURE";
+        string summary = passed
+            ? "affected tests passed"
+            : status == "fail"
+                ? "affected tests failed"
+                : "affected test validation was blocked by infrastructure";
+        return new(passed, passed ? status : status == "fail" ? "fail" : "infrastructure", summary, freshness, freshness ? ["validated RimTest artifact"] : [], errorCode, Bound(process.Stdout));
     }
 
     private static JsonElement? LastJson(string output)
@@ -1408,49 +1649,6 @@ public sealed class RimDevWorkflow
             : "unknown";
     }
 
-    private bool TryReuseTestEvidence(
-        RimDevRepository repository,
-        RimDevRepositoryObservation observation,
-        string? dependencyFingerprint,
-        out RimDevTestExecutionResult result)
-    {
-        result = null!;
-        if (observation.State is null)
-        {
-            return false;
-        }
-
-        RimDevTestEvidence? evidence = testEvidenceStore.Read(repository.Path);
-        if (evidence is null ||
-            !string.Equals(evidence.HeadSha, observation.State.HeadSha, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (repository.Dependencies.Count > 0 &&
-            (dependencyFingerprint is null || evidence.DependencyFingerprint is null ||
-                !string.Equals(dependencyFingerprint, evidence.DependencyFingerprint, StringComparison.OrdinalIgnoreCase)))
-        {
-            return false;
-        }
-
-        string? identity = RimDevSourceIdentity.Compute(
-            repository.Path,
-            observation.State,
-            observation.MeaningfulPaths);
-        if (!string.Equals(identity, evidence.SourceIdentity, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        result = new(
-            true,
-            "reused",
-            "reused the validated RimTest result for the unchanged source identity",
-            true,
-            evidence.Deployed);
-        return true;
-    }
 
     private async Task<string> MergeReadinessAsync(
         RimDevRepository repository,
@@ -1530,8 +1728,13 @@ public sealed class RimDevWorkflow
     private static RimDevRepositoryResult Failed(RimDevRepository repository, string code, string summary, GitRepositoryStateSnapshot? state, string? build = null, string? deployment = null) =>
         new(repository.Name, repository.Path, "fail", summary, state?.Branch, state?.Dirty, state?.Ahead, state?.Behind, state?.UpstreamName, build, deployment, ErrorCode: code, NextAction: FriendlyNextAction(repository, code));
 
-    private static RimDevRepositoryResult Blocked(RimDevRepository repository, string code, string? summary, GitRepositoryStateSnapshot? state = null) =>
-        new(repository.Name, repository.Path, "blocked", summary ?? "blocked safely", state?.Branch, state?.Dirty, state?.Ahead, state?.Behind, state?.UpstreamName, ErrorCode: code, NextAction: FriendlyNextAction(repository, code));
+    private static RimDevRepositoryResult Blocked(
+        RimDevRepository repository,
+        string code,
+        string? summary,
+        GitRepositoryStateSnapshot? state = null,
+        string? nextAction = null) =>
+        new(repository.Name, repository.Path, "blocked", summary ?? "blocked safely", state?.Branch, state?.Dirty, state?.Ahead, state?.Behind, state?.UpstreamName, ErrorCode: code, NextAction: nextAction ?? FriendlyNextAction(repository, code));
 
     private static string StatusNextAction(RimDevRepository repository, GitRepositoryStateSnapshot state)
     {
@@ -1586,12 +1789,14 @@ public sealed class RimDevWorkflow
         "MERGE_CHECKS_NOT_PASSING" => "Wait for every required check to pass, then run rimdev merge again.",
         "MERGE_SOURCE_STALE" or "MERGE_TARGET_STALE" => "The branch changed while the merge was being checked. Ask your development agent to refresh the work and retry.",
         "GITHUB_PR_QUERY_UNAVAILABLE" => "RimDev could not check GitHub right now. Check the connection or ask your development agent, then retry.",
+        "RIMDEV_BUILD_FAILED" or "RIMDEV_BUILD_TIMEOUT" => "A build failed. Review the compiler output, fix the source, and run rimdev build again.",
+        "RIMDEV_BUILD_OUTPUT_MISSING" or "RIMDEV_BUILD_PROJECT_AMBIGUOUS" => "RimDev could not establish a trustworthy build output. Review the project configuration, then run rimdev build again.",
         "RIMDEV_BUILD_EVIDENCE_MISSING" => "Run rimdev build first and keep the source unchanged before deploying.",
-        "RIMDEV_BUILD_EVIDENCE_STALE" => "The build no longer matches the current source. Run rimdev build again before deploying.",
         "RIMDEV_DEPLOY_TEST_FAILED" => "Fix the test or readiness issue, then run rimdev all again.",
-        "RIMDEV_DEPLOYMENT_CONFIGURATION_MISSING" => "The deployment target is not configured. Ask your development agent to finish the project setup.",
-        "RIMDEV_BUILD_FAILED" => "A build failed. Ask your development agent to review the build output, fix the source, and run rimdev build again.",
+        "RIMDEV_DEPLOY_TEST_BLOCKED" => "Validation infrastructure did not prove the deployment safe. Follow the reported recovery action, then run rimdev all again.",
         "RIMDEV_TEST_FAILED" => "A test failed. Ask your development agent to review the test result, fix the source, and run rimdev test again.",
+        "RIMDEV_CANONICAL_TEST_EVIDENCE_MISSING" => "RimTest did not leave reusable canonical validation evidence. Follow the reported recovery action, then run rimdev test again.",
+        "RIMDEV_TEST_BLOCKED" or "RIMDEV_TEST_INFRASTRUCTURE" or "RIMDEV_TEST_TIMEOUT" or "RIMDEV_TEST_RESULT_MISSING" => "Validation infrastructure did not prove the test safe. Follow the reported recovery action, then run rimdev test again.",
         "RIMDEV_DEPLOYMENT_FAILED" => "Deployment did not complete. Ask your development agent to review the target and run rimdev deploy again.",
         "RIMDEV_DEPENDENCY_BLOCKED" => "A required project did not finish. Fix that project first, then run rimdev all again.",
         "RIMDEV_DEPENDENCY_CYCLE" => "Project dependencies need attention. Ask your development agent to repair the project setup.",
@@ -1799,6 +2004,7 @@ public sealed class RimDevWorkflow
     private sealed class RimDevInvocationContext
     {
         public Dictionary<string, RimDevTestExecutionResult> TestResults { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<RimDevRepositoryResult>> PhaseResults { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }
 
@@ -1844,66 +2050,5 @@ internal sealed class RimDevBuildEvidenceStore
         string identity = Path.GetFullPath(repositoryPath).ToLowerInvariant();
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
         return Path.Combine(directory, hash + ".json");
-    }
-}
-
-internal sealed class RimDevTestEvidenceStore
-{
-    private readonly string directory;
-
-    public RimDevTestEvidenceStore(string? directory = null)
-    {
-        directory = directory ?? Environment.GetEnvironmentVariable("RIMDEV_STATE_ROOT") ??
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RimLiaison", "rimdev-state");
-        this.directory = Path.GetFullPath(directory);
-    }
-
-    public RimDevTestEvidence? Read(string repositoryPath)
-    {
-        try
-        {
-            string path = FilePath(repositoryPath);
-            if (!File.Exists(path) || new FileInfo(path).Length > 128 * 1024)
-            {
-                return null;
-            }
-
-            return JsonSerializer.Deserialize<RimDevTestEvidence>(
-                File.ReadAllText(path),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-            JsonException or NotSupportedException)
-        {
-            return null;
-        }
-    }
-
-    public bool Write(RimDevTestEvidence evidence)
-    {
-        string path = FilePath(evidence.RepositoryPath);
-        string temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            Directory.CreateDirectory(directory);
-            File.WriteAllText(temporary, JsonSerializer.Serialize(evidence));
-            File.Move(temporary, path, overwrite: true);
-            return true;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            return false;
-        }
-        finally
-        {
-            try { if (File.Exists(temporary)) File.Delete(temporary); } catch (Exception) { }
-        }
-    }
-
-    private string FilePath(string repositoryPath)
-    {
-        string identity = Path.GetFullPath(repositoryPath).ToLowerInvariant();
-        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
-        return Path.Combine(directory, hash + ".test.json");
     }
 }

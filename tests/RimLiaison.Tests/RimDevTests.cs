@@ -1,7 +1,11 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Diagnostics;
 using RimLiaison;
 using RimLiaison.Git;
+using RimLiaison.Observability;
+using RimLiaison.Provenance;
 using RimLiaison.RimDev;
 
 namespace RimLiaison.Tests;
@@ -61,14 +65,52 @@ public static class RimDevTests
 
     public static void GeneratedStateIsIgnored()
     {
+        AssertEqual(
+            RepositoryChangeClassificationKind.GeneratedTransient,
+            RimDevGitReader.ClassifyPath("bin/Release/Repo.dll").Kind);
+        AssertEqual(
+            RepositoryChangeClassificationKind.GeneratedTransient,
+            RimDevGitReader.ClassifyPath("obj/Release/Repo.pdb").Kind);
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/observability/events.json"), "RimDev observability state must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/profiles/run.json"), "RimDev profiles must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/validation-proofs/proof.json"), "Validation proofs must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimctx/index.sqlite"), "RimContext indexes must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath("TestResults/result.trx"), "Test result output must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimerror/failure.json"), "RimError state must be generated.");
-        Assert(RimDevGitReader.IsGeneratedPath("bin/Release/Repo.dll"), "Build output must be generated.");
+        Assert(!RimDevGitReader.IsGeneratedPath(".rimdev/stack.json"), "The stack manifest must remain meaningful configuration.");
         Assert(!RimDevGitReader.IsGeneratedPath("Source/Repo.cs"), "Source files must remain meaningful inputs.");
+        Assert(!RimDevGitReader.IsGeneratedPath("random/location/Unknown.dll"), "An arbitrary tracked assembly must not be hidden by its extension.");
+        Assert(!RimDevGitReader.IsGeneratedPath("random/location/Unknown.pdb"), "An arbitrary tracked symbol file must not be hidden by its extension.");
+    }
+
+    public static void OwnerAwareClassificationAgreesAcrossConsumers()
+    {
+        var context = new RepositoryChangeClassificationContext(
+            buildOwnedPaths: ["1.6/Assemblies/Fixture.dll"],
+            trackedProductionPaths: ["Assemblies/MyMod.dll"]);
+
+        AssertEqual(
+            RepositoryChangeClassificationKind.BuildOwnedArtifact,
+            RepositoryChangeClassificationPolicy.Classify("1.6/Assemblies/Fixture.dll", context).Kind);
+        AssertEqual(
+            RepositoryChangeClassificationKind.BuildOwnedArtifact,
+            RimDevGitReader.ClassifyPath("1.6/Assemblies/Fixture.dll", context).Kind);
+        AssertEqual(
+            RepositoryChangeClassificationKind.TrackedProductionArtifact,
+            RepositoryChangeClassificationPolicy.Classify("Assemblies/MyMod.dll", context).Kind);
+        AssertEqual(
+            RepositoryChangeClassificationKind.Unknown,
+            RepositoryChangeClassificationPolicy.Classify("random/location/Unknown.dll").Kind);
+
+        ValidationChangeAnalysis analysis = ValidationChangeAnalyzer.Analyze(
+        [
+            new GitRepositoryChange("bin/Release/Generated.dll", "M", false, true),
+            new GitRepositoryChange(".rimdev/stack.json", "M", false, false),
+            new GitRepositoryChange("random/location/Unknown.dll", "M", false, false)
+        ]);
+        Assert(analysis.GeneratedPaths.SequenceEqual(["bin/Release/Generated.dll"]), "Validation must share generated-path classification.");
+        Assert(analysis.MeaningfulPaths.SequenceEqual([".rimdev/stack.json", "random/location/Unknown.dll"]), "Validation must retain meaningful and unknown tracked artifacts.");
+        Assert(!ValidationChangeAnalyzer.IsGeneratedPath("random/location/Unknown.dll"), "Validation must not apply extension-global artifact rules.");
     }
 
     public static void GeneratedOnlyWorktreeIsNotReportedDirty()
@@ -112,6 +154,112 @@ public static class RimDevTests
         AssertEqual("RIMDEV_TEST_FAILED", result.GetProperty("repositories")[0].GetProperty("errorCode").GetString());
     }
 
+    public static void InfrastructureBlockedTestCannotPush()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        workspace.Process.TestInfrastructureBlocks.Add(workspace.RepoPath);
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.All);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "Infrastructure-blocked validation must not push.");
+    }
+
+    public static void FailedTestCannotPushDirectly()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        workspace.Process.TestFailures.Add(workspace.RepoPath);
+        Run(workspace, RimDevOperation.Test);
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "A failed test must not be bypassed by direct push.");
+    }
+
+    public static void InvalidatedEvidenceCannotPush()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        string source = Path.Combine(workspace.RepoPath, "Source", "Repo.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+        File.WriteAllText(source, "v1");
+        AssertEqual(0, Run(workspace, RimDevOperation.Test).ExitCode);
+        File.WriteAllText(source, "v2");
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "Invalidated evidence must not push.");
+    }
+
+    public static void MissingCanonicalEvidenceBlocksPush()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "Missing canonical evidence must block publication.");
+    }
+
+    public static void PassingProcessWithoutCanonicalEvidenceIsBlocked()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        workspace.Process.SuppressCanonicalEvidence = true;
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Test);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        AssertEqual("RIMDEV_CANONICAL_TEST_EVIDENCE_MISSING", result.GetProperty("repositories")[0].GetProperty("errorCode").GetString());
+    }
+
+
+    public static void BuildEvidenceAloneCannotAuthorizePush()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        string identity = Path.GetFullPath(workspace.RepoPath).ToLowerInvariant();
+        string hash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(identity)))
+            .ToLowerInvariant();
+        Directory.CreateDirectory(workspace.StateDirectory);
+        File.WriteAllText(
+            Path.Combine(workspace.StateDirectory, hash + ".json"),
+            JsonSerializer.Serialize(new
+            {
+                repositoryPath = workspace.RepoPath,
+                projectPath = "Repo.csproj",
+                configuration = "Release",
+                headSha = "head",
+                changedPathsFingerprint = "legacy-build-inputs",
+                identityPaths = new[] { "Source/Repo.cs" },
+                outputPath = Path.Combine(workspace.RepoPath, "bin", "Release", "Repo.dll"),
+                outputSha256 = new string('a', 64),
+                builtAtUtc = DateTimeOffset.UtcNow,
+                schemaVersion = "rimdev-build-evidence/v1"
+            }));
+
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(3, exitCode);
+        AssertEqual("blocked", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "Build evidence must not satisfy the canonical test-evidence requirement.");
+    }
+    public static void DocumentationOnlyChangeCanPush()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["README.md"];
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(0, exitCode);
+        AssertEqual("pushed", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+    }
+
     public static void DeploymentFailure()
     {
         using TestWorkspace workspace = TestWorkspace.Create("Repo");
@@ -123,6 +271,10 @@ public static class RimDevTests
         (int deployExitCode, JsonElement result) = Run(workspace, RimDevOperation.Deploy);
         AssertEqual(1, deployExitCode);
         AssertEqual("RIMDEV_DEPLOYMENT_FAILED", result.GetProperty("repositories")[0].GetProperty("errorCode").GetString());
+        (int pushExitCode, JsonElement push) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(3, pushExitCode);
+        AssertEqual("blocked", push.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "A deployment failure must not be followed by a push.");
     }
 
     public static void SafePush()
@@ -408,10 +560,31 @@ public static class RimDevTests
         Assert(result.GetProperty("nextActions").EnumerateArray().Any(value => value.GetString()!.Contains("test failed", StringComparison.OrdinalIgnoreCase)), "The failed component should have a direct next action.");
     }
 
+    public static void FailedDependencyBlocksDependentPublication()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Consumer", "Framework");
+        workspace.ConfigureDependencies(("Consumer", ["Framework"]));
+        workspace.SetState(State(Path.Combine(workspace.Root, "Consumer"), "feature", 1, 0, false));
+        workspace.SetState(State(Path.Combine(workspace.Root, "Framework"), "feature", 1, 0, false));
+        workspace.SetChangedPaths("Consumer", "Source/Consumer.cs");
+        workspace.SetChangedPaths("Framework", "Source/Framework.cs");
+        workspace.Process.TestFailures.Add(Path.Combine(workspace.Root, "Framework"));
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.All);
+        AssertEqual(1, exitCode);
+        JsonElement consumer = result.GetProperty("repositories").EnumerateArray()
+            .Single(value => value.GetProperty("name").GetString() == "Consumer");
+        AssertEqual("fail", result.GetProperty("repositories").EnumerateArray()
+            .Single(value => value.GetProperty("name").GetString() == "Framework")
+            .GetProperty("status").GetString());
+        AssertEqual("blocked", consumer.GetProperty("status").GetString());
+        Assert(!workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "A failed dependency must prevent dependent publication.");
+    }
+
     public static void TrustworthyTestEvidenceIsReused()
     {
         using TestWorkspace workspace = TestWorkspace.Create("Repo");
         workspace.SetState(State(workspace.RepoPath, "main", 0, 0, false));
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
         workspace.ChangedPaths = ["Source/Repo.cs"];
         (int firstExitCode, _) = Run(workspace, RimDevOperation.Test);
         AssertEqual(0, firstExitCode);
@@ -420,7 +593,54 @@ public static class RimDevTests
         AssertEqual(0, secondExitCode);
         AssertEqual(callsAfterFirstRun, workspace.Process.TestCalls);
         AssertEqual("reused", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        int callsBeforePush = workspace.Process.TestCalls;
+        (int pushExitCode, JsonElement push) = Run(workspace, RimDevOperation.Push);
+        AssertEqual(0, pushExitCode);
+        AssertEqual("pushed", push.GetProperty("repositories")[0].GetProperty("status").GetString());
+        AssertEqual(callsBeforePush, workspace.Process.TestCalls);
     }
+
+    public static void LegacyTestEvidenceCannotAuthorizeReuse()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        string identity = Path.GetFullPath(workspace.RepoPath).ToLowerInvariant();
+        string hash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(identity)))
+            .ToLowerInvariant();
+        Directory.CreateDirectory(workspace.StateDirectory);
+        File.WriteAllText(
+            Path.Combine(workspace.StateDirectory, hash + ".test.json"),
+            JsonSerializer.Serialize(new
+            {
+                repositoryPath = workspace.RepoPath,
+                headSha = "head",
+                sourceIdentity = "legacy-source-identity",
+                deployed = new[] { "legacy-artifact" },
+                recordedAtUtc = DateTimeOffset.UtcNow,
+                schemaVersion = "rimdev-test-evidence/v1"
+            }));
+
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.Test);
+        AssertEqual(0, exitCode);
+        AssertEqual(1, workspace.Process.TestCalls);
+        AssertEqual("pass", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+    }
+
+    public static void CanonicalEvidenceIsReusedByAll()
+    {
+        using TestWorkspace workspace = TestWorkspace.Create("Repo");
+        workspace.SetState(State(workspace.RepoPath, "feature", 1, 0, false));
+        workspace.ChangedPaths = ["Source/Repo.cs"];
+        workspace.RecordPassingValidation(workspace.RepoPath);
+        (int exitCode, JsonElement result) = Run(workspace, RimDevOperation.All);
+        AssertEqual(0, exitCode);
+        AssertEqual(0, workspace.Process.TestCalls);
+        AssertEqual("ok", result.GetProperty("repositories")[0].GetProperty("status").GetString());
+        Assert(workspace.Git.Calls.Any(call => call.Arguments.Count > 0 && call.Arguments[0] == "push"), "Canonical reusable evidence should permit All to push without rerunning tests.");
+    }
+
 
     public static void MergeConfirmationDefaultsToNo()
     {
@@ -572,7 +792,8 @@ public static class RimDevTests
             workspace.Process,
             workspace.PullRequests,
             workspace.States,
-            workspace.StateDirectory);
+            workspace.StateDirectory,
+            workspace.Observability);
         int exitCode = workflow.RunAsync(
                 new RimDevRunOptions(operation, workspace.Root, confirm, true, workspace.StateDirectory),
                 stdout,
@@ -655,8 +876,9 @@ public static class RimDevTests
             DeploymentRoot = Path.Combine(root, "deploy");
             Directory.CreateDirectory(DeploymentRoot);
             States = new FixedStateProvider();
+            Observability = new AgentObservabilityStore();
             Git = new FakeGitClient(this);
-            Process = new FakeProcessRunner();
+            Process = new FakeProcessRunner(this);
             PullRequests = new FakePullRequestProvider();
         }
 
@@ -666,9 +888,11 @@ public static class RimDevTests
         public string RepoPath => Path.Combine(Root, Repositories[0]);
         public string DeploymentRoot { get; }
         public FixedStateProvider States { get; }
+        public AgentObservabilityStore Observability { get; }
         public FakeGitClient Git { get; }
         public FakeProcessRunner Process { get; }
         public FakePullRequestProvider PullRequests { get; }
+
         public string[] ChangedPaths { get; set; } = [];
         public Dictionary<string, string[]> ChangedPathsByRepository { get; } = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, string[]> DependencyMap { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -739,8 +963,60 @@ public static class RimDevTests
             States.Results[path] = new GitRepositoryStateResult(true, state);
         }
 
+
+        public void RecordPassingValidation(string repositoryPath)
+        {
+            string root = Path.GetFullPath(repositoryPath);
+            GitRepositoryStateSnapshot state = States.Results[root].State!;
+            string modId = Path.GetFileName(root);
+            IReadOnlyList<GitRepositoryChange> changes = ChangedPathsFor(root)
+                .Select(path => new GitRepositoryChange(path, "M", false, RimDevGitReader.IsGeneratedPath(path)))
+                .ToArray();
+            var configuration = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["catalog"] = Path.GetFullPath(Path.Combine(root, "TestCatalog/rimtest.catalog.json")),
+                ["devBridgeProject"] = "unknown",
+                ["fallbackSuite"] = "smoke"
+            };
+            using var run = new AgentObservabilityRun("rimdev-test-" + Guid.NewGuid().ToString("N"), Observability);
+            AgentObservabilitySession agent = run.CreateAgent(modId, modId);
+            using IDisposable activation = agent.Activate();
+            agent.Start("fake affected validation");
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.SuiteCompleted,
+                "Fake affected validation completed.",
+                new
+                {
+                    selectedTests = new[] { "smoke" },
+                    artifactFreshness = new
+                    {
+                        generation = 1,
+                        builtArtifactSha256 = "built",
+                        deployedArtifactSha256 = "deployed",
+                        evaluationStatus = "FRESH"
+                    }
+                });
+            ValidationPublicationCheck check = ValidationPublicationChecker.Evaluate(
+                state,
+                changes,
+                Observability,
+                modId,
+                configuration);
+            ValidationEvidenceRecord evidence = ValidationEvidenceRecord.Create(
+                check.CurrentIdentity,
+                "pass",
+                DateTimeOffset.UtcNow);
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.ValidationEvidenceRecorded,
+                "Fake immutable validation evidence recorded.",
+                new { validationEvidence = evidence });
+        }
+
         public void Dispose()
         {
+            Observability.Dispose();
             try
             {
                 if (Directory.Exists(Root))
@@ -808,13 +1084,20 @@ public static class RimDevTests
 
     private sealed class FakeProcessRunner : IRimDevProcessRunner
     {
+        private readonly TestWorkspace workspace;
+
+        public FakeProcessRunner(TestWorkspace workspace)
+        {
+            this.workspace = workspace;
+        }
         public HashSet<string> BuildFailures { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> TestFailures { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> TestInfrastructureBlocks { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public bool SuppressCanonicalEvidence { get; set; }
         public int BuildCalls { get; private set; }
         public int TestCalls { get; private set; }
         public List<string> BuildRepositories { get; } = [];
         public List<string> TestRepositories { get; } = [];
-
         public Task<RimDevProcessResult> RunAsync(string workingDirectory, string fileName, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             if (arguments.Contains("affected", StringComparer.Ordinal))
@@ -824,6 +1107,15 @@ public static class RimDevTests
                 if (TestFailures.Contains(workingDirectory))
                 {
                     return Task.FromResult(new RimDevProcessResult(1, "{\"status\":\"fail\"}", string.Empty));
+                }
+                if (TestInfrastructureBlocks.Contains(workingDirectory))
+                {
+                    return Task.FromResult(new RimDevProcessResult(2, "{\"status\":\"blocked\"}", "fake infrastructure refusal"));
+                }
+
+                if (!SuppressCanonicalEvidence)
+                {
+                    workspace.RecordPassingValidation(workingDirectory);
                 }
 
                 return Task.FromResult(new RimDevProcessResult(0, "{\"status\":\"pass\",\"artifactFreshness\":{\"loadedArtifactFreshnessProven\":true}}", string.Empty));

@@ -1721,7 +1721,7 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
             CacheMisses = cacheMisses,
             ReusedEvidenceCount = cacheHits,
             InvalidatedEvidenceCount = invalidatedEvidenceCount,
-            ExpensiveOperationCount = expensiveOperationCount,
+            ObservedPerformance = ProjectObservedPerformance(events),
             BenchmarkSummary = GoldenWorkflowBenchmarkRunner.Summary(),
             RimWorldLaunches = events
                 .Select(record => GetInt(record.Data.GetValueOrDefault(), "launchesConsumed"))
@@ -1731,6 +1731,145 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
             Retries = retries
         };
     }
+
+    public static RimContextObservedPerformanceSummary ProjectObservedPerformance(
+        IReadOnlyList<AgentEvent> events)
+    {
+        ObservedWorkflow[] workflows = events
+            .GroupBy(static record => record.RunId, StringComparer.Ordinal)
+            .Select(ProjectObservedWorkflow)
+            .Where(static workflow => workflow is not null)
+            .Select(static workflow => workflow!)
+            .OrderByDescending(static workflow => workflow.EndedAt)
+            .Take(32)
+            .ToArray();
+        if (workflows.Length == 0)
+        {
+            return new RimContextObservedPerformanceSummary
+            {
+                Status = "insufficient-data",
+                SampleCount = 0
+            };
+        }
+
+        long[] durations = workflows
+            .Select(static workflow => workflow.DurationMs)
+            .OrderBy(static duration => duration)
+            .ToArray();
+        int runtimeCount = workflows.Count(static workflow => workflow.RuntimeRequired);
+        int reuseCount = workflows.Count(static workflow => workflow.ReusedValidation);
+        int retryCount = workflows.Count(static workflow => workflow.InfrastructureRetry);
+        string? topFailure = workflows
+            .Select(static workflow => workflow.FailureClassification)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .GroupBy(static value => value!, StringComparer.Ordinal)
+            .OrderByDescending(static group => group.Count())
+            .ThenBy(static group => group.Key, StringComparer.Ordinal)
+            .Select(static group => group.Key)
+            .FirstOrDefault();
+        return new RimContextObservedPerformanceSummary
+        {
+            Status = workflows.Length >= 2 ? "available" : "insufficient-data",
+            SampleCount = workflows.Length,
+            MedianWorkflowDurationMs = workflows.Length >= 2 ? Percentile(durations, 0.50) : null,
+            P90WorkflowDurationMs = workflows.Length >= 2 ? Percentile(durations, 0.90) : null,
+            ValidationReuseRate = workflows.Length >= 2 ? (double)reuseCount / workflows.Length : null,
+            AverageExpensiveOperations = workflows.Length >= 2
+                ? workflows.Average(static workflow => workflow.ExpensiveOperations)
+                : null,
+            RuntimeLaunchesPerRuntimeWorkflow = runtimeCount >= 2
+                ? (double)workflows.Where(static workflow => workflow.RuntimeRequired)
+                    .Sum(static workflow => workflow.RuntimeLaunches) / runtimeCount
+                : null,
+            InfrastructureRetryRate = workflows.Length >= 2
+                ? (double)retryCount / workflows.Length
+                : null,
+            TopFailureClassification = topFailure
+        };
+    }
+
+    private static ObservedWorkflow? ProjectObservedWorkflow(
+        IEnumerable<AgentEvent> grouped)
+    {
+        AgentEvent[] records = grouped
+            .OrderBy(static record => record.Timestamp)
+            .ThenBy(static record => record.Sequence)
+            .ToArray();
+        AgentEvent? started = records.FirstOrDefault(record =>
+            record.Type == AgentEventTypes.CommandStarted);
+        AgentEvent? completed = records.LastOrDefault(record =>
+            record.Type == AgentEventTypes.CommandCompleted);
+        string? command = FirstString(
+            started?.Data.GetValueOrDefault() ?? default,
+            "command") ??
+            FirstString(
+                completed?.Data.GetValueOrDefault() ?? default,
+                "command");
+        if (started is null || completed is null ||
+            command is not ("affected" or "rimdev" or "publish" or "build" or "deploy" or "test"))
+        {
+            return null;
+        }
+
+        long duration = GetLong(
+                completed.Data.GetValueOrDefault(),
+                "durationMs") ??
+            Math.Max(0, completed.Timestamp - started.Timestamp);
+        bool reused = records.Any(record =>
+            record.Type == AgentEventTypes.ValidationEvidenceDecision &&
+            GetString(record.Data.GetValueOrDefault(), "action") == RimContextDecisionActions.Reuse) ||
+            records.Any(record =>
+                record.Type == AgentEventTypes.PublicationChecked &&
+                GetString(record.Data.GetValueOrDefault(), "publicationAction") == "reuse");
+        bool runtime = records.Any(record =>
+            record.Type == AgentEventTypes.SuiteCompleted &&
+            (GetObject(record.Data.GetValueOrDefault(), "artifactFreshness").ValueKind == JsonValueKind.Object ||
+             GetBoolean(record.Data.GetValueOrDefault(), "requiresRuntime") == true));
+        int expensive = records.Count(record =>
+            record.Type is AgentEventTypes.BuildSucceeded or
+                AgentEventTypes.BuildFailed or
+                AgentEventTypes.SuiteCompleted or
+                AgentEventTypes.TestStarted);
+        int launches = records
+            .Select(record => GetInt(record.Data.GetValueOrDefault(), "launchesConsumed"))
+            .Where(static value => value.HasValue)
+            .Sum(static value => value!.Value);
+        string? failure = records
+            .Where(record => record.Type is AgentEventTypes.CommandFailed or
+                AgentEventTypes.BuildFailed or
+                AgentEventTypes.TestFailed or
+                AgentEventTypes.IntegrationFailed)
+            .Select(record => FirstString(record.Data.GetValueOrDefault(), "errorCode", "code") ?? record.Type)
+            .FirstOrDefault();
+        return new ObservedWorkflow(
+            completed.Timestamp,
+            duration,
+            runtime,
+            reused,
+            records.Any(record => record.Type == AgentEventTypes.RetryStarted),
+            expensive,
+            launches,
+            failure);
+    }
+
+    private static long Percentile(IReadOnlyList<long> values, double percentile)
+    {
+        int index = Math.Clamp(
+            (int)Math.Ceiling(values.Count * percentile) - 1,
+            0,
+            values.Count - 1);
+        return values[index];
+    }
+
+    private sealed record ObservedWorkflow(
+        long EndedAt,
+        long DurationMs,
+        bool RuntimeRequired,
+        bool ReusedValidation,
+        bool InfrastructureRetry,
+        int ExpensiveOperations,
+        int RuntimeLaunches,
+        string? FailureClassification);
 
     private static long? DurationFor(
         IReadOnlyList<AgentEvent> events,

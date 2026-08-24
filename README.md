@@ -102,5 +102,11 @@ dotnet run --project tests/RimLiaison.Tests/RimLiaison.Tests.csproj --configurat
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 -Json
 ```
 
+The custom `RimLiaison.Tests` runner executes each test in an isolated child
+process with a bounded watchdog. Set `RIMLIAISON_TEST_TIMEOUT_SECONDS` for a
+diagnostic timeout (clamped to 1–300 seconds); successful output stays compact,
+while timeout output includes the active test and bounded recent-test/process
+diagnostics.
+
 The composition gate uses the pinned external DevBridge2 fake host. It proves the no-RimWorld
 composition and bounded contracts; real RimWorld/RimBridgeServer smoke remains owned by DevBridge2.

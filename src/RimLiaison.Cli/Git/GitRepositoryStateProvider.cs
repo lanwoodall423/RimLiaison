@@ -40,7 +40,8 @@ public sealed record GitRepositoryChange(
     string Status,
     bool Untracked,
     bool Generated,
-    string? OriginalPath = null);
+    string? OriginalPath = null,
+    RepositoryChangeClassificationKind Classification = RepositoryChangeClassificationKind.Unknown);
 
 /// <summary>
 /// Read-only Git metadata for context snapshots. It is separate from the
@@ -51,19 +52,6 @@ public sealed class SystemGitRepositoryStateProvider : IGitRepositoryStateProvid
 {
     private const int MaximumOutputBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(10);
-    private static readonly HashSet<string> GeneratedDirectories = new(
-        [
-            ".git",
-            ".rimctx",
-            ".vs",
-            "artifacts",
-            "bin",
-            "coverage",
-            "obj",
-            "testresults",
-            ".rimerror"
-        ],
-        StringComparer.OrdinalIgnoreCase);
 
     public async Task<GitRepositoryStateResult> ReadAsync(
         string rootPath,
@@ -276,6 +264,7 @@ public sealed class SystemGitRepositoryStateProvider : IGitRepositoryStateProvid
                 return false;
             }
 
+            bool untracked = status.IndexOf('?') >= 0;
             string? originalPath = null;
             if (status.IndexOf('R') >= 0 || status.IndexOf('C') >= 0)
             {
@@ -288,85 +277,21 @@ public sealed class SystemGitRepositoryStateProvider : IGitRepositoryStateProvid
                 originalPath = records[++index].Replace('\\', '/');
             }
 
-            bool untracked = status.IndexOf('?') >= 0;
+            RepositoryChangeClassification classification =
+                RepositoryChangeClassificationPolicy.Classify(path);
             parsed.Add(new GitRepositoryChange(
                 path,
                 status,
                 untracked,
-                IsGenerated(path),
-                originalPath));
+                classification.IsGenerated,
+                originalPath,
+                classification.Kind));
         }
 
         changes = parsed.ToArray();
         return true;
     }
 
-    private static bool IsGenerated(string path)
-    {
-        string[] segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        string fileName = segments.LastOrDefault() ?? path;
-        if (segments.Length >= 2 &&
-            segments[^2].Equals("DevelopmentProjects", StringComparison.OrdinalIgnoreCase) &&
-            IsLegacyDescriptorRecoveryFile(fileName))
-        {
-            return true;
-        }
-
-        if (segments.Length >= 2 &&
-            segments[0].Equals(".rimdev", StringComparison.OrdinalIgnoreCase) &&
-            (segments[1].Equals("observability", StringComparison.OrdinalIgnoreCase) ||
-             segments[1].Equals("profiles", StringComparison.OrdinalIgnoreCase) ||
-             segments[1].Equals("validation-proofs", StringComparison.OrdinalIgnoreCase)))
-        {
-            return true;
-        }
-
-        if (segments.Any(GeneratedDirectories.Contains))
-        {
-            return true;
-        }
-
-        if (segments.Length == 2 &&
-            segments[0].Equals(".rimdev", StringComparison.OrdinalIgnoreCase) &&
-            fileName.EndsWith(".local.json", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        return fileName.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".generated.cs", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".deps.json", StringComparison.OrdinalIgnoreCase) ||
-            fileName.EndsWith(".runtimeconfig.json", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsLegacyDescriptorRecoveryFile(string fileName)
-    {
-        const string backupMarker = ".recovery-backup-";
-        int backupIndex = fileName.LastIndexOf(backupMarker, StringComparison.OrdinalIgnoreCase);
-        if (backupIndex >= 0)
-        {
-            string identity = fileName[(backupIndex + backupMarker.Length)..];
-            return identity.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
-                IsGuidN(identity[..^5]);
-        }
-
-        const string temporaryMarker = ".recovery-";
-        int temporaryIndex = fileName.LastIndexOf(temporaryMarker, StringComparison.OrdinalIgnoreCase);
-        if (temporaryIndex < 0)
-        {
-            return false;
-        }
-
-        string temporaryIdentity = fileName[(temporaryIndex + temporaryMarker.Length)..];
-        return temporaryIdentity.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) &&
-            IsGuidN(temporaryIdentity[..^4]);
-    }
-
-    private static bool IsGuidN(string value) =>
-        value.Length == 32 && Guid.TryParseExact(value, "N", out _);
 
     private static async Task<GitCommandResult> RunGitAsync(
         string workingDirectory,

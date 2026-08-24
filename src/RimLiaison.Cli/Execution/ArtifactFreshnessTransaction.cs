@@ -1358,6 +1358,8 @@ internal static class WorktreeMutationClassifier
                     "Build-output provenance was incomplete or contradictory.");
             }
         }
+        var classificationContext = new RepositoryChangeClassificationContext(
+            buildOwnedPaths: expected.Keys);
 
         string[] mutatedPaths = before.Paths.Keys
             .Concat(after.Paths.Keys)
@@ -1365,12 +1367,15 @@ internal static class WorktreeMutationClassifier
             .Where(path => !SameState(before.Paths, after.Paths, path))
             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
         var accepted = new List<RimTestBuildOwnedOutputChange>();
         foreach (string path in mutatedPaths)
         {
             before.Paths.TryGetValue(path, out WorktreePathState? previous);
             after.Paths.TryGetValue(path, out WorktreePathState? current);
-            if (!string.Equals(deploymentDecision, "deployed", StringComparison.Ordinal) ||
+            if (RepositoryChangeClassificationPolicy.Classify(path, classificationContext).Kind !=
+                    RepositoryChangeClassificationKind.BuildOwnedArtifact ||
+                !string.Equals(deploymentDecision, "deployed", StringComparison.Ordinal) ||
                 !expected.TryGetValue(path, out DevBridgeBuildOutputEvidence? output) ||
                 current is null ||
                 !current.Exists ||
@@ -1449,17 +1454,15 @@ internal static class SourceChangeClassifier
             return false;
         }
 
-        string normalized = path.Replace('\\', '/').TrimStart('.', '/');
-        string lower = normalized.ToLowerInvariant();
-        if (lower.StartsWith(".git/", StringComparison.Ordinal) ||
-            lower.StartsWith(".rimctx/", StringComparison.Ordinal) ||
-            lower.Contains("/bin/", StringComparison.Ordinal) ||
-            lower.Contains("/obj/", StringComparison.Ordinal) ||
-            lower.StartsWith("bin/", StringComparison.Ordinal) ||
-            lower.StartsWith("obj/", StringComparison.Ordinal))
+        RepositoryChangeClassification classification =
+            RepositoryChangeClassificationPolicy.Classify(path);
+        if (classification.IsGenerated)
         {
             return false;
         }
+
+        string normalized = classification.Path.TrimStart('.', '/');
+        string lower = normalized.ToLowerInvariant();
 
         if (lower.StartsWith("source/", StringComparison.Ordinal) ||
             lower.StartsWith("src/", StringComparison.Ordinal))

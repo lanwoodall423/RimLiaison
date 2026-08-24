@@ -1,6 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Security.Cryptography;
+using System.Diagnostics;
+using System.Text;
+
 using RimError.Core;
 using RimContext.Core;
 using RimContext.Core.Context;
@@ -33,8 +36,13 @@ internal static class Program
         ("context projects RimError structured store", ContextProjectsRimErrorStructuredStore),
         ("context provider projects synchronized owner evidence", ContextProviderProjectsSynchronizedOwnerEvidence),
         ("validation evidence identity is immutable and relevant", ValidationEvidenceIdentityIsImmutableAndRelevant),
-        ("publication gate separates reuse and invalidation", PublicationGateSeparatesReuseAndInvalidation),
+        ("publication gate rejects newly selected tests", PublicationGateRejectsNewlySelectedTests),
         ("golden workflow benchmark matches baseline", GoldenWorkflowBenchmarkMatchesBaseline),
+        ("observability retains bounded parallel identities", ObservabilityRetainsBoundedParallelIdentities),
+        ("observed performance stays separate from benchmarks", ObservedPerformanceStaysSeparateFromBenchmarks),
+        ("observed performance reports insufficient data", ObservedPerformanceReportsInsufficientData),
+        ("real workflow telemetry aggregates bounded events", ObservabilityTests.RealWorkflowTelemetryAggregatesBoundedEvents),
+        ("runner timeout contains a hung child", RunnerTimeoutContainsHungChild),
         ("failure knowledge matches generated state", FailureKnowledgeMatchesGeneratedState),
         ("context exposes provenance benchmarks and failure knowledge", ContextExposesProvenanceBenchmarksAndFailureKnowledge),
         ("isolation metadata validates safe defaults", IsolationMetadataValidatesSafeDefaults),
@@ -316,9 +324,17 @@ internal static class Program
         ("rimdev dirty repo", RimDevTests.DirtyRepo),
         ("rimdev no upstream", RimDevTests.NoUpstream),
         ("rimdev generated state is ignored", RimDevTests.GeneratedStateIsIgnored),
+        ("rimdev owner-aware classification agrees across consumers", RimDevTests.OwnerAwareClassificationAgreesAcrossConsumers),
         ("rimdev generated-only worktree is not reported dirty", RimDevTests.GeneratedOnlyWorktreeIsNotReportedDirty),
         ("rimdev build failure", RimDevTests.BuildFailure),
         ("rimdev test failure", RimDevTests.TestFailure),
+        ("rimdev infrastructure-blocked test cannot push", RimDevTests.InfrastructureBlockedTestCannotPush),
+        ("rimdev failed test cannot push directly", RimDevTests.FailedTestCannotPushDirectly),
+        ("rimdev invalidated evidence cannot push", RimDevTests.InvalidatedEvidenceCannotPush),
+        ("rimdev missing canonical evidence blocks push", RimDevTests.MissingCanonicalEvidenceBlocksPush),
+        ("rimdev passing process without canonical evidence is blocked", RimDevTests.PassingProcessWithoutCanonicalEvidenceIsBlocked),
+        ("rimdev build evidence alone cannot authorize push", RimDevTests.BuildEvidenceAloneCannotAuthorizePush),
+        ("rimdev documentation-only change can push", RimDevTests.DocumentationOnlyChangeCanPush),
         ("rimdev deployment failure", RimDevTests.DeploymentFailure),
         ("rimdev safe push", RimDevTests.SafePush),
         ("rimdev rejects non-fast-forward push", RimDevTests.RejectedNonFastForwardPush),
@@ -330,19 +346,40 @@ internal static class Program
         ("rimdev merge requires exact source identity", RimDevTests.MergeRequiresExactSourceIdentity),
         ("rimdev partial multi-repository failure", RimDevTests.PartialMultiRepositoryFailure),
         ("rimdev affected-only build and test selection", RimDevTests.AffectedOnlyBuildAndTestSelection),
-        ("rimdev dependency changes select downstream in order", RimDevTests.DependencyChangesSelectDownstreamInOrder),
+        ("rimdev failed dependency blocks dependent publication", RimDevTests.FailedDependencyBlocksDependentPublication),
+        ("rimdev reuses canonical validation evidence", RimDevTests.TrustworthyTestEvidenceIsReused),
+        ("rimdev legacy test evidence cannot authorize reuse", RimDevTests.LegacyTestEvidenceCannotAuthorizeReuse),
+        ("rimdev All reuses canonical publication evidence", RimDevTests.CanonicalEvidenceIsReusedByAll),
         ("rimdev one changed leaf selects only that repository", RimDevTests.OneChangedLeafSelectsOnlyThatRepository),
         ("rimdev dirty sync preserves work and continues", RimDevTests.DirtySyncPreservesWorkAndContinues),
         ("rimdev all failure blocks only failed deployment", RimDevTests.AllFailureBlocksOnlyFailedDeployment),
-        ("rimdev reuses trustworthy test evidence", RimDevTests.TrustworthyTestEvidenceIsReused),
         ("rimdev merge confirmation defaults to no", RimDevTests.MergeConfirmationDefaultsToNo),
         ("rimdev multiple merge candidates require selection", RimDevTests.MultipleMergeCandidatesRequireExplicitSelection),
         ("rimdev no-argument menu and help are beginner friendly", RimDevTests.CliNoArgumentAndHelpAreBeginnerFriendly),
-        ("rimdev wrapper forwards arguments from another folder", RimDevTests.WindowsWrapperForwardsArgumentsFromAnotherFolder)
     ];
 
-    public static int Main(string[] args)
+    private const int DefaultTestTimeoutSeconds = 60;
+    private const int MaximumTestTimeoutSeconds = 300;
+    private const int MaximumChildOutputCharacters = 8_192;
+
+    public static int Main(string[] args) =>
+        RunAsync(args).GetAwaiter().GetResult();
+
+    private static async Task<int> RunAsync(string[] args)
     {
+        if (args.Length == 1 &&
+            string.Equals(args[0], "--timeout-probe", StringComparison.Ordinal))
+        {
+            Thread.Sleep(Timeout.Infinite);
+            return 1;
+        }
+
+        if (args.Length == 2 &&
+            string.Equals(args[0], "--child", StringComparison.Ordinal))
+        {
+            return RunChild(args[1]);
+        }
+
         string? filter = args.Length == 2 &&
             string.Equals(args[0], "--filter", StringComparison.Ordinal)
                 ? args[1]
@@ -357,23 +394,349 @@ internal static class Program
         }
 
         int failures = 0;
-        foreach ((string name, Action test) in selected)
+        Queue<string> recentTests = new();
+        int timeoutSeconds = ReadTestTimeoutSeconds();
+        foreach ((string name, _) in selected)
         {
-            try
-            {
-                test();
-                Console.WriteLine($"PASS {name}");
-            }
-            catch (Exception exception)
+            Console.WriteLine($"BEGIN {name}");
+            long started = Stopwatch.GetTimestamp();
+            IsolatedTestResult result = await RunIsolatedAsync(name, timeoutSeconds);
+            string duration = $"durationMs={ElapsedMilliseconds(started)}";
+            if (result.TimedOut)
             {
                 failures++;
-                Console.Error.WriteLine($"FAIL {name}: {exception.Message}");
+                Console.Error.WriteLine("TEST_TIMEOUT");
+                Console.Error.WriteLine($"test={name}");
+                Console.Error.WriteLine(duration);
+                Console.Error.WriteLine($"previousTest={(recentTests.Count == 0 ? "none" : recentTests.Last())}");
+                Console.Error.WriteLine($"recentTests={(recentTests.Count == 0 ? "none" : string.Join(",", recentTests))}");
+                Console.Error.WriteLine(ProcessDiagnostics());
+            }
+            else if (result.ExitCode == 0)
+            {
+                Console.WriteLine($"PASS {name} {duration}");
+            }
+            else
+            {
+                failures++;
+                string details = FirstNonEmpty(result.StandardError, result.StandardOutput);
+                Console.Error.WriteLine(
+                    $"FAIL {name} {duration}: {BoundedSingleLine(details)}");
+            }
+
+            recentTests.Enqueue(name);
+            while (recentTests.Count > 4)
+            {
+                recentTests.Dequeue();
             }
         }
 
         Console.WriteLine($"{selected.Length - failures}/{selected.Length} tests passed.");
         return failures == 0 ? 0 : 1;
     }
+
+    private static int RunChild(string name)
+    {
+        (string Name, Action Test)? selected = Tests.FirstOrDefault(
+            value => string.Equals(value.Name, name, StringComparison.Ordinal));
+        if (selected is null)
+        {
+            Console.Error.WriteLine($"No test matched child '{name}'.");
+            return 2;
+        }
+
+        try
+        {
+            selected.Value.Test();
+            Console.WriteLine($"PASS {name}");
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"FAIL {name}: {exception}");
+            return 1;
+        }
+    }
+
+    private static Task<IsolatedTestResult> RunIsolatedAsync(
+        string name,
+        int timeoutSeconds) =>
+        RunIsolatedAsync(["--child", name], timeoutSeconds);
+
+    private static async Task<IsolatedTestResult> RunIsolatedAsync(
+        IReadOnlyList<string> arguments,
+        int timeoutSeconds)
+    {
+        using Process process = new()
+        {
+            StartInfo = CreateChildStartInfo(arguments)
+        };
+        if (!process.Start())
+        {
+            return new IsolatedTestResult(-1, false, string.Empty, "child process did not start");
+        }
+
+        Task<string> outputTask = ReadBoundedAsync(process.StandardOutput);
+        Task<string> errorTask = ReadBoundedAsync(process.StandardError);
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(timeoutSeconds));
+        bool timedOut = false;
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            timedOut = true;
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited at the timeout boundary.
+            }
+
+            await process.WaitForExitAsync();
+        }
+
+        return new IsolatedTestResult(
+            process.ExitCode,
+            timedOut,
+            await outputTask,
+            await errorTask);
+    }
+
+    private static ProcessStartInfo CreateChildStartInfo(IReadOnlyList<string> arguments)
+    {
+        string processPath = Environment.ProcessPath ??
+            throw new InvalidOperationException("The test runner process path is unavailable.");
+        string assemblyPath = typeof(Program).Assembly.Location;
+        bool isDotnetHost = string.Equals(
+            Path.GetFileNameWithoutExtension(processPath),
+            "dotnet",
+            StringComparison.OrdinalIgnoreCase);
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = processPath,
+            WorkingDirectory = Environment.CurrentDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        if (isDotnetHost)
+        {
+            startInfo.ArgumentList.Add(assemblyPath);
+        }
+
+        foreach (string argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        return startInfo;
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader)
+    {
+        StringBuilder output = new();
+        char[] buffer = new char[1024];
+        int read;
+        while ((read = await reader.ReadAsync(buffer.AsMemory())) > 0)
+        {
+            if (output.Length < MaximumChildOutputCharacters)
+            {
+                int retained = Math.Min(
+                    read,
+                    MaximumChildOutputCharacters - output.Length);
+                output.Append(buffer, 0, retained);
+            }
+        }
+
+        return output.ToString();
+    }
+
+    private static int ReadTestTimeoutSeconds()
+    {
+        string? value = Environment.GetEnvironmentVariable("RIMLIAISON_TEST_TIMEOUT_SECONDS");
+        return int.TryParse(value, out int seconds)
+            ? Math.Clamp(seconds, 1, MaximumTestTimeoutSeconds)
+            : DefaultTestTimeoutSeconds;
+    }
+
+    private static string FirstNonEmpty(string first, string second) =>
+        string.IsNullOrWhiteSpace(first) ? second : first;
+
+    private static string BoundedSingleLine(string value)
+    {
+        string oneLine = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return oneLine.Length <= MaximumChildOutputCharacters
+            ? oneLine
+            : oneLine[..MaximumChildOutputCharacters] + "...";
+    }
+
+    private static string ProcessDiagnostics()
+    {
+        using Process process = Process.GetCurrentProcess();
+        return $"process=pid:{process.Id};threads:{process.Threads.Count};workingSetBytes:{process.WorkingSet64}";
+    }
+
+    private static long ElapsedMilliseconds(long started) =>
+        (long)Math.Round(
+            (Stopwatch.GetTimestamp() - started) * 1000d / Stopwatch.Frequency);
+
+    private readonly record struct IsolatedTestResult(
+        int ExitCode,
+        bool TimedOut,
+        string StandardOutput,
+        string StandardError);
+
+    private static void RunnerTimeoutContainsHungChild()
+    {
+        IsolatedTestResult result = RunIsolatedAsync(["--timeout-probe"], 1)
+            .GetAwaiter()
+            .GetResult();
+        Assert(result.TimedOut, "hung child was not timed out");
+        Assert(result.ExitCode != 0, "timed out child reported success");
+    }
+
+    private static void ObservabilityRetainsBoundedParallelIdentities()
+    {
+        using AgentObservabilityStore parallelStore = new(
+            options: new AgentObservabilityOptions { MaximumEvents = 20 });
+        foreach (string runId in new[] { "run-a", "run-b" })
+        {
+            parallelStore.RegisterAgent(new AgentSnapshot
+            {
+                RunId = runId,
+                AgentId = "agent-" + runId,
+                ModId = "mod.test",
+                ModName = "Test Mod",
+                StartTime = 90
+            });
+            parallelStore.AppendEvent(new AgentEventRequest(
+                runId,
+                "agent-" + runId,
+                "mod.test",
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandStarted,
+                "started",
+                new { command = "affected" },
+                Timestamp: 100));
+            parallelStore.AppendEvent(new AgentEventRequest(
+                runId,
+                "agent-" + runId,
+                "mod.test",
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandCompleted,
+                "completed",
+                new { command = "affected", durationMs = 10 },
+                Timestamp: 110));
+        }
+
+        IReadOnlyList<AgentEvent> parallelEvents = parallelStore.GetEvents(limit: 20);
+        Assert(parallelEvents.Count == 4, "parallel events were overwritten");
+        Assert(
+            parallelEvents.Select(static value => value.RunId).Distinct(StringComparer.Ordinal).Count() == 2,
+            "parallel run identity was not retained");
+
+        using AgentObservabilityStore boundedStore = new(
+            options: new AgentObservabilityOptions { MaximumEvents = 3 });
+        boundedStore.RegisterAgent(new AgentSnapshot
+        {
+            RunId = "run-bounded",
+            AgentId = "agent-bounded",
+            ModId = "mod.test",
+            ModName = "Test Mod",
+            StartTime = 190
+        });
+        for (int index = 0; index < 6; index++)
+        {
+            boundedStore.AppendEvent(new AgentEventRequest(
+                "run-bounded",
+                "agent-bounded",
+                "mod.test",
+                DevelopmentStage.Testing,
+                AgentEventTypes.ToolCompleted,
+                "event",
+                Timestamp: 200 + index));
+        }
+
+        IReadOnlyList<AgentEvent> boundedEvents = boundedStore.GetEvents(limit: 20);
+        Assert(boundedEvents.Count == 3, "event retention exceeded its bound");
+        Assert(
+            boundedEvents.Select(static value => value.Sequence).SequenceEqual([4L, 5L, 6L]),
+            "retention did not preserve the newest events in order");
+    }
+
+    private static void ObservedPerformanceStaysSeparateFromBenchmarks()
+    {
+        AgentEvent[] events =
+        [
+            ObservedEvent("run-a", 100, 1, AgentEventTypes.CommandStarted, new { command = "affected" }),
+            ObservedEvent("run-a", 110, 2, AgentEventTypes.ValidationEvidenceDecision, new { action = RimContextDecisionActions.Reuse }),
+            ObservedEvent("run-a", 120, 3, AgentEventTypes.SuiteCompleted, new { artifactFreshness = new { state = "fresh" } }),
+            ObservedEvent("run-a", 200, 4, AgentEventTypes.CommandCompleted, new { command = "affected", durationMs = 100 }),
+            ObservedEvent("run-b", 300, 5, AgentEventTypes.CommandStarted, new { command = "affected" }),
+            ObservedEvent("run-b", 320, 6, AgentEventTypes.BuildStarted),
+            ObservedEvent("run-b", 350, 7, AgentEventTypes.BuildSucceeded),
+            ObservedEvent("run-b", 500, 8, AgentEventTypes.CommandCompleted, new { command = "affected", durationMs = 200 })
+        ];
+
+        RimContextObservedPerformanceSummary observed =
+            RimLiaisonContextBundleProvider.ProjectObservedPerformance(events);
+        Assert(observed.Status == "available", "observed sample did not become available");
+        Assert(observed.SampleCount == 2, "observed samples were not grouped by run");
+        Assert(observed.MedianWorkflowDurationMs == 100, "observed median is incorrect");
+        Assert(observed.P90WorkflowDurationMs == 200, "observed p90 is incorrect");
+        Assert(observed.ValidationReuseRate == 0.5, "observed reuse rate is incorrect");
+
+        RimContextEfficiencyMetrics metrics = new()
+        {
+            BenchmarkSummary = GoldenWorkflowBenchmarkRunner.Summary(),
+            ObservedPerformance = observed
+        };
+        string json = JsonSerializer.Serialize(metrics);
+        Assert(json.Contains("\"benchmarkSummary\"", StringComparison.Ordinal), "synthetic benchmark missing");
+        Assert(json.Contains("\"observedPerformance\"", StringComparison.Ordinal), "observed metrics missing");
+        Assert(json.Contains("\"status\":\"available\"", StringComparison.Ordinal), "observed status missing");
+    }
+
+    private static void ObservedPerformanceReportsInsufficientData()
+    {
+        AgentEvent[] events =
+        [
+            ObservedEvent("run-a", 100, 1, AgentEventTypes.CommandStarted, new { command = "affected" }),
+            ObservedEvent("run-a", 200, 2, AgentEventTypes.CommandCompleted, new { command = "affected", durationMs = 100 })
+        ];
+
+        RimContextObservedPerformanceSummary observed =
+            RimLiaisonContextBundleProvider.ProjectObservedPerformance(events);
+        Assert(observed.Status == "insufficient-data", "single workflow was treated as representative");
+        Assert(observed.SampleCount == 1, "insufficient sample count is incorrect");
+        Assert(observed.MedianWorkflowDurationMs is null, "insufficient median should be absent");
+        Assert(observed.P90WorkflowDurationMs is null, "insufficient p90 should be absent");
+    }
+
+    private static AgentEvent ObservedEvent(
+        string runId,
+        long timestamp,
+        long sequence,
+        string type,
+        object? data = null) =>
+        new()
+        {
+            Id = $"{runId}-{sequence}",
+            RunId = runId,
+            AgentId = "agent-" + runId,
+            ModId = "mod.test",
+            Timestamp = timestamp,
+            Sequence = sequence,
+            Stage = DevelopmentStage.Testing,
+            Type = type,
+            Summary = type,
+            Data = data is null ? null : JsonSerializer.SerializeToElement(data)
+        };
 
     private static void ValidCatalogLoads()
     {
@@ -1262,6 +1625,67 @@ internal static class Program
                 decision.Action == RimContextDecisionActions.Reuse &&
                 decision.ValidationKind == ValidationEvidenceKinds.Static),
             "static evidence should remain reusable across deployment mismatch");
+        ValidationEvidenceIdentity dependencyEvidenceIdentity = CreateValidationIdentity(
+            "source-1",
+            ["Source/Thing.cs"],
+            ["quicktest"],
+            runtimeGeneration: 4,
+            build: "build-4",
+            deployment: "deploy-4",
+            dependencies: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["framework"] = "old"
+            });
+        ValidationPublicationResult dependencyResult = ValidationPublicationGate.Evaluate(
+            runtime,
+            CreateValidationIdentity(
+                "source-1",
+                ["Source/Thing.cs"],
+                [],
+                runtimeGeneration: 4,
+                build: "build-4",
+                deployment: "deploy-4",
+                dependencies: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["framework"] = "new"
+                }),
+            [ValidationEvidenceRecord.Create(
+                dependencyEvidenceIdentity,
+                "pass",
+                DateTimeOffset.UtcNow)],
+            DateTimeOffset.UtcNow);
+        Assert(!dependencyResult.SafeToPublish, "A dependency identity change must invalidate canonical evidence.");
+        Assert(dependencyResult.Decisions.Any(decision =>
+            decision.Action == RimContextDecisionActions.Invalidate &&
+            decision.ReasonCode == ValidationDecisionReasonCodes.EvidenceInputMismatch),
+            "Dependency changes must be reported as canonical evidence input invalidation.");
+    }
+
+    private static void PublicationGateRejectsNewlySelectedTests()
+    {
+        ValidationChangeAnalysis analysis = ValidationChangeAnalyzer.Analyze(
+            [new GitRepositoryChange("Source/Thing.cs", "M", false, false)]);
+        ValidationEvidenceIdentity evidenceIdentity = CreateValidationIdentity(
+            "source-1",
+            ["Source/Thing.cs"],
+            ["compile"]);
+        ValidationPublicationResult result = ValidationPublicationGate.Evaluate(
+            analysis,
+            CreateValidationIdentity(
+                "source-1",
+                ["Source/Thing.cs"],
+                ["compile", "quicktest"]),
+            [ValidationEvidenceRecord.Create(
+                evidenceIdentity,
+                "pass",
+                DateTimeOffset.UtcNow)],
+            DateTimeOffset.UtcNow);
+
+        Assert(!result.SafeToPublish, "newly selected tests must not reuse narrower evidence");
+        Assert(result.Decisions.Any(decision =>
+            decision.Action == RimContextDecisionActions.Invalidate &&
+            decision.ReasonCode == ValidationDecisionReasonCodes.EvidenceTestIdentityMismatch),
+            "newly selected tests must invalidate canonical evidence");
     }
 
     private static void GoldenWorkflowBenchmarkMatchesBaseline()
@@ -1437,13 +1861,15 @@ internal static class Program
         IReadOnlyList<string> testIds,
         int? runtimeGeneration = null,
         string? build = null,
-        string? deployment = null) =>
+        string? deployment = null,
+        IReadOnlyDictionary<string, string>? dependencies = null) =>
         new()
         {
             Repository = "git:fixture",
             ContentFingerprint = content,
             SelectedSourceInputs = sourceInputs,
-            DependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal),
+            DependencyFingerprints = dependencies ??
+                new Dictionary<string, string>(StringComparer.Ordinal),
             BuildArtifactSha256 = build,
             DeploymentArtifactSha256 = deployment,
             ValidationKind = runtimeGeneration.HasValue
@@ -1875,12 +2301,16 @@ internal static class Program
                 """));
         var stdout = new StringWriter();
         var stderr = new StringWriter();
+        using AgentObservabilityStore observabilityStore = new();
 
-        int exitCode = CliApplication.Run(
-            ["recipe", "plan", "fixture"],
-            stdout,
-            stderr,
-            CreateAdapter(transport));
+        int exitCode = CliApplication.RunAsync(
+                ["recipe", "plan", "fixture"],
+                stdout,
+                stderr,
+                CreateAdapter(transport),
+                observabilityStore: observabilityStore)
+            .GetAwaiter()
+            .GetResult();
 
         AssertEqual(CliExitCodes.Success, exitCode);
         Assert(stdout.ToString().Contains(
@@ -1909,12 +2339,16 @@ internal static class Program
             File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
             var stdout = new StringWriter();
             var stderr = new StringWriter();
+            using AgentObservabilityStore observabilityStore = new();
 
-            int exitCode = CliApplication.Run(
-                ["run", "assembler-smoke", "--json", "--catalog", catalogPath],
-                stdout,
-                stderr,
-                CreateAdapter(transport));
+            int exitCode = CliApplication.RunAsync(
+                    ["run", "assembler-smoke", "--json", "--catalog", catalogPath],
+                    stdout,
+                    stderr,
+                    CreateAdapter(transport),
+                    observabilityStore: observabilityStore)
+                .GetAwaiter()
+                .GetResult();
 
             AssertEqual(CliExitCodes.Success, exitCode);
             Assert(stdout.ToString().Contains(
@@ -9752,10 +10186,17 @@ internal static class Program
             File.WriteAllText(catalogPath, Serialize(catalog));
             var stdout = new StringWriter();
             var stderr = new StringWriter();
+            using AgentObservabilityStore observabilityStore = new();
             string[] args = command
                 .Concat(["--catalog", catalogPath])
                 .ToArray();
-            int exitCode = CliApplication.Run(args, stdout, stderr);
+            int exitCode = CliApplication.RunAsync(
+                    args,
+                    stdout,
+                    stderr,
+                    observabilityStore: observabilityStore)
+                .GetAwaiter()
+                .GetResult();
             return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
         }
         finally
@@ -9789,17 +10230,28 @@ internal static class Program
             File.WriteAllText(catalogPath, Serialize(catalog));
             var stdout = new StringWriter();
             var stderr = new StringWriter();
+            using AgentObservabilityStore observabilityStore = new();
             string[] args = command
                 .Concat(["--catalog", catalogPath])
                 .ToArray();
             int exitCode = diagnosisAdapter is null
-                ? CliApplication.Run(args, stdout, stderr, recipeAdapter)
-                : CliApplication.Run(
+                ? CliApplication.RunAsync(
                     args,
                     stdout,
                     stderr,
                     recipeAdapter,
-                    diagnosisAdapter);
+                    observabilityStore: observabilityStore)
+                    .GetAwaiter()
+                    .GetResult()
+                : CliApplication.RunAsync(
+                    args,
+                    stdout,
+                    stderr,
+                    recipeAdapter,
+                    diagnosisAdapter: diagnosisAdapter,
+                    observabilityStore: observabilityStore)
+                    .GetAwaiter()
+                    .GetResult();
             return new CliResult(exitCode, stdout.ToString(), stderr.ToString());
         }
         finally

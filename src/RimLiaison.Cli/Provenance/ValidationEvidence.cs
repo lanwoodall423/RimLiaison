@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using RimLiaison.Execution;
 using RimLiaison.Git;
 using RimLiaison.Observability;
 using RimLiaison.Results;
@@ -511,21 +512,26 @@ public sealed record ValidationChangeAnalysis(
 
 public static class ValidationChangeAnalyzer
 {
-    public static ValidationChangeAnalysis Analyze(IEnumerable<GitRepositoryChange> changes)
+    public static ValidationChangeAnalysis Analyze(
+        IEnumerable<GitRepositoryChange> changes,
+        RepositoryChangeClassificationContext? context = null)
     {
         ArgumentNullException.ThrowIfNull(changes);
         GitRepositoryChange[] all = changes
             .Where(static change => change is not null)
             .ToArray();
-        string[] generated = all
-            .Where(static change => change.Generated || IsGeneratedPath(change.Path))
-            .Select(static change => Normalize(change.Path))
+        RepositoryChangeClassification[] classifications = all
+            .Select(change => RepositoryChangeClassificationPolicy.Classify(change, context))
+            .ToArray();
+        string[] generated = classifications
+            .Where(static classification => classification.IsGenerated)
+            .Select(static classification => classification.Path)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static path => path, StringComparer.Ordinal)
             .ToArray();
-        string[] meaningful = all
-            .Where(static change => !change.Generated && !IsGeneratedPath(change.Path))
-            .Select(static change => Normalize(change.Path))
+        string[] meaningful = classifications
+            .Where(static classification => classification.IsMeaningful)
+            .Select(static classification => classification.Path)
             .Where(static path => path.Length > 0)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static path => path, StringComparer.Ordinal)
@@ -626,27 +632,8 @@ public static class ValidationChangeAnalyzer
         path.Contains("/source/", StringComparison.OrdinalIgnoreCase) ||
         path.Contains("/assemblies/", StringComparison.OrdinalIgnoreCase);
 
-    private static string Normalize(string path) => path.Replace('\\', '/').TrimStart('/');
-
-    public static bool IsGeneratedPath(string path)
-    {
-        string normalized = Normalize(path);
-        string[] segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length >= 2 &&
-            string.Equals(segments[0], ".rimdev", StringComparison.OrdinalIgnoreCase) &&
-            segments[1] is "observability" or "profiles" or "validation-proofs")
-        {
-            return true;
-        }
-
-        return segments.Any(segment => segment.Equals(".rimctx", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals(".rimerror", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("artifacts", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("coverage", StringComparison.OrdinalIgnoreCase) ||
-            segment.Equals("testresults", StringComparison.OrdinalIgnoreCase));
-    }
+    public static bool IsGeneratedPath(string path) =>
+        RepositoryChangeClassificationPolicy.IsGeneratedPath(path);
 }
 
 public sealed record ValidationPublicationDecision(
@@ -738,9 +725,11 @@ public static class ValidationPublicationGate
                 .ThenBy(static record => record.EvidenceId, StringComparer.Ordinal)
                 .ToArray();
             ValidationEvidenceRecord? latest = allForKind.FirstOrDefault();
-            ValidationEvidenceRecord[] candidates = allForKind
-                .Where(static record => record.Reusable && record.Result == "pass")
-                .ToArray();
+            ValidationEvidenceRecord[] candidates = latest is { Reusable: true, Result: "pass" }
+                ? allForKind
+                    .Where(static record => record.Reusable && record.Result == "pass")
+                    .ToArray()
+                : [];
             ValidationEvidenceRecord? matching = candidates.FirstOrDefault(record =>
                 MatchesForKind(record.Identity, normalizedCurrent, kind, out _));
 
@@ -849,7 +838,7 @@ public static class ValidationPublicationGate
         }
 
         if (current.TestIds.Count > 0 &&
-            !evidence.TestIds.All(testId => current.TestIds.Contains(testId, StringComparer.Ordinal)))
+            !current.TestIds.All(testId => evidence.TestIds.Contains(testId, StringComparer.Ordinal)))
         {
             reason = ValidationDecisionReasonCodes.EvidenceTestIdentityMismatch;
             return false;
@@ -928,7 +917,7 @@ public static class ValidationPublicationGate
         }
 
         if (current.TestIds.Count > 0 &&
-            !evidence.TestIds.All(testId => current.TestIds.Contains(testId, StringComparer.Ordinal)))
+            !current.TestIds.All(testId => evidence.TestIds.Contains(testId, StringComparer.Ordinal)))
         {
             return ValidationDecisionReasonCodes.EvidenceTestIdentityMismatch;
         }
@@ -974,4 +963,168 @@ public static class ValidationPublicationGate
                 decision.ValidationKind is not null &&
                 (decision.Action == global::RimContext.Core.Context.RimContextDecisionActions.Block ||
                  decision.Action == global::RimContext.Core.Context.RimContextDecisionActions.Invalidate)));
+}
+
+public sealed record ValidationPublicationCheck(
+    ValidationChangeAnalysis Analysis,
+    ValidationPublicationResult Result,
+    int EvidenceCount,
+    ValidationEvidenceIdentity CurrentIdentity);
+
+public static class ValidationPublicationChecker
+{
+    public static ValidationPublicationCheck Evaluate(
+        GitRepositoryStateSnapshot repository,
+        IEnumerable<GitRepositoryChange> changes,
+        IAgentObservabilityStore observabilityStore,
+        string modId,
+        IReadOnlyDictionary<string, string>? configuration = null,
+        IReadOnlyDictionary<string, string>? dependencyFingerprints = null)
+    {
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(changes);
+        ArgumentNullException.ThrowIfNull(observabilityStore);
+
+        ValidationChangeAnalysis analysis = ValidationChangeAnalyzer.Analyze(changes);
+        string? contentFingerprint = null;
+        if (analysis.MeaningfulPaths.Count > 0 &&
+            WorktreeFingerprint.TryCompute(
+                repository.RootPath,
+                analysis.MeaningfulPaths,
+                out string computedFingerprint,
+                out _))
+        {
+            contentFingerprint = computedFingerprint;
+        }
+
+        IReadOnlyList<AgentEvent> events = observabilityStore
+            .GetEvents(modId: modId, limit: 512);
+        ValidationEvidenceRecord[] evidence = events
+            .Select(record => ValidationEvidenceParser.TryParse(record, out ValidationEvidenceRecord? parsed)
+                ? parsed
+                : null)
+            .Where(static record => record is not null)
+            .Select(static record => record!)
+            .OrderByDescending(static record => record.RecordedAtUtc)
+            .ThenByDescending(static record => record.EvidenceId, StringComparer.Ordinal)
+            .ToArray();
+        RuntimeEvidenceInputs runtime = LatestRuntimeEvidence(events);
+        string[] selectedTestIds = LatestSelectedTestIds(events);
+        ValidationEvidenceIdentity current = ValidationEvidenceFactory.CurrentIdentity(
+            repository,
+            analysis.MeaningfulPaths,
+            analysis.RequiredKinds,
+            testIds: selectedTestIds.Length == 0 ? null : selectedTestIds,
+            dependencyFingerprints: dependencyFingerprints,
+            toolVersions: ValidationEvidenceFactory.DefaultToolVersions(),
+            configuration: configuration,
+            environmentFingerprint: ValidationEvidenceFactory.DefaultEnvironmentFingerprint(),
+            deploymentCorrespondence: runtime.DeploymentCorrespondence,
+            runtimeGeneration: runtime.Generation,
+            buildArtifactSha256: runtime.BuildArtifactSha256,
+            deploymentArtifactSha256: runtime.DeploymentArtifactSha256,
+            contentFingerprint: contentFingerprint);
+        ValidationPublicationResult result = ValidationPublicationGate.Evaluate(
+            analysis,
+            current,
+            evidence,
+            DateTimeOffset.UtcNow);
+        return new(analysis, result, evidence.Length, current);
+    }
+
+    private static RuntimeEvidenceInputs LatestRuntimeEvidence(
+        IReadOnlyList<AgentEvent> events)
+    {
+        foreach (AgentEvent record in events
+                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted)
+                     .OrderByDescending(static value => value.Timestamp)
+                     .ThenByDescending(static value => value.Sequence))
+        {
+            if (record.Data is not JsonElement data ||
+                data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty("artifactFreshness", out JsonElement freshness) ||
+                freshness.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string? built = JsonString(freshness, "builtArtifactSha256");
+            string? deployed = JsonString(freshness, "deployedArtifactSha256");
+            string? evaluation = JsonString(freshness, "evaluationStatus");
+            string? correspondence = evaluation is not null
+                ? evaluation.Equals("FRESH", StringComparison.OrdinalIgnoreCase)
+                    ? "synchronized"
+                    : "mismatch"
+                : built is not null && deployed is not null
+                    ? string.Equals(built, deployed, StringComparison.OrdinalIgnoreCase)
+                        ? "synchronized"
+                        : "mismatch"
+                    : null;
+            return new(
+                JsonInt(freshness, "generation") ?? JsonInt(freshness, "generationAfter"),
+                built,
+                deployed,
+                correspondence);
+        }
+
+        return new(null, null, null, null);
+    }
+
+    private static string[] LatestSelectedTestIds(IReadOnlyList<AgentEvent> events)
+    {
+        foreach (AgentEvent record in events
+                     .Where(static value => value.Type == AgentEventTypes.SuiteCompleted ||
+                         value.Type == AgentEventTypes.ValidationEvidenceDecision ||
+                         value.Type == "test.selection.decision")
+                     .OrderByDescending(static value => value.Timestamp)
+                     .ThenByDescending(static value => value.Sequence))
+        {
+            if (record.Data is not JsonElement data || data.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            foreach (string propertyName in new[] { "selectedTests", "tests" })
+            {
+                if (!data.TryGetProperty(propertyName, out JsonElement values) ||
+                    values.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                string[] result = values.EnumerateArray()
+                    .Where(static value => value.ValueKind == JsonValueKind.String)
+                    .Select(static value => value.GetString()!)
+                    .Where(static value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(static value => value, StringComparer.Ordinal)
+                    .ToArray();
+                if (result.Length > 0)
+                {
+                    return result;
+                }
+            }
+        }
+
+        return [];
+    }
+
+    private static string? JsonString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out JsonElement value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int? JsonInt(JsonElement element, string name) =>
+        element.TryGetProperty(name, out JsonElement value) &&
+        value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt32(out int result)
+            ? result
+            : null;
+
+    private sealed record RuntimeEvidenceInputs(
+        int? Generation,
+        string? BuildArtifactSha256,
+        string? DeploymentArtifactSha256,
+        string? DeploymentCorrespondence);
 }

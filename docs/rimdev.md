@@ -51,10 +51,9 @@ from a particular workspace.
 | `rimdev sync` | Fetches remotes and performs only safe `--ff-only` updates. Dirty-behind, detached, missing-upstream, and diverged repositories are reported without changing them. |
 | `rimdev build` | Builds only repositories with affected build inputs, plus downstream repositories whose configured dependencies changed, in dependency order; source/output identity is recorded outside the worktree. |
 | `rimdev test` | Delegates affected selection and execution to `rimliaison affected --run --json`, including downstream consumers of changed workspace dependencies; a proven unchanged source identity can reuse a prior RimTest result. |
-| `rimdev deploy` | Replaces only a configured target after current source identity and output hash checks pass. It reports every deployed target. |
-| `rimdev push` | Fetches first, then pushes committed ahead work without force-push. Dirty files are left alone and explained. |
+| `rimdev push` | Fetches first, then requires the canonical RimTest/RimLiaison publication-evidence check for each repository before pushing committed ahead work. Valid reusable evidence is reused; missing, failed, invalidated, stale, or infrastructure-blocked evidence prevents that repository's push. Dirty files are left alone and explained. |
 | `rimdev merge` | Finds one open, non-draft, mergeable PR with passing checks and matching source/target identities. If several candidates exist, it asks for the exact PR number. It prints a compact plan and asks for explicit confirmation; Enter means No. `--yes` is available for a deliberate scripted confirmation. |
-| `rimdev all` | Runs sync, affected test, affected build, deployment, and safe push, then reports PR readiness. It never merges; run `rimdev merge` separately. |
+| `rimdev all` | Runs sync, affected test, affected build, deployment, canonical publication-evidence check, and safe push per repository, then reports PR readiness. It never merges; run `rimdev merge` separately. One repository's failure does not globally abort unrelated repositories; configured dependents are conservatively blocked. |
 
 The default output is concise and human-readable. Add `--json` for the versioned
 `rimdev-result/v1` envelope. `--yes`/`--confirm` is accepted only by `rimdev merge`.
@@ -73,7 +72,13 @@ read-only processing of the others. Multi-repository mutating commands return a 
 successful repositories and blockers remain visible together.
 
 Build/test evidence is stored outside repositories under the local RimDev state directory. Set
-`RIMDEV_STATE_ROOT` to choose that location. Generated RimLiaison/RimTest observability, profile,
-index, and proof files remain governed by their existing owner and ignore rules. A worktree with
-only provider-classified generated changes is not treated as user-dirty; mixed or unclassified
-changes remain conservative and require attention.
+`RIMDEV_STATE_ROOT` to choose that location. RimDev uses canonical RimTest/RimLiaison validation
+provenance for test validity, reuse, invalidation, and publication; legacy RimDev test evidence
+files cannot authorize work. RimDev build evidence remains operational metadata for locating and
+hash-checking produced outputs and never satisfies a test-evidence requirement. Change
+classification is owner/path-aware: known transient locations such as `bin`, `obj`, `.rimctx`,
+and `.rimdev/observability` are generated, while `.rimdev/stack.json`, arbitrary tracked
+`.dll`/`.pdb` files, and declared production artifacts remain meaningful. DevBridge build-output
+provenance is still required before a tracked build-owned artifact mutation is accepted. A
+worktree with only provider-classified generated changes is not treated as user-dirty; mixed or
+unknown changes remain conservative and require attention.

@@ -64,6 +64,7 @@ internal sealed record CliRequest(
     bool ContextVerbose,
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
+    IReadOnlyDictionary<string, string> DependencyFingerprints,
     bool RunSelected,
     bool FailFast,
     bool InitForce,
@@ -134,6 +135,7 @@ internal static class CliParser
         bool rimDevConfirm = false;
         bool rimDevJson = false;
         bool helpRequested = false;
+        var dependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
         var positionals = new List<string>();
 
         for (int index = 0; index < args.Count; index++)
@@ -249,6 +251,16 @@ internal static class CliParser
                     }
 
                     break;
+                case "--dependency-fingerprint":
+                    string dependency = ReadOptionValue(args, ref index, argument);
+                    int separator = dependency.IndexOf('=');
+                    if (separator <= 0 || separator == dependency.Length - 1)
+                    {
+                        throw new CliParseException("Option --dependency-fingerprint must use NAME=VALUE.");
+                    }
+
+                    dependencyFingerprints[dependency[..separator]] = dependency[(separator + 1)..];
+                    break;
                 case "--run":
                     runSelected = true;
                     break;
@@ -333,6 +345,7 @@ internal static class CliParser
                 contextVerbose,
                 null,
                 [],
+                dependencyFingerprints,
                 false,
                 false,
                 initForce,
@@ -664,6 +677,7 @@ internal static class CliParser
             positionals
                 .Skip(1)
                 .ToArray(),
+            dependencyFingerprints,
             runSelected,
             failFast,
             initForce,
@@ -732,8 +746,8 @@ internal static class CliParser
                 "--lease <lease-id> (with transactional ui screenshot; omit to acquire one)",
                 "--check-input (with ui screenshot; uses semantic live input state when registered)",
                 "--explain",
-                "--verbose (with context)",
                 "--base <git-ref> (with affected or publish check)",
+                "--dependency-fingerprint <name=value> (with affected validation)",
                 "--json (default output)",
                 "--run (with affected)",
                 "--fail-fast (with affected --run or suite run)",

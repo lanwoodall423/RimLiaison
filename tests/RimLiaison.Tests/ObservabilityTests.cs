@@ -663,11 +663,70 @@ internal static class ObservabilityTests
         AssertEqual(0, exitCode);
         Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.CommandStarted),
             "the CLI should wire command start events into the product store");
-        Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.CommandCompleted),
-            "the CLI should wire command completion events into the product store");
+        AgentEvent completed = store.GetEvents()
+            .Last(value => value.Type == AgentEventTypes.CommandCompleted);
+        Assert(completed.Data is JsonElement data &&
+            data.TryGetProperty("telemetry", out JsonElement telemetry) &&
+            telemetry.ValueKind == JsonValueKind.Object,
+            "command completion should carry bounded real workflow telemetry");
         Assert(store.GetAgents().Any(value => value.ModName == "RimLiaison"),
             "the CLI should expose the mod display name as the agent identity");
     }
+
+    public static void RealWorkflowTelemetryAggregatesBoundedEvents()
+    {
+        AgentEvent[] events =
+        [
+            Event(1, AgentEventTypes.CommandStarted, new { command = "affected" }),
+            Event(2, AgentEventTypes.BuildSucceeded, new { operationKey = "build:mod" }),
+            Event(3, AgentEventTypes.ToolCompleted, new { operationKey = "build:mod", durationMs = 42 }),
+            Event(
+                4,
+                AgentEventTypes.SuiteCompleted,
+                new
+                {
+                    selectedTests = new[] { "static", "runtime" },
+                    executedTests = new[] { "static" },
+                    launchesConsumed = 1,
+                    artifactFreshness = new { evaluationStatus = "FRESH" }
+                }),
+            Event(5, AgentEventTypes.ValidationEvidenceDecision, new { action = "reuse" }),
+            Event(6, AgentEventTypes.ValidationEvidenceDecision, new { action = "invalidate" }),
+            Event(7, AgentEventTypes.RetryStarted),
+            Event(8, AgentEventTypes.PublicationChecked, new { publicationAction = "block" })
+        ];
+
+        AgentWorkflowTelemetrySummary summary =
+            AgentWorkflowTelemetrySummary.FromEvents(events);
+
+        AssertEqual("mod.test", summary.Repository);
+        AssertEqual("affected", summary.Operation);
+        AssertEqual(1, summary.BuildCount);
+        AssertEqual(42L, summary.BuildDurationMs);
+        AssertEqual(1, summary.DeploymentCount);
+        AssertEqual(2, summary.SelectedTestCount);
+        AssertEqual(1, summary.ExecutedTestCount);
+        AssertEqual(1, summary.ReusedEvidenceCount);
+        AssertEqual(1, summary.InvalidatedEvidenceCount);
+        AssertEqual(1, summary.RuntimeLaunchCount);
+        AssertEqual(1, summary.InfrastructureRetryCount);
+        AssertEqual("block", summary.PublicationAction);
+    }
+
+    private static AgentEvent Event(long sequence, string type, object? data = null) =>
+        new()
+        {
+            Id = "telemetry-" + sequence,
+            RunId = "run-telemetry",
+            AgentId = "agent-telemetry",
+            ModId = "mod.test",
+            Timestamp = sequence,
+            Sequence = sequence,
+            Stage = DevelopmentStage.Testing,
+            Type = type,
+            Summary = type,
+            Data = data is null ? null : JsonSerializer.SerializeToElement(data)
+        };
 
     private static void Assert(bool condition, string message = "assertion failed")
     {

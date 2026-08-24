@@ -37,18 +37,6 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
 {
     private const int MaximumOutputBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(10);
-    private static readonly HashSet<string> GeneratedDirectories = new(
-        [
-            ".git",
-            ".rimctx",
-            ".vs",
-            "artifacts",
-            "bin",
-            "coverage",
-            "obj",
-            "testresults"
-        ],
-        StringComparer.OrdinalIgnoreCase);
 
     public async Task<GitChangeDiscoveryResult> DiscoverAsync(
         string rootPath,
@@ -371,8 +359,7 @@ public sealed class SystemGitChangeProvider : IGitChangeProvider
             return false;
         }
 
-        string[] segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Any(segment => GeneratedDirectories.Contains(segment)))
+        if (RepositoryChangeClassificationPolicy.IsGeneratedPath(path))
         {
             return true;
         }

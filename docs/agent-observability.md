@@ -157,6 +157,21 @@ are bounded. Text values use key-aware and pattern-aware redaction for
 credentials, tokens, authorization values, and common API-key formats before
 they reach the store or a diagnostic bundle.
 
+## Observed performance
+
+`RimLiaisonContextBundleProvider` projects observed workflow samples from the
+same canonical events. Each completed command also records a compact
+`telemetry` summary containing repository/operation identity, build and
+deployment counts, selected/executed tests, evidence reuse/invalidation,
+runtime launches, retries, publication outcome, failure classification, and
+expensive-operation count. It reports bounded median/p90 duration, validation
+reuse, expensive-operation count, runtime launches, retry rate, and top failure
+classification only after at least two completed workflows. Fewer samples are
+marked `insufficient-data`; synthetic golden-workflow benchmarks remain under
+`benchmarkSummary` and are never mixed with observed metrics. The projection
+uses run identity and the store's bounded retention; it does not start a
+telemetry service or create a second database.
+
 ## OpenTelemetry
 
 `OpenTelemetryAgentTelemetry` creates this hierarchy when enabled:
