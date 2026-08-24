@@ -64,12 +64,128 @@ internal static class DesktopObservabilityTests
         AgentObservabilityUiNavigationItem[] navigationAgents = ui.Snapshot.Navigation.Items
             .Where(static item => item.Kind == "agent")
             .ToArray();
-        AssertEqual(2, navigationAgents.Length,
-            "concurrent runs must keep both agent tabs visible");
+        AssertEqual(2, navigationAgents.Length);
         Assert(navigationAgents.Any(item => item.FullLabel == "First"));
         Assert(navigationAgents.Any(item => item.FullLabel == "Second"));
-        AssertEqual(2, ui.Snapshot.All!.Agents.Count,
-            "All activity must retain agents from concurrent runs");
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count);
+    }
+
+    public static void RepeatedRunsForSameModShareOneTab()
+    {
+        using var store = new AgentObservabilityStore();
+        using var historicalRun = new AgentObservabilityRun(
+            "ui-wildlife-history",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession historical = historicalRun.CreateAgent(
+            "Wildlife",
+            "Wildlife");
+        historical.Start();
+        historical.Complete();
+
+        using var activeRun = new AgentObservabilityRun(
+            "ui-wildlife-active",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession active = activeRun.CreateAgent(
+            "Wildlife",
+            "Wildlife");
+        active.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] wildlifeTabs = ui.Snapshot.Navigation.Items
+            .Where(item => item.Kind == "agent" && item.ModId == "Wildlife")
+            .ToArray();
+
+        AssertEqual(1, wildlifeTabs.Length);
+        AssertEqual(active.RunId, wildlifeTabs[0].RunId);
+        AssertEqual(active.AgentId, wildlifeTabs[0].AgentId);
+        AssertEqual(AgentStatus.Running, wildlifeTabs[0].Status);
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count);
+    }
+
+    public static void RepeatedFinishedRunsDismissAsOneTab()
+    {
+        using var store = new AgentObservabilityStore();
+        using var firstRun = new AgentObservabilityRun(
+            "ui-dismiss-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "Wildlife",
+            "Wildlife");
+        first.Start();
+        first.Complete();
+
+        using var secondRun = new AgentObservabilityRun(
+            "ui-dismiss-second",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "Wildlife",
+            "Wildlife");
+        second.Start();
+        second.Complete();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent" && item.ModId == "Wildlife");
+        Assert(tab.CanDismiss);
+        Assert(ui.DismissAgent(tab.AgentId!, tab.RunId));
+        Assert(!ui.Snapshot.Navigation.Items.Any(item =>
+            item.Kind == "agent" && item.ModId == "Wildlife"));
+    }
+
+    public static void ActiveAgentsArePrioritizedInBoundedNavigation()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 3; index++)
+        {
+            using var historicalRun = new AgentObservabilityRun(
+                "ui-history-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession historical = historicalRun.CreateAgent(
+                "mod.history." + index,
+                "A Historical " + index);
+            historical.Start();
+            historical.Complete();
+        }
+
+        using var firstRun = new AgentObservabilityRun(
+            "ui-active-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using var secondRun = new AgentObservabilityRun(
+            "ui-active-second",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "mod.active.first",
+            "Z Active First");
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "mod.active.second",
+            "Z Active Second");
+        first.Start();
+        second.Start();
+
+        using var ui = new AgentObservabilityUi(
+            store,
+            new AgentObservabilityUiOptions
+            {
+                MaximumNavigationAgents = 2,
+                MaximumIndexedAgents = 10
+            });
+        AgentObservabilityUiNavigationItem[] navigationAgents = ui.Snapshot.Navigation.Items
+            .Where(static item => item.Kind == "agent")
+            .ToArray();
+
+        AssertEqual(2, navigationAgents.Length);
+        Assert(navigationAgents.All(item =>
+            item.Status is AgentStatus.Created or AgentStatus.Running or AgentStatus.Waiting),
+            "bounded navigation must retain active agents before finished history");
+        Assert(navigationAgents.Any(item => item.FullLabel == "Z Active First"));
+        Assert(navigationAgents.Any(item => item.FullLabel == "Z Active Second"));
     }
 
     public static void InterleavedEventsRemainChronological()
@@ -422,9 +538,11 @@ internal static class DesktopObservabilityTests
             .ToArray();
         AssertEqual(2, navigationAgents.Length);
         Assert(navigationAgents.Any(item => item.FullLabel == "Current Mod" &&
-            item.Key.Contains("ui-current-run", StringComparison.Ordinal)));
+            item.RunId == "ui-current-run" &&
+            item.Key == "agent-group:mod.current"));
         Assert(navigationAgents.Any(item => item.FullLabel == "Historical Mod" &&
-            item.Key.Contains("ui-history-run", StringComparison.Ordinal)));
+            item.RunId == "ui-history-run" &&
+            item.Key == "agent-group:mod.history"));
         AssertEqual(2, ui.Snapshot.All!.Agents.Count);
 
         Assert(!ui.DismissAgent(current.AgentId, current.RunId),
