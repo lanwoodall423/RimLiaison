@@ -888,7 +888,8 @@ public static class CliApplication
                                 SelectionRecovery(selection),
                                 validationChangedPaths: changedPaths,
                                 freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
-                                providedCapabilityAdapter: capabilityAdapter)
+                                providedCapabilityAdapter: capabilityAdapter,
+                                protectRepositoryWorktree: true)
                             .ConfigureAwait(false);
                     }
 
