@@ -10408,9 +10408,17 @@ internal static class Program
             Directory.CreateDirectory(Path.Combine(directory, "Source"));
             File.WriteAllText(
                 Path.Combine(directory, "Source", "Changed.cs"),
-                "class Changed { int Value = 1; }\n");
+                "class Changed { int Value = 0; }\n");
             string catalogPath = Path.Combine(directory, "catalog.json");
             File.WriteAllText(catalogPath, Serialize(scenarioCatalog ?? CreateCatalog()));
+            RunGit(directory, "init", "--quiet");
+            RunGit(directory, "config", "user.email", "RimLiaison@example.invalid");
+            RunGit(directory, "config", "user.name", "RimLiaison");
+            RunGit(directory, "add", "Source/Changed.cs", "catalog.json");
+            RunGit(directory, "commit", "--quiet", "-m", "initial");
+            File.WriteAllText(
+                Path.Combine(directory, "Source", "Changed.cs"),
+                "class Changed { int Value = 1; }\n");
 
             var recipeAdapter = new FakeRecipeAdapter
             {
