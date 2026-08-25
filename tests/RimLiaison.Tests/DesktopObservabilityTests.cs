@@ -697,7 +697,7 @@ internal static class DesktopObservabilityTests
             AgentObservabilityActivityReconciliation.Plan(current, existingRows);
         Assert(!unchanged.HasChanges, "unchanged refresh must perform no row operations");
 
-        AgentObservabilityActivityRow[] newestFirst = [newest, ..existingRows];
+        AgentObservabilityActivityRow[] newestFirst = [newest, .. existingRows];
         AgentObservabilityActivityReconciliationPlan inserted =
             AgentObservabilityActivityReconciliation.Plan(current, newestFirst);
         Assert(inserted.InsertedEventIds.SequenceEqual(["event-newest"]));
@@ -809,7 +809,7 @@ internal static class DesktopObservabilityTests
         AgentObservabilityIssueReconciliationPlan insertion =
             AgentObservabilityIssueReconciliation.Plan(
                 current,
-                [insertedItem, ..current]);
+                [insertedItem, .. current]);
         Assert(insertion.InsertedIssueIds.SequenceEqual(
             ["synthetic-presentation-issue"]));
         AssertEqual(0, insertion.RemovedIssueIds.Count);
@@ -825,7 +825,7 @@ internal static class DesktopObservabilityTests
         AgentObservabilityIssueReconciliationPlan update =
             AgentObservabilityIssueReconciliation.Plan(
                 current,
-                [updatedItem, ..current.Skip(1)]);
+                [updatedItem, .. current.Skip(1)]);
         Assert(update.UpdatedIssueIds.SequenceEqual([current[0].IssueId]));
         AssertEqual(0, update.RemovedIssueIds.Count);
         AssertEqual(0, update.InsertedIssueIds.Count);
