@@ -20,7 +20,8 @@ public sealed record AgentObservabilitySharedToolingHint(
     string FailureCode,
     string Component,
     int AffectedAgentCount,
-    IReadOnlyList<string> AffectedModIds)
+    IReadOnlyList<string> AffectedModIds,
+    int AffectedSessionCount = 0)
 {
     public int OtherAffectedAgentCount => Math.Max(0, AffectedAgentCount - 1);
 }
@@ -38,6 +39,9 @@ public sealed record AgentObservabilityIssueTriage
     public string? Command { get; init; }
     public string? FailureEventId { get; init; }
     public string? ErrorCode { get; init; }
+    public string? OuterErrorCode { get; init; }
+    public string? UnderlyingErrorCode { get; init; }
+    public string? CapabilityId { get; init; }
     public required string ToolOrComponent { get; init; }
     public required bool EvidenceComplete { get; init; }
     public required IReadOnlyList<string> MissingEvidence { get; init; }
@@ -48,6 +52,7 @@ public sealed record AgentObservabilityIssueTriage
     public IReadOnlyList<string> TransactionIds { get; init; } = [];
     public IReadOnlyList<string> WorkflowIds { get; init; } = [];
     public required string SessionKind { get; init; }
+    public string? LogicalAgentId { get; init; }
     public required string RunId { get; init; }
     public required string AgentId { get; init; }
     public required string ModName { get; init; }
@@ -62,12 +67,12 @@ public static class AgentObservabilityIssueTriageBuilder
     private static readonly Regex StructuredCode = new(
         @"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     public static AgentObservabilityIssueSignature Describe(
         AgentIssue issue,
         IReadOnlyList<AgentEvent> events)
     {
-        string? errorCode = FirstValue(
+        string? underlyingErrorCode = FirstValue(events, ["underlyingErrorCode"]);
+        string? errorCode = underlyingErrorCode ?? FirstValue(
             events,
             ["errorCode", "failureCode", "diagnosticCode", "code"]);
         errorCode ??= CompilerCode.Match(string.Join(" ", events.Select(value => value.Summary))).Value;
@@ -76,14 +81,30 @@ public static class AgentObservabilityIssueTriageBuilder
         string? tool = FirstValue(events, ["toolName", "tool", "component", "service"]);
         string? command = FirstValue(events, ["command", "commandText"]);
         string component = IdentifyComponent(errorCode, tool, command, events);
+        if (issue.Category == AgentIssueCategory.CapabilityGap)
+        {
+            string? capabilityId = issue.CapabilityId ??
+                FirstValue(events, ["requiredCapabilityId", "capabilityId"]);
+            string? provider = FirstValue(events, ["expectedProvider", "discoveredProvider"]);
+            string fingerprint = "capability|" + (capabilityId ?? "unknown") +
+                "|provider|" + (provider ?? "any");
+            return new AgentObservabilityIssueSignature(
+                errorCode,
+                component == "Unknown" ? "Validation capability registry" : component,
+                fingerprint,
+                IsStrong: true,
+                AgentObservabilityData.BoundIdentifier(tool, 128),
+                AgentObservabilityData.SanitizeCommand(command, 512));
+        }
+
         bool strong = !string.IsNullOrWhiteSpace(errorCode) && IsToolingComponent(component);
-        string fingerprint = string.IsNullOrWhiteSpace(errorCode)
+        string normalFingerprint = string.IsNullOrWhiteSpace(errorCode)
             ? string.Empty
             : component + "|" + errorCode;
         return new AgentObservabilityIssueSignature(
             errorCode,
             component == "Unknown" ? null : component,
-            fingerprint,
+            normalFingerprint,
             strong,
             AgentObservabilityData.BoundIdentifier(tool, 128),
             AgentObservabilityData.SanitizeCommand(command, 512));
@@ -96,6 +117,16 @@ public static class AgentObservabilityIssueTriageBuilder
     {
         string code = signature.ErrorCode ?? string.Empty;
         string component = signature.Component ?? "Unknown";
+        if (issue.Category == AgentIssueCategory.CapabilityGap)
+        {
+            string owner = issue.ProbableOwner ??
+                FirstValue(events, ["probableOwner", "expectedProvider"]) ??
+                "validation capability provider";
+            return new(
+                owner,
+                "high",
+                "the validation capability registry identified a missing or incompatible declared capability.");
+        }
         if (component == "DevBridge2" ||
             code.StartsWith("DEVBRIDGE_", StringComparison.Ordinal) ||
             code.StartsWith("READINESS_", StringComparison.Ordinal) ||
@@ -170,7 +201,8 @@ public static class AgentObservabilityIssueTriageBuilder
         IReadOnlyList<AgentEvent> supportingEvents,
         AgentDiagnosticBundle bundle,
         bool currentSession,
-        AgentObservabilitySharedToolingHint? sharedTooling)
+        AgentObservabilitySharedToolingHint? sharedTooling,
+        AgentObservabilityIssueSignature? signature = null)
     {
         AgentEvent? failure = supportingEvents
             .Where(IsFailureEvent)
@@ -185,8 +217,12 @@ public static class AgentObservabilityIssueTriageBuilder
         AgentEvent? immediatelyBefore = failureIndex > 0
             ? supportingEvents[failureIndex - 1]
             : null;
-        AgentObservabilityIssueSignature signature = Describe(issue, supportingEvents);
+        signature ??= Describe(issue, supportingEvents);
         AgentObservabilityProbableOwner owner = Classify(issue, supportingEvents, signature);
+        string? outerErrorCode = FirstValue(supportingEvents, ["outerErrorCode"]);
+        string? underlyingErrorCode = FirstValue(
+            supportingEvents,
+            ["underlyingErrorCode"]);
         string? operation = issue.OperationKey ??
             FirstValue(supportingEvents, ["operationKey", "operation", "command", "commandText"]);
         string? tool = signature.Component ?? signature.Tool ??
@@ -203,13 +239,23 @@ public static class AgentObservabilityIssueTriageBuilder
             : AgentObservabilityData.GetString(lastSuccess.Data, "operationKey") ??
               AgentObservabilityData.GetString(lastSuccess.Data, "operation") ??
               lastSuccess.Summary;
-        bool blocked = !issue.Recovered && agent is not null && agent.Status != AgentStatus.Completed;
+        bool blocked = issue.Category == AgentIssueCategory.CapabilityGap ||
+            !issue.Recovered && agent is not null && agent.Status != AgentStatus.Completed;
+        string? capabilityId = issue.CapabilityId ??
+            FirstValue(supportingEvents, ["requiredCapabilityId", "capabilityId"]);
         return new AgentObservabilityIssueTriage
         {
-            WhatFailed = AgentObservabilityData.BoundText(issue.Summary, 512),
-            AttemptedOperation = AgentObservabilityData.BoundText(operation, 512) is { Length: > 0 } value
-                ? value
-                : "No operation was recorded.",
+            WhatFailed = issue.Category == AgentIssueCategory.CapabilityGap
+                ? AgentObservabilityData.BoundText(
+                    "Validation blocked: required capability " + (capabilityId ?? "unknown") +
+                    " is unavailable. No product failure was observed.",
+                    512)
+                : AgentObservabilityData.BoundText(issue.Summary, 512),
+            AttemptedOperation = issue.Category == AgentIssueCategory.CapabilityGap
+                ? "Validation capability preflight (recipe execution not attempted)"
+                : AgentObservabilityData.BoundText(operation, 512) is { Length: > 0 } value
+                    ? value
+                    : "No operation was recorded.",
             Stage = issue.Stage?.ToString() ?? failure?.Stage.ToString() ?? "Unknown",
             IsBlocked = blocked,
             ImmediatelyBefore = immediatelyBefore is null
@@ -226,7 +272,9 @@ public static class AgentObservabilityIssueTriageBuilder
             ProbableOwner = owner,
             SharedTooling = sharedTooling,
             ErrorCode = signature.ErrorCode,
-            Command = signature.Command,
+            CapabilityId = capabilityId,
+            OuterErrorCode = outerErrorCode,
+            UnderlyingErrorCode = underlyingErrorCode,
             FailureEventId = failure?.Id,
             LastSuccessfulOperation = AgentObservabilityData.BoundText(lastSuccessfulOperation, 512) is { Length: > 0 } successValue
                 ? successValue
@@ -239,11 +287,11 @@ public static class AgentObservabilityIssueTriageBuilder
             WorkflowIds = bundle.Correlations
                 .Where(value => value.Kind == "workflow")
                 .Select(value => value.Value)
-                .Take(8)
                 .ToArray(),
             SessionKind = currentSession ? "current/latest" : "historical",
             RunId = issue.RunId,
             AgentId = issue.AgentId,
+            LogicalAgentId = issue.LogicalAgentId,
             ModName = agent?.ModName ?? issue.ModId,
             FailureFingerprint = string.IsNullOrWhiteSpace(signature.Fingerprint)
                 ? null
@@ -257,27 +305,49 @@ public static class AgentObservabilityIssueTriageBuilder
         AgentDiagnosticBundle bundle)
     {
         var builder = new StringBuilder();
+        string? packetCommand = triage.Command ??
+            bundle.CommandEvidence
+                .Select(static value => value.Command)
+                .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
         builder.AppendLine("RimLiaison Observability diagnostic handoff");
         builder.AppendLine("Please assess whether this is a tooling/infrastructure issue.");
         builder.AppendLine($"Agent/mod: {triage.ModName}");
-        builder.AppendLine($"Session: {triage.SessionKind}; run={triage.RunId}; agent={triage.AgentId}");
+        builder.AppendLine($"Session: {triage.SessionKind}; logicalAgent={triage.LogicalAgentId ?? "legacy/session-scoped"}; run={triage.RunId}; agent={triage.AgentId}");
         builder.AppendLine($"Issue: {issue.Id}; state={triage.ResolutionState}; blocked={YesNo(triage.IsBlocked)}");
+        builder.AppendLine($"Failure event: {triage.FailureEventId ?? "not recorded"}");
+        builder.AppendLine($"Command: {packetCommand ?? "not recorded"}");
         builder.AppendLine($"Failure: {triage.WhatFailed}");
         builder.AppendLine($"Stage: {triage.Stage}");
-        builder.AppendLine($"Attempted operation: {triage.AttemptedOperation}");
-        builder.AppendLine($"Failure event: {triage.FailureEventId ?? "not recorded"}");
-        builder.AppendLine($"Command: {triage.Command ?? "not recorded"}");
+        builder.AppendLine($"Tool/component: {triage.ToolOrComponent}");
+        builder.AppendLine($"Error code: {triage.ErrorCode ?? "not recorded"}");
+        if (triage.OuterErrorCode is not null)
+        {
+            builder.AppendLine($"Outer error code: {triage.OuterErrorCode}");
+        }
+        if (triage.UnderlyingErrorCode is not null)
+        {
+            builder.AppendLine($"Underlying error code: {triage.UnderlyingErrorCode}");
+        }
         builder.AppendLine($"Immediately before: {triage.ImmediatelyBefore}");
         builder.AppendLine($"Retry: {YesNo(triage.Retried)} ({triage.RetryCount})");
         builder.AppendLine($"Recovery: {(triage.Recovered ? "recovered" : "not recovered")}");
-        builder.AppendLine($"Tool/component: {triage.ToolOrComponent}");
-        builder.AppendLine($"Error code: {triage.ErrorCode ?? "not recorded"}");
         builder.AppendLine($"Probable owner: {triage.ProbableOwner.Owner} — {triage.ProbableOwner.Confidence}");
+        if (issue.Category == AgentIssueCategory.CapabilityGap)
+        {
+            builder.AppendLine("Classification: BLOCKED / CAPABILITY GAP");
+            builder.AppendLine($"Required capability: {triage.CapabilityId ?? "not recorded"}");
+            builder.AppendLine("Validation operation attempted: no");
+            builder.AppendLine("This is not negative evidence about the mod.");
+        }
         builder.AppendLine($"Reason: {triage.ProbableOwner.Reason}");
         builder.AppendLine($"Last successful operation: {triage.LastSuccessfulOperation ?? "not recorded"}");
         if (triage.SharedTooling is not null)
         {
-            builder.AppendLine($"Shared tooling: {triage.SharedTooling.AffectedAgentCount} agents affected by {triage.SharedTooling.FailureCode}");
+            builder.AppendLine($"Shared tooling: {triage.SharedTooling.AffectedAgentCount} logical agents affected by {triage.SharedTooling.FailureCode}");
+            if (triage.SharedTooling.AffectedSessionCount > triage.SharedTooling.AffectedAgentCount)
+            {
+                builder.AppendLine($"Affected sessions: {triage.SharedTooling.AffectedSessionCount}");
+            }
             builder.AppendLine($"Shared component: {triage.SharedTooling.Component}");
         }
 
@@ -307,6 +377,7 @@ public static class AgentObservabilityIssueTriageBuilder
 
     public static bool IsToolingComponent(string? component) => component is
         "DevBridge2" or "RimLiaison" or "RimTest" or "RimContext" or "RimError" or
+        "Validation capability registry" or
         "Git / GitHub" or "Environment / machine";
 
     private static string IdentifyComponent(

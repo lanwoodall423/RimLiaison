@@ -1,3 +1,4 @@
+using RimLiaison;
 using RimLiaison.Observability;
 
 namespace RimLiaison.Tests;
@@ -330,6 +331,118 @@ internal static class ObservabilityIsolationTests
         {
             DeleteTemporaryDirectory(directory);
         }
+    }
+
+    public static void TemporaryWorktreesShareProvenRepositoryIdentity()
+    {
+        string main = CreateTemporaryDirectory("RimLiaison-");
+        string tests = CreateTemporaryDirectory("RimLiaison-tests-3f2a");
+        string unrelated = CreateTemporaryDirectory("OtherProject-");
+        try
+        {
+            WriteGitOrigin(main, "git@github.com:example/RimLiaison.git");
+            WriteGitOrigin(tests, "https://github.com/example/RimLiaison.git");
+            WriteGitOrigin(unrelated, "git@github.com:other/OtherProject.git");
+
+            ObservabilityProjectIdentity mainIdentity =
+                ObservabilityProjectIdentityResolver.Resolve(main);
+            ObservabilityProjectIdentity testIdentity =
+                ObservabilityProjectIdentityResolver.Resolve(tests);
+            ObservabilityProjectIdentity unrelatedIdentity =
+                ObservabilityProjectIdentityResolver.Resolve(unrelated);
+            AssertEqual(mainIdentity.ModId, testIdentity.ModId);
+            Assert(!string.Equals(
+                    mainIdentity.ModId,
+                    unrelatedIdentity.ModId,
+                    StringComparison.OrdinalIgnoreCase),
+                "different Git repositories must remain separate");
+            AssertEqual("git-remote", testIdentity.Source);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(main);
+            DeleteTemporaryDirectory(tests);
+            DeleteTemporaryDirectory(unrelated);
+        }
+    }
+
+    public static void KnownTemporaryIdentityMigrationPreservesBoundaries()
+    {
+        string directory = CreateTemporaryDirectory("rimliaison-observability-migration-");
+        try
+        {
+            using (var writer = new AgentObservabilityStore(directory))
+            {
+                writer.RegisterAgent(new AgentSnapshot
+                {
+                    AgentId = "agent-polluted",
+                    RunId = "run-polluted",
+                    ModId = "RimLiaison-tests-3f2a",
+                    ModName = "RimLiaison-tests-3f2a",
+                    StartTime = 1
+                });
+            }
+
+            using var reader = new AgentObservabilityStore(directory);
+            AgentSnapshot migrated = reader.GetAgents().Single();
+            AssertEqual("RimLiaison", migrated.ModId);
+            AssertEqual("agent-polluted", migrated.AgentId);
+            AssertEqual("run-polluted", migrated.RunId);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(directory);
+        }
+    }
+    public static void CliFixtureStoreCannotWriteCanonicalRoot()
+    {
+        string canonical = CreateTemporaryDirectory("rimliaison-observability-canonical-");
+        string? previous = Environment.GetEnvironmentVariable(
+            AgentObservabilityStorage.DirectoryEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(
+                AgentObservabilityStorage.DirectoryEnvironmentVariable,
+                canonical);
+            using var store = new AgentObservabilityStore();
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "list",
+                        "--catalog",
+                        Path.Combine(
+                            Directory.GetCurrentDirectory(),
+                            "TestCatalog",
+                            "rimtest.catalog.json")
+                    ],
+                    output,
+                    error,
+                    observabilityStore: store,
+                    observabilityTelemetry: new NoopAgentObservabilityTelemetry())
+                .GetAwaiter()
+                .GetResult();
+            AssertEqual(CliExitCodes.Success, exitCode);
+            Assert(!Directory.EnumerateFileSystemEntries(canonical).Any(),
+                "in-memory CLI fixtures must not create canonical store records");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                AgentObservabilityStorage.DirectoryEnvironmentVariable,
+                previous);
+            DeleteTemporaryDirectory(canonical);
+        }
+    }
+
+
+    private static void WriteGitOrigin(string root, string remote)
+    {
+        string git = Path.Combine(root, ".git");
+        Directory.CreateDirectory(git);
+        File.WriteAllText(
+            Path.Combine(git, "config"),
+            "[remote \"origin\"]\n\turl = " + remote + "\n");
     }
 
     private static void EmitEvents(AgentObservabilitySession agent, string suffix)

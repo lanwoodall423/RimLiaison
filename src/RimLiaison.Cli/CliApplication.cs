@@ -126,7 +126,10 @@ public static class CliApplication
                 eventStore,
                 observabilityTelemetry);
             (string modId, string modName) = ResolveObservabilityMod(request);
-            observabilityAgent = observabilityRun.CreateAgent(modId, modName);
+            observabilityAgent = observabilityRun.CreateAgent(
+                modId,
+                modName,
+                logicalAgentId: ResolveLogicalAgentId());
             observabilityActivation = observabilityAgent.Activate();
             observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
             DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
@@ -265,6 +268,7 @@ public static class CliApplication
                             stdout,
                             processTransport,
                             capabilityAdapter,
+                            workflowId,
                             cancellationToken),
                         AnnotateExit,
                         phase: "command",
@@ -329,7 +333,8 @@ public static class CliApplication
                         started,
                         workflowId,
                         developmentAdapter,
-                        freshGenerationRecoveryAdapter),
+                        freshGenerationRecoveryAdapter,
+                        capabilityAdapter),
                     AnnotateExit,
                     phase: "command",
                     scope: request.Command.ToString())
@@ -562,7 +567,8 @@ public static class CliApplication
         long started,
         string? workflowId,
         IDevBridgeModDevelopmentAdapter? developmentAdapter,
-        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter)
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter,
+        IDevBridgeCapabilityAdapter? capabilityAdapter)
     {
         CatalogLoadResult loaded = CatalogLoader.Load(request.CatalogPath);
         if (loaded.Catalog is null)
@@ -661,7 +667,8 @@ public static class CliApplication
                             processTransport,
                             started,
                             cancellationToken,
-                            workflowId: workflowId)
+                            workflowId: workflowId,
+                            providedCapabilityAdapter: capabilityAdapter)
                         .ConfigureAwait(false);
                 }
             case CliCommand.Affected:
@@ -880,8 +887,8 @@ public static class CliApplication
                                 freshnessRequest,
                                 SelectionRecovery(selection),
                                 validationChangedPaths: changedPaths,
-                                protectRepositoryWorktree: gitChanges is not null,
-                                freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter)
+                                freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
+                                providedCapabilityAdapter: capabilityAdapter)
                             .ConfigureAwait(false);
                     }
 
@@ -920,7 +927,8 @@ public static class CliApplication
                         adapter,
                         diagnosisAdapter,
                         diagnosticSourceAdapter,
-                        processTransport);
+                        processTransport,
+                        capabilityAdapter);
                     CatalogTestExecutionResult execution = await executor.RunAsync(
                             loaded.Catalog,
                             test.Id,
@@ -929,7 +937,9 @@ public static class CliApplication
                             workflowId)
                         .ConfigureAwait(false);
                     WriteJson(stdout, execution.Result);
-                    return RimTestExitCodeFor(execution.Run.RecipeResult.Status.Outcome);
+                    return execution.Result.Status == "blocked"
+                        ? CliExitCodes.ConservativeSelection
+                        : RimTestExitCodeFor(execution.Run.RecipeResult.Status.Outcome);
                 }
             default:
                 throw new InvalidOperationException("Unknown catalog command.");
@@ -1250,6 +1260,7 @@ public static class CliApplication
         TextWriter stdout,
         IDevBridgeProcessTransport? processTransport,
         IDevBridgeCapabilityAdapter? capabilityAdapter,
+        string? workflowId,
         CancellationToken cancellationToken)
     {
         IDevBridgeCapabilityAdapter adapter = CreateCapabilityAdapter(
@@ -1264,8 +1275,80 @@ public static class CliApplication
             request.CapabilityLimit);
         DevBridgeCapabilityDiscoveryResult result = await adapter.DiscoverAsync(
                 query,
+                workflowId,
+                null,
                 cancellationToken)
             .ConfigureAwait(false);
+        DevBridgeCapabilityRecoveryResult? recovery = null;
+
+        if (!result.Status.IsSuccess)
+        {
+            RecordCapabilityFailure(result.Status);
+            if (RuntimeTransitionRecoveryClassifier.IsRecoverableCapability(result.Status) &&
+                TryGetCapabilityRecovery(adapter, request, processTransport, out var recoveryContext))
+            {
+                RecordCapabilityEvent(
+                    AgentEventTypes.RetryStarted,
+                    "Retrying DevBridge capability discovery after bounded recovery.",
+                    result.Status,
+                    new { retryCount = 1, recoveryAction = "doctor" });
+                recovery = await DevBridgeCapabilityRecovery.RecoverAsync(
+                        recoveryContext.Transport,
+                        recoveryContext.Options,
+                        workflowId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Analysis,
+                    AgentEventTypes.RecoveryCompleted,
+                    recovery.Succeeded
+                        ? "DevBridge capability recovery completed."
+                        : "DevBridge capability recovery failed.",
+                    new
+                    {
+                        state = recovery.State.ToString(),
+                        attempts = recovery.Attempts,
+                        errorCode = recovery.ErrorCode,
+                        error = recovery.Error
+                    });
+
+                if (recovery.Succeeded)
+                {
+                    DevBridgeCapabilityDiscoveryResult retry = await adapter.DiscoverAsync(
+                            query,
+                            workflowId,
+                            null,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    result = retry;
+                    AgentObservabilityRuntime.Record(
+                        DevelopmentStage.Analysis,
+                        AgentEventTypes.RetryCompleted,
+                        retry.Status.IsSuccess
+                            ? "DevBridge capability retry succeeded."
+                            : "DevBridge capability retry remained failed.",
+                        new
+                        {
+                            retryCount = 1,
+                            recovered = retry.Status.IsSuccess,
+                            errorCode = retry.Status.ErrorCode
+                        });
+                }
+                else
+                {
+                    AgentObservabilityRuntime.Record(
+                        DevelopmentStage.Analysis,
+                        AgentEventTypes.RetryCompleted,
+                        "DevBridge capability retry was not attempted after recovery failure.",
+                        new
+                        {
+                            retryCount = 1,
+                            recovered = false,
+                            errorCode = recovery.ErrorCode
+                        });
+                }
+            }
+        }
 
         if (result.Status.IsSuccess)
         {
@@ -1306,21 +1389,146 @@ public static class CliApplication
         {
             failure["nextAction"] = result.Status.NextAction;
         }
-
         if (result.Status.ResponseSchema is not null)
         {
             failure["responseSchema"] = result.Status.ResponseSchema;
         }
-
         if (result.Status.ProcessExitCode.HasValue)
         {
             failure["processExitCode"] = result.Status.ProcessExitCode.Value;
+        }
+        AddCapabilityFailureEvidence(failure, result.Status.Evidence);
+        if (recovery is not null)
+        {
+            failure["recovery"] = new
+            {
+                state = recovery.State.ToString(),
+                attempts = recovery.Attempts,
+                errorCode = recovery.ErrorCode,
+                error = recovery.Error
+            };
         }
 
         WriteJson(stdout, failure);
         return CapabilityExitCodeFor(result.Status.Outcome);
     }
 
+
+    private static bool TryGetCapabilityRecovery(
+        IDevBridgeCapabilityAdapter adapter,
+        CliRequest request,
+        IDevBridgeProcessTransport? processTransport,
+        out CapabilityRecoveryContext context)
+    {
+        if (adapter is DevBridgeCapabilityAdapter concrete)
+        {
+            context = new(
+                processTransport ?? new SystemDevBridgeProcessTransport(),
+                concrete.Options);
+            return true;
+        }
+
+        if (processTransport is not null)
+        {
+            context = new(
+                processTransport,
+                DevBridgeAdapterOptions.Discover(
+                    request.DevBridgePath,
+                    request.DevBridgeRootPath));
+            return true;
+        }
+        context = null!;
+        return false;
+    }
+
+    private static void RecordCapabilityFailure(DevBridgeCapabilityStatus status) =>
+        RecordCapabilityEvent(
+            AgentEventTypes.ToolFailed,
+            "DevBridge capability discovery failed.",
+            status,
+            new { toolName = "DevBridge", command = "bridge tools" });
+
+    private static void RecordCapabilityEvent(
+        string type,
+        string summary,
+        DevBridgeCapabilityStatus status,
+        object? additionalData = null)
+    {
+        DevBridgeFailureEvidence? evidence = status.Evidence;
+        var data = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["toolName"] = "DevBridge",
+            ["command"] = evidence?.Command ?? "bridge tools",
+            ["errorCode"] = evidence?.UnderlyingErrorCode ?? status.ErrorCode,
+            ["underlyingErrorCode"] = evidence?.UnderlyingErrorCode,
+            ["outerErrorCode"] = evidence?.OuterErrorCode,
+            ["error"] = evidence?.UnderlyingError ?? status.Error,
+            ["outerError"] = status.Error,
+            ["exitCode"] = evidence?.ExitCode ?? status.ProcessExitCode,
+            ["leaseId"] = evidence?.LeaseId,
+            ["scopeIdentity"] = evidence?.ScopeIdentity,
+            ["generation"] = evidence?.Generation,
+            ["route"] = evidence?.Route,
+            ["readinessIdentity"] = evidence?.ReadinessIdentity,
+            ["stdoutTail"] = evidence?.StdoutTail,
+            ["stderrTail"] = evidence?.StderrTail,
+            ["diagnosticTail"] = evidence?.DiagnosticTail
+        };
+        if (additionalData is not null)
+        {
+            foreach (var property in additionalData.GetType().GetProperties())
+            {
+                data[property.Name] = property.GetValue(additionalData);
+            }
+        }
+
+        AgentObservabilityRuntime.Record(
+            DevelopmentStage.Analysis,
+            type,
+            summary,
+            data);
+    }
+
+    private static void AddCapabilityFailureEvidence(
+        IDictionary<string, object?> output,
+        DevBridgeFailureEvidence? evidence)
+    {
+        if (evidence is null)
+        {
+            return;
+        }
+
+        AddIfPresent(output, "outerErrorCode", evidence.OuterErrorCode);
+        AddIfPresent(output, "underlyingErrorCode", evidence.UnderlyingErrorCode);
+        AddIfPresent(output, "underlyingError", evidence.UnderlyingError);
+        AddIfPresent(output, "coordinatorRoot", evidence.CoordinatorRoot);
+        AddIfPresent(output, "leaseId", evidence.LeaseId);
+        AddIfPresent(output, "scopeIdentity", evidence.ScopeIdentity);
+        if (evidence.Generation.HasValue)
+        {
+            output["generation"] = evidence.Generation.Value;
+        }
+        AddIfPresent(output, "route", evidence.Route);
+        AddIfPresent(output, "readinessIdentity", evidence.ReadinessIdentity);
+        AddIfPresent(output, "stdoutTail", evidence.StdoutTail);
+        AddIfPresent(output, "stderrTail", evidence.StderrTail);
+        AddIfPresent(output, "diagnosticTail", evidence.DiagnosticTail);
+    }
+
+    private static void AddIfPresent(
+        IDictionary<string, object?> output,
+        string key,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            output[key] = value;
+        }
+    }
+
+    private sealed record CapabilityRecoveryContext(
+        IDevBridgeProcessTransport Transport,
+        DevBridgeAdapterOptions Options);
     private static async Task<int> ExecuteUiCommandAsync(
         CliRequest request,
         TextWriter stdout,
@@ -2488,12 +2696,14 @@ public static class CliApplication
         return new RimContextImpactAdapter(options);
     }
 
+
     private static CatalogTestExecutionService CreateTestExecutor(
         CliRequest request,
         IDevBridgeRecipeAdapter recipeAdapter,
         IRimErrorDiagnosisAdapter? diagnosisAdapter,
         IDevBridgeDiagnosticSourceAdapter? diagnosticSourceAdapter,
-        IDevBridgeProcessTransport? processTransport)
+        IDevBridgeProcessTransport? processTransport,
+        IDevBridgeCapabilityAdapter? providedCapabilityAdapter = null)
     {
         IDevBridgeDiagnosticSourceAdapter? selectedSource = diagnosticSourceAdapter;
         if (selectedSource is null && diagnosisAdapter is null)
@@ -2513,10 +2723,24 @@ public static class CliApplication
             }
         }
 
+        IDevBridgeCapabilityAdapter? capabilityAdapter = providedCapabilityAdapter;
+        if (capabilityAdapter is null &&
+            (recipeAdapter is not null || processTransport is not null || diagnosisAdapter is null))
+        {
+            DevBridgeAdapterOptions capabilityOptions = DevBridgeAdapterOptions.Discover(
+                request.DevBridgePath,
+                request.DevBridgeRootPath);
+            capabilityAdapter = new DevBridgeCapabilityAdapter(
+                processTransport ?? new SystemDevBridgeProcessTransport(),
+                capabilityOptions);
+        }
+
+        ArgumentNullException.ThrowIfNull(recipeAdapter);
         return new CatalogTestExecutionService(
             recipeAdapter,
             () => CreateRimErrorAdapter(request, diagnosisAdapter, processTransport),
-            selectedSource is null ? null : () => selectedSource);
+            selectedSource is null ? null : () => selectedSource,
+            capabilityAdapter);
     }
 
     private static async Task<int> RunSuiteAsync(
@@ -2540,7 +2764,8 @@ public static class CliApplication
         RimTestPrerequisiteRecovery? selectionRecovery = null,
         IReadOnlyList<string>? validationChangedPaths = null,
         bool protectRepositoryWorktree = false,
-        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
+        IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null,
+        IDevBridgeCapabilityAdapter? providedCapabilityAdapter = null)
     {
         bool ownsRecipeAdapter = recipeAdapter is null;
         bool needsBridgeTransport = ownsRecipeAdapter || freshnessRequest is not null;
@@ -2561,7 +2786,8 @@ public static class CliApplication
             adapter,
             diagnosisAdapter,
             diagnosticSourceAdapter,
-            processTransport);
+            processTransport,
+            providedCapabilityAdapter);
         IDevBridgeLeaseAdapter? leaseAdapter = needsBridgeTransport &&
             bridgeOptions is not null && bridgeTransport is not null
             ? new DevBridgeLeaseAdapter(bridgeTransport, bridgeOptions)
@@ -3319,28 +3545,20 @@ public static class CliApplication
         request.Command == CliCommand.Affected && request.RunSelected ||
         request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
 
+    private static string? ResolveLogicalAgentId()
+    {
+        string? value = Environment.GetEnvironmentVariable("RIMLIAISON_LOGICAL_AGENT_ID") ??
+            Environment.GetEnvironmentVariable("RIMLIAISON_WORKER_ID");
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
     private static (string ModId, string ModName) ResolveObservabilityMod(CliRequest request)
     {
-        string? project = request.StackManifest.Manifest?.Project;
-        string root = request.StackManifest.RepositoryRoot;
-        string fallback = Path.GetFileName(
-                Path.TrimEndingDirectorySeparator(root))
-            .Trim();
-        if (string.IsNullOrWhiteSpace(fallback))
-        {
-            fallback = "RimWorldMod";
-        }
-
-        string modId = !string.IsNullOrWhiteSpace(project)
-            ? project
-            : fallback;
-        string? modDisplayName = TryReadModDisplayName(root);
-        if (!string.IsNullOrWhiteSpace(project))
-        {
-            return (project, modDisplayName ?? project);
-        }
-
-        return (modId, modDisplayName ?? fallback);
+        ObservabilityProjectIdentity identity =
+            ObservabilityProjectIdentityResolver.Resolve(
+                request.StackManifest.RepositoryRoot,
+                request.StackManifest.Manifest?.Project);
+        return (identity.ModId, identity.ModName);
     }
 
     private static string? TryReadModDisplayName(string repositoryRoot)

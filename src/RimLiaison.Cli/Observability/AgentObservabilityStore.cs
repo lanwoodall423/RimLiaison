@@ -101,6 +101,7 @@ public sealed class AgentObservabilityStore :
     private readonly AgentIssueDetector issueDetector;
     private long nextSequence;
     private long lastTimestamp;
+    private long diagnosticBundleCreationCount;
     private int refreshRequested;
     private int refreshQueued;
     private int disposed;
@@ -145,6 +146,16 @@ public sealed class AgentObservabilityStore :
     }
 
     public string? StorageDirectory => storageDirectory;
+    public long DiagnosticBundleCreationCount
+    {
+        get
+        {
+            lock (gate)
+            {
+                return diagnosticBundleCreationCount;
+            }
+        }
+    }
 
     public static string ResolveDefaultStorageDirectory() =>
         AgentObservabilityStorage.ResolveCanonicalRoot();
@@ -153,6 +164,7 @@ public sealed class AgentObservabilityStore :
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ValidateIdentity(snapshot.RunId, snapshot.AgentId, snapshot.ModId);
+        ValidateOptionalLogicalAgentId(snapshot.LogicalAgentId);
         ValidateText(snapshot.ModName, nameof(snapshot.ModName), 256);
         AgentObservabilityNotification? notification = null;
         lock (gate)
@@ -187,6 +199,7 @@ public sealed class AgentObservabilityStore :
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ValidateIdentity(snapshot.RunId, snapshot.AgentId, snapshot.ModId);
+        ValidateOptionalLogicalAgentId(snapshot.LogicalAgentId);
         ValidateText(snapshot.ModName, nameof(snapshot.ModName), 256);
         AgentObservabilityNotification? notification = null;
         lock (gate)
@@ -221,6 +234,7 @@ public sealed class AgentObservabilityStore :
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateIdentity(request.RunId, request.AgentId, request.ModId);
+        ValidateOptionalLogicalAgentId(request.LogicalAgentId);
         ValidateText(request.Type, nameof(request.Type), 128);
         ValidateText(request.Summary, nameof(request.Summary), 1024);
 
@@ -237,11 +251,22 @@ public sealed class AgentObservabilityStore :
                     "An agent must be registered before it can emit events.");
             }
 
+            string logicalAgentId = request.LogicalAgentId ?? agent.LogicalAgentId ?? string.Empty;
             if (!string.Equals(agent.RunId, request.RunId, StringComparison.Ordinal) ||
-                !string.Equals(agent.ModId, request.ModId, StringComparison.Ordinal))
+                !string.Equals(agent.ModId, request.ModId, StringComparison.Ordinal) ||
+                !string.Equals(
+                    AgentObservabilityLogicalIdentity.For(
+                        agent.LogicalAgentId,
+                        agent.RunId,
+                        agent.AgentId),
+                    AgentObservabilityLogicalIdentity.For(
+                        logicalAgentId,
+                        request.RunId,
+                        request.AgentId),
+                    StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    "An event cannot cross run, agent, or mod boundaries.");
+                    "An event cannot cross run, agent, logical-agent, or mod boundaries.");
             }
 
             long requestedTimestamp = request.Timestamp.GetValueOrDefault(
@@ -263,6 +288,7 @@ public sealed class AgentObservabilityStore :
                 Id = "evt-" + Guid.NewGuid().ToString("N"),
                 RunId = request.RunId,
                 AgentId = request.AgentId,
+                LogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId) ? null : logicalAgentId,
                 ModId = request.ModId,
                 Timestamp = timestamp,
                 Sequence = sequence,
@@ -470,6 +496,7 @@ public sealed class AgentObservabilityStore :
         ArgumentNullException.ThrowIfNull(issueIds);
         lock (gate)
         {
+            diagnosticBundleCreationCount++;
             string[] requestedIds = issueIds
                 .Where(static id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
@@ -658,7 +685,8 @@ public sealed class AgentObservabilityStore :
                     agent.ModId,
                     agent.ModName,
                     agent.AgentId,
-                    agent.RunId))
+                    agent.RunId,
+                    agent.LogicalAgentId))
                 .OrderBy(static value => value.ModId, StringComparer.Ordinal)
                 .ThenBy(static value => value.AgentId, StringComparer.Ordinal)
                 .ToArray();
@@ -1731,6 +1759,7 @@ public sealed class AgentObservabilityStore :
                 {
                     events.Add(valueRecord with
                     {
+                        ModId = NormalizePersistedModId(valueRecord.ModId),
                         Summary = AgentObservabilityData.BoundText(valueRecord.Summary, 1024),
                         Data = AgentObservabilityData.ToElement(
                             valueRecord.Data,
@@ -1781,7 +1810,8 @@ public sealed class AgentObservabilityStore :
                     AgentObservabilityJson.Options);
                 if (agent is not null && !string.IsNullOrWhiteSpace(agent.AgentId))
                 {
-                    agents[new AgentObservabilityAgentIdentity(agent.RunId, agent.AgentId)] = agent;
+                    agents[new AgentObservabilityAgentIdentity(agent.RunId, agent.AgentId)] =
+                        NormalizePersistedAgent(agent);
                 }
             }
             catch (JsonException)
@@ -2377,8 +2407,30 @@ public sealed class AgentObservabilityStore :
         }
     }
 
+    // Normalize only deterministic, known test/temp prefixes while loading;
+    // ambiguous history remains untouched and no records are deleted.
+    private static string NormalizePersistedModId(string modId) =>
+        ObservabilityProjectIdentityResolver.TryNormalizeKnownTemporaryIdentity(
+            modId,
+            out string canonicalModId)
+            ? canonicalModId
+            : modId;
+
+    private static AgentSnapshot NormalizePersistedAgent(AgentSnapshot agent)
+    {
+        string modId = NormalizePersistedModId(agent.ModId);
+        return string.Equals(modId, agent.ModId, StringComparison.Ordinal)
+            ? agent
+            : agent with
+            {
+                ModId = modId,
+                ModName = "RimLiaison"
+            };
+    }
+
     private AgentIssue NormalizePersistedIssue(AgentIssue issue) => issue with
     {
+        ModId = NormalizePersistedModId(issue.ModId),
         Summary = AgentObservabilityData.BoundText(issue.Summary, 512),
         EventIds = issue.EventIds
             .Where(static value => !string.IsNullOrWhiteSpace(value))
@@ -2452,12 +2504,22 @@ public sealed class AgentObservabilityStore :
             throw new ObjectDisposedException(nameof(AgentObservabilityStore));
         }
     }
+    private static void ValidateOptionalLogicalAgentId(string? logicalAgentId)
+    {
+        if (!string.IsNullOrWhiteSpace(logicalAgentId))
+        {
+            ValidateText(logicalAgentId, nameof(logicalAgentId), 256);
+        }
+    }
 
     private static bool SameIdentity(AgentSnapshot left, AgentSnapshot right) =>
         string.Equals(left.AgentId, right.AgentId, StringComparison.Ordinal) &&
         string.Equals(left.RunId, right.RunId, StringComparison.Ordinal) &&
-        string.Equals(left.ModId, right.ModId, StringComparison.Ordinal);
-
+        string.Equals(left.ModId, right.ModId, StringComparison.Ordinal) &&
+        string.Equals(
+            AgentObservabilityLogicalIdentity.For(left),
+            AgentObservabilityLogicalIdentity.For(right),
+            StringComparison.Ordinal);
     private static bool Matches(string value, string? expected) =>
         string.IsNullOrWhiteSpace(expected) ||
         string.Equals(value, expected, StringComparison.Ordinal);

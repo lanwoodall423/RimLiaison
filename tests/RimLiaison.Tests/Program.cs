@@ -21,6 +21,7 @@ using RimLiaison.RimContext;
 using RimLiaison.Recovery;
 using RimLiaison.Results;
 using RimLiaison.Provenance;
+using RimLiaison.Validation;
 
 namespace RimLiaison.Tests;
 
@@ -90,6 +91,13 @@ internal static class Program
         ("cancellation is classified", CancellationIsClassified),
         ("malformed response is classified", MalformedResponseIsClassified),
         ("incompatible schema is classified", IncompatibleSchemaIsClassified),
+        ("validation chain build failure is infrastructure", ValidationChainDiagnosisTests.DevelopmentBuildFailureIsInfrastructure),
+        ("validation chain freshness failure is infrastructure", ValidationChainDiagnosisTests.ArtifactFreshnessFailureIsInfrastructure),
+        ("validation chain readiness identity failure is infrastructure", ValidationChainDiagnosisTests.ReadinessIdentityFailureIsInfrastructure),
+        ("validation chain lease failure is infrastructure", ValidationChainDiagnosisTests.LeaseFailureIsInfrastructure),
+        ("validation chain runtime timeout is infrastructure", ValidationChainDiagnosisTests.RuntimeTimeoutIsInfrastructure),
+        ("validation chain project assertion is project failure", ValidationChainDiagnosisTests.ProjectAssertionFailureIsProjectFailure),
+        ("validation chain success is pass", ValidationChainDiagnosisTests.CompleteChainIsPass),
         ("RimContext direct coverage selects a test", RimContextDirectCoverageSelectsTest),
         ("RimContext transitive coverage selects a test", RimContextTransitiveCoverageSelectsTest),
         ("RimContext shared coverage is deduplicated", RimContextSharedCoverageIsDeduplicated),
@@ -159,6 +167,17 @@ internal static class Program
         ("capabilities reject malformed response", CapabilitiesRejectMalformedResponse),
         ("capabilities reject incompatible response", CapabilitiesRejectIncompatibleResponse),
         ("capability discovery does not mutate lifecycle", CapabilityDiscoveryDoesNotMutateLifecycle),
+        ("validation capability present", ValidationCapabilityPresent),
+        ("validation capability absent blocks execution", ValidationCapabilityAbsentBlocksExecution),
+        ("validation capability provider mismatch blocks", ValidationCapabilityProviderMismatchBlocks),
+        ("validation capability schema mismatch blocks", ValidationCapabilitySchemaMismatchBlocks),
+        ("validation capability discovery infrastructure is distinct", ValidationCapabilityDiscoveryInfrastructureIsDistinct),
+        ("validation capability old recipe remains compatible", ValidationCapabilityOldRecipeRemainsCompatible),
+        ("validation capability JSON is structured", ValidationCapabilityJsonIsStructured),
+        ("validation capability suite aggregation", ValidationCapabilitySuiteAggregation),
+        ("validation capability observability deduplicates", ValidationCapabilityObservabilityDeduplicates),
+        ("validation capability product failure remains distinct", ValidationCapabilityProductFailureRemainsDistinct),
+        ("validation capability infrastructure remains distinct", ValidationCapabilityInfrastructureRemainsDistinct),
         ("ui target enumeration", UiTargetEnumeration),
         ("ui target object schema is supported", UiTargetObjectSchemaIsSupported),
         ("ui target discovery recovers a required lease", UiTargetDiscoveryRecoversRequiredLease),
@@ -272,6 +291,9 @@ internal static class Program
         ("observability shared store hydrates across processes", ObservabilityIsolationTests.SharedStoreHydratesAndPublishesAcrossProcesses),
         ("observability concurrent stores preserve identity boundaries", ObservabilityIsolationTests.ConcurrentStoresShareSequencesAndAgentIdentityBoundaries),
         ("observability historical runs do not duplicate live agents", ObservabilityIsolationTests.HistoricalRunsDoNotCreateDuplicateLiveAgents),
+        ("observability temporary worktrees share repository identity", ObservabilityIsolationTests.TemporaryWorktreesShareProvenRepositoryIdentity),
+        ("observability known temporary identity migration preserves boundaries", ObservabilityIsolationTests.KnownTemporaryIdentityMigrationPreservesBoundaries),
+        ("observability CLI fixture store cannot write canonical root", ObservabilityIsolationTests.CliFixtureStoreCannotWriteCanonicalRoot),
         ("observability desktop retains concurrent runs", ObservabilityIsolationTests.UnscopedUiRetainsConcurrentRuns),
         ("prompt 3 multi-agent lifecycle and bundle audit", Prompt3AuditTests.MultiAgentLifecycleAndBundleAudit),
         ("prompt 3 redaction and issue bounds audit", Prompt3AuditTests.RedactionAndIssueBoundsAudit),
@@ -284,6 +306,9 @@ internal static class Program
         ("desktop multiple agents appear", DesktopObservabilityTests.MultipleConcurrentAgentsAppear),
         ("desktop concurrent runs remain visible", DesktopObservabilityTests.MultipleConcurrentRunsRemainVisible),
         ("desktop repeated runs for one mod share a tab", DesktopObservabilityTests.RepeatedRunsForSameModShareOneTab),
+        ("desktop eleven sessions count one logical agent", DesktopObservabilityTests.ElevenSessionsOfOneLogicalAgentCountOnce),
+        ("desktop distinct concurrent logical agents remain separate", DesktopObservabilityTests.DistinctConcurrentLogicalAgentsRemainSeparate),
+        ("desktop legacy records remain conservatively separate", DesktopObservabilityTests.LegacyRecordsStayConservativelySeparate),
         ("desktop completed agents remain visible", DesktopObservabilityTests.CompletedRunsRemainVisibleWithoutDismissal),
         ("desktop bounded navigation prioritizes active agents", DesktopObservabilityTests.ActiveAgentsArePrioritizedInBoundedNavigation),
         ("desktop interleaved activity is chronological", DesktopObservabilityTests.InterleavedEventsRemainChronological),
@@ -303,8 +328,10 @@ internal static class Program
         ("desktop large volume remains bounded", DesktopObservabilityTests.LargeVolumeViewsRemainBounded),
         ("desktop agent navigation identity and history are stable", DesktopObservabilityTests.AgentNavigationIdentityAndHistoryAreStable),
         ("desktop activity refresh is incremental", DesktopObservabilityTests.ActivityRefreshPlanIsIncremental),
+        ("desktop presentation reconciliation is stable", DesktopObservabilityTests.DesktopPresentationReconciliationIsStable),
         ("desktop issue selection and assessment survive live updates", DesktopObservabilityTests.IssueSelectionAndAssessmentSurviveLiveUpdates),
         ("desktop activity selection resolves related details", DesktopObservabilityTests.ActivitySelectionResolvesRelatedDetailsAndSurvivesLiveEvents),
+        ("prompt 2 Issues projection is indexed, cached, and lazy", DesktopObservabilityTests.IssuesProjectionIsIndexedCachedAndLazy),
         ("prompt 2 triage classifies owners conservatively", DesktopObservabilityTests.IssueTriageClassifiesOwnersConservatively),
         ("prompt 2 shared tooling hints avoid unrelated failures", DesktopObservabilityTests.SharedToolingHintsAvoidUnrelatedFailures),
         ("prompt 2 ChatGPT packet is bounded and explicit", DesktopObservabilityTests.ChatPacketContainsBoundedTriageAndMissingEvidence),
@@ -449,6 +476,15 @@ internal static class Program
             return 2;
         }
 
+        string isolatedObservabilityRoot = Path.Combine(
+            Path.GetTempPath(),
+            "RimLiaison-test-observability-" + Guid.NewGuid().ToString("N"));
+        string? previousObservabilityRoot = Environment.GetEnvironmentVariable(
+            AgentObservabilityStorage.DirectoryEnvironmentVariable);
+        Directory.CreateDirectory(isolatedObservabilityRoot);
+        Environment.SetEnvironmentVariable(
+            AgentObservabilityStorage.DirectoryEnvironmentVariable,
+            isolatedObservabilityRoot);
         try
         {
             selected.Value.Test();
@@ -459,6 +495,13 @@ internal static class Program
         {
             Console.Error.WriteLine($"FAIL {name}: {exception}");
             return 1;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                AgentObservabilityStorage.DirectoryEnvironmentVariable,
+                previousObservabilityRoot);
+            DeleteDirectoryIncludingReadOnlyFiles(isolatedObservabilityRoot);
         }
     }
 
@@ -5570,6 +5613,307 @@ internal static class Program
         }
     }
 
+    private static void ValidationCapabilityPresent()
+    {
+        var capability = new DevBridgeCapability(
+            "rimworld/get_game_state",
+            [],
+            "Game state",
+            "Read state",
+            "inspection",
+            "rimworld",
+            "Core",
+            [],
+            true,
+            "2.1.0",
+            "rimbridge-capability/v2");
+        ValidationCapabilityPreflightResult result = new ValidationCapabilityNegotiator(
+                new FakeCapabilityAdapter([capability]))
+            .NegotiateAsync(
+                CapabilityTestCatalog(
+                    new CatalogCapabilityRequirement
+                    {
+                        CapabilityId = capability.Id,
+                        ExpectedProvider = "rimworld",
+                        MinimumVersion = "2.0.0",
+                        MinimumSchemaVersion = "rimbridge-capability/v1",
+                        Purpose = "Read live state",
+                        Owner = "RimBridgeServer"
+                    }).Tests[0])
+            .GetAwaiter()
+            .GetResult();
+        Assert(
+            result.IsAvailable,
+            $"A compatible declared capability must permit validation: {result.Outcome}/{result.ErrorCode}/{string.Join(",", result.Evidence.Select(value => value.ErrorCode + ":provider=" + value.ExpectedProvider + "/" + value.DiscoveredProvider + ":schema=" + value.MinimumSchemaVersion + "/" + value.DiscoveredSchemaVersion + ":version=" + value.MinimumVersion + "/" + value.DiscoveredVersion))}");
+    }
+
+    private static void ValidationCapabilityAbsentBlocksExecution()
+    {
+        var adapter = new FakeRecipeAdapter
+        {
+            Runs = { ["recipe"] = FailedRun("recipe", "product", "PRODUCT_ASSERTION_FAILED") }
+        };
+        var capability = new FakeCapabilityAdapter([]);
+        CatalogTestRunResult run = new CatalogTestRecipeRunner(adapter, capability)
+            .RunAsync(CapabilityTestCatalog(new CatalogCapabilityRequirement
+            {
+                CapabilityId = "rimworld/get_game_state",
+                Purpose = "Read live state",
+                Owner = "RimBridgeServer"
+            }), "test")
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(0, adapter.RunCalls.Count);
+        Assert(run.CapabilityPreflight?.IsBlocked == true, "Missing capability must block preflight.");
+        AssertEqual(ValidationCapabilitySchema.UnavailableCode, run.CapabilityPreflight!.ErrorCode);
+    }
+
+    private static void ValidationCapabilityProviderMismatchBlocks()
+    {
+        ValidationCapabilityPreflightResult result = Negotiate(
+            new CatalogCapabilityRequirement
+            {
+                CapabilityId = "capability/state",
+                ExpectedProvider = "owner-a",
+                Purpose = "Read state"
+            },
+            new DevBridgeCapability(
+                "capability/state", [], "State", "State", null, "owner-b", null, [], true));
+        Assert(result.IsBlocked, "A provider mismatch must block validation.");
+        AssertEqual(ValidationCapabilitySchema.IncompatibleCode, result.ErrorCode);
+        AssertEqual("owner-b", result.Evidence[0].DiscoveredProvider);
+    }
+
+    private static void ValidationCapabilitySchemaMismatchBlocks()
+    {
+        ValidationCapabilityPreflightResult result = Negotiate(
+            new CatalogCapabilityRequirement
+            {
+                CapabilityId = "capability/state",
+                MinimumSchemaVersion = "schema/v2",
+                MinimumVersion = "3.0.0",
+                Purpose = "Read state"
+            },
+            new DevBridgeCapability(
+                "capability/state", [], "State", "State", null, "owner", null, [], true,
+                "2.0.0",
+                "schema/v1"));
+        Assert(result.IsBlocked, "An incompatible schema/version must block validation.");
+        AssertEqual(ValidationCapabilitySchema.IncompatibleCode, result.Evidence[0].ErrorCode);
+    }
+
+    private static void ValidationCapabilityDiscoveryInfrastructureIsDistinct()
+    {
+        var recipe = new FakeRecipeAdapter
+        {
+            Runs = { ["recipe"] = FailedRun("recipe", "product", "PRODUCT_ASSERTION_FAILED") }
+        };
+        var service = new CatalogTestExecutionService(
+            recipe,
+            capabilityAdapter: new FakeCapabilityAdapter(
+                status: new DevBridgeCapabilityStatus(
+                    DevBridgeCapabilityOutcome.InfrastructureFailure,
+                    "DEVBRIDGE_CAPABILITIES_TIMEOUT")));
+        CatalogTestExecutionResult result = service.RunAsync(
+                CapabilityTestCatalog(new CatalogCapabilityRequirement
+                {
+                    CapabilityId = "capability/state",
+                    Purpose = "Read state"
+                }),
+                "test",
+                Stopwatch.GetTimestamp())
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual("infrastructure", result.Result.Status);
+        AssertEqual("DEVBRIDGE_CAPABILITIES_TIMEOUT", result.Result.ErrorCode);
+        AssertEqual(0, recipe.RunCalls.Count);
+    }
+
+    private static void ValidationCapabilityOldRecipeRemainsCompatible()
+    {
+        var recipe = new FakeRecipeAdapter
+        {
+            Runs = { ["recipe"] = SuccessfulRun("recipe") }
+        };
+        CatalogTestRunResult result = new CatalogTestRecipeRunner(recipe)
+            .RunAsync(CapabilityTestCatalog(), "test")
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(1, recipe.RunCalls.Count);
+        Assert(result.CapabilityPreflight?.IsAvailable == true,
+            "Recipes without requirements must retain the old execution path.");
+    }
+
+    private static void ValidationCapabilityJsonIsStructured()
+    {
+        ValidationCapabilityPreflightResult result = Negotiate(
+            new CatalogCapabilityRequirement
+            {
+                CapabilityId = "capability/state",
+                ExpectedProvider = "owner",
+                Purpose = "Read state",
+                Owner = "RimBridgeServer"
+            });
+        string json = JsonSerializer.Serialize(result.Evidence);
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement evidence = document.RootElement[0];
+        AssertEqual("VALIDATION_CAPABILITY_UNAVAILABLE", evidence.GetProperty("errorCode").GetString());
+        AssertEqual("test", evidence.GetProperty("validationId").GetString());
+        AssertEqual("capability/state", evidence.GetProperty("requiredCapabilityId").GetString());
+        Assert(!evidence.GetProperty("operationAttempted").GetBoolean(),
+            "Capability blocker evidence must state that execution was not attempted.");
+        AssertEqual("RimBridgeServer", evidence.GetProperty("probableOwner").GetString());
+    }
+
+    private static void ValidationCapabilitySuiteAggregation()
+    {
+        var execution = new CatalogSuiteExecutionResult(
+            "suite",
+            [
+                RimTestResultFactory.CapabilityBlocked(
+                    "blocked-test",
+                    [
+                        new ValidationCapabilityEvidence
+                        {
+                            ErrorCode = ValidationCapabilitySchema.UnavailableCode,
+                            ValidationId = "blocked-test",
+                            RequiredCapabilityId = "capability/state",
+                            Reason = "Read state",
+                            ProbableOwner = "owner",
+                            RecommendedRemediation = "Install capability",
+                            Fingerprint = "capability|capability/state|provider|any"
+                        }
+                    ]),
+                new RimTestResult
+                {
+                    Status = "pass",
+                    Test = "pass-test"
+                }
+            ],
+            0,
+            false);
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 1);
+        AssertEqual("blocked", result.Status);
+        AssertEqual(1, result.Blocked);
+        AssertEqual(1, result.Passed);
+        AssertEqual("blocked", result.Failures![0].Status);
+    }
+
+    private static void ValidationCapabilityObservabilityDeduplicates()
+    {
+        using var store = new AgentObservabilityStore();
+        RegisterObservationAgent(store, "run-a", "agent-a", "mod-a");
+        RegisterObservationAgent(store, "run-b", "agent-b", "mod-b");
+        AppendCapabilityGap(store, "run-a", "agent-a", "mod-a");
+        AppendCapabilityGap(store, "run-b", "agent-b", "mod-b");
+        AgentIssue[] issues = store.GetIssues().ToArray();
+        AgentIssue issue = issues.Single(value => value.Category == AgentIssueCategory.CapabilityGap);
+        AssertEqual(2, issue.Occurrences);
+        AssertEqual(2, issue.AffectedAgentIds!.Count);
+        Assert(issue.Summary.Contains("CAPABILITY GAP / BLOCKED", StringComparison.Ordinal),
+            "Capability gaps must be visibly classified.");
+    }
+
+    private static void ValidationCapabilityProductFailureRemainsDistinct()
+    {
+        using var store = new AgentObservabilityStore();
+        RegisterObservationAgent(store, "run", "agent", "mod");
+        store.AppendEvent(new AgentEventRequest(
+            "run",
+            "agent",
+            "mod",
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestFailed,
+            "Test failed.",
+            new { errorCode = "PRODUCT_ASSERTION_FAILED", operationKey = "test:test" }));
+        AgentIssue issue = store.GetIssues().Single();
+        AssertEqual(AgentIssueCategory.Error, issue.Category);
+        Assert(issue.Category != AgentIssueCategory.CapabilityGap,
+            "Product failures must not be classified as capability gaps.");
+    }
+
+    private static void ValidationCapabilityInfrastructureRemainsDistinct()
+    {
+        using var store = new AgentObservabilityStore();
+        RegisterObservationAgent(store, "run", "agent", "mod");
+        store.AppendEvent(new AgentEventRequest(
+            "run",
+            "agent",
+            "mod",
+            DevelopmentStage.Testing,
+            AgentEventTypes.ToolFailed,
+            "Capability discovery failed.",
+            new { errorCode = "DEVBRIDGE_CAPABILITIES_TIMEOUT", operationKey = "capability-discovery" }));
+        AgentIssue issue = store.GetIssues().Single();
+        AssertEqual(AgentIssueCategory.Error, issue.Category);
+        Assert(issue.Category != AgentIssueCategory.CapabilityGap,
+            "Infrastructure failures must not be classified as capability gaps.");
+    }
+
+    private static ValidationCapabilityPreflightResult Negotiate(
+        CatalogCapabilityRequirement requirement,
+        DevBridgeCapability? capability = null) =>
+        new ValidationCapabilityNegotiator(
+                new FakeCapabilityAdapter(
+                    capability is null ? [] : [capability]))
+            .NegotiateAsync(CapabilityTestCatalog(requirement).Tests[0])
+            .GetAwaiter()
+            .GetResult();
+
+    private static CatalogDocument CapabilityTestCatalog(
+        params CatalogCapabilityRequirement[] requirements) =>
+        new()
+        {
+            SchemaVersion = CatalogSchema.Current,
+            Tests =
+            [
+                new CatalogTest
+                {
+                    Id = "test",
+                    Recipe = "recipe",
+                    RequiredCapabilities = requirements.Length == 0 ? null : [.. requirements]
+                }
+            ],
+            Suites = []
+        };
+
+    private static void RegisterObservationAgent(
+        AgentObservabilityStore store,
+        string runId,
+        string agentId,
+        string modId) =>
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = runId,
+            AgentId = agentId,
+            ModId = modId,
+            ModName = modId,
+            StartTime = 1
+        });
+
+    private static void AppendCapabilityGap(
+        AgentObservabilityStore store,
+        string runId,
+        string agentId,
+        string modId) =>
+        store.AppendEvent(new AgentEventRequest(
+            runId,
+            agentId,
+            modId,
+            DevelopmentStage.Testing,
+            AgentEventTypes.ValidationCapabilityBlocked,
+            "Validation blocked: required capability capability/state is unavailable.",
+            new
+            {
+                operationKey = "test:test",
+                errorCode = ValidationCapabilitySchema.UnavailableCode,
+                requiredCapabilityId = "capability/state",
+                probableOwner = "RimBridgeServer",
+                fingerprint = "capability|capability/state|provider|any",
+                operationAttempted = false
+            }));
+
+
     private static void CapabilitiesDiscoverRegisteredSurface()
     {
         (CliResult result, FakeTransport transport) = RunCapabilitiesFixture(
@@ -5816,6 +6160,240 @@ internal static class Program
             "Capability discovery must not expose a generic bridge call.");
         Assert(!request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase),
             "Capability discovery must not begin a lifecycle session.");
+    }
+
+    private static void CapabilityRetryRecoversTransientReadiness()
+    {
+        int toolsCalls = 0;
+        var transport = new FakeTransport(
+            (request, _) =>
+            {
+                if (request.Arguments.Contains("doctor", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"status":"ready"}""");
+                }
+
+                return Interlocked.Increment(ref toolsCalls) == 1
+                    ? ProcessResult("""{"success":false,"errorCode":"RIMBRIDGE_NOT_READY","error":"not ready"}""")
+                    : ProcessResult("""{"success":true,"rimBridgeRoute":{"success":true,"result":{"tools":[]}}}""");
+            });
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        using var store = new AgentObservabilityStore();
+
+        int exitCode = RunCapabilitiesWith(
+            transport,
+            stdout,
+            stderr,
+            store);
+
+        AssertEqual(CliExitCodes.Success, exitCode);
+        AssertEqual(3, transport.Requests.Count);
+        Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.RetryStarted),
+            "Transient recovery must be visible as retry.started.");
+        Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.RecoveryCompleted),
+            "Recovery completion must be visible.");
+        Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.RetryCompleted),
+            "Retry completion must be visible.");
+        Assert(store.GetAgents().Single().Status == AgentStatus.Completed,
+            "A successful retry must not leave a terminal failed agent.");
+    }
+
+    private static void CapabilityRetryBoundsPersistentReadinessFailure()
+    {
+        var transport = new FakeTransport(
+            (request, _) => request.Arguments.Contains(
+                    "doctor",
+                    StringComparer.OrdinalIgnoreCase)
+                ? ProcessResult("""{"success":false,"errorCode":"DEVBRIDGE_COORDINATOR_NOT_READY","error":"still unavailable"}""")
+                : ProcessResult("""{"success":false,"errorCode":"RIMBRIDGE_NOT_READY","error":"not ready"}"""));
+        // Exercise the same bounded path with the persistent doctor failure.
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        using var store = new AgentObservabilityStore();
+        int actualExitCode = RunCapabilitiesWith(transport, stdout, stderr, store);
+        using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+        AssertEqual("RIMBRIDGE_NOT_READY", document.RootElement.GetProperty("code").GetString());
+        AssertEqual(CliExitCodes.InternalError, actualExitCode);
+        AssertEqual(2, transport.Requests.Count);
+        Assert(!transport.Requests.Skip(1).Any(request =>
+                request.Arguments.Contains("bridge", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("tools", StringComparer.OrdinalIgnoreCase)),
+            "Persistent recovery must not create a second retry storm.");
+        Assert(store.GetEvents().Any(value => value.Type == AgentEventTypes.RecoveryCompleted),
+            "Persistent recovery must remain observable.");
+    }
+
+    private static void CapabilityRecoveryIsSingleFlight()
+    {
+        int doctorCalls = 0;
+        var transport = new FakeTransport(
+            (request, _) =>
+            {
+                if (!request.Arguments.Contains("doctor", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"success":true}""");
+                }
+
+                Interlocked.Increment(ref doctorCalls);
+                Thread.Sleep(100);
+                return ProcessResult("""{"status":"ready"}""");
+            });
+        string root = CreateTempDirectory();
+        try
+        {
+            var options = new DevBridgeAdapterOptions
+            {
+                CommandPath = "DevBridge.cmd",
+                RootPath = root,
+                ShowPlanTimeout = TimeSpan.FromSeconds(1)
+            };
+            Task<DevBridgeCapabilityRecoveryResult>[] tasks = Enumerable
+                .Range(0, 8)
+                .Select(_ => Task.Run(
+                    () => DevBridgeCapabilityRecovery.RecoverAsync(
+                        transport,
+                        options,
+                        "workflow-single-flight")))
+                .ToArray();
+            Task.WhenAll(tasks).GetAwaiter().GetResult();
+            AssertEqual(1, doctorCalls);
+            Assert(tasks.All(task => task.Result.Succeeded),
+                "All concurrent waiters must receive the shared recovery result.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(root);
+        }
+    }
+
+    private static void NestedCapabilityFailurePreservesDevBridgeOwner()
+    {
+        var issue = new AgentIssue
+        {
+            Id = "issue-nested",
+            RunId = "run-nested",
+            AgentId = "agent-nested",
+            ModId = "mod.nested",
+            Category = AgentIssueCategory.Error,
+            Severity = AgentIssueSeverity.Error,
+            Summary = "RimLiaison command failed.",
+            EventIds = ["outer"]
+        };
+        AgentEvent[] events =
+        [
+            new AgentEvent
+            {
+                Id = "nested",
+                RunId = issue.RunId,
+                AgentId = issue.AgentId,
+                ModId = issue.ModId,
+                Type = AgentEventTypes.ToolFailed,
+                Summary = "DevBridge capability discovery failed.",
+                Sequence = 1,
+                Data = JsonSerializer.SerializeToElement(new
+                {
+                    toolName = "DevBridge",
+                    errorCode = "DEVBRIDGE_COORDINATOR_NOT_READY",
+                    underlyingErrorCode = "DEVBRIDGE_COORDINATOR_NOT_READY",
+                    outerErrorCode = "RIMLIAISON_COMMAND_FAILED"
+                })
+            },
+            new AgentEvent
+            {
+                Id = "outer",
+                RunId = issue.RunId,
+                AgentId = issue.AgentId,
+                ModId = issue.ModId,
+                Type = AgentEventTypes.CommandFailed,
+                Summary = "RimLiaison command failed.",
+                Sequence = 2,
+                Data = JsonSerializer.SerializeToElement(new
+                {
+                    errorCode = "RIMLIAISON_COMMAND_FAILED",
+                    outerErrorCode = "RIMLIAISON_COMMAND_FAILED"
+                })
+            }
+        ];
+        AgentObservabilityIssueSignature signature =
+            AgentObservabilityIssueTriageBuilder.Describe(issue, events);
+        AgentObservabilityProbableOwner owner =
+            AgentObservabilityIssueTriageBuilder.Classify(issue, events, signature);
+        AssertEqual("DEVBRIDGE_COORDINATOR_NOT_READY", signature.ErrorCode);
+        AssertEqual("DevBridge2", owner.Owner);
+        Assert(!owner.Owner.Contains("Frontier", StringComparison.OrdinalIgnoreCase),
+            "Nested DevBridge failures must not be assigned to Frontier.");
+    }
+
+    private static void LocalCapabilityFailurePreservesRimLiaisonOwner()
+    {
+        var issue = new AgentIssue
+        {
+            Id = "issue-local",
+            RunId = "run-local",
+            AgentId = "agent-local",
+            ModId = "mod.local",
+            Category = AgentIssueCategory.Error,
+            Severity = AgentIssueSeverity.Error,
+            Summary = "Invalid local capability query.",
+            EventIds = ["local"]
+        };
+        AgentEvent localEvent = new()
+        {
+            Id = "local",
+            RunId = issue.RunId,
+            AgentId = issue.AgentId,
+            ModId = issue.ModId,
+            Type = AgentEventTypes.CommandFailed,
+            Summary = issue.Summary,
+            Sequence = 1,
+            Data = JsonSerializer.SerializeToElement(new
+            {
+                toolName = "RimLiaison",
+                command = "capabilities",
+                errorCode = "RIMLIAISON_ARGUMENT_INVALID"
+            })
+        };
+        AgentObservabilityIssueSignature signature =
+            AgentObservabilityIssueTriageBuilder.Describe(issue, [localEvent]);
+        AgentObservabilityProbableOwner owner =
+            AgentObservabilityIssueTriageBuilder.Classify(issue, [localEvent], signature);
+        AssertEqual("RimLiaison", owner.Owner);
+        Assert(!owner.Owner.Contains("DevBridge", StringComparison.OrdinalIgnoreCase),
+            "Local failures must not be assigned to DevBridge.");
+    }
+
+    private static int RunCapabilitiesWith(
+        FakeTransport transport,
+        StringWriter stdout,
+        StringWriter stderr,
+        IAgentObservabilityStore store)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            return WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        [
+                            "capabilities",
+                            "--json",
+                            "--devbridge",
+                            "DevBridge.cmd",
+                            "--devbridge-root",
+                            directory
+                        ],
+                        stdout,
+                        stderr,
+                        processTransport: transport,
+                        observabilityStore: store)
+                    .GetAwaiter()
+                    .GetResult());
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
     }
 
     private static void UiTargetEnumeration()
@@ -9458,6 +10036,23 @@ internal static class Program
             File.SetAttributes(file, FileAttributes.Normal);
         }
 
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+                return;
+            }
+            catch (IOException) when (attempt < 19)
+            {
+                Thread.Sleep(25);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 19)
+            {
+                Thread.Sleep(25);
+            }
+        }
+
         Directory.Delete(directory, recursive: true);
     }
 
@@ -9890,6 +10485,26 @@ internal static class Program
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }
+
+    private static DevBridgeRecipeRunResult SuccessfulRun(
+        string recipeId,
+        int generation = 1,
+        string? workflowId = null) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(DevBridgeOutcomeKind.Success),
+            true,
+            "run-" + recipeId,
+            generation,
+            null,
+            null,
+            "evidence-" + recipeId,
+            null,
+            null,
+            null,
+            null,
+            [],
+            workflowId);
 
     private static DevBridgeRecipeRunResult FailedRun(
         string recipeId,
@@ -10369,6 +10984,36 @@ internal static class Program
             Requests.Add(request);
             return Task.FromResult(handler(request, cancellationToken));
         }
+    }
+
+    private sealed class FakeCapabilityAdapter : IDevBridgeCapabilityAdapter
+    {
+        private readonly IReadOnlyList<DevBridgeCapability> capabilities;
+        private readonly DevBridgeCapabilityStatus status;
+
+        public FakeCapabilityAdapter(
+            IReadOnlyList<DevBridgeCapability>? capabilities = null,
+            DevBridgeCapabilityStatus? status = null)
+        {
+            this.capabilities = capabilities ?? [];
+            this.status = status ?? new DevBridgeCapabilityStatus(
+                DevBridgeCapabilityOutcome.Success);
+        }
+
+        public Task<DevBridgeCapabilityDiscoveryResult> DiscoverAsync(
+            DevBridgeCapabilityQuery query,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Result());
+
+        public Task<DevBridgeCapabilityDiscoveryResult> DiscoverAsync(
+            DevBridgeCapabilityQuery query,
+            string? workflowId,
+            string? leaseId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Result());
+
+        private DevBridgeCapabilityDiscoveryResult Result() =>
+            new(status, capabilities, capabilities.Count, false);
     }
 
     private sealed class FakeRecipeAdapter : IDevBridgeRecipeAdapter

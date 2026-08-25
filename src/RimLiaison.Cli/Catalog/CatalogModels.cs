@@ -81,6 +81,35 @@ public sealed class CatalogTest
     [JsonPropertyName("isolation")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CatalogRecipeIsolation? Isolation { get; init; }
+
+    [JsonPropertyName("requiredCapabilities")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<CatalogCapabilityRequirement>? RequiredCapabilities { get; init; }
+}
+
+public sealed class CatalogCapabilityRequirement
+{
+    [JsonPropertyName("capabilityId")]
+    public required string CapabilityId { get; init; }
+
+    [JsonPropertyName("expectedProvider")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ExpectedProvider { get; init; }
+
+    [JsonPropertyName("minimumSchemaVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MinimumSchemaVersion { get; init; }
+
+    [JsonPropertyName("minimumVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MinimumVersion { get; init; }
+
+    [JsonPropertyName("purpose")]
+    public required string Purpose { get; init; }
+
+    [JsonPropertyName("owner")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Owner { get; init; }
 }
 
 public sealed class CatalogCoverage

@@ -25,6 +25,16 @@ public static class RuntimeTransitionRecoveryClassifier
         "ENDPOINT_UNAVAILABLE",
         "DEVBRIDGE_NO_STRUCTURED_RESPONSE",
 
+        // Coordinator/readiness/scope failures can be transient for a
+        // read-only capability probe.
+        "DEVBRIDGE_COORDINATOR_UNAVAILABLE",
+        "DEVBRIDGE_COORDINATOR_NOT_READY",
+        "DEVBRIDGE_COORDINATOR_SCOPE_MISMATCH",
+        "DEVBRIDGE_SCOPE_MISMATCH",
+        "READINESS_NOT_READY",
+        "READINESS_TIMEOUT",
+        "SCOPE_MISMATCH",
+
         // Existing DevBridge/RimLiaison readiness spellings.
         "PROCESS_EXITED",
         "PROCESS_STOPPED",
@@ -33,7 +43,6 @@ public static class RuntimeTransitionRecoveryClassifier
         "RIMBRIDGE_STALE",
         "GENERATION_INPUT_MISMATCH",
         "RIMBRIDGE_ENDPOINT_UNAVAILABLE",
-
         // The mod-development adapter's own response-envelope failures.  Do
         // not include output-limit, schema, or start failures: those are
         // client/configuration problems, not evidence of a shared transition.
@@ -53,5 +62,18 @@ public static class RuntimeTransitionRecoveryClassifier
             status.ErrorCode is not null &&
             RecoverableCodes.Contains(status.ErrorCode);
     }
+
+    public static bool IsRecoverableCapability(
+        DevBridgeCapabilityStatus status)
+    {
+        string? code = status.Evidence?.UnderlyingErrorCode ?? status.ErrorCode;
+        return (status.Outcome is DevBridgeCapabilityOutcome.InfrastructureFailure or
+                DevBridgeCapabilityOutcome.Unavailable or
+                DevBridgeCapabilityOutcome.Timeout) &&
+            IsRecoverableCode(code);
+    }
+
+    private static bool IsRecoverableCode(string? code) =>
+        code is not null && RecoverableCodes.Contains(code);
 
 }

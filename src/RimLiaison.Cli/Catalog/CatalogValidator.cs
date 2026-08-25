@@ -8,6 +8,7 @@ public static class CatalogValidator
     private const int MaxTagLength = 64;
     private const int MaxCoverageKindLength = 64;
     private const int MaxCoverageNameLength = 256;
+    private const int MaxCapabilityVersionLength = 128;
     private const int MaxReuseKeyLength = 128;
     private const int MaxResetRecipeLength = 128;
 
@@ -81,8 +82,11 @@ public static class CatalogValidator
 
             ValidateDescription(test.Description, $"{path}.description", errors);
             ValidateTags(test.Tags, $"{path}.tags", errors);
-            ValidateCoverage(test.Covers, $"{path}.covers", errors);
             ValidateIsolation(test.Isolation, $"{path}.isolation", errors);
+            ValidateCapabilityRequirements(
+                test.RequiredCapabilities,
+                $"{path}.requiredCapabilities",
+                errors);
 
             if (knownRecipeIds is not null &&
                 !string.IsNullOrWhiteSpace(recipe) &&
@@ -340,6 +344,87 @@ public static class CatalogValidator
                     $"Coverage {kind}:{name} is duplicated.",
                     coverPath));
             }
+        }
+    }
+
+    private static void ValidateCapabilityRequirements(
+        List<CatalogCapabilityRequirement>? requirements,
+        string path,
+        ICollection<CatalogIssue> errors)
+    {
+        if (requirements is null)
+        {
+            return;
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (int index = 0; index < requirements.Count; index++)
+        {
+            CatalogCapabilityRequirement? requirement = requirements[index];
+            string requirementPath = $"{path}[{index}]";
+            if (requirement is null)
+            {
+                errors.Add(new CatalogIssue(
+                    "CAPABILITY_REQUIREMENT_INVALID",
+                    "Capability requirement must be an object.",
+                    requirementPath));
+                continue;
+            }
+
+            string capabilityId = requirement.CapabilityId ?? string.Empty;
+            ValidateIdentifier(
+                capabilityId,
+                $"{requirementPath}.capabilityId",
+                "CAPABILITY_ID_INVALID",
+                errors);
+            if (!seen.Add(capabilityId))
+            {
+                errors.Add(new CatalogIssue(
+                    "CAPABILITY_REQUIREMENT_DUPLICATE",
+                    $"Capability {capabilityId} is required more than once.",
+                    requirementPath));
+            }
+
+            if (string.IsNullOrWhiteSpace(requirement.Purpose) ||
+                requirement.Purpose.Length > MaxDescriptionLength)
+            {
+                errors.Add(new CatalogIssue(
+                    "CAPABILITY_PURPOSE_INVALID",
+                    $"Capability purpose must be non-empty and at most {MaxDescriptionLength} characters.",
+                    $"{requirementPath}.purpose"));
+            }
+
+            ValidateCapabilityVersion(
+                requirement.ExpectedProvider,
+                $"{requirementPath}.expectedProvider",
+                errors);
+            ValidateCapabilityVersion(
+                requirement.MinimumSchemaVersion,
+                $"{requirementPath}.minimumSchemaVersion",
+                errors);
+            ValidateCapabilityVersion(
+                requirement.MinimumVersion,
+                $"{requirementPath}.minimumVersion",
+                errors);
+            ValidateCapabilityVersion(
+                requirement.Owner,
+                $"{requirementPath}.owner",
+                errors);
+        }
+    }
+
+    private static void ValidateCapabilityVersion(
+        string? value,
+        string path,
+        ICollection<CatalogIssue> errors)
+    {
+        if (value is not null &&
+            (string.IsNullOrWhiteSpace(value) || value.Length > MaxCapabilityVersionLength))
+        {
+            errors.Add(new CatalogIssue(
+                "CAPABILITY_METADATA_INVALID",
+                $"Capability metadata must be non-empty and at most {MaxCapabilityVersionLength} characters.",
+                path));
         }
     }
 

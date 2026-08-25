@@ -16,7 +16,8 @@ internal sealed class AgentIssueDetector
         AgentEvent eventRecord,
         IEnumerable<AgentIssue> currentIssues)
     {
-        var known = currentIssues
+        AgentIssue[] allKnown = currentIssues.ToArray();
+        var known = allKnown
             .Where(issue =>
                 string.Equals(issue.RunId, eventRecord.RunId, StringComparison.Ordinal) &&
                 string.Equals(issue.AgentId, eventRecord.AgentId, StringComparison.Ordinal) &&
@@ -25,21 +26,29 @@ internal sealed class AgentIssueDetector
             static issue => issue.Id,
             StringComparer.Ordinal);
         var updates = new Dictionary<string, AgentIssue>(StringComparer.Ordinal);
+        string? capabilityFingerprint =
+            AgentObservabilityData.GetString(eventRecord.Data, "fingerprint");
 
         AgentIssue? Find(
             AgentIssueCategory category,
             string? operationKey = null,
             bool includeRecovered = false)
         {
-            return updates.Values
-                    .Concat(known.Values)
+            IEnumerable<AgentIssue> candidates = category == AgentIssueCategory.CapabilityGap &&
+                !string.IsNullOrWhiteSpace(capabilityFingerprint)
+                ? updates.Values
+                    .Concat(allKnown)
+                    .Where(issue => string.Equals(
+                        issue.Fingerprint,
+                        capabilityFingerprint,
+                        StringComparison.Ordinal))
+                : updates.Values.Concat(known.Values);
+            return candidates
                     .Where(issue =>
-                        string.Equals(issue.RunId, eventRecord.RunId, StringComparison.Ordinal) &&
-                        string.Equals(issue.AgentId, eventRecord.AgentId, StringComparison.Ordinal) &&
-                        string.Equals(issue.ModId, eventRecord.ModId, StringComparison.Ordinal) &&
                         issue.Category == category &&
                         (includeRecovered || !issue.Recovered) &&
-                        (operationKey is null ||
+                        (category == AgentIssueCategory.CapabilityGap ||
+                            operationKey is null ||
                             string.Equals(issue.OperationKey, operationKey, StringComparison.Ordinal)))
                     .OrderByDescending(static issue => issue.Timestamp)
                     .ThenByDescending(static issue => issue.Occurrences)
@@ -311,7 +320,12 @@ internal sealed class AgentIssueDetector
             TraceId = issue.TraceId ?? eventRecord.TraceId,
             RetryCount = issue.RetryCount +
                 (eventRecord.Type is AgentEventTypes.RetryStarted or AgentEventTypes.RetryCompleted ? 1 : 0),
-            Occurrences = Math.Max(1, issue.Occurrences + occurrenceIncrement)
+            Occurrences = Math.Max(1, issue.Occurrences + occurrenceIncrement),
+            AffectedAgentIds = MergeValues(issue.AffectedAgentIds, [eventRecord.AgentId]),
+            AffectedRunIds = MergeValues(issue.AffectedRunIds, [eventRecord.RunId]),
+            AffectedModIds = MergeValues(issue.AffectedModIds, [eventRecord.ModId]),
+            ProbableOwner = issue.ProbableOwner ??
+                AgentObservabilityData.GetString(eventRecord.Data, "probableOwner")
         };
     }
 
@@ -328,6 +342,7 @@ internal sealed class AgentIssueDetector
             Id = "issue-" + Guid.NewGuid().ToString("N"),
             RunId = eventRecord.RunId,
             AgentId = eventRecord.AgentId,
+            LogicalAgentId = eventRecord.LogicalAgentId,
             ModId = eventRecord.ModId,
             Timestamp = eventRecord.Timestamp,
             Category = category,
@@ -345,7 +360,17 @@ internal sealed class AgentIssueDetector
             TraceId = eventRecord.TraceId,
             SpanIds = MergeSpanIds(null, eventRecord.SpanId),
             OperationKey = operationKey,
-            RetryCount = eventRecord.Type is AgentEventTypes.RetryStarted or AgentEventTypes.RetryCompleted ? 1 : 0
+            RetryCount = eventRecord.Type is AgentEventTypes.RetryStarted or AgentEventTypes.RetryCompleted ? 1 : 0,
+            Classification = category == AgentIssueCategory.CapabilityGap ? "CAPABILITY_GAP" : null,
+            CapabilityId = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "requiredCapabilityId") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "capabilityId"),
+            Fingerprint = AgentObservabilityData.GetString(eventRecord.Data, "fingerprint"),
+            ProbableOwner = AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
+            AffectedAgentIds = [eventRecord.AgentId],
+            AffectedRunIds = [eventRecord.RunId],
+            AffectedModIds = [eventRecord.ModId]
         };
 
     private static string OperationKey(AgentEvent eventRecord)
@@ -437,6 +462,10 @@ internal sealed class AgentIssueDetector
                 category = AgentIssueCategory.ToolLimitation;
                 severity = AgentIssueSeverity.Info;
                 return true;
+            case AgentEventTypes.ValidationCapabilityBlocked:
+                category = AgentIssueCategory.CapabilityGap;
+                severity = AgentIssueSeverity.Warning;
+                return true;
             case AgentEventTypes.ContextIssue:
                 category = AgentIssueCategory.ContextIssue;
                 severity = AgentIssueSeverity.Warning;
@@ -454,7 +483,6 @@ internal sealed class AgentIssueDetector
                 return false;
         }
     }
-
     private static string ExplicitIssueSummary(
         AgentIssueCategory category,
         string summary)
@@ -463,6 +491,7 @@ internal sealed class AgentIssueDetector
         string prefix = category switch
         {
             AgentIssueCategory.ToolLimitation => "Possible tooling limitation: ",
+            AgentIssueCategory.CapabilityGap => "CAPABILITY GAP / BLOCKED: ",
             AgentIssueCategory.ContextIssue => "Possible context issue: ",
             AgentIssueCategory.Rework => "Potential rework: ",
             AgentIssueCategory.Workaround => "Workaround applied: ",

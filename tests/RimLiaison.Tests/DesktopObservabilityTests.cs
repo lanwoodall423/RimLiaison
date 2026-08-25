@@ -79,7 +79,8 @@ internal static class DesktopObservabilityTests
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession historical = historicalRun.CreateAgent(
             "Wildlife",
-            "Wildlife");
+            "Wildlife",
+            logicalAgentId: "logical-wildlife");
         historical.Start();
         historical.Complete();
 
@@ -89,7 +90,8 @@ internal static class DesktopObservabilityTests
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession active = activeRun.CreateAgent(
             "Wildlife",
-            "Wildlife");
+            "Wildlife",
+            logicalAgentId: "logical-wildlife");
         active.Start();
 
         using var ui = new AgentObservabilityUi(store);
@@ -110,6 +112,84 @@ internal static class DesktopObservabilityTests
         AssertEqual(past.RunId, pastView.Agent.RunId);
         AssertEqual(active.RunId, pastView.CurrentSession.RunId);
     }
+    public static void ElevenSessionsOfOneLogicalAgentCountOnce()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 11; index++)
+        {
+            using var run = new AgentObservabilityRun(
+                "ui-eleven-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession session = run.CreateAgent(
+                "mod.frontier",
+                "Frontier",
+                "frontier-session-" + index,
+                "logical-frontier");
+            session.Start();
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandFailed,
+                "RimLiaison command failed.",
+                new
+                {
+                    operationKey = "command:frontier:" + index,
+                    toolName = "RimLiaison",
+                    errorCode = "RIMLIAISON_COMMAND_FAILED",
+                    command = "rimliaison affected",
+                    exitCode = 1
+                });
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityIssueRow row = ui.ShowIssues().Issues!.Issues
+            .First(value => value.Issue.ModId == "mod.frontier");
+        AssertEqual(1, row.SharedAgentCount);
+        AssertEqual(11, row.SharedTooling!.AffectedSessionCount);
+    }
+
+    public static void DistinctConcurrentLogicalAgentsRemainSeparate()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-concurrent-frontier",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent(
+            "mod.frontier",
+            "Frontier",
+            "frontier-one-session",
+            "logical-frontier-one");
+        using AgentObservabilitySession second = run.CreateAgent(
+            "mod.frontier",
+            "Frontier",
+            "frontier-two-session",
+            "logical-frontier-two");
+        first.Start();
+        second.Start();
+        RecordSharedFailure(first, "one");
+        RecordSharedFailure(second, "two");
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            2,
+            ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
+        AgentObservabilityIssueRow firstIssue = ui.ShowIssues().Issues!.Issues
+            .First(value => value.Issue.AgentId == first.AgentId);
+        AssertEqual(2, firstIssue.SharedAgentCount);
+    }
+
+    public static void LegacyRecordsStayConservativelySeparate()
+    {
+        using var store = new AgentObservabilityStore();
+        store.RegisterAgent(LegacyAgent("legacy-run-one", "legacy-agent-one"));
+        store.RegisterAgent(LegacyAgent("legacy-run-two", "legacy-agent-two"));
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            2,
+            ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
+    }
 
     public static void CompletedRunsRemainVisibleWithoutDismissal()
     {
@@ -120,7 +200,8 @@ internal static class DesktopObservabilityTests
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession first = firstRun.CreateAgent(
             "Aquaculture",
-            "Aquaculture");
+            "Aquaculture",
+            logicalAgentId: "logical-aquaculture");
         first.Start();
         first.Complete();
 
@@ -135,9 +216,10 @@ internal static class DesktopObservabilityTests
             new NoopAgentObservabilityTelemetry());
         using AgentObservabilitySession second = secondRun.CreateAgent(
             "Aquaculture",
-            "Aquaculture");
+            "Aquaculture",
+            logicalAgentId: "logical-aquaculture");
         second.Start();
-
+        AssertEqual(AgentStatus.Running, second.Snapshot.Status);
         AgentObservabilityUiNavigationItem activeTab = ui.Snapshot.Navigation.Items
             .Single(item => item.Kind == "agent" && item.ModId == "Aquaculture");
         AssertEqual(1, ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
@@ -632,6 +714,123 @@ internal static class DesktopObservabilityTests
         Assert(changed.UpdatedEventIds.SequenceEqual([existingRows[0].Event.Id]));
     }
 
+    public static void DesktopPresentationReconciliationIsStable()
+    {
+        AgentObservabilityStageProgress[] stages =
+        [
+            new(DevelopmentStage.Analysis, "completed", false),
+            new(DevelopmentStage.Research, "completed", false),
+            new(DevelopmentStage.Implementation, "running", true),
+            new(DevelopmentStage.Testing, "pending", false),
+            new(DevelopmentStage.Packaging, "pending", false),
+            new(DevelopmentStage.Complete, "pending", false)
+        ];
+        long stageMutationCount = 0;
+        for (int iteration = 0; iteration < 100; iteration++)
+        {
+            AgentObservabilityStageReconciliationPlan plan =
+                AgentObservabilityStageReconciliation.Plan(stages, stages);
+            Assert(!plan.HasChanges, "unchanged stages must not mutate controls");
+            stageMutationCount += plan.RemovedStages.Count +
+                plan.MovedStages.Count +
+                plan.UpdatedStages.Count +
+                plan.InsertedStages.Count;
+        }
+
+        AssertEqual(0L, stageMutationCount);
+        AgentObservabilityStageProgress[] changedStages = stages.ToArray();
+        changedStages[2] = changedStages[2] with
+        {
+            State = "completed",
+            IsCurrent = false
+        };
+        AgentObservabilityStageReconciliationPlan stageUpdate =
+            AgentObservabilityStageReconciliation.Plan(stages, changedStages);
+        Assert(stageUpdate.UpdatedStages.SequenceEqual(
+            [DevelopmentStage.Implementation]));
+        AssertEqual(0, stageUpdate.RemovedStages.Count);
+        AssertEqual(0, stageUpdate.MovedStages.Count);
+        AssertEqual(0, stageUpdate.InsertedStages.Count);
+
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-presentation-reconcile",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.presentation-reconcile",
+            "Presentation Reconcile");
+        agent.Start();
+        for (int index = 0; index < 3; index++)
+        {
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.TestFailed,
+                "Issue " + index,
+                new
+                {
+                    operationKey = "test:presentation-" + index,
+                    toolName = "dotnet test",
+                    exitCode = 1
+                });
+        }
+
+        using var ui = new AgentObservabilityUi(store, runId: run.RunId);
+        AgentObservabilityUiSnapshot allFirst = ui.Snapshot;
+        AgentObservabilityUiSnapshot allSecond = ui.Snapshot;
+        Assert(ReferenceEquals(allFirst.All, allSecond.All));
+        Assert(ReferenceEquals(allFirst.Navigation, allSecond.Navigation));
+        AgentObservabilityIssueListItem[] current = ui.ShowIssues().Issues!.Issues
+            .Select(static row => new AgentObservabilityIssueListItem(row.Issue.Id, row))
+            .ToArray();
+        long issueMutationCount = 0;
+        for (int iteration = 0; iteration < 100; iteration++)
+        {
+            AgentObservabilityIssueReconciliationPlan plan =
+                AgentObservabilityIssueReconciliation.Plan(current, current);
+            Assert(!plan.HasChanges, "unchanged issues must not mutate rows");
+            issueMutationCount += plan.RemovedIssueIds.Count +
+                plan.MovedIssueIds.Count +
+                plan.UpdatedIssueIds.Count +
+                plan.InsertedIssueIds.Count;
+        }
+
+        AssertEqual(0L, issueMutationCount);
+        AgentObservabilityIssueListItem insertedItem = new(
+            "synthetic-presentation-issue",
+            current[0].Row with
+            {
+                Issue = current[0].Row.Issue with
+                {
+                    Id = "synthetic-presentation-issue",
+                    Summary = "Synthetic issue"
+                }
+            });
+        AgentObservabilityIssueReconciliationPlan insertion =
+            AgentObservabilityIssueReconciliation.Plan(
+                current,
+                [insertedItem, ..current]);
+        Assert(insertion.InsertedIssueIds.SequenceEqual(
+            ["synthetic-presentation-issue"]));
+        AssertEqual(0, insertion.RemovedIssueIds.Count);
+        AssertEqual(0, insertion.UpdatedIssueIds.Count);
+
+        AgentObservabilityIssueListItem updatedItem = current[0] with
+        {
+            Row = current[0].Row with
+            {
+                Issue = current[0].Row.Issue with { Summary = "Updated issue" }
+            }
+        };
+        AgentObservabilityIssueReconciliationPlan update =
+            AgentObservabilityIssueReconciliation.Plan(
+                current,
+                [updatedItem, ..current.Skip(1)]);
+        Assert(update.UpdatedIssueIds.SequenceEqual([current[0].IssueId]));
+        AssertEqual(0, update.RemovedIssueIds.Count);
+        AssertEqual(0, update.InsertedIssueIds.Count);
+    }
+
     public static void IssueSelectionAndAssessmentSurviveLiveUpdates()
     {
         using var store = new AgentObservabilityStore();
@@ -853,12 +1052,16 @@ internal static class DesktopObservabilityTests
         AssertEqual("READINESS_IDENTITY_MISMATCH", shared.SharedTooling!.FailureCode);
         Assert(issues.Issues.All(row => row.Issue.AgentId != unrelated.AgentId ||
             row.SharedAgentCount == 0));
+        long signatureComputationsBeforeRecovery = ui.IssueSignatureComputations;
 
         first.Record(
             DevelopmentStage.Testing,
             AgentEventTypes.RecoveryCompleted,
             "Readiness recovered.",
             new { operationKey = "readiness:shared-1", recovered = true });
+        Assert(
+            ui.IssueSignatureComputations > signatureComputationsBeforeRecovery,
+            "relevant issue evidence must invalidate its cached signature");
         AgentObservabilityIssuesView ordered = ui.ShowIssues().Issues!;
         Assert(!ordered.Issues[0].Issue.Recovered,
             "unresolved issue must outrank recovered shared-tooling history");
@@ -920,6 +1123,85 @@ internal static class DesktopObservabilityTests
         Assert(packet.Length <= 8_000);
     }
 
+    public static void IssuesProjectionIsIndexedCachedAndLazy()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-indexed-issues",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        var sessions = new List<AgentObservabilitySession>();
+        try
+        {
+            for (int index = 0; index < 150; index++)
+            {
+                AgentObservabilitySession session = run.CreateAgent(
+                    "mod.issue-" + index,
+                    "Issue " + index);
+                session.Start();
+                RecordReadinessFailure(session, "indexed-" + index);
+                sessions.Add(session);
+            }
+
+            Assert(store.GetIssues().Count >= 100, "fixture should contain a large issue history");
+            using var ui = new AgentObservabilityUi(
+                store,
+                new AgentObservabilityUiOptions
+                {
+                    MaximumIssueRows = 25,
+                    MaximumIndexedIssues = 500
+                });
+            AgentObservabilityUiSnapshot first = ui.ShowIssues();
+            long signatureComputations = ui.IssueSignatureComputations;
+            AssertEqual(0L, store.DiagnosticBundleCreationCount);
+            AgentObservabilityUiSnapshot second = ui.Snapshot;
+            Assert(ReferenceEquals(first.Issues, second.Issues),
+                "unchanged Issues projections should be reused");
+            AssertEqual(signatureComputations, ui.IssueSignatureComputations);
+            Assert(first.Issues!.Issues.Count <= 25);
+            Assert(first.Issues.HasMoreIssues);
+
+            AgentObservabilityUiSnapshot expanded = ui.LoadMoreIssues();
+            Assert(expanded.Issues!.Issues.Count <= 50);
+            Assert(expanded.Issues.Issues.Count > first.Issues.Issues.Count);
+        }
+        finally
+        {
+            foreach (AgentObservabilitySession session in sessions)
+            {
+                session.Dispose();
+            }
+        }
+    }
+
+    private static void RecordSharedFailure(
+        AgentObservabilitySession agent,
+        string suffix)
+    {
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "RimLiaison command failed.",
+            new
+            {
+                operationKey = "command:shared:" + suffix,
+                toolName = "RimLiaison",
+                command = "rimliaison affected",
+                errorCode = "RIMLIAISON_COMMAND_FAILED",
+                exitCode = 1
+            });
+    }
+
+    private static AgentSnapshot LegacyAgent(string runId, string agentId) =>
+        new()
+        {
+            RunId = runId,
+            AgentId = agentId,
+            ModId = "mod.legacy",
+            ModName = "Legacy",
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+
     private static void RecordReadinessFailure(
         AgentObservabilitySession agent,
         string operationKey)
@@ -940,12 +1222,14 @@ internal static class DesktopObservabilityTests
 
     public static void ExistingCliUiRemainsAvailable()
     {
+        using var store = new AgentObservabilityStore();
         using var output = new StringWriter();
         using var error = new StringWriter();
         int exitCode = CliApplication.RunAsync(
                 ["list", "--catalog", Path.Combine(Directory.GetCurrentDirectory(), "TestCatalog", "rimtest.catalog.json")],
                 output,
                 error,
+                observabilityStore: store,
                 observabilityTelemetry: new NoopAgentObservabilityTelemetry())
             .GetAwaiter()
             .GetResult();

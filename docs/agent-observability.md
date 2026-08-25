@@ -2,23 +2,27 @@
 
 RimLiaison now keeps product observability state locally and independently of
 OpenTelemetry. One `AgentObservabilityRun` represents a RimLiaison invocation,
-and each mod is represented by one `AgentObservabilitySession`. Analysis,
-research, implementation, testing, packaging, recovery, and completion are
-stages on that same mod agent; they are not separate user-facing agents.
+and each mod session belongs to a durable logical development agent when the
+caller supplies one. Analysis, research, implementation, testing, packaging,
+recovery, and completion are stages on that logical agent; they are not
+separate user-facing agents.
 
 ## Authoritative state
 
 `RimLiaison.Observability.AgentObservabilityStore` owns the durable structured
 records:
 
-- `AgentEvent` records have stable event IDs, run/agent/mod identity, a
-  sequence for deterministic ordering, lifecycle stage, summary, bounded
-  structured data, and optional trace/span IDs.
-- `AgentIssue` records have stable issue IDs, supporting event IDs, category,
-  severity, related tools/commands/files, retry/occurrence counts, and an
-  explicit recovery event when recovered.
-- `AgentSnapshot` exposes the mod display name, status, current stage/activity,
-  start/completion state, and failure state.
+- `AgentEvent` records have stable event IDs, run/session/mod identity, an
+  optional durable logical-agent identity, a sequence for deterministic
+  ordering, lifecycle stage, summary, bounded structured data, and optional
+  trace/span IDs.
+- `AgentIssue` records have stable issue IDs, run/session/mod identity, the
+  optional logical-agent identity, supporting event IDs, category, severity,
+  related tools/commands/files, retry/occurrence counts, and an explicit
+  recovery event when recovered.
+- `AgentSnapshot` exposes the logical-agent identity when available, the mod
+  display name, status, current stage/activity, start/completion state, and
+  failure state.
 
 The store supports all-event, issues-only, and agent-scoped queries. Its
 subscription callback drives the desktop presentation layer; the CLI and
@@ -32,8 +36,7 @@ Diagnostic exports use the `rimliaison-agent-diagnostic-bundle/v2` contract.
 `correlatedIssueIds` and `correlatedIssues` are a separate, bounded causal
 closure. The closure follows stable event, operation, trace/span,
 transaction/workflow, and structured relationship identifiers, while keeping
-the `(runId, agentId, modId)` identity boundary. It does not use a broad time
-window or dump every event from a run. The bundle also exposes structured
+the `(logicalAgentId, runId, agentId, modId)` identity boundary. It does not use a broad time window or dump every event from a run. The bundle also exposes structured
 command, build/deployment, tool-operation, repository, environment, recovery,
 trace, and correlation evidence. `completeness.status` and
 `completeness.missingEvidence` make missing command output or build/compiler
@@ -51,20 +54,29 @@ the same store instance/root mechanism.
 
 The current JSONL layout is application-level (`events.jsonl`, `issues.jsonl`,
 `agents.jsonl`, and the sequence metadata under the canonical root). Run,
-agent, mod, event, issue, and optional trace/span identities remain in every
-record, so records from multiple runs share one transport without becoming
-ambiguous. The store uses per-file locks, a shared sequence counter, atomic
-compaction, and a bounded file watcher refresh. A desktop process therefore
-hydrates the same persisted records written by a runtime process and receives
-cross-process updates without a local service or telemetry backend.
+session, logical-agent, mod, event, issue, and optional trace/span identities
+remain in every new record, so records from multiple runs share one transport
+without becoming ambiguous. Records written before `logicalAgentId` existed
+use a conservative `(runId, agentId)` fallback and are never merged merely
+because their mod names match. The store uses per-file locks, a shared
+sequence counter, atomic compaction, and a bounded file watcher refresh. A
+desktop process therefore hydrates the same persisted records written by a
+runtime process and receives cross-process updates without a local service or
+telemetry backend.
 
-An unscoped desktop view aggregates agents from all runs in that shared store,
-including runs that arrive while the window is open. Navigation groups those
-invocations by stable mod identity, so repeated commands for `Wildlife`, for
-example, remain one tab. The tab represents the newest active invocation, or
-the newest finished invocation when none remain active. Callers that need a
-single-run history view can construct `AgentObservabilityUi` with an explicit
-`runId`; that scope is preserved for both initial hydration and live updates.
+An unscoped desktop view aggregates sessions from all runs in that shared
+store, including runs that arrive while the window is open. Navigation groups
+sessions by `(logicalAgentId, modId)`, so repeated sessions for one logical
+`Frontier` agent remain one tab while distinct logical agents remain separate.
+The tab represents the newest active session, or the newest finished session
+when none remain active. Callers that need a single-run history view can
+construct `AgentObservabilityUi` with an explicit `runId`; that scope is
+preserved for both initial hydration and live updates.
+
+The CLI carries an upstream worker identity from
+`RIMLIAISON_LOGICAL_AGENT_ID` (or the compatibility alias
+`RIMLIAISON_WORKER_ID`) into each new session. Separate concurrent workers
+must use different values; the same value is scoped with the mod ID.
 
 ## Desktop surface
 
@@ -74,19 +86,19 @@ C#/.NET Windows toolchain and has no existing web or cross-platform frontend
 runtime to reuse. The form keeps navigation and filtering local to the
 store-backed `AgentObservabilityUi` presentation layer:
 
-One `AgentObservabilitySession` is created per mod within a run. That same
-session owns analysis, research, implementation, testing, packaging, recovery,
-and completion; creating a second role-specific agent for the same mod returns
-the existing session.
+One `AgentObservabilitySession` is created per mod/logical-agent pair within
+a run. A caller without an explicit identity retains the existing one-session
+per-mod behavior for that run; callers can supply distinct logical identities
+for genuinely concurrent agents working on the same mod.
 
 - `All` is the default chronological activity view and shows concurrent mod
   agents together.
 - `Issues` shows unresolved and recovered structured issues, supports multiple
   selection, opens supporting activity, and prepares/copies/exports assessment
   bundles.
-- Each mod gets a navigation item and an end-to-end agent view with stage
-  progress, current activity, files, tools, commands, build/test results, and
-  issue state.
+- Each logical agent/mod pair gets one navigation item and an end-to-end agent
+  view with stage progress, current activity, files, tools, commands,
+  build/test results, issue state, and selectable current/past sessions.
 
 The store subscription is coalesced through a bounded WinForms refresh timer,
 so new authoritative runtime events update the window without forcing the

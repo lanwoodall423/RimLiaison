@@ -17,6 +17,7 @@ public static class AgentObservabilityTags
 {
     public const string RunId = "rimliaison.run.id";
     public const string AgentId = "rimliaison.agent.id";
+    public const string LogicalAgentId = "rimliaison.logical.agent.id";
     public const string ModId = "rimliaison.mod.id";
     public const string ModName = "rimliaison.mod.name";
     public const string Stage = "rimliaison.stage";

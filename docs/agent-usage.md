@@ -65,6 +65,22 @@ freshness evaluation; it is not evidence of a stale deployed artifact. Only ambi
 contention, unsafe or unwritable state, owner refusal, or another result explicitly marked as
 requiring intervention should stop for manual repair.
 
+Affected JSON includes additive `validationDiagnosis` evidence for the chain
+`source -> build -> deploy -> artifact-freshness -> readiness -> lease -> runtime -> evidence`.
+Use `result` as the agent-facing classification:
+
+- `PASS`: every boundary completed with current-artifact evidence.
+- `PROJECT_VALIDATION_FAILED`: project runtime executed and returned an assertion failure.
+- `INFRASTRUCTURE_BLOCKED`: a tooling boundary stopped validation before a project assertion,
+  or runtime infrastructure failed.
+- `NOT_PROVEN`: evidence is incomplete or ambiguous; do not infer project failure.
+
+`firstFailedBoundary`, `code`, `probableOwner`, `ownershipConfidence`,
+`projectRuntimeExecuted`, `artifactFreshness`, `readiness`, `lease`, and `evidenceIds` explain
+where the chain stopped. A `DEVELOPMENT_BUILD_FAILED` result before lease/runtime is
+`INFRASTRUCTURE_BLOCKED`, never a mod failure. Follow `nextAction` and rerun the canonical
+affected command after the owning boundary is repaired.
+
 Shared DevBridge runtime transitions are bounded and owner-mediated. For a
 `READINESS_IDENTITY_MISMATCH`, RimLiaison classifies the returned field before acting:
 generation/process churn and same-root stale descriptor/profile registration are recovery
@@ -76,6 +92,18 @@ development/freshness transaction up to three times. Successful recovery reports
 refusal or exhaustion reports `INFRASTRUCTURE_FAILURE` with `NOT_RUN`, the mismatch details, and
 the recovery attempt count. The old generation, lease, artifact proof, and runtime evidence are
 never reused. Agents must not kill, restart, or take over another valid DevBridge/RimWorld owner.
+
+### Validation capability gaps
+
+Catalog tests may declare `requiredCapabilities`. RimLiaison negotiates these through the
+read-only DevBridge capability registry before recipe execution. A missing or incompatible
+capability is `status: "blocked"` / `CAPABILITY GAP`, not a mod failure:
+
+- Never change mod production behavior to compensate for an unavailable validation capability.
+- Never claim a mod failed when `operationAttempted` is `false`.
+- Report the exact capability ID and probable owner from `capabilityBlocker`.
+- Do not repeatedly retry a capability discovery result that proves the capability absent.
+- A capability blocker prevents claiming validation completion, but is not negative evidence about the mod.
 
 ## Human multi-repository workflow
 

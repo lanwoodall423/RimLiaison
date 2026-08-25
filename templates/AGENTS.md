@@ -52,3 +52,13 @@ fields, and DevBridge protocol contracts. Treat
 `artifactFreshness.loadedArtifactFreshnessProven: true` as required evidence for a source-change
 PASS. Recipe reuse is opt-in catalog metadata and is invalidated by failure, reset, lease,
 readiness, generation, ownership, or cleanup uncertainty.
+
+Validation capability blockers are first-class results. When JSON reports `status: "blocked"` with
+`errorCode: "VALIDATION_CAPABILITY_UNAVAILABLE"` or
+`"VALIDATION_CAPABILITY_INCOMPATIBLE"`:
+
+- Never modify mod production behavior because a validation capability is absent.
+- Never claim the mod failed when the validation was not executable.
+- Report the exact `requiredCapabilityId` and `probableOwner`.
+- Do not repeatedly retry after capability discovery has proven the capability absent.
+- A capability blocker prevents claiming validation completion, but is not negative evidence about the mod.

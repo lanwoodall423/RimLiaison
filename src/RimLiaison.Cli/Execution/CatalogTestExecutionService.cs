@@ -4,6 +4,7 @@ using RimLiaison.DevBridge;
 using RimLiaison.Profiling;
 using RimLiaison.RimError;
 using RimLiaison.Results;
+using RimLiaison.Validation;
 
 namespace RimLiaison.Execution;
 
@@ -20,9 +21,10 @@ public sealed class CatalogTestExecutionService
     public CatalogTestExecutionService(
         IDevBridgeRecipeAdapter recipeAdapter,
         Func<IRimErrorDiagnosisAdapter>? diagnosisFactory = null,
-        Func<IDevBridgeDiagnosticSourceAdapter>? diagnosticSourceFactory = null)
+        Func<IDevBridgeDiagnosticSourceAdapter>? diagnosticSourceFactory = null,
+        IDevBridgeCapabilityAdapter? capabilityAdapter = null)
         : this(
-            new CatalogTestRecipeRunner(recipeAdapter),
+            new CatalogTestRecipeRunner(recipeAdapter, capabilityAdapter),
             diagnosisFactory,
             diagnosticSourceFactory)
     {
@@ -76,11 +78,17 @@ public sealed class CatalogTestExecutionService
                 target: testId,
                 scope: "test")
             .ConfigureAwait(false);
-        RimTestResult normalized = RimTestResultFactory.FromRun(
-            run.TestId,
-            run.RecipeResult,
-            ElapsedMilliseconds(started),
-            workflowId);
+        RimTestResult normalized = run.CapabilityPreflight is { IsBlocked: true } preflight
+            ? RimTestResultFactory.CapabilityBlocked(
+                run.TestId,
+                preflight.Evidence,
+                ElapsedMilliseconds(started),
+                workflowId)
+            : RimTestResultFactory.FromRun(
+                run.TestId,
+                run.RecipeResult,
+                ElapsedMilliseconds(started),
+                workflowId);
 
         if (run.RecipeResult.Status.Outcome == DevBridgeOutcomeKind.TestFailure)
         {

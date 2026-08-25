@@ -32,6 +32,9 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("orchestration")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RimTestOrchestrationSummary? Orchestration { get; init; }
+    [JsonPropertyName("validationDiagnosis")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimTestValidationChainDiagnosis? ValidationDiagnosis { get; init; }
 
     [JsonPropertyName("prerequisiteRecovery")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -50,6 +53,10 @@ public sealed class RimTestSuiteResult
 
     [JsonPropertyName("failed")]
     public int Failed { get; init; }
+
+    [JsonPropertyName("blocked")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Blocked { get; init; }
 
     [JsonPropertyName("durationMs")]
     public long DurationMs { get; init; }
@@ -139,6 +146,12 @@ public static class RimTestSuiteResultFactory
             SelectionStatus = selectionStatus,
             SelectionErrorCode = errorCode,
             NextAction = nextAction,
+            ValidationDiagnosis = RimTestValidationChainDiagnoser.Diagnose(
+                execution,
+                selectionStatus,
+                errorCode,
+                freshnessRequested: false,
+                workflowId: workflowId),
             Orchestration = RimTestOrchestrationProjector.Project(
                 execution,
                 suiteId,
@@ -167,6 +180,7 @@ public static class RimTestSuiteResultFactory
         RimTestResult[] children = execution.Tests.ToArray();
         bool emptyExecution = children.Length == 0;
         int passed = children.Count(static child => child.Status == "pass");
+        int blocked = children.Count(static child => child.Status == "blocked");
         int failed = children.Count(static child =>
             child.Status is "fail" or "infrastructure" or "invalid");
         int cancelledChildren = children.Count(static child => child.Status == "cancelled");
@@ -184,14 +198,16 @@ public static class RimTestSuiteResultFactory
                     ? "infrastructure"
                     : failed > 0
                         ? "fail"
-                        : failFastIncomplete
-                            ? "conservative"
-                            : execution.Reuse?.Status == "invalidated"
-                                ? "infrastructure"
-                                : "pass";
+                        : blocked > 0
+                            ? "blocked"
+                            : failFastIncomplete
+                                ? "conservative"
+                                : execution.Reuse?.Status == "invalidated"
+                                    ? "infrastructure"
+                                    : "pass";
 
         RimTestSuiteFailure[] failures = children
-            .Where(static child => child.Status is "fail" or "infrastructure" or "invalid")
+            .Where(static child => child.Status is "fail" or "infrastructure" or "invalid" or "blocked")
             .OrderBy(static child => child.Test, StringComparer.Ordinal)
             .Select(static child => new RimTestSuiteFailure
             {
@@ -239,8 +255,21 @@ public static class RimTestSuiteResultFactory
                 .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
             Passed = passed,
             Failed = failed,
+            Blocked = blocked > 0 ? blocked : null,
             DurationMs = Math.Max(0, durationMs),
             ArtifactFreshness = projectedFreshness,
+            ValidationDiagnosis = string.Equals(execution.SuiteId, "affected", StringComparison.Ordinal)
+                ? RimTestValidationChainDiagnoser.Diagnose(
+                    execution,
+                    selectionStatus,
+                    selectionErrorCode,
+                    projectedFreshness,
+                    freshnessStatus,
+                    freshnessRequested,
+                    workflowId ?? children
+                        .Select(static child => child.WorkflowId)
+                        .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)))
+                : null,
             Orchestration = string.Equals(execution.SuiteId, "affected", StringComparison.Ordinal)
                 ? RimTestOrchestrationProjector.Project(
                     execution,

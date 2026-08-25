@@ -2,13 +2,15 @@ using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Observability;
 using RimLiaison.Profiling;
+using RimLiaison.Validation;
 
 namespace RimLiaison.Execution;
 
 public sealed record CatalogTestRunResult(
     string TestId,
     string RecipeId,
-    DevBridgeRecipeRunResult RecipeResult);
+    DevBridgeRecipeRunResult RecipeResult,
+    ValidationCapabilityPreflightResult? CapabilityPreflight = null);
 
 public interface ICatalogTestRecipeRunner
 {
@@ -23,10 +25,16 @@ public interface ICatalogTestRecipeRunner
 public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
 {
     private readonly IDevBridgeRecipeAdapter adapter;
+    private readonly ValidationCapabilityNegotiator? capabilityNegotiator;
 
-    public CatalogTestRecipeRunner(IDevBridgeRecipeAdapter adapter)
+    public CatalogTestRecipeRunner(
+        IDevBridgeRecipeAdapter adapter,
+        IDevBridgeCapabilityAdapter? capabilityAdapter = null)
     {
         this.adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
+        capabilityNegotiator = capabilityAdapter is null
+            ? null
+            : new ValidationCapabilityNegotiator(capabilityAdapter);
     }
 
     public async Task<CatalogTestRunResult> RunAsync(
@@ -40,6 +48,60 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
         if (test is null)
         {
             throw new KeyNotFoundException($"Test was not found: {testId}.");
+        }
+
+        ValidationCapabilityPreflightResult preflight =
+            test.RequiredCapabilities is not { Count: > 0 }
+                ? new(ValidationCapabilityPreflightOutcome.Available, [])
+                : capabilityNegotiator is null
+                    ? new(
+                        ValidationCapabilityPreflightOutcome.InfrastructureFailure,
+                        [],
+                        ValidationCapabilitySchema.DiscoveryFailedCode)
+                    : await capabilityNegotiator.NegotiateAsync(
+                            test,
+                            workflowId,
+                            executionContext?.LeaseId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+        if (!preflight.IsAvailable)
+        {
+            string errorCode = preflight.ErrorCode ??
+                preflight.Evidence.FirstOrDefault()?.ErrorCode ??
+                ValidationCapabilitySchema.DiscoveryFailedCode;
+            if (preflight.IsBlocked)
+            {
+                ValidationCapabilityEvidence[] gaps = preflight.Evidence.ToArray();
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Testing,
+                    AgentEventTypes.ValidationCapabilityBlocked,
+                    $"Validation blocked: required capability {gaps[0].RequiredCapabilityId} is unavailable. No product failure was observed. Probable owner: {gaps[0].ProbableOwner}.",
+                    new
+                    {
+                        operationKey = "test:" + test.Id,
+                        validationId = test.Id,
+                        state = "CAPABILITY_GAP",
+                        outcome = "blocked",
+                        errorCode = gaps[0].ErrorCode,
+                        capabilityId = gaps[0].RequiredCapabilityId,
+                        requiredCapabilityId = gaps[0].RequiredCapabilityId,
+                        expectedProvider = gaps[0].ExpectedProvider,
+                        discoveredProvider = gaps[0].DiscoveredProvider,
+                        reason = gaps[0].Reason,
+                        probableOwner = gaps[0].ProbableOwner,
+                        recommendedRemediation = gaps[0].RecommendedRemediation,
+                        operationAttempted = false,
+                        workflowId,
+                        agentId = gaps[0].AgentId,
+                        fingerprint = gaps[0].Fingerprint
+                    });
+            }
+
+            return new CatalogTestRunResult(
+                test.Id,
+                test.Recipe,
+                NotAttemptedResult(test.Recipe, errorCode, workflowId),
+                preflight);
         }
 
         AgentOperationScope? observation = AgentObservabilityRuntime.BeginOperation(
@@ -125,7 +187,7 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
                     "Test failed.",
                     details);
             }
-            return new CatalogTestRunResult(test.Id, test.Recipe, result);
+            return new CatalogTestRunResult(test.Id, test.Recipe, result, preflight);
         }
         catch (OperationCanceledException)
         {
@@ -160,4 +222,28 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
             observation?.Dispose();
         }
     }
+
+    private static DevBridgeRecipeRunResult NotAttemptedResult(
+        string recipeId,
+        string errorCode,
+        string? workflowId) =>
+        new(
+            recipeId,
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                errorCode,
+                "Validation preflight did not permit recipe execution."),
+            Passed: null,
+            RunId: null,
+            Generation: null,
+            LeaseId: null,
+            Evidence: null,
+            EvidenceId: null,
+            FailureFingerprint: null,
+            FinalNextAction: "inspect-validation-capability",
+            RestartRequired: null,
+            LaunchesConsumed: 0,
+            Operations: [],
+            WorkflowId: workflowId);
 }
+

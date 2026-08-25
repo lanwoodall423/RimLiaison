@@ -1,12 +1,14 @@
 using System.Text.Json.Serialization;
 using RimLiaison.DevBridge;
 using RimLiaison.RimError;
+using RimLiaison.Validation;
 
 namespace RimLiaison.Results;
 
 public static class RimTestResultSchema
 {
     public const string Current = "rimtest-result/v1";
+    public const string ValidationCapability = ValidationCapabilitySchema.Current;
 }
 
 /// <summary>
@@ -102,6 +104,10 @@ public sealed class RimTestResult
     [JsonPropertyName("nextAction")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NextAction { get; init; }
+
+    [JsonPropertyName("capabilityBlocker")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ValidationCapabilityEvidence>? CapabilityBlocker { get; init; }
 }
 
 public static class RimTestResultFactory
@@ -147,6 +153,27 @@ public static class RimTestResultFactory
                 ? run.Status.ErrorCode
                 : null,
             NextAction = NextActionFor(run.Status.Outcome)
+        };
+    }
+
+    public static RimTestResult CapabilityBlocked(
+        string testId,
+        IReadOnlyList<ValidationCapabilityEvidence> evidence,
+        long durationMs = 0,
+        string? workflowId = null)
+    {
+        ValidationCapabilityEvidence first = evidence.FirstOrDefault() ??
+            throw new ArgumentException("Capability blocker evidence is required.", nameof(evidence));
+        return new RimTestResult
+        {
+            Status = "blocked",
+            Test = testId,
+            WorkflowId = workflowId ?? first.WorkflowId,
+            DurationMs = BoundDuration(durationMs),
+            ErrorCode = first.ErrorCode,
+            FailureFingerprint = first.Fingerprint,
+            CapabilityBlocker = evidence,
+            NextAction = "inspect-validation-capability"
         };
     }
 

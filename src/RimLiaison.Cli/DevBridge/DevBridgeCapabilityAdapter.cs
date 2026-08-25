@@ -1,5 +1,5 @@
 using System.Text.Json;
-
+using RimLiaison.Observability;
 namespace RimLiaison.DevBridge;
 
 public static class DevBridgeCapabilitySchemas
@@ -18,13 +18,30 @@ public enum DevBridgeCapabilityOutcome
     IncompatibleSchema
 }
 
+public sealed record DevBridgeFailureEvidence(
+    string? OuterErrorCode = null,
+    string? UnderlyingErrorCode = null,
+    string? UnderlyingError = null,
+    string? Command = null,
+    int? ExitCode = null,
+    string? CoordinatorRoot = null,
+    string? LeaseId = null,
+    string? ScopeIdentity = null,
+    int? Generation = null,
+    string? Route = null,
+    string? ReadinessIdentity = null,
+    string? StdoutTail = null,
+    string? StderrTail = null,
+    string? DiagnosticTail = null);
+
 public sealed record DevBridgeCapabilityStatus(
     DevBridgeCapabilityOutcome Outcome,
     string? ErrorCode = null,
     string? Error = null,
     int? ProcessExitCode = null,
     string? ResponseSchema = null,
-    string? NextAction = "DevBridge.cmd doctor --json")
+    string? NextAction = "DevBridge.cmd doctor --json",
+    DevBridgeFailureEvidence? Evidence = null)
 {
     public bool IsSuccess => Outcome == DevBridgeCapabilityOutcome.Success;
 }
@@ -52,7 +69,9 @@ public sealed record DevBridgeCapability(
     string? ProviderId,
     string? Source,
     IReadOnlyList<DevBridgeCapabilityParameter> Parameters,
-    bool? ReadOnly);
+    bool? ReadOnly,
+    string? Version = null,
+    string? SchemaVersion = null);
 
 public sealed record DevBridgeCapabilityDiscoveryResult(
     DevBridgeCapabilityStatus Status,
@@ -83,6 +102,7 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
     private const int MaxMessageLength = 512;
     private readonly IDevBridgeProcessTransport transport;
     private readonly DevBridgeAdapterOptions options;
+    public DevBridgeAdapterOptions Options => options;
 
     public DevBridgeCapabilityAdapter(
         IDevBridgeProcessTransport transport,
@@ -316,12 +336,13 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
 
             if (process.ExitCode is > 0)
             {
-                return Failure(
+                return FailureWithEvidence(
                     DevBridgeCapabilityOutcome.InfrastructureFailure,
                     "DEVBRIDGE_RESULT_CONFLICT",
                     "DevBridge returned capability data with a non-success process result.",
-                    process.ExitCode,
-                    schema);
+                    process,
+                    schema,
+                    root);
             }
 
             return new DevBridgeCapabilityDiscoveryResult(
@@ -354,14 +375,15 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
             root,
             "error",
             "DevBridge could not provide the live-game capability registry.");
-        return Failure(
+        return FailureWithEvidence(
             IsUnavailableCode(errorCode)
                 ? DevBridgeCapabilityOutcome.Unavailable
                 : DevBridgeCapabilityOutcome.InfrastructureFailure,
             errorCode,
             error,
-            process.ExitCode,
-            schema);
+            process,
+            schema,
+            root);
     }
 
     private static bool TryGetCapabilityResult(
@@ -498,7 +520,9 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
             !TryGetOptionalString(value, out string? summary, "summary", "description") ||
             !TryGetOptionalString(value, out string? category, "category") ||
             !TryGetOptionalString(value, out string? providerId, "providerId", "provider") ||
-            !TryGetOptionalString(value, out string? source, "source"))
+            !TryGetOptionalString(value, out string? source, "source") ||
+            !TryGetOptionalString(value, out string? version, "version", "capabilityVersion") ||
+            !TryGetOptionalString(value, out string? schemaVersion, "schemaVersion", "capabilitySchemaVersion"))
         {
             error = $"Capability {id} has an invalid authoring metadata field.";
             return false;
@@ -520,7 +544,9 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
             providerId,
             source,
             parameters,
-            readOnly);
+            readOnly,
+            version,
+            schemaVersion);
         return true;
     }
 
@@ -807,6 +833,217 @@ public sealed class DevBridgeCapabilityAdapter : IDevBridgeCapabilityAdapter
 
     private static bool Contains(string? value, string query) =>
         value?.Contains(query, StringComparison.OrdinalIgnoreCase) == true;
+    private static DevBridgeCapabilityDiscoveryResult FailureWithEvidence(
+        DevBridgeCapabilityOutcome outcome,
+        string errorCode,
+        string error,
+        DevBridgeProcessResult process,
+        string? responseSchema,
+        JsonElement root)
+    {
+        DevBridgeCapabilityDiscoveryResult failure = Failure(
+            outcome,
+            errorCode,
+            error,
+            process.ExitCode,
+            responseSchema);
+        return failure with
+        {
+            Status = failure.Status with
+            {
+                Evidence = BuildFailureEvidence(
+                    errorCode,
+                    error,
+                    process,
+                    root)
+            }
+        };
+    }
+
+    private static DevBridgeFailureEvidence BuildFailureEvidence(
+        string outerErrorCode,
+        string outerError,
+        DevBridgeProcessResult process,
+        JsonElement? root = null)
+    {
+        string? underlyingCode = root.HasValue
+            ? FindNestedErrorCode(root.Value, outerErrorCode)
+            : null;
+        string? underlyingError = root.HasValue
+            ? FindNestedStringLast(root.Value, "error", "message", "failureMessage")
+            : null;
+        string? coordinatorRoot = root.HasValue
+            ? FindNestedString(root.Value, "coordinatorRoot", "rootPath", "coordinator")
+            : null;
+        string? leaseId = root.HasValue
+            ? FindNestedString(root.Value, "leaseId", "lease")
+            : null;
+        string? scopeIdentity = root.HasValue
+            ? FindNestedString(root.Value, "scopeIdentity", "scope", "identity")
+            : null;
+        int? generation = root.HasValue
+            ? FindNestedInt(root.Value, "generation", "runtimeGeneration")
+            : null;
+        string? route = root.HasValue
+            ? FindNestedJsonText(root.Value, "rimBridgeRoute", "route", "rimBridge")
+            : null;
+        string? readiness = root.HasValue
+            ? FindNestedStringLast(root.Value, "readinessIdentity", "readiness", "state")
+            : null;
+        string? stdoutTail = Tail(process.Stdout);
+        string? stderrTail = Tail(process.Stderr);
+        return new DevBridgeFailureEvidence(
+            outerErrorCode,
+            underlyingCode,
+            underlyingError ?? BoundMessage(outerError),
+            "bridge tools",
+            process.ExitCode,
+            coordinatorRoot,
+            leaseId,
+            scopeIdentity,
+            generation,
+            route,
+            readiness,
+            stdoutTail,
+            stderrTail,
+            Tail(string.Join(
+                Environment.NewLine,
+                new[] { stderrTail, stdoutTail }.Where(value => !string.IsNullOrWhiteSpace(value)))));
+    }
+
+    private static string? FindNestedErrorCode(JsonElement root, string outerCode)
+    {
+        foreach (string code in FindStrings(root, "errorCode"))
+        {
+            if (!string.Equals(code, outerCode, StringComparison.OrdinalIgnoreCase) &&
+                (code.StartsWith("DEVBRIDGE_", StringComparison.OrdinalIgnoreCase) ||
+                 code.StartsWith("RIMBRIDGE_", StringComparison.OrdinalIgnoreCase) ||
+                 code.StartsWith("READINESS_", StringComparison.OrdinalIgnoreCase) ||
+                 code.StartsWith("LEASE_", StringComparison.OrdinalIgnoreCase) ||
+                 code.StartsWith("GENERATION_", StringComparison.OrdinalIgnoreCase)))
+            {
+                return code;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindNestedString(JsonElement root, params string[] names) =>
+        FindStrings(root, names).FirstOrDefault();
+
+    private static string? FindNestedStringLast(
+        JsonElement root,
+        params string[] names) =>
+        names
+            .SelectMany(name => FindStrings(root, name))
+            .LastOrDefault();
+
+    private static string? FindNestedJsonText(
+        JsonElement root,
+        params string[] names)
+    {
+        foreach (string name in names)
+        {
+            foreach (JsonElement value in FindValues(root, name))
+            {
+                if (value.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(value.GetString()))
+                {
+                    return value.GetString();
+                }
+                if (value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                {
+                    return AgentObservabilityData.BoundText(value.GetRawText(), 2048);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int? FindNestedInt(JsonElement root, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            foreach (JsonElement value in FindValues(root, name))
+            {
+                if (value.ValueKind == JsonValueKind.Number &&
+                    value.TryGetInt32(out int result))
+                {
+                    return result;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> FindStrings(JsonElement root, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            foreach (JsonElement value in FindValues(root, name))
+            {
+                if (value.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(value.GetString()))
+                {
+                    yield return value.GetString()!;
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<JsonElement> FindValues(
+        JsonElement value,
+        string name,
+        int depth = 0)
+    {
+        if (depth > 8)
+        {
+            yield break;
+        }
+
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty property in value.EnumerateObject())
+            {
+                if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return property.Value;
+                }
+
+                foreach (JsonElement nested in FindValues(property.Value, name, depth + 1))
+                {
+                    yield return nested;
+                }
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in value.EnumerateArray())
+            {
+                foreach (JsonElement nested in FindValues(item, name, depth + 1))
+                {
+                    yield return nested;
+                }
+            }
+        }
+    }
+
+    private static string? Tail(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        string text = value.Trim();
+        return AgentObservabilityData.BoundText(
+            text.Length <= 2048 ? text : text[^2048..],
+            2048);
+    }
+
 
     private static bool IsSupportedSchema(string schema) =>
         schema.Equals("v1", StringComparison.OrdinalIgnoreCase) ||

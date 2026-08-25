@@ -5,9 +5,12 @@ namespace RimLiaison.Observability;
 
 public static partial class AgentObservabilitySchemas
 {
-    public const string Event = "rimliaison-agent-event/v1";
-    public const string Issue = "rimliaison-agent-issue/v1";
-    public const string Agent = "rimliaison-agent-snapshot/v1";
+    public const string Event = "rimliaison-agent-event/v2";
+    public const string Issue = "rimliaison-agent-issue/v2";
+    public const string Agent = "rimliaison-agent-snapshot/v2";
+    public const string LegacyEvent = "rimliaison-agent-event/v1";
+    public const string LegacyIssue = "rimliaison-agent-issue/v1";
+    public const string LegacyAgent = "rimliaison-agent-snapshot/v1";
     public const string Bundle = "rimliaison-agent-diagnostic-bundle/v2";
     public const string LegacyBundle = "rimliaison-agent-diagnostic-bundle/v1";
 }
@@ -49,6 +52,7 @@ public enum AgentIssueCategory
     Retry,
     Rework,
     ToolLimitation,
+    CapabilityGap,
     Stall,
     RedundantWork,
     ContextIssue,
@@ -89,6 +93,7 @@ public static class AgentEventTypes
     public const string TestStarted = "test.started";
     public const string TestPassed = "test.passed";
     public const string TestFailed = "test.failed";
+    public const string ValidationCapabilityBlocked = "validation.capability.blocked";
     public const string SuiteCompleted = "test.suite.completed";
     public const string ValidationEvidenceRecorded = "test.evidence.recorded";
     public const string ValidationEvidenceDecision = "test.evidence.decision";
@@ -119,7 +124,8 @@ public sealed record AgentEventRequest(
     object? Data = null,
     long? Timestamp = null,
     string? TraceId = null,
-    string? SpanId = null);
+    string? SpanId = null,
+    string? LogicalAgentId = null);
 
 public sealed record AgentEvent
 {
@@ -135,6 +141,9 @@ public sealed record AgentEvent
     [JsonPropertyName("agentId")]
     public required string AgentId { get; init; }
 
+    [JsonPropertyName("logicalAgentId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LogicalAgentId { get; init; }
     [JsonPropertyName("modId")]
     public required string ModId { get; init; }
 
@@ -173,6 +182,10 @@ public sealed record AgentSnapshot
 
     [JsonPropertyName("agentId")]
     public required string AgentId { get; init; }
+
+    [JsonPropertyName("logicalAgentId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LogicalAgentId { get; init; }
 
     [JsonPropertyName("runId")]
     public required string RunId { get; init; }
@@ -225,6 +238,9 @@ public sealed record AgentIssue
     [JsonPropertyName("agentId")]
     public required string AgentId { get; init; }
 
+    [JsonPropertyName("logicalAgentId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LogicalAgentId { get; init; }
     [JsonPropertyName("modId")]
     public required string ModId { get; init; }
 
@@ -274,15 +290,73 @@ public sealed record AgentIssue
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? SpanIds { get; init; }
 
+
     [JsonPropertyName("operationKey")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OperationKey { get; init; }
 
+    [JsonPropertyName("classification")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Classification { get; init; }
+
+    [JsonPropertyName("capabilityId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CapabilityId { get; init; }
+
+    [JsonPropertyName("fingerprint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Fingerprint { get; init; }
+
+    [JsonPropertyName("probableOwner")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ProbableOwner { get; init; }
+
+    [JsonPropertyName("affectedAgentIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AffectedAgentIds { get; init; }
+
+    [JsonPropertyName("affectedRunIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AffectedRunIds { get; init; }
+
+    [JsonPropertyName("affectedModIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AffectedModIds { get; init; }
     [JsonPropertyName("retryCount")]
     public int RetryCount { get; init; }
 
     [JsonPropertyName("occurrences")]
     public int Occurrences { get; init; } = 1;
+}
+public static class AgentObservabilityLogicalIdentity
+{
+    public static string For(AgentSnapshot agent) =>
+        For(agent.LogicalAgentId, agent.RunId, agent.AgentId);
+
+    public static string For(AgentEvent eventRecord) =>
+        For(eventRecord.LogicalAgentId, eventRecord.RunId, eventRecord.AgentId);
+
+    public static string For(AgentIssue issue) =>
+        For(issue.LogicalAgentId, issue.RunId, issue.AgentId);
+
+    public static string For(
+        string? logicalAgentId,
+        string runId,
+        string agentId)
+    {
+        return string.IsNullOrWhiteSpace(logicalAgentId)
+            ? "legacy:" + runId + "\u001f" + agentId
+            : logicalAgentId.Trim();
+    }
+
+    public static string GroupKey(AgentSnapshot agent) =>
+        GroupKey(For(agent), agent.ModId);
+
+    public static string GroupKey(AgentIssue issue) =>
+        GroupKey(For(issue), issue.ModId);
+
+    public static string GroupKey(string logicalAgentId, string modId) =>
+        logicalAgentId + "\u001f" + modId.Trim();
 }
 
 public sealed record AgentObservabilityView(
@@ -294,7 +368,8 @@ public sealed record AgentDiagnosticMod(
     string ModId,
     string ModName,
     string AgentId,
-    string RunId);
+    string RunId,
+    string? LogicalAgentId = null);
 
 public sealed record AgentTraceReference(
     string? TraceId,

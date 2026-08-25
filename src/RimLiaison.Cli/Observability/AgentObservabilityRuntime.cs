@@ -108,7 +108,8 @@ public sealed class AgentObservabilityRun : IDisposable
     public AgentObservabilitySession CreateAgent(
         string modId,
         string modName,
-        string? agentId = null)
+        string? agentId = null,
+        string? logicalAgentId = null)
     {
         if (Volatile.Read(ref disposed) != 0)
         {
@@ -117,14 +118,26 @@ public sealed class AgentObservabilityRun : IDisposable
 
         lock (sessions)
         {
-            AgentObservabilitySession? existing = sessions.FirstOrDefault(session =>
-                string.Equals(session.ModId, modId, StringComparison.Ordinal));
-            if (existing is not null)
+            if (agentId is null && logicalAgentId is null)
             {
-                // The product model is one user-facing agent per mod. Stages
-                // and operations belong to this session rather than creating
-                // role-specific agents for the same mod.
-                return existing;
+                AgentObservabilitySession? existing = sessions.FirstOrDefault(session =>
+                    string.Equals(session.ModId, modId, StringComparison.Ordinal));
+                if (existing is not null)
+                {
+                    return existing;
+                }
+            }
+
+            string resolvedAgentId = agentId ?? "agent-" + Guid.NewGuid().ToString("N");
+            string resolvedLogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId)
+                ? resolvedAgentId
+                : logicalAgentId.Trim();
+            AgentObservabilitySession? logicalExisting = sessions.FirstOrDefault(session =>
+                string.Equals(session.ModId, modId, StringComparison.Ordinal) &&
+                string.Equals(session.LogicalAgentId, resolvedLogicalAgentId, StringComparison.Ordinal));
+            if (logicalExisting is not null)
+            {
+                return logicalExisting;
             }
 
             AgentObservabilitySession session = new(
@@ -133,7 +146,8 @@ public sealed class AgentObservabilityRun : IDisposable
                 telemetry,
                 modId,
                 modName,
-                agentId ?? "agent-" + Guid.NewGuid().ToString("N"),
+                resolvedAgentId,
+                resolvedLogicalAgentId,
                 runActivity);
             sessions.Add(session);
             return session;
@@ -211,20 +225,23 @@ public sealed class AgentObservabilitySession : IDisposable
         string modId,
         string modName,
         string agentId,
+        string logicalAgentId,
         Activity? runActivity)
     {
         this.run = run;
         this.store = store;
         this.telemetry = telemetry;
-        ValidateIdentity(modId, modName, agentId);
+        ValidateIdentity(modId, modName, agentId, logicalAgentId);
         AgentId = agentId;
+        LogicalAgentId = logicalAgentId;
         ModId = modId;
         ModName = modName;
-        startedTimestamp = Stopwatch.GetTimestamp();
         long startTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        startedTimestamp = Stopwatch.GetTimestamp();
         snapshot = new AgentSnapshot
         {
             AgentId = AgentId,
+            LogicalAgentId = LogicalAgentId,
             RunId = run.RunId,
             ModId = ModId,
             ModName = ModName,
@@ -243,6 +260,7 @@ public sealed class AgentObservabilitySession : IDisposable
                 {
                     [AgentObservabilityTags.RunId] = run.RunId,
                     [AgentObservabilityTags.AgentId] = AgentId,
+                    [AgentObservabilityTags.LogicalAgentId] = LogicalAgentId,
                     [AgentObservabilityTags.ModId] = ModId,
                     [AgentObservabilityTags.ModName] = ModName,
                     [AgentObservabilityTags.Stage] = "analysis"
@@ -260,6 +278,8 @@ public sealed class AgentObservabilitySession : IDisposable
     }
 
     public string AgentId { get; }
+
+    public string LogicalAgentId { get; }
 
     public string RunId => run.RunId;
 
@@ -479,7 +499,8 @@ public sealed class AgentObservabilitySession : IDisposable
                 summary,
                 data,
                 TraceId: correlation?.TraceId.ToString(),
-                SpanId: correlation?.SpanId.ToString()));
+                SpanId: correlation?.SpanId.ToString(),
+                LogicalAgentId: LogicalAgentId));
             try
             {
                 telemetry.RecordEvent(type);
@@ -748,7 +769,11 @@ public sealed class AgentObservabilitySession : IDisposable
         }
     }
 
-    private static void ValidateIdentity(string modId, string modName, string agentId)
+    private static void ValidateIdentity(
+        string modId,
+        string modName,
+        string agentId,
+        string logicalAgentId)
     {
         if (string.IsNullOrWhiteSpace(modId) || modId.Length > 256 || modId.Any(char.IsControl))
         {
@@ -761,6 +786,14 @@ public sealed class AgentObservabilitySession : IDisposable
         if (string.IsNullOrWhiteSpace(agentId) || agentId.Length > 256 || agentId.Any(char.IsControl))
         {
             throw new ArgumentException("A bounded agent id is required.", nameof(agentId));
+        }
+        if (string.IsNullOrWhiteSpace(logicalAgentId) ||
+            logicalAgentId.Length > 256 ||
+            logicalAgentId.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                "A bounded logical agent id is required.",
+                nameof(logicalAgentId));
         }
     }
 
@@ -775,7 +808,6 @@ public sealed class AgentOperationScope : IDisposable
     private readonly Activity? activity;
     private readonly long startedTimestamp;
     private int completed;
-
     internal AgentOperationScope(
         AgentObservabilitySession session,
         IAgentObservabilityTelemetry telemetry,
@@ -802,6 +834,7 @@ public sealed class AgentOperationScope : IDisposable
                 {
                     [AgentObservabilityTags.RunId] = session.RunId,
                     [AgentObservabilityTags.AgentId] = session.AgentId,
+                    [AgentObservabilityTags.LogicalAgentId] = session.LogicalAgentId,
                     [AgentObservabilityTags.ModId] = session.ModId,
                     [AgentObservabilityTags.ModName] = session.ModName,
                     [AgentObservabilityTags.Stage] = stage.ToString().ToLowerInvariant(),

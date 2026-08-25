@@ -34,9 +34,9 @@ public enum AgentObservabilityAgentDetailTab
 }
 
 /// <summary>
-/// Stable identity for one mod agent within one observability run.
-/// Agent ids are normally globally unique, but the run is part of the
-/// identity so hydration and reconnects cannot merge two runs accidentally.
+/// Stable identity for one persisted observability session. RunId remains part
+/// of the session key; logical-agent grouping is handled separately so
+/// multiple sessions can share one top-level agent view.
 /// </summary>
 public readonly record struct AgentObservabilityAgentIdentity(
     string RunId,
@@ -184,7 +184,8 @@ public sealed record AgentObservabilitySessionSummary(
     long? CompletedAt,
     long? DurationMilliseconds,
     bool FailureState,
-    string? FailureSummary);
+    string? FailureSummary,
+    string? LogicalAgentId = null);
 
 
 public sealed record AgentObservabilityEventDetail(
@@ -340,7 +341,7 @@ public sealed record AgentObservabilityUiUpdate(
 public sealed class AgentObservabilityUiOptions
 {
     public int MaximumActivityRows { get; init; } = 1_000;
-    public int MaximumIssueRows { get; init; } = 500;
+    public int MaximumIssueRows { get; init; } = 100;
     public int MaximumRecentActivityRows { get; init; } = 50;
     public int MaximumSupportingEvents { get; init; } = 1_000;
     public int MaximumIndexedEvents { get; init; } = 20_000;
@@ -414,6 +415,9 @@ public sealed class AgentObservabilityUi : IDisposable
     private readonly HashSet<string> hydratedOperations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AgentIssue> issues = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HashSet<string>> issueIdsByEvent = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentObservabilityIssueSignature> issueSignatures = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> issueIdsByFingerprint = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentObservabilitySharedToolingHint?> sharedToolingHints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AgentDiagnosticBundle> diagnosticBundles = new(StringComparer.Ordinal);
     private readonly List<Action<AgentObservabilityUiUpdate>> subscribers = [];
     private readonly IDisposable storeSubscription;
@@ -429,8 +433,20 @@ public sealed class AgentObservabilityUi : IDisposable
     private bool delayed;
     private string? streamMessage;
     private long revision;
+    private long issueProjectionRevision;
+    private long issueSelectionRevision;
+    private long issueSignatureComputations;
+    private long cachedIssueProjectionRevision = -1;
+    private long cachedIssueSelectionRevision = -1;
+    private bool cachedIncludeRecovered;
+    private int cachedVisibleIssueLimit;
+    private AgentObservabilityIssuesView? cachedIssuesView;
+    private AgentObservabilityUiNavigationModel? cachedNavigation;
+    private long cachedNavigationRevision = -1;
+    private AgentObservabilityAllView? cachedAllView;
+    private long cachedAllRevision = -1;
+    private int visibleIssueLimit;
     private int disposed;
-
     public AgentObservabilityUi(
         IAgentObservabilityStore store,
         AgentObservabilityUiOptions? options = null,
@@ -444,6 +460,7 @@ public sealed class AgentObservabilityUi : IDisposable
         activeRunId = explicitRunId;
         this.nowMilliseconds = nowMilliseconds ??
             (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        visibleIssueLimit = this.options.MaximumIssueRows;
 
         AgentObservabilityView initial = store.Query(
             runId: explicitRunId,
@@ -477,6 +494,16 @@ public sealed class AgentObservabilityUi : IDisposable
             lock (gate)
             {
                 return route.View;
+            }
+        }
+    }
+    public long IssueSignatureComputations
+    {
+        get
+        {
+            lock (gate)
+            {
+                return issueSignatureComputations;
             }
         }
     }
@@ -530,6 +557,21 @@ public sealed class AgentObservabilityUi : IDisposable
         }
 
         return Navigate(new AgentObservabilityUiRoute(AgentObservabilityUiView.Issues));
+    }
+    public AgentObservabilityUiSnapshot LoadMoreIssues()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposedLocked();
+            if (route.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue)
+            {
+                visibleIssueLimit = Math.Min(
+                    options.MaximumIndexedIssues,
+                    visibleIssueLimit + options.MaximumIssueRows);
+            }
+        }
+
+        return Snapshot;
     }
 
     public AgentObservabilityUiSnapshot ShowAgent(
@@ -726,6 +768,7 @@ public sealed class AgentObservabilityUi : IDisposable
             {
                 assessment = null;
                 issueMode = AgentObservabilityIssueMode.Details;
+                issueSelectionRevision++;
             }
             selected = selectedIssueIds
                 .OrderBy(static value => value, StringComparer.Ordinal)
@@ -869,11 +912,17 @@ public sealed class AgentObservabilityUi : IDisposable
             hydratedOperations.Clear();
             issues.Clear();
             issueIdsByEvent.Clear();
+            issueSignatures.Clear();
+            issueIdsByFingerprint.Clear();
+            sharedToolingHints.Clear();
             diagnosticBundles.Clear();
             selectedIssueIds.Clear();
-            selectedIssueId = null;
+            cachedIssuesView = null;
+            cachedNavigation = null;
+            cachedAllView = null;
             selectedEventId = null;
             assessment = null;
+            cachedIssuesView = null;
         }
     }
 
@@ -1050,6 +1099,12 @@ public sealed class AgentObservabilityUi : IDisposable
 
     private AgentObservabilityUiNavigationModel BuildNavigationLocked()
     {
+        if (cachedNavigation is not null &&
+            cachedNavigationRevision == revision)
+        {
+            return cachedNavigation;
+        }
+
         var items = new List<AgentObservabilityUiNavigationItem>
         {
             new(
@@ -1072,19 +1127,20 @@ public sealed class AgentObservabilityUi : IDisposable
                 : null;
         string? selectedGroupKey = selectedAgent is null
             ? null
-            : AgentGroupKey(selectedAgent);
+            : AgentLogicalGroupKey(selectedAgent);
         IEnumerable<NavigationAgentGroup> modAgents = agents.Values
             .Where(agent => MatchesRun(agent.RunId))
-            .GroupBy(AgentGroupKey, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(AgentLogicalGroupKey, StringComparer.OrdinalIgnoreCase)
             .Select(group =>
             {
                 AgentSnapshot[] groupAgents = group.ToArray();
-                bool hasUnresolvedError = groupAgents.Any(agent =>
-                    issues.Values.Any(issue =>
-                        !issue.Recovered &&
-                        issue.Severity == AgentIssueSeverity.Error &&
-                        string.Equals(issue.RunId, agent.RunId, StringComparison.Ordinal) &&
-                        string.Equals(issue.AgentId, agent.AgentId, StringComparison.Ordinal)));
+                bool hasUnresolvedError = issues.Values.Any(issue =>
+                    !issue.Recovered &&
+                    issue.Severity == AgentIssueSeverity.Error &&
+                    string.Equals(
+                        AgentLogicalGroupKey(issue),
+                        group.Key,
+                        StringComparison.OrdinalIgnoreCase));
                 AgentSnapshot representative = PreferredAgent(groupAgents);
                 AgentObservabilityAgentNavigationStatus navigationStatus =
                     representative.Status == AgentStatus.Failed
@@ -1132,11 +1188,19 @@ public sealed class AgentObservabilityUi : IDisposable
                 group.HasUnresolvedError));
         }
 
-        return new AgentObservabilityUiNavigationModel(route.View, items);
+        cachedNavigation = new AgentObservabilityUiNavigationModel(route.View, items);
+        cachedNavigationRevision = revision;
+        return cachedNavigation;
     }
 
     private AgentObservabilityAllView BuildAllViewLocked()
     {
+        if (cachedAllView is not null &&
+            cachedAllRevision == revision)
+        {
+            return cachedAllView;
+        }
+
         AgentSnapshot[] visibleAgents = agents.Values
             .Where(agent => MatchesRun(agent.RunId))
             .OrderByDescending(static agent => agent.StartTime)
@@ -1157,7 +1221,7 @@ public sealed class AgentObservabilityUi : IDisposable
         var rows = boundedEvents
             .Select(eventRecord => ToActivityRowLocked(eventRecord, issueIdsByEvent))
             .ToArray();
-        return new AgentObservabilityAllView(
+        cachedAllView = new AgentObservabilityAllView(
             visibleAgents,
             rows,
             hasMore,
@@ -1167,19 +1231,26 @@ public sealed class AgentObservabilityUi : IDisposable
                 : rows.Length == 0
                     ? "Agents are registered; activity has not arrived yet."
                     : null);
+        cachedAllRevision = revision;
+        return cachedAllView;
+
     }
 
     private AgentObservabilityIssuesView BuildIssuesViewLocked()
     {
+        if (cachedIssuesView is not null &&
+            cachedIssueProjectionRevision == issueProjectionRevision &&
+            cachedIssueSelectionRevision == issueSelectionRevision &&
+            cachedIncludeRecovered == includeRecovered &&
+            cachedVisibleIssueLimit == visibleIssueLimit)
+        {
+            return cachedIssuesView;
+        }
+
         AgentIssue[] candidates = issues.Values
             .Where(issue => MatchesRun(issue.RunId) &&
                 (includeRecovered || !issue.Recovered))
             .ToArray();
-        Dictionary<string, AgentObservabilitySharedToolingHint?> sharedHints =
-            candidates.ToDictionary(
-                issue => issue.Id,
-                BuildSharedToolingHintLocked,
-                StringComparer.Ordinal);
         AgentIssue[] visibleIssues = candidates
             .OrderBy(static issue => issue.Recovered ? 1 : 0)
             .ThenBy(static issue => issue.Severity switch
@@ -1188,22 +1259,23 @@ public sealed class AgentObservabilityUi : IDisposable
                 AgentIssueSeverity.Warning => 1,
                 _ => 2
             })
-            .ThenByDescending(issue => sharedHints[issue.Id]?.AffectedAgentCount ?? 0)
-            .ThenByDescending(issue => IsActiveAgentLocked(issue))
+            .ThenByDescending(issue => GetSharedToolingHintLocked(issue)?.AffectedAgentCount ?? 0)
+            .ThenByDescending(IsActiveAgentLocked)
             .ThenByDescending(static issue => issue.Timestamp)
             .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
             .ToArray();
         int recoveredCount = candidates.Count(static issue => issue.Recovered);
         int unresolvedCount = candidates.Length - recoveredCount;
-        bool hasMore = visibleIssues.Length > options.MaximumIssueRows;
+        bool hasMore = visibleIssues.Length > visibleIssueLimit;
         AgentIssueRowBuilder rowBuilder = new(agents);
         AgentObservabilityIssueRow[] rows = visibleIssues
-            .Take(options.MaximumIssueRows)
+            .Take(visibleIssueLimit)
             .Select(issue =>
             {
                 AgentObservabilityIssueRow row =
                     rowBuilder.Build(issue, selectedIssueIds.Contains(issue.Id));
-                AgentObservabilitySharedToolingHint? shared = sharedHints[issue.Id];
+                AgentObservabilitySharedToolingHint? shared =
+                    GetSharedToolingHintLocked(issue);
                 return row with
                 {
                     SharedAgentCount = shared?.AffectedAgentCount ?? 0,
@@ -1211,7 +1283,7 @@ public sealed class AgentObservabilityUi : IDisposable
                 };
             })
             .ToArray();
-        return new AgentObservabilityIssuesView(
+        cachedIssuesView = new AgentObservabilityIssuesView(
             rows,
             selectedIssueIds
                 .Where(id => rows.Any(row => string.Equals(row.Issue.Id, id, StringComparison.Ordinal)))
@@ -1222,7 +1294,14 @@ public sealed class AgentObservabilityUi : IDisposable
             hasMore,
             candidates.Length == 0
                 ? "No structured issues have been reported."
-                : null);
+                : hasMore
+                    ? $"Showing the first {rows.Length} issues. Load more to inspect older history."
+                    : null);
+        cachedIssueProjectionRevision = issueProjectionRevision;
+        cachedIssueSelectionRevision = issueSelectionRevision;
+        cachedIncludeRecovered = includeRecovered;
+        cachedVisibleIssueLimit = visibleIssueLimit;
+        return cachedIssuesView;
     }
 
     private AgentObservabilityAgentView? BuildAgentViewLocked(
@@ -1309,7 +1388,7 @@ public sealed class AgentObservabilityUi : IDisposable
         AgentSnapshot[] sessionAgents = agents.Values
             .Where(value =>
                 MatchesRun(value.RunId) &&
-                string.Equals(AgentGroupKey(value), AgentGroupKey(agent), StringComparison.OrdinalIgnoreCase))
+                string.Equals(AgentLogicalGroupKey(value), AgentLogicalGroupKey(agent), StringComparison.OrdinalIgnoreCase))
             .ToArray();
         AgentSnapshot currentSessionAgent = PreferredAgent(sessionAgents);
         AgentObservabilitySessionSummary currentSession = ToSessionSummary(currentSessionAgent);
@@ -1502,9 +1581,7 @@ public sealed class AgentObservabilityUi : IDisposable
             }
         }
 
-        AgentEvent[] supporting = issue.EventIds
-            .Where(eventIndex.ContainsKey)
-            .Select(eventId => eventIndex[eventId])
+        AgentEvent[] supporting = IssueEventsLocked(issue)
             .OrderBy(static eventRecord => eventRecord.Sequence)
             .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
             .Take(options.MaximumSupportingEvents)
@@ -1542,8 +1619,9 @@ public sealed class AgentObservabilityUi : IDisposable
                 IsSuccessfulEvent(eventRecord)))
             .ToArray();
         AgentDiagnosticBundle bundle = GetDiagnosticBundleLocked(issue.Id);
+        AgentObservabilityIssueSignature signature = GetIssueSignatureLocked(issue);
         AgentObservabilitySharedToolingHint? sharedTooling =
-            BuildSharedToolingHintLocked(issue);
+            GetSharedToolingHintLocked(issue);
         AgentObservabilityIssueTriage triage =
             AgentObservabilityIssueTriageBuilder.Build(
                 issue,
@@ -1551,7 +1629,8 @@ public sealed class AgentObservabilityUi : IDisposable
                 supporting,
                 bundle,
                 agent is not null && IsCurrentSessionLocked(agent),
-                sharedTooling);
+                sharedTooling,
+                signature);
         return new AgentObservabilityIssueDetail(
             issue,
             agent,
@@ -1584,73 +1663,118 @@ public sealed class AgentObservabilityUi : IDisposable
         return bundle;
     }
 
-    private AgentObservabilitySharedToolingHint? BuildSharedToolingHintLocked(
-        AgentIssue issue)
+    private AgentObservabilityIssueSignature GetIssueSignatureLocked(AgentIssue issue)
     {
-        AgentObservabilityIssueSignature signature =
-            AgentObservabilityIssueTriageBuilder.Describe(
+        if (!issueSignatures.TryGetValue(issue.Id, out AgentObservabilityIssueSignature? signature))
+        {
+            issueSignatureComputations++;
+            signature = AgentObservabilityIssueTriageBuilder.Describe(
                 issue,
                 IssueEventsLocked(issue));
-        if (!signature.IsStrong ||
-            signature.ErrorCode is null ||
-            signature.Component is null)
-        {
-            return null;
-        }
-
-        if (!AgentObservabilityIssueTriageBuilder.IsToolingComponent(signature.Component))
-        {
-            return null;
-        }
-
-        var affected = new Dictionary<string, AgentIssue>(StringComparer.OrdinalIgnoreCase);
-        foreach (AgentIssue candidate in issues.Values)
-        {
-            AgentObservabilityIssueSignature candidateSignature =
-                AgentObservabilityIssueTriageBuilder.Describe(
-                    candidate,
-                    IssueEventsLocked(candidate));
-            if (!candidateSignature.IsStrong ||
-                !string.Equals(candidateSignature.Fingerprint, signature.Fingerprint, StringComparison.Ordinal))
+            issueSignatures[issue.Id] = signature;
+            if (signature.IsStrong && !string.IsNullOrWhiteSpace(signature.Fingerprint))
             {
-                continue;
+                if (!issueIdsByFingerprint.TryGetValue(
+                        signature.Fingerprint,
+                        out HashSet<string>? issueIds))
+                {
+                    issueIds = new HashSet<string>(StringComparer.Ordinal);
+                    issueIdsByFingerprint[signature.Fingerprint] = issueIds;
+                }
+
+                issueIds.Add(issue.Id);
+                InvalidateSharedToolingHintsLocked(issueIds);
             }
-
-            string durableKey = string.IsNullOrWhiteSpace(candidate.ModId)
-                ? candidate.AgentId
-                : candidate.ModId.Trim();
-            affected.TryAdd(durableKey, candidate);
         }
 
-        if (affected.Count < 2)
-        {
-            return null;
-        }
-
-        return new AgentObservabilitySharedToolingHint(
-            signature.ErrorCode,
-            signature.Component,
-            affected.Count,
-            affected.Values
-                .Select(static value => value.ModId)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
-                .Take(options.MaximumNavigationAgents)
-                .ToArray());
+        return signature;
     }
 
-    private IReadOnlyList<AgentEvent> IssueEventsLocked(AgentIssue issue) =>
-        issue.EventIds
+    private AgentObservabilitySharedToolingHint? GetSharedToolingHintLocked(
+        AgentIssue issue)
+    {
+        if (sharedToolingHints.TryGetValue(issue.Id, out AgentObservabilitySharedToolingHint? cached))
+        {
+            return cached;
+        }
+
+        AgentObservabilityIssueSignature signature = GetIssueSignatureLocked(issue);
+        AgentObservabilitySharedToolingHint? result = null;
+        if (signature.IsStrong &&
+            signature.ErrorCode is not null &&
+            signature.Component is not null &&
+            AgentObservabilityIssueTriageBuilder.IsToolingComponent(signature.Component) &&
+            issueIdsByFingerprint.TryGetValue(
+                signature.Fingerprint,
+                out HashSet<string>? issueIds))
+        {
+            var affected = new Dictionary<string, AgentIssue>(StringComparer.OrdinalIgnoreCase);
+            foreach (string issueId in issueIds)
+            {
+                if (!issues.TryGetValue(issueId, out AgentIssue? candidate))
+                {
+                    continue;
+                }
+
+                string logicalKey = AgentLogicalGroupKey(candidate);
+                affected.TryAdd(logicalKey, candidate);
+            }
+
+            int affectedSessionCount = issueIds
+                .Select(id => issues.TryGetValue(id, out AgentIssue? value)
+                    ? value.RunId + "\u001f" + value.AgentId
+                    : null)
+                .Where(static value => value is not null)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+            if (affected.Count >= 2 || affectedSessionCount >= 2)
+            {
+                result = new AgentObservabilitySharedToolingHint(
+                    signature.ErrorCode,
+                    signature.Component,
+                    affected.Count,
+                    affected.Values
+                        .Select(static value => value.ModId)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
+                        .Take(options.MaximumNavigationAgents)
+                        .ToArray(),
+                    affectedSessionCount);
+            }
+        }
+
+        sharedToolingHints[issue.Id] = result;
+        return result;
+    }
+
+    private IReadOnlyList<AgentEvent> IssueEventsLocked(AgentIssue issue)
+    {
+        IEnumerable<AgentEvent> direct = issue.EventIds
             .Where(eventsById.ContainsKey)
-            .Select(eventId => eventsById[eventId])
+            .Select(eventId => eventsById[eventId]);
+        IEnumerable<AgentEvent> causal = eventsById.Values
             .Where(value =>
                 string.Equals(value.RunId, issue.RunId, StringComparison.Ordinal) &&
                 string.Equals(value.AgentId, issue.AgentId, StringComparison.Ordinal) &&
-                string.Equals(value.ModId, issue.ModId, StringComparison.Ordinal))
+                string.Equals(value.ModId, issue.ModId, StringComparison.Ordinal) &&
+                IsCausalDevBridgeEvent(value));
+        return direct
+            .Concat(causal)
+            .DistinctBy(static value => value.Id, StringComparer.Ordinal)
             .OrderBy(static value => value.Sequence)
             .ThenBy(static value => value.Id, StringComparer.Ordinal)
             .Take(options.MaximumSupportingEvents)
             .ToArray();
+    }
+
+    private static bool IsCausalDevBridgeEvent(AgentEvent value)
+    {
+        string? tool = AgentObservabilityData.GetString(value.Data, "toolName");
+        return string.Equals(tool, "DevBridge", StringComparison.OrdinalIgnoreCase) &&
+            (AgentObservabilityData.GetString(value.Data, "underlyingErrorCode") is not null ||
+             AgentObservabilityData.GetString(value.Data, "errorCode") is not null ||
+             AgentObservabilityData.GetString(value.Data, "outerErrorCode") is not null);
+    }
 
     private bool IsActiveAgentLocked(AgentIssue issue) =>
         agents.TryGetValue(new AgentObservabilityAgentIdentity(issue.RunId, issue.AgentId), out AgentSnapshot? agent) &&
@@ -1661,7 +1785,7 @@ public sealed class AgentObservabilityUi : IDisposable
         AgentSnapshot[] candidates = agents.Values
             .Where(value =>
                 MatchesRun(value.RunId) &&
-                string.Equals(AgentGroupKey(value), AgentGroupKey(agent), StringComparison.OrdinalIgnoreCase))
+                string.Equals(AgentLogicalGroupKey(value), AgentLogicalGroupKey(agent), StringComparison.OrdinalIgnoreCase))
             .ToArray();
         return candidates.Length > 0 &&
             string.Equals(
@@ -1803,7 +1927,17 @@ public sealed class AgentObservabilityUi : IDisposable
             return;
         }
 
-        agents[AgentIdentity(agent)] = agent;
+        AgentObservabilityAgentIdentity identity = AgentIdentity(agent);
+        bool orderingChanged = !agents.TryGetValue(identity, out AgentSnapshot? existing) ||
+            IsActiveStatus(existing.Status) != IsActiveStatus(agent.Status) ||
+            !string.Equals(existing.ModName, agent.ModName, StringComparison.Ordinal) ||
+            !string.Equals(existing.ModId, agent.ModId, StringComparison.Ordinal);
+        agents[identity] = agent;
+        if (orderingChanged)
+        {
+            issueProjectionRevision++;
+        }
+
         if (agents.Count > options.MaximumIndexedAgents)
         {
             AgentSnapshot? remove = agents.Values
@@ -1815,6 +1949,7 @@ public sealed class AgentObservabilityUi : IDisposable
             if (remove is not null)
             {
                 agents.Remove(AgentIdentity(remove));
+                issueProjectionRevision++;
             }
         }
     }
@@ -1826,7 +1961,15 @@ public sealed class AgentObservabilityUi : IDisposable
             return;
         }
 
-        if (eventsById.TryGetValue(eventRecord.Id, out AgentEvent? existing))
+        bool evidenceChanged = !eventsById.TryGetValue(
+                eventRecord.Id,
+                out AgentEvent? existing) ||
+            !SameEventEvidence(existing, eventRecord);
+        if (evidenceChanged)
+        {
+            InvalidateIssueSignaturesForEventLocked(eventRecord.Id);
+        }
+        if (existing is not null)
         {
             RemoveEventFromOperationIndexLocked(existing);
             eventsById[eventRecord.Id] = eventRecord;
@@ -1836,6 +1979,7 @@ public sealed class AgentObservabilityUi : IDisposable
             {
                 events[index] = eventRecord;
             }
+
             diagnosticBundles.Clear();
             return;
         }
@@ -1869,14 +2013,31 @@ public sealed class AgentObservabilityUi : IDisposable
             return;
         }
 
-        if (issues.TryGetValue(issue.Id, out AgentIssue? existing))
+        bool added = !issues.TryGetValue(issue.Id, out AgentIssue? existing);
+        bool evidenceChanged = added || !SameIssueEvidence(existing!, issue);
+        bool projectionChanged = added || !SameIssueProjection(existing!, issue);
+        if (!added)
         {
-            RemoveIssueFromEventIndexLocked(existing);
+            RemoveIssueFromEventIndexLocked(existing!);
+            if (evidenceChanged)
+            {
+                RemoveIssueSignatureLocked(existing!.Id);
+            }
         }
 
         issues[issue.Id] = issue;
-        diagnosticBundles.Clear();
         AddIssueToEventIndexLocked(issue);
+        if (evidenceChanged)
+        {
+            GetIssueSignatureLocked(issue);
+        }
+
+        if (projectionChanged || evidenceChanged)
+        {
+            issueProjectionRevision++;
+            diagnosticBundles.Clear();
+        }
+
         if (issues.Count > options.MaximumIndexedIssues)
         {
             string? remove = issues.Values
@@ -1884,12 +2045,12 @@ public sealed class AgentObservabilityUi : IDisposable
                 .ThenBy(static value => value.Id, StringComparer.Ordinal)
                 .Select(static value => value.Id)
                 .FirstOrDefault(value => !selectedIssueIds.Contains(value));
-            if (remove is not null)
+            if (remove is not null &&
+                issues.Remove(remove, out AgentIssue? removed))
             {
-                if (issues.Remove(remove, out AgentIssue? removed))
-                {
-                    RemoveIssueFromEventIndexLocked(removed);
-                }
+                RemoveIssueFromEventIndexLocked(removed);
+                RemoveIssueSignatureLocked(removed.Id);
+                issueProjectionRevision++;
             }
         }
     }
@@ -1909,7 +2070,8 @@ public sealed class AgentObservabilityUi : IDisposable
             agent.CompletedAt,
             duration,
             agent.FailureState,
-            agent.FailureSummary);
+            agent.FailureSummary,
+            agent.LogicalAgentId);
     }
 
     private bool MatchesRun(string value) =>
@@ -1925,10 +2087,11 @@ public sealed class AgentObservabilityUi : IDisposable
     private static AgentObservabilityAgentIdentity AgentIdentity(AgentEvent eventRecord) =>
         new(eventRecord.RunId, eventRecord.AgentId);
 
-    private static string AgentGroupKey(AgentSnapshot agent) =>
-        string.IsNullOrWhiteSpace(agent.ModId)
-            ? agent.AgentId
-            : agent.ModId.Trim();
+    private static string AgentLogicalGroupKey(AgentSnapshot agent) =>
+        AgentObservabilityLogicalIdentity.GroupKey(agent);
+
+    private static string AgentLogicalGroupKey(AgentIssue issue) =>
+        AgentObservabilityLogicalIdentity.GroupKey(issue);
 
     private static AgentSnapshot PreferredAgent(IEnumerable<AgentSnapshot> candidates) =>
         candidates
@@ -2085,6 +2248,78 @@ public sealed class AgentObservabilityUi : IDisposable
             }
         }
     }
+    private void RemoveIssueSignatureLocked(string issueId)
+    {
+        sharedToolingHints.Remove(issueId);
+        if (!issueSignatures.Remove(issueId, out AgentObservabilityIssueSignature? signature) ||
+            string.IsNullOrWhiteSpace(signature.Fingerprint) ||
+            !issueIdsByFingerprint.TryGetValue(signature.Fingerprint, out HashSet<string>? issueIds))
+        {
+            return;
+        }
+
+        issueIds.Remove(issueId);
+        InvalidateSharedToolingHintsLocked(issueIds);
+        if (issueIds.Count == 0)
+        {
+            issueIdsByFingerprint.Remove(signature.Fingerprint);
+        }
+    }
+
+    private void InvalidateIssueSignaturesForEventLocked(string eventId)
+    {
+        if (!issueIdsByEvent.TryGetValue(eventId, out HashSet<string>? issueIds))
+        {
+            return;
+        }
+
+        string[] affected = issueIds.ToArray();
+        foreach (string issueId in affected)
+        {
+            RemoveIssueSignatureLocked(issueId);
+        }
+
+        if (affected.Length > 0)
+        {
+            issueProjectionRevision++;
+        }
+    }
+
+    private void InvalidateSharedToolingHintsLocked(IEnumerable<string> issueIds)
+    {
+        foreach (string issueId in issueIds)
+        {
+            sharedToolingHints.Remove(issueId);
+        }
+    }
+
+    private static bool SameIssueEvidence(AgentIssue left, AgentIssue right) =>
+        string.Equals(left.RunId, right.RunId, StringComparison.Ordinal) &&
+        string.Equals(left.AgentId, right.AgentId, StringComparison.Ordinal) &&
+        string.Equals(left.ModId, right.ModId, StringComparison.Ordinal) &&
+        left.EventIds.SequenceEqual(right.EventIds, StringComparer.Ordinal);
+
+    private static bool SameIssueProjection(AgentIssue left, AgentIssue right) =>
+        SameIssueEvidence(left, right) &&
+        left.Timestamp == right.Timestamp &&
+        left.Category == right.Category &&
+        left.Severity == right.Severity &&
+        string.Equals(left.Summary, right.Summary, StringComparison.Ordinal) &&
+        left.Recovered == right.Recovered;
+
+    private static bool SameEventEvidence(AgentEvent left, AgentEvent right) =>
+        string.Equals(left.RunId, right.RunId, StringComparison.Ordinal) &&
+        string.Equals(left.AgentId, right.AgentId, StringComparison.Ordinal) &&
+        string.Equals(left.ModId, right.ModId, StringComparison.Ordinal) &&
+        string.Equals(left.Type, right.Type, StringComparison.Ordinal) &&
+        string.Equals(left.Summary, right.Summary, StringComparison.Ordinal) &&
+        string.Equals(
+            left.Data?.GetRawText(),
+            right.Data?.GetRawText(),
+            StringComparison.Ordinal);
+
+    private static bool IsActiveStatus(AgentStatus status) =>
+        status is AgentStatus.Created or AgentStatus.Running or AgentStatus.Waiting;
 
     private string? ResolveFocusEventLocked(
         string? requestedEventId,

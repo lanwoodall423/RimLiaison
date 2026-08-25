@@ -6,6 +6,16 @@ using RimLiaison.Observability;
 
 namespace RimLiaison.Desktop;
 
+public readonly record struct AgentObservabilityDesktopMutationCounts(
+    long StageControlCreations,
+    long StageControlRemovals,
+    long StageControlReplacements,
+    long IssueItemInserts,
+    long IssueItemRemovals,
+    long IssueItemMoves,
+    long IssueItemUpdates,
+    long IssueItemClears);
+
 public sealed class ObservabilityMainForm : Form
 {
     private readonly IAgentObservabilityStore store;
@@ -34,11 +44,22 @@ public sealed class ObservabilityMainForm : Form
     private readonly ListView pastSessions;
     private readonly Button viewActivityButton;
     private readonly Button issueDetailsButton;
+    private readonly Button loadMoreIssuesButton;
     private readonly Button prepareAssessmentButton;
     private readonly Button copyChatButton;
     private readonly Button copyBundleButton;
     private readonly Button exportBundleButton;
     private TabControl agentDetailTabs = null!;
+    private readonly Dictionary<DevelopmentStage, Label> stageControls = [];
+    private readonly Dictionary<string, ListViewItem> issueItems =
+        new(StringComparer.Ordinal);
+    private string? renderedIssueDetailSignature;
+    private AgentObservabilityIssuesView? renderedIssuesView;
+    private string? renderedIssueSelectionId;
+    private AgentObservabilityAllView? renderedAllView;
+    private long renderedAgentDataRevision = -1;
+    private string? renderedAgentEventId;
+    private long renderedAgentDetailRevision = -1;
     private string? bundleJson;
     private string? bundleStatusMessage;
     private string? renderedNavigationSignature;
@@ -46,6 +67,14 @@ public sealed class ObservabilityMainForm : Form
     private bool suppressIssueSelection;
     private bool suppressActivitySelection;
     private bool suppressDetailTabSelection;
+    private long stageControlCreations;
+    private long stageControlRemovals;
+    private long stageControlReplacements;
+    private long issueItemInserts;
+    private long issueItemRemovals;
+    private long issueItemMoves;
+    private long issueItemUpdates;
+    private long issueItemClears;
     private int disposed;
 
     public ObservabilityMainForm(IAgentObservabilityStore? store = null)
@@ -57,7 +86,7 @@ public sealed class ObservabilityMainForm : Form
             new AgentObservabilityUiOptions
             {
                 MaximumActivityRows = 1_000,
-                MaximumIssueRows = 500,
+                MaximumIssueRows = 100,
                 MaximumRecentActivityRows = 100,
                 MaximumSupportingEvents = 2_000
             });
@@ -132,6 +161,7 @@ public sealed class ObservabilityMainForm : Form
         issueDetails = CreateDetailsBox();
         viewActivityButton = CreateButton("View activity", OnViewIssueActivity);
         issueDetailsButton = CreateButton("Details", OnViewIssueDetails);
+        loadMoreIssuesButton = CreateButton("Load older issues", OnLoadMoreIssues);
         prepareAssessmentButton = CreateButton("Preview full assessment", OnPrepareAssessment);
         copyChatButton = CreateButton("Copy for ChatGPT", OnCopyForChatGPT);
         copyBundleButton = CreateButton("Copy full diagnostic", OnCopyBundle);
@@ -149,7 +179,7 @@ public sealed class ObservabilityMainForm : Form
             Font = new Font(Font, FontStyle.Bold),
             AutoEllipsis = true
         };
-        agentProgress = new FlowLayoutPanel
+        agentProgress = new BufferedFlowLayoutPanel
         {
             Dock = DockStyle.Top,
             Height = 42,
@@ -186,6 +216,28 @@ public sealed class ObservabilityMainForm : Form
         FormClosed += OnFormClosed;
 
         RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+    public AgentObservabilityDesktopMutationCounts MutationCounts =>
+        new(
+            stageControlCreations,
+            stageControlRemovals,
+            stageControlReplacements,
+            issueItemInserts,
+            issueItemRemovals,
+            issueItemMoves,
+            issueItemUpdates,
+            issueItemClears);
+
+    public void ResetMutationCounts()
+    {
+        stageControlCreations = 0;
+        stageControlRemovals = 0;
+        stageControlReplacements = 0;
+        issueItemInserts = 0;
+        issueItemRemovals = 0;
+        issueItemMoves = 0;
+        issueItemUpdates = 0;
+        issueItemClears = 0;
     }
 
     protected override void Dispose(bool disposing)
@@ -243,6 +295,7 @@ public sealed class ObservabilityMainForm : Form
         };
         actions.Controls.Add(viewActivityButton);
         actions.Controls.Add(issueDetailsButton);
+        actions.Controls.Add(loadMoreIssuesButton);
         actions.Controls.Add(prepareAssessmentButton);
         actions.Controls.Add(copyChatButton);
         actions.Controls.Add(copyBundleButton);
@@ -276,6 +329,24 @@ public sealed class ObservabilityMainForm : Form
         return panel;
     }
 
+    private sealed class BufferedListView : ListView
+    {
+        public BufferedListView()
+        {
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+        }
+    }
+
+    private sealed class BufferedFlowLayoutPanel : FlowLayoutPanel
+    {
+        public BufferedFlowLayoutPanel()
+        {
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+        }
+    }
+
     private static TabPage CreateTab(string title, Control content)
     {
         var page = new TabPage(title);
@@ -285,7 +356,7 @@ public sealed class ObservabilityMainForm : Form
 
     private static ListView CreateListView(params (string Name, int Width)[] columns)
     {
-        var list = new ListView
+        var list = new BufferedListView
         {
             Dock = DockStyle.Fill,
             View = View.Details,
@@ -372,18 +443,22 @@ public sealed class ObservabilityMainForm : Form
         string liveStatus = snapshot.Stream.Delayed
             ? "Live stream delayed" + (snapshot.Stream.Message is null ? string.Empty : ": " + snapshot.Stream.Message)
             : $"Live · revision {snapshot.Stream.Revision} · sequence {snapshot.Stream.LatestSequence?.ToString() ?? "—"}";
-        streamStatus.Text = bundleStatusMessage ?? liveStatus;
+        SetText(streamStatus, bundleStatusMessage ?? liveStatus);
 
-        allPanel.Visible = snapshot.View == AgentObservabilityUiView.All;
-        issuesPanel.Visible = snapshot.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue;
-        agentPanel.Visible = snapshot.View == AgentObservabilityUiView.Agent;
-        viewTitle.Text = snapshot.View switch
-        {
-            AgentObservabilityUiView.All => "All",
-            AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Issues",
-            AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Agent",
-            _ => "RimLiaison"
-        };
+        SetVisible(allPanel, snapshot.View == AgentObservabilityUiView.All);
+        SetVisible(
+            issuesPanel,
+            snapshot.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue);
+        SetVisible(agentPanel, snapshot.View == AgentObservabilityUiView.Agent);
+        SetText(
+            viewTitle,
+            snapshot.View switch
+            {
+                AgentObservabilityUiView.All => "All",
+                AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Issues",
+                AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Agent",
+                _ => "RimLiaison"
+            });
 
         if (snapshot.All is not null)
         {
@@ -508,24 +583,51 @@ public sealed class ObservabilityMainForm : Form
         };
         string displayLabel = statusMarker + item.Label;
         int fullWidth = Math.Min(240, Math.Max(96, displayLabel.Length * 9 + 28));
-        container.Width = fullWidth;
-        button.Text = displayLabel;
-        button.Width = fullWidth;
-        button.Tag = item;
-        button.AccessibleName = item.FullLabel + " · " + item.NavigationStatus;
-        toolTip.SetToolTip(button, item.FullLabel + " · " + item.NavigationStatus);
-        button.BackColor = item.Selected
+        if (container.Width != fullWidth)
+        {
+            container.Width = fullWidth;
+        }
+
+        SetText(button, displayLabel);
+        if (button.Width != fullWidth)
+        {
+            button.Width = fullWidth;
+        }
+
+        if (button.Tag is not AgentObservabilityUiNavigationItem existing ||
+            existing != item)
+        {
+            button.Tag = item;
+        }
+
+        string accessibleName = item.FullLabel + " · " + item.NavigationStatus;
+        if (!string.Equals(button.AccessibleName, accessibleName, StringComparison.Ordinal))
+        {
+            button.AccessibleName = accessibleName;
+            toolTip.SetToolTip(button, accessibleName);
+        }
+
+        Color backColor = item.Selected
             ? SystemColors.Highlight
             : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.NeedsAttention
                 ? Color.MistyRose
                 : item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Failed
                     ? Color.LightSalmon
                     : SystemColors.Control;
-        button.ForeColor = item.Selected
+        if (button.BackColor != backColor)
+        {
+            button.BackColor = backColor;
+        }
+
+        Color foreColor = item.Selected
             ? SystemColors.HighlightText
             : item.NavigationStatus is AgentObservabilityAgentNavigationStatus.NeedsAttention or AgentObservabilityAgentNavigationStatus.Failed
                 ? Color.DarkRed
                 : SystemColors.ControlText;
+        if (button.ForeColor != foreColor)
+        {
+            button.ForeColor = foreColor;
+        }
     }
 
     private readonly ToolTip toolTip = new();
@@ -556,16 +658,26 @@ public sealed class ObservabilityMainForm : Form
 
     private void RefreshAll(AgentObservabilityAllView view)
     {
-        allAgentSummary.Text = view.Agents.Count == 0
-            ? view.EmptyState ?? "No agents"
-            : string.Join(
-                "   ",
-                view.Agents.Select(agent =>
-                    $"{agent.ModName}: {StatusText(agent.Status)}"));
+        if (ReferenceEquals(renderedAllView, view))
+        {
+            return;
+        }
+
+        renderedAllView = view;
+        SetText(
+            allAgentSummary,
+            view.Agents.Count == 0
+                ? view.EmptyState ?? "No agents"
+                : string.Join(
+                    "   ",
+                    view.Agents.Select(agent =>
+                        $"{agent.ModName}: {StatusText(agent.Status)}")));
         RefreshActivityList(allActivity, view.Activity, includeMod: true);
         if (allActivity.SelectedItems.Count == 0)
         {
-            allDetails.Text = view.EmptyState ?? "Select an activity row to inspect bounded details.";
+            SetText(
+                allDetails,
+                view.EmptyState ?? "Select an activity row to inspect bounded details.");
         }
     }
 
@@ -575,49 +687,159 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityUiSnapshot snapshot)
     {
         string? selectedIssue = snapshot.SelectedIssueId;
-        suppressIssueSelection = true;
-        int topIndex = TopIndex(issueList);
-        issueList.BeginUpdate();
-        try
+        AgentObservabilityIssueListItem[] desired = view.Issues
+            .Select(static row => new AgentObservabilityIssueListItem(row.Issue.Id, row))
+            .ToArray();
+        AgentObservabilityIssueListItem[] current = issueList.Items
+            .Cast<ListViewItem>()
+            .Select(item => item.Tag as AgentObservabilityIssueListItem)
+            .Where(static item => item is not null)
+            .Select(static item => item!)
+            .ToArray();
+        AgentObservabilityIssueReconciliationPlan plan =
+            AgentObservabilityIssueReconciliation.Plan(current, desired);
+        bool selectionChanged = !string.Equals(
+            renderedIssueSelectionId,
+            selectedIssue,
+            StringComparison.Ordinal);
+        bool listChanged = plan.HasChanges ||
+            !ReferenceEquals(renderedIssuesView, view) ||
+            selectionChanged;
+
+        if (listChanged)
         {
-            issueList.Items.Clear();
-            foreach (AgentObservabilityIssueRow row in view.Issues)
+            int topIndex = TopIndex(issueList);
+            suppressIssueSelection = true;
+            if (plan.HasChanges)
             {
-                var item = new ListViewItem(row.StateLabel);
-                item.SubItems.Add(row.Issue.Severity.ToString());
-                item.SubItems.Add(row.SharedAgentCount > 1
-                    ? row.SharedAgentCount + " agents"
-                    : string.Empty);
-                item.SubItems.Add(row.ModName);
-                item.SubItems.Add(row.Issue.Category.ToString());
-                item.SubItems.Add(row.Issue.Summary);
-                item.SubItems.Add(row.Issue.Id);
-                item.Tag = row.Issue;
-                if (row.Issue.Recovered)
+                issueList.BeginUpdate();
+            }
+
+            try
+            {
+                foreach (string issueId in plan.RemovedIssueIds)
                 {
-                    item.ForeColor = Color.DarkGreen;
-                }
-                else if (row.Issue.Severity == AgentIssueSeverity.Error)
-                {
-                    item.ForeColor = Color.DarkRed;
+                    if (issueItems.Remove(issueId, out ListViewItem? item))
+                    {
+                        issueList.Items.Remove(item);
+                        issueItemRemovals++;
+                    }
                 }
 
-                issueList.Items.Add(item);
-                item.Checked = view.SelectedIssueIds.Contains(row.Issue.Id, StringComparer.Ordinal);
-                if (row.Issue.Id == selectedIssue)
+                HashSet<string> updatedIds =
+                    plan.UpdatedIssueIds.ToHashSet(StringComparer.Ordinal);
+                for (int index = 0; index < desired.Length; index++)
                 {
-                    item.Selected = true;
+                    AgentObservabilityIssueListItem desiredItem = desired[index];
+                    if (!issueItems.TryGetValue(desiredItem.IssueId, out ListViewItem? item))
+                    {
+                        item = CreateIssueItem(desiredItem);
+                        issueItems[desiredItem.IssueId] = item;
+                        issueList.Items.Insert(index, item);
+                        issueItemInserts++;
+                    }
+                    else
+                    {
+                        int currentIndex = issueList.Items.IndexOf(item);
+                        if (currentIndex != index)
+                        {
+                            issueList.Items.RemoveAt(currentIndex);
+                            issueList.Items.Insert(index, item);
+                            issueItemMoves++;
+                        }
+
+                        if (updatedIds.Contains(desiredItem.IssueId))
+                        {
+                            UpdateIssueItem(item, desiredItem);
+                        }
+                    }
+
+                    bool shouldBeChecked = view.SelectedIssueIds.Contains(
+                        desiredItem.IssueId,
+                        StringComparer.Ordinal);
+                    if (item.Checked != shouldBeChecked)
+                    {
+                        item.Checked = shouldBeChecked;
+                        issueItemUpdates++;
+                    }
+
+                    bool shouldBeSelected = string.Equals(
+                        desiredItem.IssueId,
+                        selectedIssue,
+                        StringComparison.Ordinal);
+                    if (item.Selected != shouldBeSelected)
+                    {
+                        item.Selected = shouldBeSelected;
+                    }
                 }
             }
-        }
-        finally
-        {
-            issueList.EndUpdate();
-            suppressIssueSelection = false;
+            finally
+            {
+                if (plan.HasChanges)
+                {
+                    issueList.EndUpdate();
+                }
+
+                suppressIssueSelection = false;
+            }
+
+            RestoreTopIndex(issueList, topIndex);
+            renderedIssuesView = view;
+            renderedIssueSelectionId = selectedIssue;
         }
 
-        RestoreTopIndex(issueList, topIndex);
         RefreshIssueDetails(view, detail, snapshot);
+        SetEnabled(loadMoreIssuesButton, view.HasMoreIssues);
+    }
+
+    private ListViewItem CreateIssueItem(
+        AgentObservabilityIssueListItem state)
+    {
+        var item = new ListViewItem(state.Row.StateLabel);
+        for (int index = 1; index < 7; index++)
+        {
+            item.SubItems.Add(string.Empty);
+        }
+
+        UpdateIssueItem(item, state);
+        return item;
+    }
+
+    private void UpdateIssueItem(
+        ListViewItem item,
+        AgentObservabilityIssueListItem state)
+    {
+        bool changed = item.Tag is not AgentObservabilityIssueListItem current ||
+            current.Row != state.Row;
+        if (!changed)
+        {
+            return;
+        }
+
+        SetSubItem(item, 0, state.Row.StateLabel);
+        SetSubItem(item, 1, state.Row.Issue.Severity.ToString());
+        SetSubItem(
+            item,
+            2,
+            state.Row.SharedAgentCount > 1
+                ? state.Row.SharedAgentCount + " agents"
+                : string.Empty);
+        SetSubItem(item, 3, state.Row.ModName);
+        SetSubItem(item, 4, state.Row.Issue.Category.ToString());
+        SetSubItem(item, 5, state.Row.Issue.Summary);
+        SetSubItem(item, 6, state.Row.Issue.Id);
+        Color foreColor = state.Row.Issue.Recovered
+            ? Color.DarkGreen
+            : state.Row.Issue.Severity == AgentIssueSeverity.Error
+                ? Color.DarkRed
+                : SystemColors.WindowText;
+        if (item.ForeColor != foreColor)
+        {
+            item.ForeColor = foreColor;
+        }
+
+        item.Tag = state;
+        issueItemUpdates++;
     }
 
     private void RefreshIssueDetails(
@@ -628,36 +850,68 @@ public sealed class ObservabilityMainForm : Form
         if (snapshot.IssueMode == AgentObservabilityIssueMode.Assessment &&
             snapshot.Assessment is not null)
         {
-            bundleJson = JsonSerializer.Serialize(
-                snapshot.Assessment,
-                new JsonSerializerOptions(AgentObservabilityJson.Options)
-                {
-                    WriteIndented = true
-                });
-            issueDetails.Text = bundleJson;
-            bundleStatusMessage = FormatBundleStatus(snapshot.Assessment);
-            copyChatButton.Enabled = false;
-            copyBundleButton.Enabled = true;
-            exportBundleButton.Enabled = true;
+            string signature = "assessment:" + string.Join(
+                '\u001F',
+                snapshot.Assessment.IssueIds);
+            if (!string.Equals(
+                    renderedIssueDetailSignature,
+                    signature,
+                    StringComparison.Ordinal))
+            {
+                bundleJson = JsonSerializer.Serialize(
+                    snapshot.Assessment,
+                    new JsonSerializerOptions(AgentObservabilityJson.Options)
+                    {
+                        WriteIndented = true
+                    });
+                SetText(issueDetails, bundleJson);
+                bundleStatusMessage = FormatBundleStatus(snapshot.Assessment);
+                renderedIssueDetailSignature = signature;
+            }
+
+            SetEnabled(copyChatButton, false);
+            SetEnabled(copyBundleButton, true);
+            SetEnabled(exportBundleButton, true);
+            return;
         }
-        else if (detail is not null)
+
+        if (detail is not null)
         {
-            bundleJson = null;
-            issueDetails.Text = FormatIssueDetail(detail);
-            copyChatButton.Enabled = detail.Triage is not null;
+            string signature = "detail:" + detail.Issue.Id + ":" + snapshot.Stream.Revision;
+            if (!string.Equals(
+                    renderedIssueDetailSignature,
+                    signature,
+                    StringComparison.Ordinal))
+            {
+                bundleJson = null;
+                SetText(issueDetails, FormatIssueDetail(detail));
+                renderedIssueDetailSignature = signature;
+            }
+
+            SetEnabled(copyChatButton, detail.Triage is not null);
             bool hasCheckedIssues = snapshot.SelectedIssueIds.Count > 0;
-            copyBundleButton.Enabled = hasCheckedIssues;
-            exportBundleButton.Enabled = hasCheckedIssues;
+            SetEnabled(copyBundleButton, hasCheckedIssues);
+            SetEnabled(exportBundleButton, hasCheckedIssues);
+            return;
         }
-        else
+
+        bundleJson = null;
+        string emptySignature = "empty:" + (view.EmptyState ?? string.Empty);
+        if (!string.Equals(
+                renderedIssueDetailSignature,
+                emptySignature,
+                StringComparison.Ordinal))
         {
-            bundleJson = null;
-            copyChatButton.Enabled = false;
-            bool hasCheckedIssues = snapshot.SelectedIssueIds.Count > 0;
-            copyBundleButton.Enabled = hasCheckedIssues;
-            exportBundleButton.Enabled = hasCheckedIssues;
-            issueDetails.Text = view.EmptyState ?? "Select an issue to inspect supporting evidence.";
+            SetText(
+                issueDetails,
+                view.EmptyState ?? "Select an issue to inspect supporting evidence.");
+            renderedIssueDetailSignature = emptySignature;
         }
+
+        SetEnabled(copyChatButton, false);
+        bool hasSelectedIssues = snapshot.SelectedIssueIds.Count > 0;
+        SetEnabled(copyBundleButton, hasSelectedIssues);
+        SetEnabled(exportBundleButton, hasSelectedIssues);
     }
 
     private void RefreshAgent(
@@ -665,77 +919,179 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityUiSnapshot snapshot)
     {
         AgentSnapshot agent = view.Agent;
-        agentHeader.Text =
+        SetText(
+            agentHeader,
             $"{agent.ModName}   ·   {StatusText(agent.Status)}   ·   {agent.CurrentStage}   ·   " +
-            $"{view.ElapsedMilliseconds / 1000.0:0.0}s   ·   session {agent.RunId}   ·   {agent.CurrentActivity ?? "—"}";
+            $"{view.ElapsedMilliseconds / 1000.0:0.0}s   ·   session {agent.RunId}   ·   {agent.CurrentActivity ?? "—"}");
+        RefreshStageProgress(view.StageProgress);
+
+        bool dataChanged =
+            renderedAgentDataRevision != snapshot.Stream.Revision ||
+            !string.Equals(
+                renderedAgentEventId,
+                view.SelectedEventId,
+                StringComparison.Ordinal);
+        if (dataChanged)
+        {
+            suppressActivitySelection = true;
+            try
+            {
+                RefreshActivityList(
+                    agentActivity,
+                    view.RecentActivity,
+                    includeMod: false,
+                    selectedEventId: view.SelectedEventId);
+            }
+            finally
+            {
+                suppressActivitySelection = false;
+            }
+
+            RefreshPastSessions(view.PastSessions);
+            renderedAgentDataRevision = snapshot.Stream.Revision;
+            renderedAgentEventId = view.SelectedEventId;
+        }
+
+        if (view.SelectedEvent is not null &&
+            (renderedAgentDetailRevision != snapshot.Stream.Revision ||
+             !string.Equals(
+                 renderedAgentEventId,
+                 view.SelectedEventId,
+                 StringComparison.Ordinal)))
+        {
+            SetText(agentDetails, FormatEventDetail(view.SelectedEvent));
+            SetText(agentEvidence, FormatEventEvidence(view.SelectedEvent));
+            SetText(agentResults, FormatEventResults(view.SelectedEvent));
+            renderedAgentDetailRevision = snapshot.Stream.Revision;
+        }
+        else if (view.SelectedEvent is null)
+        {
+            SetText(
+                agentDetails,
+                view.EmptyState ?? "Select an activity row to inspect bounded details.");
+            SetText(
+                agentEvidence,
+                "Select an activity row to inspect files, tools, and commands.");
+            SetText(
+                agentResults,
+                "Select an activity row to inspect build, test, and issue data.");
+            renderedAgentDetailRevision = snapshot.Stream.Revision;
+        }
+
+        if (agentDetailTabs.SelectedIndex != 3)
+        {
+            int selectedTab = snapshot.AgentDetailTab switch
+            {
+                AgentObservabilityAgentDetailTab.Artifacts => 1,
+                AgentObservabilityAgentDetailTab.BuildTestIssues => 2,
+                _ => 0
+            };
+            if (agentDetailTabs.SelectedIndex != selectedTab)
+            {
+                suppressDetailTabSelection = true;
+                try
+                {
+                    agentDetailTabs.SelectedIndex = selectedTab;
+                }
+                finally
+                {
+                    suppressDetailTabSelection = false;
+                }
+            }
+        }
+    }
+
+    private void RefreshStageProgress(
+        IReadOnlyList<AgentObservabilityStageProgress> desired)
+    {
+        AgentObservabilityStageProgress[] current = agentProgress.Controls
+            .Cast<Control>()
+            .Select(control => control.Tag as AgentObservabilityStageProgress)
+            .Where(static stage => stage is not null)
+            .Select(static stage => stage!)
+            .ToArray();
+        AgentObservabilityStageReconciliationPlan plan =
+            AgentObservabilityStageReconciliation.Plan(current, desired);
+        if (!plan.HasChanges)
+        {
+            return;
+        }
+
         agentProgress.SuspendLayout();
         try
         {
-            agentProgress.Controls.Clear();
-            foreach (AgentObservabilityStageProgress stage in view.StageProgress)
+            foreach (DevelopmentStage stage in plan.RemovedStages)
             {
-                var label = new Label
+                if (stageControls.Remove(stage, out Label? label))
                 {
-                    AutoSize = true,
-                    Text = StageGlyph(stage.State) + " " + stage.Stage,
-                    Padding = new Padding(5, 4, 5, 3),
-                    Margin = new Padding(0, 0, 4, 0),
-                    BorderStyle = BorderStyle.FixedSingle,
-                    ForeColor = stage.State is "failed" ? Color.DarkRed : Color.Black,
-                    BackColor = stage.IsCurrent ? Color.LightGoldenrodYellow : Color.WhiteSmoke
-                };
-                agentProgress.Controls.Add(label);
+                    agentProgress.Controls.Remove(label);
+                    label.Dispose();
+                    stageControlRemovals++;
+                }
+            }
+
+            for (int index = 0; index < desired.Count; index++)
+            {
+                AgentObservabilityStageProgress state = desired[index];
+                if (!stageControls.TryGetValue(state.Stage, out Label? label))
+                {
+                    label = CreateStageLabel(state);
+                    stageControls[state.Stage] = label;
+                    agentProgress.Controls.Add(label);
+                    stageControlCreations++;
+                }
+
+                int currentIndex = agentProgress.Controls.IndexOf(label);
+                if (currentIndex != index)
+                {
+                    agentProgress.Controls.SetChildIndex(label, index);
+                }
+
+                UpdateStageLabel(label, state);
             }
         }
         finally
         {
             agentProgress.ResumeLayout();
         }
+    }
 
-        suppressActivitySelection = true;
-        try
+    private Label CreateStageLabel(AgentObservabilityStageProgress state)
+    {
+        var label = new Label
         {
-            RefreshActivityList(
-                agentActivity,
-                view.RecentActivity,
-                includeMod: false,
-                selectedEventId: view.SelectedEventId);
-        }
-        finally
-        {
-            suppressActivitySelection = false;
-        }
-        RefreshPastSessions(view.PastSessions);
+            AutoSize = true,
+            Padding = new Padding(5, 4, 5, 3),
+            Margin = new Padding(0, 0, 4, 0),
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        UpdateStageLabel(label, state);
+        return label;
+    }
 
-        if (view.SelectedEvent is not null)
+    private void UpdateStageLabel(
+        Label label,
+        AgentObservabilityStageProgress state)
+    {
+        SetText(label, StageGlyph(state.State) + " " + state.Stage);
+        Color foreColor = state.State is "failed" ? Color.DarkRed : Color.Black;
+        if (label.ForeColor != foreColor)
         {
-            agentDetails.Text = FormatEventDetail(view.SelectedEvent);
-            agentEvidence.Text = FormatEventEvidence(view.SelectedEvent);
-            agentResults.Text = FormatEventResults(view.SelectedEvent);
-        }
-        else
-        {
-            agentDetails.Text = view.EmptyState ?? "Select an activity row to inspect bounded details.";
-            agentEvidence.Text = "Select an activity row to inspect files, tools, and commands.";
-            agentResults.Text = "Select an activity row to inspect build, test, and issue data.";
+            label.ForeColor = foreColor;
         }
 
-        if (agentDetailTabs.SelectedIndex != 3)
+        Color backColor = state.IsCurrent
+            ? Color.LightGoldenrodYellow
+            : Color.WhiteSmoke;
+        if (label.BackColor != backColor)
         {
-            suppressDetailTabSelection = true;
-            try
-            {
-                agentDetailTabs.SelectedIndex = snapshot.AgentDetailTab switch
-                {
-                    AgentObservabilityAgentDetailTab.Artifacts => 1,
-                    AgentObservabilityAgentDetailTab.BuildTestIssues => 2,
-                    _ => 0
-                };
-            }
-            finally
-            {
-                suppressDetailTabSelection = false;
-            }
+            label.BackColor = backColor;
+        }
+
+        if (label.Tag is not AgentObservabilityStageProgress current ||
+            current != state)
+        {
+            label.Tag = state;
         }
     }
 
@@ -826,16 +1182,9 @@ public sealed class ObservabilityMainForm : Form
         string? selectedEventId = null)
     {
         string? selected = selectedEventId ?? SelectedEventId(list);
-        Dictionary<string, AgentObservabilityActivityRow> desiredById = rows
-            .ToDictionary(row => row.Event.Id, StringComparer.Ordinal);
-        var current = list.Items.Cast<ListViewItem>()
-            .Select(item =>
-            {
-                string? eventId = EventIdFromTag(item);
-                return eventId is not null && desiredById.TryGetValue(eventId, out AgentObservabilityActivityRow? row)
-                    ? new AgentObservabilityActivityListItem(eventId, row)
-                    : null;
-            })
+        var current = list.Items
+            .Cast<ListViewItem>()
+            .Select(item => item.Tag as AgentObservabilityActivityListItem)
             .Where(static item => item is not null)
             .Select(static item => item!)
             .ToArray();
@@ -938,6 +1287,31 @@ public sealed class ObservabilityMainForm : Form
         }
     }
 
+    private static void SetText(Control control, string? value)
+    {
+        string text = value ?? string.Empty;
+        if (!string.Equals(control.Text, text, StringComparison.Ordinal))
+        {
+            control.Text = text;
+        }
+    }
+
+    private static void SetVisible(Control control, bool visible)
+    {
+        if (control.Visible != visible)
+        {
+            control.Visible = visible;
+        }
+    }
+
+    private static void SetEnabled(Control control, bool enabled)
+    {
+        if (control.Enabled != enabled)
+        {
+            control.Enabled = enabled;
+        }
+    }
+
     private static void SetSubItem(ListViewItem item, int index, string value)
     {
         if (!string.Equals(item.SubItems[index].Text, value, StringComparison.Ordinal))
@@ -954,8 +1328,10 @@ public sealed class ObservabilityMainForm : Form
         }
 
         string[] ids = issueList.Items.Cast<ListViewItem>()
-            .Where(item => item.Checked && item.Tag is AgentIssue)
-            .Select(item => ((AgentIssue)item.Tag!).Id)
+            .Where(item =>
+                item.Checked &&
+                item.Tag is AgentObservabilityIssueListItem)
+            .Select(item => ((AgentObservabilityIssueListItem)item.Tag!).IssueId)
             .ToArray();
         observabilityUi.SelectIssues(ids);
         bundleJson = null;
@@ -971,12 +1347,12 @@ public sealed class ObservabilityMainForm : Form
     {
         if (suppressIssueSelection ||
             issueList.SelectedItems.Count == 0 ||
-            issueList.SelectedItems[0].Tag is not AgentIssue issue)
+            issueList.SelectedItems[0].Tag is not AgentObservabilityIssueListItem item)
         {
             return;
         }
 
-        observabilityUi.SelectIssue(issue.Id);
+        observabilityUi.SelectIssue(item.IssueId);
         bundleJson = null;
         bundleStatusMessage = null;
         AgentObservabilityUiSnapshot snapshot = observabilityUi.Snapshot;
@@ -1011,6 +1387,10 @@ public sealed class ObservabilityMainForm : Form
 
         observabilityUi.ShowIssue(issue.Id);
         RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+    private void OnLoadMoreIssues(object? sender, EventArgs e)
+    {
+        RefreshFromSnapshot(observabilityUi.LoadMoreIssues());
     }
 
     private void OnPrepareAssessment(object? sender, EventArgs e)
@@ -1197,8 +1577,10 @@ public sealed class ObservabilityMainForm : Form
     private string PrepareFreshBundle()
     {
         string[] ids = issueList.Items.Cast<ListViewItem>()
-            .Where(item => item.Checked && item.Tag is AgentIssue)
-            .Select(item => ((AgentIssue)item.Tag!).Id)
+            .Where(item =>
+                item.Checked &&
+                item.Tag is AgentObservabilityIssueListItem)
+            .Select(item => ((AgentObservabilityIssueListItem)item.Tag!).IssueId)
             .ToArray();
         observabilityUi.SelectIssues(ids);
         AgentDiagnosticBundle bundle = observabilityUi.PrepareAssessment();
@@ -1225,10 +1607,17 @@ public sealed class ObservabilityMainForm : Form
         return "Diagnostic bundle: incomplete (missing " + missing + ").";
     }
 
-    private AgentIssue? SelectedIssue() =>
-        issueList.SelectedItems.Count == 0
-            ? null
+    private AgentIssue? SelectedIssue()
+    {
+        if (issueList.SelectedItems.Count == 0)
+        {
+            return null;
+        }
+
+        return issueList.SelectedItems[0].Tag is AgentObservabilityIssueListItem item
+            ? item.Row.Issue
             : issueList.SelectedItems[0].Tag as AgentIssue;
+    }
 
     private void ShowEventDetails(ListViewItem item, TextBox target)
     {
@@ -1388,7 +1777,12 @@ public sealed class ObservabilityMainForm : Form
             if (triage.SharedTooling is not null)
             {
                 builder.AppendLine(
-                    $"Shared tooling:          {triage.SharedTooling.AffectedAgentCount} agents affected by {triage.SharedTooling.FailureCode}");
+                    $"Shared tooling:          {triage.SharedTooling.AffectedAgentCount} logical agents affected by {triage.SharedTooling.FailureCode}");
+                if (triage.SharedTooling.AffectedSessionCount > triage.SharedTooling.AffectedAgentCount)
+                {
+                    builder.AppendLine(
+                        $"Affected sessions:       {triage.SharedTooling.AffectedSessionCount}");
+                }
                 builder.AppendLine($"Shared component:        {triage.SharedTooling.Component}");
             }
         }
@@ -1399,6 +1793,7 @@ public sealed class ObservabilityMainForm : Form
         builder.AppendLine($"Issue:      {detail.Issue.Id}");
         builder.AppendLine($"Mod:        {detail.Issue.ModId}");
         builder.AppendLine($"Agent:      {detail.Issue.AgentId}");
+        builder.AppendLine($"Logical agent: {detail.Issue.LogicalAgentId ?? "legacy/session-scoped"}");
         builder.AppendLine($"Run:        {detail.Issue.RunId}");
         builder.AppendLine($"Category:   {detail.Issue.Category}");
         builder.AppendLine($"Severity:   {detail.Issue.Severity}");

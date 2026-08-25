@@ -22,8 +22,8 @@ internal static class Prompt3AuditTests
             "Beta",
             "agent-beta");
 
-        Assert(ReferenceEquals(alpha, run.CreateAgent("mod.alpha", "Alpha", "ignored")),
-            "one run must own one agent per mod");
+        Assert(ReferenceEquals(alpha, run.CreateAgent("mod.alpha", "Alpha")),
+            "default same-mod creation must reuse the active logical session");
         alpha.Start("analysis");
         beta.Start("analysis");
 
