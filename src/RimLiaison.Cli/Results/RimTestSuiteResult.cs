@@ -1,7 +1,10 @@
+using RimDev.Contracts;
 using System.Text.Json.Serialization;
 using RimLiaison.DevBridge;
 using RimLiaison.Execution;
 using RimLiaison.Recovery;
+using RimLiaison.Validation;
+
 
 namespace RimLiaison.Results;
 
@@ -25,6 +28,8 @@ public sealed class RimTestSuiteResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? WorkflowId { get; init; }
 
+    [JsonIgnore]
+    public ExecutionIdentity? ExecutionIdentity { get; init; }
     [JsonPropertyName("artifactFreshness")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RimTestArtifactFreshness? ArtifactFreshness { get; init; }
@@ -57,6 +62,19 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("blocked")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Blocked { get; init; }
+
+    [JsonPropertyName("unavailable")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Unavailable { get; init; }
+
+    [JsonPropertyName("validation")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ValidationPolicyResult? Validation { get; init; }
+
+    [JsonPropertyName("validationPlan")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public global::RimContext.Core.Impact.ValidationPlan? ValidationPlan { get; init; }
+
 
     [JsonPropertyName("durationMs")]
     public long DurationMs { get; init; }
@@ -161,7 +179,7 @@ public static class RimTestSuiteResultFactory
                 freshnessRequested: false,
                 freshness: null,
                 freshnessStatus: null,
-                workflowId)
+                workflowId: workflowId)
         };
     }
 
@@ -174,19 +192,23 @@ public static class RimTestSuiteResultFactory
         string? workflowId = null,
         RimTestArtifactFreshness? artifactFreshness = null,
         DevBridgeAdapterStatus? freshnessStatus = null,
-        bool freshnessRequested = false)
+        bool freshnessRequested = false,
+        global::RimContext.Core.Impact.ValidationPlan? validationPlan = null)
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
         bool emptyExecution = children.Length == 0;
         int passed = children.Count(static child => child.Status == "pass");
         int blocked = children.Count(static child => child.Status == "blocked");
+        int unavailable = children.Count(static child =>
+            child.Status is "not_available" or "not_executed");
         int failed = children.Count(static child =>
             child.Status is "fail" or "infrastructure" or "invalid");
         int cancelledChildren = children.Count(static child => child.Status == "cancelled");
         int cancelled = cancelledChildren > 0
             ? cancelledChildren
             : execution.Cancelled ? 1 : 0;
+        ValidationPolicyResult validation = EvaluateValidation(children);
         bool failFastIncomplete =
             execution.FailFast is { ValidationCompleted: false } or { NotLaunched: > 0 };
 
@@ -245,7 +267,6 @@ public static class RimTestSuiteResultFactory
                 OperationIds = operationIds.Length == 0 ? null : operationIds
             };
         }
-
         return new RimTestSuiteResult
         {
             Status = status,
@@ -256,8 +277,12 @@ public static class RimTestSuiteResultFactory
             Passed = passed,
             Failed = failed,
             Blocked = blocked > 0 ? blocked : null,
+            Unavailable = unavailable > 0 ? unavailable : null,
+            Validation = validation,
+            ValidationPlan = validationPlan,
             DurationMs = Math.Max(0, durationMs),
             ArtifactFreshness = projectedFreshness,
+            ExecutionIdentity = projectedFreshness?.ToExecutionIdentity(),
             ValidationDiagnosis = string.Equals(execution.SuiteId, "affected", StringComparison.Ordinal)
                 ? RimTestValidationChainDiagnoser.Diagnose(
                     execution,
@@ -318,4 +343,56 @@ public static class RimTestSuiteResultFactory
                     .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action))
         };
     }
+    private static ValidationPolicyResult EvaluateValidation(
+        IReadOnlyList<RimTestResult> children)
+    {
+        var observations = children.Select(child =>
+        {
+            ValidationClassification classification =
+                Enum.TryParse(
+                    child.ValidationClassification,
+                    ignoreCase: false,
+                    out ValidationClassification parsed)
+                    ? parsed
+                    : ValidationClassification.REQUIRED;
+            ValidationRequirementSource source =
+                classification == ValidationClassification.REQUIRED
+                    ? ValidationRequirementSource.TOOLCHAIN_CONTRACT
+                    : ValidationRequirementSource.DISCOVERED;
+            ValidationCheckState state = child.Status switch
+            {
+                "pass" => ValidationCheckState.PASSED,
+                "fail" or "infrastructure" or "invalid" =>
+                    ValidationCheckState.FAILED,
+                "not_available" or "not_executed" or "blocked" =>
+                    ValidationCheckState.NOT_AVAILABLE,
+                _ => ValidationCheckState.NOT_EXECUTED
+            };
+            ValidationFindingKind? finding = child.Status switch
+            {
+                "fail" when classification != ValidationClassification.REQUIRED =>
+                    ValidationFindingKind.MOD_DEFECT,
+                "infrastructure" or "invalid" =>
+                    ValidationFindingKind.TOOLING_FAILURE,
+                "not_available" or "not_executed" =>
+                    ValidationFindingKind.OPTIONAL_VALIDATION_UNAVAILABLE,
+                _ => null
+            };
+            return new ValidationCheckObservation
+            {
+                Check = ValidationPolicyEvaluator.Define(
+                    child.Test,
+                    classification,
+                    source,
+                    "Catalog validation " + child.Test),
+                State = state,
+                Finding = finding,
+                EvidenceReference = child.EvidenceId,
+                Recommendation = child.NextAction,
+                Summary = child.ErrorCode
+            };
+        });
+        return ValidationPolicyEvaluator.Evaluate(observations);
+    }
+
 }

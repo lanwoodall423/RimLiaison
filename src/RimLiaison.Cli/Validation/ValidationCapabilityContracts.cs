@@ -17,9 +17,11 @@ public enum ValidationCapabilityPreflightOutcome
 {
     Available,
     Blocked,
+    UnavailableOptional,
     InfrastructureFailure,
     Cancelled
 }
+
 
 public sealed record ValidationCapabilityEvidence
 {
@@ -28,6 +30,13 @@ public sealed record ValidationCapabilityEvidence
 
     [JsonPropertyName("outcome")]
     public string Outcome { get; init; } = "blocked";
+
+    [JsonPropertyName("classification")]
+    public ValidationClassification Classification { get; init; } =
+        ValidationClassification.REQUIRED;
+
+    [JsonPropertyName("blocking")]
+    public bool Blocking { get; init; } = true;
 
     [JsonPropertyName("state")]
     public string State { get; init; } = "CAPABILITY_GAP";
@@ -112,7 +121,10 @@ public sealed record ValidationCapabilityPreflightResult(
 {
     public bool IsAvailable => Outcome == ValidationCapabilityPreflightOutcome.Available;
     public bool IsBlocked => Outcome == ValidationCapabilityPreflightOutcome.Blocked;
+    public bool IsUnavailableOptional =>
+        Outcome == ValidationCapabilityPreflightOutcome.UnavailableOptional;
 }
+
 
 /// <summary>
 /// Negotiates declared validation requirements through the read-only capability registry.
@@ -160,11 +172,29 @@ public sealed class ValidationCapabilityNegotiator
 
             if (!discovered.Status.IsSuccess)
             {
+                if (test.ValidationClassification != ValidationClassification.REQUIRED)
+                {
+                    ValidationCapabilityEvidence optionalEvidence = CreateEvidence(
+                        test,
+                        requirement,
+                        discovered.Status.ErrorCode ??
+                            ValidationCapabilitySchema.DiscoveryFailedCode,
+                        workflowId,
+                        reason: requirement.Purpose,
+                        discovered: null);
+                    return new(
+                        ValidationCapabilityPreflightOutcome.UnavailableOptional,
+                        [optionalEvidence],
+                        optionalEvidence.ErrorCode);
+                }
+
                 return new(
                     ValidationCapabilityPreflightOutcome.InfrastructureFailure,
                     evidence,
                     discovered.Status.ErrorCode ?? ValidationCapabilitySchema.DiscoveryFailedCode);
             }
+
+
 
             DevBridgeCapability? match = discovered.Capabilities.FirstOrDefault(
                 capability => string.Equals(
@@ -208,10 +238,11 @@ public sealed class ValidationCapabilityNegotiator
 
         if (evidence.Count > 0)
         {
-            return new(
-                ValidationCapabilityPreflightOutcome.Blocked,
-                evidence,
-                evidence[0].ErrorCode);
+            ValidationCapabilityPreflightOutcome outcome =
+                test.ValidationClassification == ValidationClassification.REQUIRED
+                    ? ValidationCapabilityPreflightOutcome.Blocked
+                    : ValidationCapabilityPreflightOutcome.UnavailableOptional;
+            return new(outcome, evidence, evidence[0].ErrorCode);
         }
 
         return new(ValidationCapabilityPreflightOutcome.Available, []);
@@ -234,6 +265,14 @@ public sealed class ValidationCapabilityNegotiator
             : $"Upgrade or configure {owner} so capability {requirement.CapabilityId} satisfies the declared provider/schema/version requirement.";
         return new ValidationCapabilityEvidence
         {
+            Outcome = test.ValidationClassification == ValidationClassification.REQUIRED
+                ? "blocked"
+                : "not_available",
+            Classification = test.ValidationClassification,
+            Blocking = test.ValidationClassification == ValidationClassification.REQUIRED,
+            State = test.ValidationClassification == ValidationClassification.REQUIRED
+                ? "CAPABILITY_GAP"
+                : "OPTIONAL_VALIDATION_UNAVAILABLE",
             ErrorCode = errorCode,
             ValidationId = test.Id,
             RequiredCapabilityId = requirement.CapabilityId,
@@ -250,6 +289,9 @@ public sealed class ValidationCapabilityNegotiator
             OperationAttempted = false,
             WorkflowId = workflowId,
             AgentId = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_AGENT"),
+            DiscoveryErrorCode = errorCode == ValidationCapabilitySchema.UnavailableCode
+                ? null
+                : errorCode,
             Fingerprint = "capability|" + requirement.CapabilityId + "|provider|" + expectedProvider,
         };
     }

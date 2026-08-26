@@ -224,6 +224,71 @@ public sealed class RimTestSelectionResult
     [JsonPropertyName("reasonsTruncated")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? ReasonsTruncated { get; init; }
+
+    [JsonPropertyName("executionPacket")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public global::RimContext.Core.Impact.ExecutionPacket? ExecutionPacket { get; init; }
+
+    [JsonPropertyName("impactPrediction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public global::RimContext.Core.Impact.PredictedImpact? ImpactPrediction { get; init; }
+
+    [JsonPropertyName("impactAnalysis")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public global::RimContext.Core.Impact.ActualImpact? ImpactAnalysis { get; init; }
+
+    [JsonPropertyName("validationPlan")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public global::RimContext.Core.Impact.ValidationPlan? ValidationPlan { get; init; }
+
+
+    public RimTestSelectionResult WithImpact(
+        global::RimContext.Core.Impact.ExecutionPacket? packet,
+        global::RimContext.Core.Impact.PredictedImpact? prediction,
+        global::RimContext.Core.Impact.ActualImpact? analysis,
+        global::RimContext.Core.Impact.ValidationPlan? validationPlan = null) =>
+        new()
+        {
+            SchemaVersion = SchemaVersion,
+            Status = Status,
+            Tests = Tests,
+            ReasonCount = ReasonCount,
+            ErrorCode = ErrorCode,
+            NextAction = NextAction,
+            RecoveryState = RecoveryState,
+            RecoveryAttempts = RecoveryAttempts,
+            RecoveryAction = RecoveryAction,
+            FallbackSuite = FallbackSuite,
+            Reasons = Reasons,
+            ReasonsTruncated = ReasonsTruncated,
+            ExecutionPacket = packet,
+            ImpactPrediction = prediction,
+            ImpactAnalysis = analysis,
+            ValidationPlan = validationPlan
+        };
+
+    public RimTestSelectionResult WithTests(
+        IReadOnlyList<string> tests,
+        string? status = null) =>
+        new()
+        {
+            SchemaVersion = SchemaVersion,
+            Status = status ?? Status,
+            Tests = tests,
+            ReasonCount = ReasonCount,
+            ErrorCode = ErrorCode,
+            NextAction = NextAction,
+            RecoveryState = RecoveryState,
+            RecoveryAttempts = RecoveryAttempts,
+            RecoveryAction = RecoveryAction,
+            FallbackSuite = FallbackSuite,
+            Reasons = Reasons,
+            ReasonsTruncated = ReasonsTruncated,
+            ExecutionPacket = ExecutionPacket,
+            ImpactPrediction = ImpactPrediction,
+            ImpactAnalysis = ImpactAnalysis,
+            ValidationPlan = ValidationPlan
+        };
 }
 
 public sealed class RimTestSelectionReason

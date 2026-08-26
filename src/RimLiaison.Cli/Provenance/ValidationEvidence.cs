@@ -809,88 +809,11 @@ public static class ValidationPublicationGate
         string kind,
         out string reason)
     {
-        reason = ValidationDecisionReasonCodes.EvidenceInputMismatch;
-        if (!string.Equals(evidence.Repository, current.Repository, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(evidence.ValidationKind, current.ValidationKind, StringComparison.Ordinal) &&
-            !evidence.CoveredKinds.Contains(kind, StringComparer.Ordinal))
-        {
-            return false;
-        }
-
-        if (!string.IsNullOrWhiteSpace(current.ContentFingerprint))
-        {
-            if (!string.Equals(evidence.ContentFingerprint, current.ContentFingerprint, StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-        else if (!string.Equals(evidence.CommitSha, current.CommitSha, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (!SequenceEqual(evidence.SelectedSourceInputs, current.SelectedSourceInputs) ||
-            !MapEqual(evidence.DependencyFingerprints, current.DependencyFingerprints) ||
-            !MapEqual(evidence.ToolVersions, current.ToolVersions) ||
-            !MapEqual(evidence.Configuration, current.Configuration))
-        {
-            return false;
-        }
-
-        if (current.TestIds.Count > 0 &&
-            !current.TestIds.All(testId => evidence.TestIds.Contains(testId, StringComparer.Ordinal)))
-        {
-            reason = ValidationDecisionReasonCodes.EvidenceTestIdentityMismatch;
-            return false;
-        }
-
-        if (!string.IsNullOrWhiteSpace(current.EnvironmentFingerprint) &&
-            !string.Equals(evidence.EnvironmentFingerprint, current.EnvironmentFingerprint, StringComparison.Ordinal))
-        {
-            reason = ValidationDecisionReasonCodes.EvidenceEnvironmentMismatch;
-            return false;
-        }
-
-        if (kind == ValidationEvidenceKinds.Runtime)
-        {
-            if (!evidence.RequiresRuntimeGeneration ||
-                !evidence.RuntimeGeneration.HasValue)
-            {
-                reason = ValidationDecisionReasonCodes.EvidenceRuntimeGenerationMissing;
-                return false;
-            }
-
-            if (current.RuntimeGeneration.HasValue &&
-                evidence.RuntimeGeneration != current.RuntimeGeneration)
-            {
-                reason = ValidationDecisionReasonCodes.EvidenceDeploymentMismatch;
-                return false;
-            }
-
-            if (current.BuildArtifactSha256 is not null &&
-                !string.Equals(evidence.BuildArtifactSha256, current.BuildArtifactSha256, StringComparison.OrdinalIgnoreCase))
-            {
-                reason = ValidationDecisionReasonCodes.EvidenceDeploymentMismatch;
-                return false;
-            }
-
-            if (current.DeploymentArtifactSha256 is not null &&
-                !string.Equals(evidence.DeploymentArtifactSha256, current.DeploymentArtifactSha256, StringComparison.OrdinalIgnoreCase))
-            {
-                reason = ValidationDecisionReasonCodes.EvidenceDeploymentMismatch;
-                return false;
-            }
-
-            if (!IsCorrespondingDeployment(evidence.DeploymentCorrespondence) ||
-                current.DeploymentCorrespondence is not null &&
-                !IsCorrespondingDeployment(current.DeploymentCorrespondence))
-            {
-                reason = ValidationDecisionReasonCodes.EvidenceDeploymentMismatch;
-                return false;
-            }
-        }
-
-        return true;
+        return SharedContractAdapters.MatchesSharedIdentity(
+            evidence,
+            current,
+            kind,
+            out reason);
     }
 
     private static string InvalidationReason(

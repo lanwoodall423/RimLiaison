@@ -50,6 +50,7 @@ public static class CliParser
         string? store = null;
         string? kind = null;
         string? file = null;
+        string? gameplayRole = null;
         var assemblyRoots = new List<string>();
         var positionals = new List<string>();
         var force = false;
@@ -61,6 +62,7 @@ public static class CliParser
         int? maxBytes = null;
         var depth = IndexConstants.DefaultAffectedDepth;
         var direction = "both";
+        var includeFailures = false;
 
         for (var index = 1; index < args.Count; index++)
         {
@@ -129,6 +131,10 @@ public static class CliParser
                 case "--kind":
                     kind = ReadValue(args, ref index, option, inlineValue);
                     break;
+                case "--role":
+                case "--gameplay-role":
+                    gameplayRole = ReadValue(args, ref index, option, inlineValue);
+                    break;
                 case "--file":
                     file = ReadValue(args, ref index, option, inlineValue);
                     break;
@@ -146,6 +152,14 @@ public static class CliParser
                 case "--max-bytes":
                     maxBytes = ParseMaxBytes(ReadValue(args, ref index, option, inlineValue));
                     break;
+                case "--include-failures":
+                    if (inlineValue is not null)
+                    {
+                        throw ErrorFactory.InvalidArgument("The --include-failures option does not accept a value.");
+                    }
+
+                    includeFailures = true;
+                    break;
                 case "--depth":
                     depth = ParseDepth(ReadValue(args, ref index, option, inlineValue));
                     break;
@@ -161,7 +175,12 @@ public static class CliParser
             throw ErrorFactory.InvalidArgument("--json and --human cannot be combined.");
         }
 
-        ValidateCommandOptions(command, positionals, force, assemblyRoots, kind, direction, depth, file, verbose);
+        ValidateCommandOptions(command, positionals, force, assemblyRoots, kind, gameplayRole, direction, depth, file, verbose);
+        if (includeFailures && command != CliCommands.Content)
+        {
+            throw ErrorFactory.InvalidArgument("--include-failures is only valid for content.");
+        }
+
         var subject = command == CliCommands.Find
             ? string.Join(' ', positionals)
             : positionals.Count == 1 ? positionals[0] : null;
@@ -183,13 +202,15 @@ public static class CliParser
             depth,
             direction,
             kind,
-            file);
-    }
+            gameplayRole,
+            file,
+            includeFailures);
 
+    }
     private static CliRequest HelpRequest() => Request(CliCommands.Help);
 
     private static CliRequest Request(string command) =>
-        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, true, false, false, IndexConstants.DefaultLimit, null, IndexConstants.DefaultAffectedDepth, "both", null, null);
+        new(command, null, Array.Empty<string>(), null, null, Array.Empty<string>(), false, false, true, false, false, IndexConstants.DefaultLimit, null, IndexConstants.DefaultAffectedDepth, "both", null, null, null);
 
     private static string ReadValue(IReadOnlyList<string> args, ref int index, string option, string? inlineValue)
     {
@@ -258,6 +279,7 @@ public static class CliParser
         bool force,
         IReadOnlyList<string> assemblyRoots,
         string? kind,
+        string? gameplayRole,
         string direction,
         int depth,
         string? file,
@@ -273,6 +295,11 @@ public static class CliParser
             !(command == CliCommands.Harmony && file is not null))
         {
             throw ErrorFactory.InvalidArgument($"The {command} command requires a selector.");
+        }
+
+        if (command == CliCommands.Content && positionals.Count > 1)
+        {
+            throw ErrorFactory.InvalidArgument("The content command accepts at most one selector.");
         }
 
         if (CliCommands.IsQuery(command) &&
@@ -294,9 +321,14 @@ public static class CliParser
             throw ErrorFactory.InvalidArgument("--force and --assembly-root are only valid for index.");
         }
 
-        if (command != CliCommands.Find && kind is not null)
+        if (command != CliCommands.Find && command != CliCommands.Content && kind is not null)
         {
-            throw ErrorFactory.InvalidArgument("--kind is only valid for find.");
+            throw ErrorFactory.InvalidArgument("--kind is only valid for find or content.");
+        }
+
+        if (command != CliCommands.Content && gameplayRole is not null)
+        {
+            throw ErrorFactory.InvalidArgument("--role is only valid for content.");
         }
 
         if (command != CliCommands.Refs && direction != "both")

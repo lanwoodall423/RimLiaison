@@ -16,6 +16,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'validation-proof.ps1')
+. (Join-Path $PSScriptRoot 'pinned-devbridge-worktree.ps1')
 
 $repositoryRoot = if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -332,6 +333,15 @@ try {
         Select-Object -Unique)
     if ($selectedStages.Count -eq 0) {
         throw 'VALIDATION_PLAN_EMPTY'
+    }
+    if (@($selectedStages | Where-Object { $_ -eq 'cross-stack' }).Count -gt 0) {
+        if ([string]::IsNullOrWhiteSpace($DevBridgeRoot)) {
+            throw 'VALIDATION_DEVBRIDGE_ROOT_MISSING'
+        }
+        $devBridgeResolution = Resolve-PinnedDevBridgeWorktree `
+            -RimLiaisonRoot $repositoryRoot `
+            -DevBridgeRoot $DevBridgeRoot
+        $DevBridgeRoot = [string]$devBridgeResolution.resolvedRoot
     }
 
     $restoreAlreadyRun = $false

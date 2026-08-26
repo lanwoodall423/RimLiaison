@@ -20,6 +20,8 @@ public static class AgentObservabilityTags
     public const string LogicalAgentId = "rimliaison.logical.agent.id";
     public const string ModId = "rimliaison.mod.id";
     public const string ModName = "rimliaison.mod.name";
+    public const string EntityType = "rimliaison.entity.type";
+    public const string CanonicalEntityId = "rimliaison.entity.canonical_id";
     public const string Stage = "rimliaison.stage";
     public const string ToolName = "rimliaison.tool.name";
     public const string OperationType = "rimliaison.operation.type";

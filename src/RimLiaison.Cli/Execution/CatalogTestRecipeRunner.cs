@@ -49,6 +49,12 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
         {
             throw new KeyNotFoundException($"Test was not found: {testId}.");
         }
+        ValidationPolicyEvaluator.Define(
+            test.Id,
+            test.ValidationClassification,
+            test.ValidationSource ?? ValidationRequirementSource.TOOLCHAIN_CONTRACT,
+            test.Description ?? "Catalog validation " + test.Id);
+
 
         ValidationCapabilityPreflightResult preflight =
             test.RequiredCapabilities is not { Count: > 0 }
@@ -69,31 +75,58 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
             string errorCode = preflight.ErrorCode ??
                 preflight.Evidence.FirstOrDefault()?.ErrorCode ??
                 ValidationCapabilitySchema.DiscoveryFailedCode;
-            if (preflight.IsBlocked)
+            if (preflight.IsBlocked || preflight.IsUnavailableOptional)
             {
                 ValidationCapabilityEvidence[] gaps = preflight.Evidence.ToArray();
+                ValidationCapabilityEvidence first = gaps.FirstOrDefault() ??
+                    new ValidationCapabilityEvidence
+                    {
+                        ErrorCode = errorCode,
+                        ValidationId = test.Id,
+                        RequiredCapabilityId = "unknown",
+                        Reason = "Capability discovery did not produce evidence.",
+                        ProbableOwner = "RimLiaison",
+                        RecommendedRemediation = "Inspect capability discovery.",
+                        Fingerprint = "capability|unknown|provider|any",
+                        Classification = test.ValidationClassification,
+                        Blocking = test.ValidationClassification ==
+                            ValidationClassification.REQUIRED
+                    };
+                bool blocking = preflight.IsBlocked;
+                string outcome = blocking ? "blocked" : "not_available";
+                string finding = blocking
+                    ? "TOOLING_FAILURE"
+                    : "OPTIONAL_VALIDATION_UNAVAILABLE";
                 AgentObservabilityRuntime.Record(
                     DevelopmentStage.Testing,
                     AgentEventTypes.ValidationCapabilityBlocked,
-                    $"Validation blocked: required capability {gaps[0].RequiredCapabilityId} is unavailable. No product failure was observed. Probable owner: {gaps[0].ProbableOwner}.",
+                    blocking
+                        ? $"Validation blocked: required capability {first.RequiredCapabilityId} is unavailable. No product failure was observed. Probable owner: {first.ProbableOwner}."
+                        : $"Optional validation not available: capability {first.RequiredCapabilityId} could not be used. No product failure was observed.",
                     new
                     {
                         operationKey = "test:" + test.Id,
                         validationId = test.Id,
-                        state = "CAPABILITY_GAP",
-                        outcome = "blocked",
-                        errorCode = gaps[0].ErrorCode,
-                        capabilityId = gaps[0].RequiredCapabilityId,
-                        requiredCapabilityId = gaps[0].RequiredCapabilityId,
-                        expectedProvider = gaps[0].ExpectedProvider,
-                        discoveredProvider = gaps[0].DiscoveredProvider,
-                        reason = gaps[0].Reason,
-                        probableOwner = gaps[0].ProbableOwner,
-                        recommendedRemediation = gaps[0].RecommendedRemediation,
+                        validationClassification = test.ValidationClassification.ToString(),
+                        state = first.State,
+                        outcome,
+                        issueKind = finding,
+                        blocking,
+                        errorCode = first.ErrorCode,
+                        capabilityId = first.RequiredCapabilityId,
+                        requiredCapabilityId = first.RequiredCapabilityId,
+                        expectedProvider = first.ExpectedProvider,
+                        discoveredProvider = first.DiscoveredProvider,
+                        reason = first.Reason,
+                        probableOwner = first.ProbableOwner,
+                        componentOwner = first.ProbableOwner,
+                        recommendedRemediation = first.RecommendedRemediation,
+                        recommendation = first.RecommendedRemediation,
+                        evidenceReference = first.EvidenceLink,
                         operationAttempted = false,
                         workflowId,
-                        agentId = gaps[0].AgentId,
-                        fingerprint = gaps[0].Fingerprint
+                        agentId = first.AgentId,
+                        fingerprint = first.Fingerprint
                     });
             }
 
@@ -172,6 +205,22 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
                     DevelopmentStage.Testing,
                     AgentEventTypes.TestPassed,
                     "Test passed.",
+                    details);
+            }
+            else if (result.Status.Outcome is not DevBridgeOutcomeKind.TestFailure and
+                not DevBridgeOutcomeKind.Cancelled &&
+                test.ValidationClassification != ValidationClassification.REQUIRED)
+            {
+                details["validationClassification"] = test.ValidationClassification.ToString();
+                details["validationId"] = test.Id;
+                details["issueKind"] = "OPTIONAL_VALIDATION_UNAVAILABLE";
+                details["blocking"] = false;
+                details["recommendation"] = "Repair the optional validation owner or recipe, then rerun when relevant.";
+                observation?.Complete("Optional validation was unavailable.", details);
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Testing,
+                    AgentEventTypes.ValidationCapabilityBlocked,
+                    "Optional validation was unavailable; no product failure was observed.",
                     details);
             }
             else

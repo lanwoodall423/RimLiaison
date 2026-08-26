@@ -1,10 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
     <AssemblyName>RimLiaison.Tests</AssemblyName>
     <RootNamespace>RimLiaison.Tests</RootNamespace>
   </PropertyGroup>
@@ -12,5 +13,6 @@
     <ProjectReference Include="..\..\src\RimContext.Core\RimContext.Core.csproj" />
     <ProjectReference Include="..\..\src\RimError.Core\RimError.Core.csproj" />
     <ProjectReference Include="..\..\src\RimLiaison.Cli\RimLiaison.Cli.csproj" />
+    <ProjectReference Include="..\..\src\RimLiaison.Desktop\RimLiaison.Desktop.csproj" />
   </ItemGroup>
 </Project>

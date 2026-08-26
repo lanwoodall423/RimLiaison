@@ -8,9 +8,13 @@ using RimContext.Core;
 using RimContext.Core.Configuration;
 using RimContext.Core.Context;
 using RimContext.Core.Contracts;
+using RimContext.Core.Content;
+
 using RimContext.Core.Discovery;
 using RimContext.Core.Model;
 using RimContext.Core.Storage;
+using RimContext.Core.Impact;
+
 
 namespace RimContext.Tests;
 
@@ -29,6 +33,12 @@ internal static class Program
             ("context bundle decision provenance", ContextBundleDecisionProvenance),
             ("context bundle stale ordering", ContextBundleStaleOrdering),
             ("context bundle provider failure", ContextBundleProviderFailure),
+            ("impact graph contract and provenance", ImpactGraphContractAndProvenance),
+            ("impact graph dynamic and serialization classes", ImpactGraphDynamicAndSerialization),
+            ("execution packet carries remediation precedents", ExecutionPacketCarriesRemediationPrecedents),
+            ("execution packet revision status", ExecutionPacketRevisionStatus),
+            ("predicted actual scope expansion", PredictedActualScopeExpansion),
+            ("indexed graph and packet generation without runtime", IndexedGraphAndPacketGeneration),
             ("json-only stdout and stderr logging", JsonOnlyStdout),
             ("typed Core facade", TypedCoreFacade),
             ("unknown command and invalid input", InvalidInput),
@@ -55,7 +65,13 @@ internal static class Program
             ("affected queries", AffectedQueries),
             ("compact query output", CompactQueryOutput),
             ("production end-to-end workflow", ProductionEndToEndWorkflow),
-            ("store recovery and lock handling", StoreRecoveryAndLockHandling)
+            ("store recovery and lock handling", StoreRecoveryAndLockHandling),
+            ("content intelligence contracts and capture", ContentIntelligenceContractsAndCapture),
+            ("content precedent query ordering and policies", ContentPrecedentQueryOrderingAndPolicies),
+            ("content identity and bounded output", ContentIdentityAndBoundedOutput),
+            ("content Phase 2 qualification, reuse, promotion, and quarantine", ContentPhase2QualificationReusePromotionAndQuarantine),
+            ("minimum-safe validation planning scenarios", MinimumSafeValidationPlanningScenarios),
+            ("validated remediation precedent safety", ValidatedRemediationPrecedentSafety),
         };
 
         var passed = 0;
@@ -71,6 +87,7 @@ internal static class Program
             catch (Exception ex)
             {
                 failed++;
+
                 Console.Error.WriteLine($"FAIL {test.Name}: {ex.Message}");
             }
         }
@@ -78,6 +95,919 @@ internal static class Program
         Console.WriteLine($"tests: {tests.Length}, passed: {passed}, failed: {failed}");
         return failed == 0 ? 0 : 1;
     }
+    private static void ImpactGraphContractAndProvenance()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        string json = ImpactGraphJson.Serialize(graph);
+        ImpactGraph roundTrip = ImpactGraphJson.Deserialize(json);
+        AssertEqual(ImpactGraphSchemas.Current, roundTrip.SchemaVersion, "impact graph schema");
+        AssertEqual(3, roundTrip.Edges.Count, "impact edge count");
+        AssertEqual(ImpactEvidenceClasses.Deterministic, roundTrip.Edges[0].Provenance.EvidenceClass, "static provenance");
+        AssertThrows<InvalidOperationException>(
+            () => ImpactGraphJson.Deserialize(json.Replace(ImpactGraphSchemas.Current, "rimimpact-graph/v2", StringComparison.Ordinal)),
+            "unsupported graph schema must fail");
+    }
+
+    private static void ImpactGraphDynamicAndSerialization()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        ImpactEdge harmony = graph.Edges.Single(edge => edge.RelationshipKind == ImpactRelationshipKinds.HarmonyTarget);
+        AssertEqual(ImpactClasses.DynamicPotential, harmony.ImpactClass, "Harmony relationship class");
+        AssertEqual(ImpactEvidenceClasses.Uncertain, harmony.Provenance.EvidenceClass, "Harmony provenance");
+        ActualImpact impact = new ImpactGraphService().AnalyzeDiff(
+            graph,
+            ["Source/Plant.cs"],
+            prediction: new PredictedImpact(["Source/Plant.cs"], ["source"], [ImpactClasses.Direct], [], "fixture"));
+        Assert(impact.HarmonyOrDynamicRisk, "Harmony broadens actual impact");
+        Assert(impact.SerializationRisk, "serialization broadens actual impact");
+        Assert(impact.ValidationConcerns.Contains("Harmony/dynamic dispatch"), "dynamic validation concern");
+        Assert(impact.ValidationConcerns.Contains("Serialization/save-load"), "serialization validation concern");
+    }
+
+    private static void ExecutionPacketRankedHardBudget()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        var evidence = Enumerable.Range(0, 100)
+            .Select(index => new ImpactNode(
+                "node-" + index,
+                "source_file",
+                "Defs/VeryLongComponent" + index + ".xml",
+                "VeryLongComponent" + index,
+                "Defs/VeryLongComponent" + index + ".xml"))
+            .ToArray();
+        graph = graph with { Nodes = graph.Nodes.Concat(evidence).ToArray() };
+        ExecutionPacket packet = new ExecutionPacketBuilder().Build(
+            graph,
+            new ExecutionPacketRequest(
+                "VeryLongComponent",
+                Project: "Frontier",
+                MaxBytes: 2_048,
+                MaxEntries: 8));
+        Assert(packet.Budget.Truncated, "large graph packet is truncated");
+        Assert(packet.Budget.UsedBytes <= packet.Budget.MaxBytes, "packet hard budget");
+        Assert(packet.TopFiles.Count <= 8, "packet entry cap");
+        Assert(packet.LikelyImplementation?.Provenance is not null, "recommendation provenance");
+        Assert(packet.Metrics.AgentInputTokens is null, "token savings remain unavailable");
+    }
+
+    private static void ExecutionPacketCarriesRemediationPrecedents()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        var identity = new global::RimDev.Contracts.ExecutionIdentity
+        {
+            RepositoryId = graph.Identity.Repository,
+            ProjectId = graph.Identity.Project,
+            SourceRevision = graph.Identity.SourceRevision,
+            SourceFingerprint = "fingerprint-packet"
+        };
+        var precedent = new global::RimDev.Contracts.RemediationPrecedent
+        {
+            PrecedentId = "precedent-packet",
+            FailureFamily = "validation-failed",
+            Applicability = ["node.plant"],
+            RootCause = "dependency changed",
+            ValidatedRemediation = "run the focused validation",
+            Evidence =
+            [
+                new global::RimDev.Contracts.EvidenceReference
+                {
+                    Kind = "test",
+                    Uri = "evidence://packet"
+                }
+            ],
+            SuccessfulValidationIdentity = identity,
+            Provenance = new global::RimDev.Contracts.ContractProvenance
+            {
+                Source = "packet-test"
+            }
+        };
+        ExecutionPacket packet = new ExecutionPacketBuilder().Build(
+            graph,
+            new ExecutionPacketRequest(
+                "medicinal plant",
+                Project: graph.Identity.Project,
+                RemediationPrecedents: [precedent]));
+
+        Assert(packet.RemediationPrecedents is not null, "packet retains precedent section");
+        AssertEqual("precedent-packet", packet.RemediationPrecedents!.Single().PrecedentId, "packet precedent identity");
+        Assert(packet.Budget.UsedBytes <= packet.Budget.MaxBytes, "packet budget");
+        Assert(JsonSerializer.Serialize(packet).Contains("remediationPrecedents", StringComparison.Ordinal), "packet serialization");
+    }
+
+    private static void ExecutionPacketRevisionStatus()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        ExecutionPacket packet = new ExecutionPacketBuilder().Build(
+            graph,
+            new ExecutionPacketRequest("medicinal plant", Project: "Frontier"));
+        ImpactGraph unchanged = graph;
+        AssertEqual(
+            ExecutionPacketStatuses.Valid,
+            new ImpactGraphService().EvaluatePacket(packet, unchanged).Status,
+            "unchanged packet valid");
+        ImpactGraph unrelatedRevision = graph with
+        {
+            Identity = graph.Identity with { IndexGeneration = "new-generation" }
+        };
+        AssertEqual(
+            ExecutionPacketStatuses.Valid,
+            new ImpactGraphService().EvaluatePacket(packet, unrelatedRevision, ["README.txt"]).Status,
+            "unrelated change preserves packet");
+        AssertEqual(
+            ExecutionPacketStatuses.PartiallyStale,
+            new ImpactGraphService().EvaluatePacket(packet, unrelatedRevision, ["Source/Plant.cs"]).Status,
+            "relevant change partially stales packet");
+        AssertEqual(
+            ExecutionPacketStatuses.Invalid,
+            new ImpactGraphService().EvaluatePacket(packet, unrelatedRevision, ["Frontier.csproj"]).Status,
+            "dependency boundary invalidates packet");
+    }
+
+    private static void PredictedActualScopeExpansion()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        PredictedImpact prediction = new(
+            ["Source/Plant.xml"],
+            ["plant"],
+            [ImpactClasses.Direct],
+            ["Def/reference"],
+            "XML-only task");
+        ActualImpact actual = new ImpactGraphService().AnalyzeDiff(
+            graph,
+            ["Source/Plant.cs", "Source/Plant.xml"],
+            prediction: prediction);
+        Assert(actual.ScopeExpanded, "actual scope expansion recorded");
+        Assert(actual.ExpansionReasons.Count >= 2, "scope expansion reasons retained");
+    }
+    private static void IndexedGraphAndPacketGeneration()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.Write(
+            "Defs/Plants.xml",
+            "<Defs><ThingDef><defName>Healroot</defName><description>medicine</description></ThingDef></Defs>");
+        new RimContextService().Index(new RimContextIndexRequest(workspace.Root));
+        var service = new RimContextService();
+        ImpactGraph graph = service.BuildImpactGraph(
+            new ImpactGraphBuildRequest(workspace.Root, Project: "Frontier"));
+        Assert(graph.Nodes.Any(node => node.Kind == "def"), "indexed Def node");
+        Assert(graph.Nodes.Any(node => node.File == "Defs/Plants.xml"), "indexed file node");
+        AssertEqual(3, graph.Metrics.IndexedLookups, "bounded indexed lookups");
+        ExecutionPacket packet = service.CreateExecutionPacket(
+            graph,
+            new ExecutionPacketRequest("add medicinal plant", Project: "Frontier", MaxBytes: 4_096));
+        AssertEqual(ExecutionPacketSchemas.Current, packet.SchemaVersion, "indexed packet schema");
+        Assert(packet.Metrics.IndexCacheHit, "packet uses indexed cache");
+        Assert(packet.TopFiles.Count <= 16, "indexed packet remains bounded");
+    }
+
+
+    private static void MinimumSafeValidationPlanningScenarios()
+    {
+        ImpactGraph graph = TestImpactGraph();
+        var identity = new ValidationSourceIdentity(
+            "workspace",
+            "source-revision",
+            "index-generation",
+            "ProjectA",
+            "Repo");
+        var catalog = new[]
+        {
+            new ValidationCatalogEntry(
+                "static-test",
+                "recipe-static",
+                [new ValidationCoverage("def", "Plant")]),
+            new ValidationCatalogEntry(
+                "component-test",
+                "recipe-component",
+                [new ValidationCoverage("def", "Plant")]),
+            new ValidationCatalogEntry(
+                "runtime-test",
+                "recipe-runtime",
+                [],
+                ["runtime", "quicktest"]),
+            new ValidationCatalogEntry(
+                "save-load-test",
+                "recipe-save-load",
+                [],
+                ["save-load"]),
+            new ValidationCatalogEntry(
+                "framework-test",
+                "recipe-framework",
+                [],
+                ["framework", "consumer"]),
+            new ValidationCatalogEntry("fallback-one", "recipe-shared", []),
+            new ValidationCatalogEntry("fallback-two", "recipe-shared", [])
+        };
+        var planner = new MinimumSafeValidationPlanner();
+
+        ValidationPlan xmlPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.xml"], ["plant"], [ImpactClasses.Direct]),
+            catalog,
+            identity));
+        AssertEqual(ValidationPlanTiers.NarrowTargeted, xmlPlan.Tier, "XML/Def tier");
+        AssertEqual(ValidationRequirementKinds.StaticReference, xmlPlan.Required[0].Kind, "XML/Def requirement");
+
+        var learned = new LearnedImpactRelationship(
+            ValidationPlanSchemas.LearningCurrent,
+            "Plant",
+            "component-test",
+            "direct-dependent",
+            ImpactClasses.Direct,
+            new ImpactProvenance("fixture", ImpactEvidenceClasses.Learned, "learned"),
+            "global",
+            Status: "proven");
+        ValidationPlan componentPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.cs"], ["source"], [ImpactClasses.Direct], dependents: ["plant"]),
+            catalog,
+            identity,
+            LearnedRelationships: [learned]));
+        AssertEqual(ValidationPlanTiers.AffectedComponent, componentPlan.Tier, "learned dependent tier");
+
+        ValidationPlan constrainedPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.cs"], ["source"], [ImpactClasses.Direct]),
+            catalog,
+            identity with { FrameworkVersion = "framework-2" },
+            LearnedRelationships: [learned with { FrameworkVersion = "framework-1" }]));
+        Assert(!constrainedPlan.Required.Any(requirement => requirement.TestId == "component-test"), "framework constraint blocks stale learning");
+
+        ValidationPlan runtimePlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.cs"], ["source"], [ImpactClasses.DynamicPotential], harmony: true),
+            catalog,
+            identity));
+        AssertEqual(ValidationPlanTiers.AffectedProject, runtimePlan.Tier, "Harmony tier");
+        Assert(runtimePlan.Required.Any(requirement => requirement.Kind == ValidationRequirementKinds.Runtime), "Harmony runtime coverage");
+        Assert(runtimePlan.RuntimeRequests is { Count: > 0 }, "runtime escalation request emitted");
+        Assert(
+            runtimePlan.RuntimeRequests!.All(request =>
+                request.RequiredEvidence.Contains("artifact-correspondence", StringComparer.Ordinal) &&
+                request.ExcludedWork.Contains("unrelated-tests", StringComparer.Ordinal)),
+            "runtime request is bounded and explicit");
+
+        var generatedRequirement = new RimDev.Contracts.ValidationRequirement
+        {
+            RequirementId = "generator.runtime-check",
+            Subject = new RimDev.Contracts.EntityReference
+            {
+                Kind = RimDev.Contracts.EntityReferenceKinds.RuntimeSubject,
+                Id = "Plant"
+            },
+            Assertion = "generated Plant behavior remains valid",
+            RuntimeRequired = true,
+            Prerequisites = ["map-ready"],
+            Producer = "content-generator",
+            Source = "generator-output"
+        };
+        ValidationPlan generatedPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.cs"], ["source"], [ImpactClasses.Direct]),
+            catalog,
+            identity,
+            GeneratedRequirements: [generatedRequirement]));
+        AssertEqual(1, generatedPlan.GeneratedRequirements!.Count, "generated requirement retained");
+        Assert(generatedPlan.Required.Any(requirement => requirement.Kind == ValidationRequirementKinds.Runtime), "generated requirement selects runtime coverage");
+        Assert(generatedPlan.RuntimeRequests!.Any(request => request.Subject.Id == "Plant"), "generated runtime request propagated");
+
+        ValidationPlan reusedPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.xml"], ["plant"], [ImpactClasses.Direct]),
+            catalog,
+            identity,
+            PriorEvidence:
+            [
+                new ValidationOutcomeEvidence(
+                    "evidence-reusable",
+                    identity,
+                    xmlPlan.PlanFingerprint,
+                    "PASS",
+                    xmlPlan.RequiredTestIds)
+            ]));
+        Assert(
+            reusedPlan.Required.Any(requirement => requirement.EvidenceIds.Contains("evidence-reusable", StringComparer.Ordinal)),
+            "exact current evidence is reused before scheduling");
+        Assert(!reusedPlan.TestsNeedingExecution.Contains("static-test", StringComparer.Ordinal), "reused evidence removes duplicate scheduling");
+
+        ValidationPlan savePlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["Source/Plant.cs"], ["save"], [ImpactClasses.Unknown], serialization: true),
+            catalog,
+            identity));
+        Assert(savePlan.Required.Any(requirement => requirement.Kind == ValidationRequirementKinds.Serialization), "save-load coverage");
+
+        ValidationPlan frameworkPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["src/Framework.cs"], ["source"], [ImpactClasses.Framework]),
+            catalog,
+            identity));
+        AssertEqual(ValidationPlanTiers.AffectedFramework, frameworkPlan.Tier, "framework tier");
+        Assert(frameworkPlan.Required.Any(requirement => requirement.Kind == ValidationRequirementKinds.FrameworkContract), "framework consumer coverage");
+
+        ValidationPlan unknownPlan = planner.Build(new ValidationPlanRequest(
+            graph,
+            NewValidationActual(["generated.bin"], [], [ImpactClasses.Unknown]),
+            catalog,
+            identity,
+            FallbackTestIds: ["fallback-one", "fallback-two"]));
+        AssertEqual(ValidationPlanTiers.BroaderCanonical, unknownPlan.Tier, "unknown tier");
+        AssertEqual(1, unknownPlan.RequiredTestIds.Count, "duplicate recipes are deduplicated");
+        AssertEqual("ready", unknownPlan.Status, "unknown impact uses available broader fallback");
+
+        ValidationPlan addedPlan = planner.ApplyAgentRequest(
+            xmlPlan,
+            new AgentValidationRequest(AdditionalTestIds: ["runtime-test"]),
+            catalog);
+        Assert(addedPlan.Additional.Any(requirement => requirement.TestId == "runtime-test"), "agent may add validation");
+        string requirementId = xmlPlan.Required[0].RequirementId;
+        ValidationPlan notRemoved = planner.ApplyAgentRequest(
+            xmlPlan,
+            new AgentValidationRequest(RemoveRequirementIds: [requirementId]),
+            catalog);
+        Assert(notRemoved.Required.Any(requirement => requirement.RequirementId == requirementId), "agent cannot remove without proof");
+        ValidationPlan removed = planner.ApplyAgentRequest(
+            xmlPlan,
+            new AgentValidationRequest(
+                RemoveRequirementIds: [requirementId],
+                Overrides:
+                [
+                    new ValidationPlanOverride(
+                        requirementId,
+                        "remove",
+                        "review-1",
+                        identity,
+                        "reviewed explicit override",
+                        true)
+                ]),
+            catalog);
+        Assert(!removed.Required.Any(requirement => requirement.RequirementId == requirementId), "accepted override permits removal");
+
+        string serialized = ValidationPlanJson.Serialize(xmlPlan);
+        AssertEqual(ValidationPlanSchemas.Current, ValidationPlanJson.Deserialize(serialized).SchemaVersion, "validation plan round trip");
+        var currentEvidence = new ValidationOutcomeEvidence(
+            "evidence-current",
+            identity,
+            xmlPlan.PlanFingerprint,
+            "PASS",
+            xmlPlan.RequiredTestIds);
+        Assert(ValidationEvidenceGate.IsCurrent(currentEvidence, identity, xmlPlan.PlanFingerprint), "current evidence accepted");
+        Assert(!ValidationEvidenceGate.IsCurrent(
+            currentEvidence,
+            identity with { SourceRevision = "stale-revision" },
+            xmlPlan.PlanFingerprint), "stale evidence rejected");
+        Assert(!ValidationEvidenceGate.IsCurrent(
+            currentEvidence,
+            identity with { WorkspaceIdentity = "other-workspace" },
+            xmlPlan.PlanFingerprint), "workspace identity mismatch rejected");
+
+        using var workspace = new TempWorkspace();
+        var learningStore = new ImpactLearningStore(Path.Combine(workspace.Root, "learning.jsonl"));
+        var learningService = new ImpactLearningService(learningStore);
+        ImpactLearningObservation observation = NewLearningObservation(
+            identity,
+            project: "ProjectA",
+            globalCandidate: true,
+            evidenceId: "evidence-global");
+        ImpactLearningResult learnedResult = learningService.Observe(observation);
+        Assert(learnedResult.PromotedGlobal, "proven causal relationship promoted globally");
+        Assert(learningStore.Read(project: "ProjectB").Any(), "global relationship reused across projects");
+        Assert(!learningService.Observe(observation with { CausalAttribution = false }).Learned, "unattributed outcome is not learned");
+        learningStore.AppendOverride(new ImpactLearningOverride(
+            observation.FromIdentity,
+            observation.ToIdentity,
+            observation.RelationshipKind,
+            "ProjectA",
+            true,
+            "project-specific exclusion",
+            identity,
+            "override-evidence"));
+        Assert(!learningStore.Read(project: "ProjectA").Any(), "project override excludes relationship");
+        Assert(learningStore.Read(project: "ProjectB").Any(), "project override does not hide global relationship elsewhere");
+    }
+
+    private static ActualImpact NewValidationActual(
+        IReadOnlyList<string> files,
+        IReadOnlyList<string> nodeIds,
+        IReadOnlyList<string> classes,
+        bool harmony = false,
+        bool serialization = false,
+        IReadOnlyList<string>? dependents = null) =>
+        new(
+            files,
+            nodeIds,
+            dependents ?? [],
+            classes,
+            [],
+            harmony,
+            serialization,
+            false,
+            []);
+
+    private static ImpactLearningObservation NewLearningObservation(
+        ValidationSourceIdentity identity,
+        string project,
+        bool globalCandidate,
+        string evidenceId) =>
+        new(
+            "Plant",
+            "component-test",
+            "direct-dependent",
+            ImpactClasses.Direct,
+            new ImpactProvenance("rimerror", ImpactEvidenceClasses.Learned, evidenceId),
+            identity with { Project = project },
+            evidenceId,
+            true,
+            DeterministicRelationship: true,
+            RimErrorAttribution: true,
+            Project: project,
+            GlobalCandidate: globalCandidate);
+
+    private static ImpactGraph TestImpactGraph()
+    {
+        var identity = new ImpactGraphIdentity(
+            "workspace",
+            "workspace-generation",
+            "index-generation",
+            Project: "Frontier");
+        var nodes = new ImpactNode[]
+        {
+            new("source", "source_file", "Source/Plant.cs", "Plant", "Source/Plant.cs"),
+            new("plant", "def", "ThingDef/Plant", "Plant", "Source/Plant.xml"),
+            new("save", "csharp_member", "Plant.ExposeData", "ExposeData", "Source/Plant.cs"),
+            new("patch", "harmony_patch", "PlantPatch", "PlantPatch", "Source/Plant.cs")
+        };
+        var edges = new ImpactEdge[]
+        {
+            new(
+                "def-edge",
+                "source",
+                "plant",
+                ImpactRelationshipKinds.ComponentDef,
+                ImpactClasses.Direct,
+                new ImpactProvenance("fixture", ImpactEvidenceClasses.Deterministic, "def-edge")),
+            new(
+                "harmony-edge",
+                "patch",
+                "source",
+                ImpactRelationshipKinds.HarmonyTarget,
+                ImpactClasses.DynamicPotential,
+                new ImpactProvenance("fixture", ImpactEvidenceClasses.Uncertain, "harmony-edge")),
+            new(
+                "save-edge",
+                "save",
+                "plant",
+                ImpactRelationshipKinds.SerializationConcern,
+                ImpactClasses.Unknown,
+                new ImpactProvenance("fixture", ImpactEvidenceClasses.Inferred, "save-edge"))
+        };
+        return new ImpactGraph(
+            ImpactGraphSchemas.Current,
+            identity,
+            nodes,
+            edges,
+            new ImpactGraphBuildMetrics(1, 3, true, nodes.Length, edges.Length));
+    }
+    private static void ContentIntelligenceContractsAndCapture()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.Write("Source/CompWidget.cs", "public sealed class CompWidget {}\n");
+        var context = new RimContextService();
+        context.Index(new RimContextIndexRequest(workspace.Root));
+        string storePath = Path.Combine(workspace.Root, "precedent.jsonl");
+        var service = new ContentIntelligenceService(new ContentIntelligenceStore(storePath));
+        var generatedRequirement = new RimDev.Contracts.ValidationRequirement
+        {
+            RequirementId = "content.generated-check",
+            Subject = new RimDev.Contracts.EntityReference
+            {
+                Kind = RimDev.Contracts.EntityReferenceKinds.ContentBlueprint,
+                Id = "CompWidget"
+            },
+            Assertion = "generated artifact has a valid ThingDef reference",
+            Producer = "content-generator"
+        };
+        ContentBlueprint blueprint = service.CaptureBlueprint(
+            new ContentBlueprintCaptureRequest(
+                workspace.Root,
+                null,
+                new ContentBlueprintIntent(
+                    "component",
+                    "supports widget interaction",
+                    new Dictionary<string, string> { ["count"] = "1" },
+                    ProjectConstraints: ["no framework dependency"]),
+                ["Source/CompWidget.cs"],
+                Repository: "FixtureMod",
+                Project: "FixtureProject",
+                AgentId: "agent-1",
+                RunId: "run-1",
+                LogicalAgentId: "logical-agent-1",
+                ValidationRequirements: [generatedRequirement]));
+        AssertEqual(ContentIntelligenceSchemas.Blueprint, blueprint.SchemaVersion, "blueprint schema");
+        AssertEqual("FixtureMod", blueprint.Metadata.Repository, "derived repository identity");
+        Assert(blueprint.Metadata.SourceFiles?.Contains("Source/CompWidget.cs") == true, "source file derivation");
+        Assert(blueprint.Metadata.SourceIdentity?.SourceFingerprint is not null, "source fingerprint derivation");
+        AssertEqual(1, blueprint.ValidationRequirements!.Count, "content generator requirement retained");
+        string originalFingerprint = blueprint.Metadata.SourceIdentity!.SourceFingerprint!;
+        workspace.Write("Source/CompWidget.cs", "public sealed class CompWidget { public int Value => 2; }\n");
+        ContentBlueprint changed = service.CaptureBlueprint(
+            new ContentBlueprintCaptureRequest(
+                workspace.Root,
+                null,
+                blueprint.Intent,
+                ["Source/CompWidget.cs"],
+                Repository: "FixtureMod",
+                Project: "FixtureProject"));
+        Assert(changed.Metadata.SourceIdentity?.SourceFingerprint != originalFingerprint,
+            "changed source uses current content instead of stale index hash");
+        Assert(blueprint.Metadata.SourceIdentity?.RimWorldVersion is null, "unknown RimWorld version remains null");
+        using (JsonDocument serialized = JsonDocument.Parse(ContentIntelligenceJson.Serialize(blueprint)))
+        {
+            AssertEqual(ContentIntelligenceSchemas.Blueprint, serialized.RootElement.GetProperty("schemaVersion").GetString(), "serialized blueprint schema");
+            AssertEqual(JsonValueKind.Null, serialized.RootElement.GetProperty("projectOverride").ValueKind, "unknown override is explicit null");
+        }
+
+        ContentEvidence evidence = service.CaptureEvidence(
+            new ContentEvidenceCaptureRequest(
+                blueprint.BlueprintId,
+                blueprint.Metadata.SourceIdentity!,
+                new ContentEvidenceOutcome(
+                    StaticReferenceValidation: "PASS",
+                    Build: "PASS",
+                    AffectedTests: "PASS",
+                    Final: "PASS"),
+                EvidenceReferences: ["test-evidence-1"]));
+        AssertEqual(ContentIntelligenceSchemas.Evidence, evidence.SchemaVersion, "evidence schema");
+        ContentBlueprint updated = service.Store.GetBlueprint(blueprint.BlueprintId)!;
+        Assert(updated.Metadata.ValidationEvidence?.Contains(evidence.EvidenceId) == true,
+            "evidence capture updates blueprint validation references");
+        AssertEqual("logical-agent-1", updated.Metadata.LogicalAgentId,
+            "persistent logical agent identity is captured");
+        File.AppendAllText(
+            storePath,
+            """{"schemaVersion":"content-intelligence-store/v2","recordType":"blueprint","value":{}}""" +
+            Environment.NewLine);
+        AssertEqual(2, service.Store.Snapshot().Blueprints.Count,
+            "future store envelope is ignored without hiding known records");
+        AssertThrows<InvalidOperationException>(
+            () => ContentIntelligenceJson.ValidateBlueprint(blueprint with { SchemaVersion = "content-blueprint/v2" }),
+            "unsupported blueprint version must fail");
+        AssertThrows<InvalidOperationException>(
+            () => ContentIntelligenceJson.ValidateBlueprint(
+                blueprint with { Intent = blueprint.Intent with { ReuseSource = "unsupported" } }),
+            "unsupported reuse source must fail");
+    }
+
+    private static void ContentPrecedentQueryOrderingAndPolicies()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.Write(
+            "Data/Defs/VanillaExample.xml",
+            "<Defs><ThingDef><defName>VanillaExample</defName></ThingDef></Defs>");
+        new RimContextService().Index(new RimContextIndexRequest(workspace.Root));
+        string storePath = Path.Combine(workspace.Root, "precedent.jsonl");
+        var service = new ContentIntelligenceService(new ContentIntelligenceStore(storePath));
+        ContentReuseDecision indexedVanillaDecision = service.SelectReuse(
+            new ContentReuseRequest(
+                ContentKind: "ThingDef",
+                RootPath: workspace.Root));
+        AssertEqual(
+            ContentReuseSources.VanillaReference,
+            indexedVanillaDecision.Source,
+            "automatic reuse selection includes indexed vanilla references");
+        ContentQueryResult indexed = service.Query(
+            new ContentQueryRequest(ContentKind: "ThingDef", RootPath: workspace.Root));
+        Assert(indexed.Results.Any(result =>
+            result.ReuseSource == ContentReuseSources.VanillaReference &&
+            result.EntityIdentifiers?.Contains("ThingDef/VanillaExample") == true),
+            "indexed vanilla reference is queried dynamically");
+        var blueprints = new[]
+        {
+            NewContentBlueprint("novel", ContentReuseSources.Novel, "ProjectA"),
+            NewContentBlueprint("vanilla", ContentReuseSources.VanillaReference, null),
+            NewContentBlueprint("precedent", ContentReuseSources.Precedent, "ProjectA"),
+            NewContentBlueprint("rimcontent", ContentReuseSources.RimContent, null)
+        };
+        foreach (ContentBlueprint blueprint in blueprints)
+        {
+            service.Store.SaveBlueprint(blueprint);
+            service.CaptureEvidence(
+                new ContentEvidenceCaptureRequest(
+                    blueprint.BlueprintId,
+                    blueprint.Metadata.SourceIdentity!,
+                    new ContentEvidenceOutcome(Final: "PASS")));
+        }
+
+        ContentQueryResult ranked = service.Query(new ContentQueryRequest(ContentKind: "ThingDef"));
+        AssertEqual(4, ranked.Results.Count, "all proven precedent sources returned");
+        AssertEqual(ContentReuseSources.RimContent, ranked.Results[0].ReuseSource, "RimContent trust order");
+        AssertEqual(ContentReuseSources.Precedent, ranked.Results[1].ReuseSource, "precedent trust order");
+        AssertEqual(ContentReuseSources.VanillaReference, ranked.Results[2].ReuseSource, "vanilla trust order");
+        service.SetProjectPolicy(new ContentPrecedentPolicy(
+            ranked.Results[1].BlueprintId,
+            Project: "ProjectB",
+            Excluded: false,
+            Constraints: ["requires ProjectB capability"]));
+        ContentQueryResult constrained = service.Query(
+            new ContentQueryRequest(ContentKind: "ThingDef", Project: "ProjectB"));
+        Assert(constrained.Results
+            .First(result => result.BlueprintId == ranked.Results[1].BlueprintId)
+            .Constraints?.Contains("requires ProjectB capability") == true,
+            "project policy constraint is preserved");
+        AssertEqual(ContentReuseSources.Novel, ranked.Results[3].ReuseSource, "novel trust order");
+
+        service.SetProjectPolicy(new ContentPrecedentPolicy(
+            ranked.Results[1].BlueprintId,
+            Project: "ProjectB",
+            Excluded: true));
+        ContentQueryResult projectResults = service.Query(
+            new ContentQueryRequest(ContentKind: "ThingDef", Project: "ProjectB"));
+        Assert(!projectResults.Results.Any(result => result.BlueprintId == ranked.Results[1].BlueprintId), "project exclusion");
+        Assert(projectResults.Results.Count > 0, "global precedents remain available to project");
+    }
+
+    private static void ContentIdentityAndBoundedOutput()
+    {
+        var expected = new ContentSourceIdentity(
+            "repo",
+            "project",
+            "commit-1",
+            "source-1",
+            "workspace-1",
+            "tool-1",
+            null);
+        Assert(ContentIntelligenceService.SourceIdentityMatches(
+            expected,
+            expected with { RimWorldVersion = "1.6" }),
+            "unknown expected version is compatible");
+        Assert(!ContentIntelligenceService.SourceIdentityMatches(
+            expected,
+            expected with { SourceFingerprint = "source-2" }),
+            "source mismatch is rejected");
+
+        using var workspace = new TempWorkspace();
+        string storePath = Path.Combine(workspace.Root, "precedent.jsonl");
+        var service = new ContentIntelligenceService(new ContentIntelligenceStore(storePath));
+        for (int index = 0; index < 12; index++)
+        {
+            ContentBlueprint blueprint = NewContentBlueprint(
+                "item-" + index.ToString(CultureInfo.InvariantCulture),
+                ContentReuseSources.Precedent,
+                null);
+            service.Store.SaveBlueprint(blueprint);
+            service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+                blueprint.BlueprintId,
+                blueprint.Metadata.SourceIdentity!,
+                new ContentEvidenceOutcome(Final: "PASS")));
+        }
+
+        ContentBlueprint unknownIdentity = NewContentBlueprint(
+            "unknown-identity",
+            ContentReuseSources.Precedent,
+            null) with
+        {
+            Metadata = NewContentBlueprint(
+                "unknown-identity",
+                ContentReuseSources.Precedent,
+                null).Metadata with
+            {
+                SourceIdentity = null
+            }
+        };
+        service.Store.SaveBlueprint(unknownIdentity);
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            unknownIdentity.BlueprintId,
+            new ContentSourceIdentity(Repository: "repo"),
+            new ContentEvidenceOutcome(Final: "PASS")));
+        Assert(!service.Query(new ContentQueryRequest(ContentKind: "ThingDef")).Results
+            .Any(result => result.BlueprintId == unknownIdentity.BlueprintId),
+            "unknown source identity cannot establish reusable evidence");
+
+        ContentBlueprint staleBlueprint = NewContentBlueprint(
+            "stale",
+            ContentReuseSources.Precedent,
+            null);
+        service.Store.SaveBlueprint(staleBlueprint);
+        service.CaptureEvidence(
+            new ContentEvidenceCaptureRequest(
+                staleBlueprint.BlueprintId,
+                staleBlueprint.Metadata.SourceIdentity! with { SourceFingerprint = "different-source" },
+                new ContentEvidenceOutcome(Final: "PASS")));
+        Assert(service.Store.GetBlueprint(staleBlueprint.BlueprintId)?.Metadata.ValidationEvidence is null,
+            "stale evidence is not attached to blueprint metadata");
+        ContentQueryResult staleQuery = service.Query(
+            new ContentQueryRequest(ContentKind: "ThingDef"));
+        Assert(!staleQuery.Results.Any(result => result.BlueprintId == staleBlueprint.BlueprintId), "stale evidence must not be reusable");
+
+        ContentQueryResult limited = service.Query(
+            new ContentQueryRequest(ContentKind: "ThingDef", Limit: 100, MaxBytes: 512));
+        Assert(limited.Results.Count < 12, "byte budget truncates results");
+        Assert(Encoding.UTF8.GetByteCount(ContentIntelligenceJson.Serialize(limited)) <= 512, "query output respects byte budget");
+
+        CliResult cli = Run("content", "--store", storePath, "--kind", "ThingDef", "--limit", "1", "--include-failures", "--json");
+        AssertEqual(0, cli.ExitCode, "content command remains compatible with direct CLI");
+        using JsonDocument document = ParseJson(cli.Stdout);
+        AssertEqual("content", document.RootElement.GetProperty("command").GetString(), "content command name");
+    }
+
+    private static void ContentPhase2QualificationReusePromotionAndQuarantine()
+    {
+        using var workspace = new TempWorkspace();
+        string storePath = Path.Combine(workspace.Root, "phase2.jsonl");
+        var store = new ContentIntelligenceStore(storePath);
+        var service = new ContentIntelligenceService(store);
+        ContentBlueprint first = NewPhase2Blueprint("first", "ProjectA", "run-1");
+        ContentBlueprint second = NewPhase2Blueprint("second", "ProjectB", "run-2");
+        store.SaveBlueprint(first);
+        store.SaveBlueprint(second);
+        ContentStructuralFingerprint firstShape = ContentStructuralFingerprinting.Compute(first);
+        AssertEqual(firstShape.Fingerprint, ContentStructuralFingerprinting.Compute(second).Fingerprint, "repeated implementations share a structural fingerprint");
+
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            first.BlueprintId,
+            first.Metadata.SourceIdentity!,
+            new ContentEvidenceOutcome("PASS", "PASS", "PASS", Final: "PASS"),
+            CapturedAtUtc: "2025-01-01T00:00:00Z"));
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            second.BlueprintId,
+            second.Metadata.SourceIdentity!,
+            new ContentEvidenceOutcome("PASS", "PASS", "PASS", Final: "PASS"),
+            CapturedAtUtc: "2025-01-02T00:00:00Z"));
+
+        ContentAnalysisResult analysis = service.Analyze(new ContentAnalysisRequest("ThingDef", "weapon"));
+        ContentPrecedentCandidate candidate = analysis.Candidates.Single();
+        Assert(candidate.Qualification.Qualified, "independent successful implementations qualify automatically");
+        AssertEqual(2, candidate.Qualification.DistinctProjects, "qualification counts distinct projects");
+        AssertEqual(2, candidate.Qualification.DistinctRuns, "qualification counts distinct runs");
+        AssertEqual(0, candidate.Qualification.FailureCount, "qualified candidate has no failed implementations");
+        ContentArchetype archetype = store.Snapshot().Archetypes.Single(item => item.Status == "active");
+        AssertEqual(ContentPhase2Schemas.Archetype, archetype.SchemaVersion, "automatic promotion stores a versioned archetype");
+        Assert(archetype.Templates is not null && archetype.Defaults is not null && archetype.Examples is not null && archetype.FrameworkRequirements is not null, "promotion stores data-only templates, defaults, examples, and framework requirements");
+        ContentBlueprint third = NewPhase2Blueprint("third", "ProjectC", "run-3");
+        store.SaveBlueprint(third);
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            third.BlueprintId,
+            third.Metadata.SourceIdentity!,
+            new ContentEvidenceOutcome("PASS", "PASS", "PASS", Final: "PASS"),
+            CapturedAtUtc: "2025-01-02T12:00:00Z"));
+        AssertEqual(2, store.Snapshot().Archetypes.Count(item => item.ArchetypeId == archetype.ArchetypeId && item.Status == "active"), "new supporting evidence creates a new active archetype version");
+
+
+        ContentReuseDecision rimContent = service.SelectReuse(new ContentReuseRequest("ThingDef", "weapon", Project: "ProjectC"));
+        AssertEqual(ContentReuseSources.RimContent, rimContent.Source, "RimContent is the first reuse source");
+        service.SetProjectPolicy(new ContentPrecedentPolicy(archetype.ArchetypeId, "ProjectC", Excluded: true));
+        ContentReuseDecision excluded = service.SelectReuse(new ContentReuseRequest("ThingDef", "weapon", Project: "ProjectC"));
+        Assert(excluded.Source != ContentReuseSources.RimContent, "project exclusion skips the active archetype");
+
+        ContentBlueprint staleReuse = NewPhase2Blueprint(
+            "stale-reuse",
+            "ProjectD",
+            "run-stale",
+            reuseDecision: rimContent);
+        store.SaveBlueprint(staleReuse);
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            staleReuse.BlueprintId,
+            staleReuse.Metadata.SourceIdentity! with { SourceFingerprint = "stale-source" },
+            new ContentEvidenceOutcome("FAIL", "FAIL", "FAIL", Final: "FAIL"),
+            CapturedAtUtc: "2025-01-02T18:00:00Z"));
+        AssertEqual(2, store.Snapshot().Archetypes.Count(item => item.ArchetypeId == archetype.ArchetypeId && item.Status == "active"), "stale reuse evidence cannot quarantine an archetype");
+        ContentBlueprint regression = NewPhase2Blueprint(
+            "regression",
+            "ProjectD",
+            "run-4",
+            reuseDecision: rimContent);
+        store.SaveBlueprint(regression);
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            regression.BlueprintId,
+            regression.Metadata.SourceIdentity!,
+            new ContentEvidenceOutcome("FAIL", "FAIL", "FAIL", Final: "FAIL"),
+            CapturedAtUtc: "2025-01-03T00:00:00Z"));
+        ContentArchetype quarantined = store.Snapshot().Archetypes
+            .Single(item => item.ArchetypeId == archetype.ArchetypeId && item.Status == "quarantined");
+        AssertEqual(2, quarantined.Version, "attributable reuse failure quarantines the current archetype version");
+        AssertEqual("ATTRIBUTABLE_REUSE_FAILURE", quarantined.QuarantineReason, "quarantine retains the exact failure reason");
+        ContentArchetype rollback = store.Snapshot().Archetypes
+            .Single(item => item.ArchetypeId == archetype.ArchetypeId && item.Status == "active");
+        AssertEqual(1, rollback.Version, "failed reuse falls back to the last proven archetype version");
+        Assert(store.Snapshot().Usages.Any(usage => usage.ArchetypeId == archetype.ArchetypeId && usage.Succeeded == false), "quarantine retains usage evidence");
+        AssertEqual(ContentReuseSources.RimContent,
+            service.SelectReuse(new ContentReuseRequest("ThingDef", "weapon", Project: "ProjectD")).Source,
+            "last proven archetype remains reusable after a newer version is quarantined");
+
+        service.SetProjectPolicy(new ContentPrecedentPolicy(archetype.ArchetypeId, "ProjectD", Excluded: true));
+
+        ContentBlueprint vanilla = NewPhase2Blueprint("vanilla", null, "run-5", reuseSource: ContentReuseSources.VanillaReference);
+        store.SaveBlueprint(vanilla);
+        service.CaptureEvidence(new ContentEvidenceCaptureRequest(
+            vanilla.BlueprintId,
+            vanilla.Metadata.SourceIdentity!,
+            new ContentEvidenceOutcome("PASS", "PASS", "PASS", Final: "PASS"),
+            CapturedAtUtc: "2025-01-04T00:00:00Z"));
+        ContentQueryResult storedVanilla = store.Query(new ContentQueryRequest(ContentKind: "ThingDef", GameplayRole: "weapon", Project: "ProjectD"));
+        Assert(storedVanilla.Results.Any(item => item.BlueprintId == vanilla.BlueprintId && item.ReuseSource == ContentReuseSources.VanillaReference), "stored vanilla reference remains queryable");
+        ContentReuseDecision vanillaDecision = service.SelectReuse(new ContentReuseRequest("ThingDef", "weapon", Project: "ProjectD"));
+        AssertEqual(ContentReuseSources.VanillaReference, vanillaDecision.Source, "vanilla is selected after failed promotion and project exclusion");
+
+        using var novelWorkspace = new TempWorkspace();
+        var novelService = new ContentIntelligenceService(
+            new ContentIntelligenceStore(Path.Combine(novelWorkspace.Root, "novel.jsonl")));
+        AssertEqual(ContentReuseSources.Novel,
+            novelService.SelectReuse(new ContentReuseRequest("ThingDef", "weapon")).Source,
+            "novel is the closed fallback when no evidence exists");
+
+        AssertEqual(ContentReuseSources.Novel,
+            service.SelectReuse(new ContentReuseRequest(
+                "ThingDef",
+                "weapon",
+                new Dictionary<string, string> { ["count"] = "2" },
+                ["Core"],
+                "ProjectD")).Source,
+            "reuse does not cross structural design shapes");
+        ContentBlueprint differentShape = NewPhase2Blueprint("different", "ProjectE", "run-5", designValue: "2");
+        Assert(firstShape.Fingerprint != ContentStructuralFingerprinting.Compute(differentShape).Fingerprint, "different design shape creates a distinct cluster");
+        ContentEvidence staleEvidence = new(
+            ContentIntelligenceSchemas.Evidence,
+            "stale-evidence",
+            differentShape.BlueprintId,
+            differentShape.Metadata.SourceIdentity! with { SourceFingerprint = "stale-source" },
+            new ContentEvidenceOutcome("PASS", "PASS", "PASS", Final: "PASS"),
+            CapturedAtUtc: "2025-01-05T00:00:00Z");
+        ContentQualificationResult stale = ContentQualificationEngine.Evaluate(
+            ContentStructuralFingerprinting.Compute(differentShape),
+            [differentShape],
+            [staleEvidence]);
+        Assert(!stale.Qualified && stale.StaleEvidenceCount == 1, "stale evidence cannot qualify a precedent");
+
+        ContentArchetype replayFailureArchetype = archetype with
+        {
+            StructuralFingerprint = ContentStructuralFingerprinting.Compute(differentShape)
+        };
+        ContentReplayResult replayFailure = ContentHistoricalReplay.Replay(replayFailureArchetype, [first]);
+        Assert(!replayFailure.Passed && replayFailure.Failures.Count > 0, "historical replay fails closed on structural mismatch");
+
+        string oldBlueprintJson = """{"schemaVersion":"content-blueprint/v1","blueprintId":"legacy","intent":{"contentKind":"ThingDef","gameplayRole":"weapon"},"metadata":{"project":"Legacy"}}""";
+        ContentBlueprint legacy = ContentIntelligenceJson.Deserialize<ContentBlueprint>(oldBlueprintJson);
+        Assert(legacy.ReuseDecision is null, "Phase 1 blueprints without Phase 2 reuse data remain readable");
+    }
+
+    private static ContentBlueprint NewPhase2Blueprint(
+        string suffix,
+        string? project,
+        string run,
+        string designValue = "1",
+        string reuseSource = ContentReuseSources.Precedent,
+        ContentReuseDecision? reuseDecision = null)
+    {
+        return new ContentBlueprint(
+            ContentIntelligenceSchemas.Blueprint,
+            "phase2-" + suffix,
+            new ContentBlueprintIntent(
+                "ThingDef",
+                "weapon",
+                new Dictionary<string, string> { ["count"] = designValue },
+                FrameworkRequirements: ["Core"],
+                ValidationExpectations: ["static", "build", "affected"],
+                ReuseSource: reuseSource),
+            new ContentBlueprintMetadata(
+                Repository: "repo-" + suffix,
+                Project: project,
+                RunId: run,
+                SourceFiles: ["Defs/" + suffix + ".xml"],
+                EntityIdentifiers: ["ThingDef/" + suffix],
+                Dependencies: ["ThingDef:dependency"],
+                FrameworkDependencies: ["Core:1"],
+                SourceIdentity: new ContentSourceIdentity(
+                    "repo-" + suffix,
+                    project,
+                    "commit-" + suffix,
+                    "source-" + suffix,
+                    "workspace-" + suffix,
+                    "tool-1")),
+            ReuseDecision: reuseDecision);
+    }
+
+    private static ContentBlueprint NewContentBlueprint(
+        string suffix,
+        string reuseSource,
+        string? project)
+    {
+        return new ContentBlueprint(
+            ContentIntelligenceSchemas.Blueprint,
+            "blueprint-" + suffix,
+            new ContentBlueprintIntent("ThingDef", "weapon", ReuseSource: reuseSource),
+            new ContentBlueprintMetadata(
+                Repository: "repo-" + suffix,
+                Project: project,
+                SourceFiles: ["Defs/" + suffix + ".xml"],
+                SourceIdentity: new ContentSourceIdentity(
+                    "repo-" + suffix,
+                    project,
+                    "commit-" + suffix,
+                    "source-" + suffix,
+                    "workspace-" + suffix,
+                    "tool-1")));
+    }
+
 
     private static void CliStartupAndVersion()
     {
@@ -1821,6 +2751,58 @@ internal static class Program
     }
 
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
+
+    private static void ValidatedRemediationPrecedentSafety()
+    {
+        using var workspace = new TempWorkspace();
+        string storePath = Path.Combine(workspace.Root, "impact-learning.jsonl");
+        var identity = new global::RimDev.Contracts.ExecutionIdentity
+        {
+            RepositoryId = "repo",
+            ProjectId = "project",
+            SourceRevision = "source-v1"
+        };
+        var subject = new global::RimDev.Contracts.EntityReference
+        {
+            Kind = global::RimDev.Contracts.EntityReferenceKinds.Test,
+            Id = "runtime-test"
+        };
+        var precedent = new global::RimDev.Contracts.RemediationPrecedent
+        {
+            PrecedentId = "precedent-1",
+            FailureFamily = "missing-reference",
+            Subject = subject,
+            Applicability = ["framework:CoreFramework"],
+            RootCause = "missing dependency declaration",
+            ValidatedRemediation = "restore the direct framework dependency",
+            Evidence =
+            [
+                new global::RimDev.Contracts.EvidenceReference
+                {
+                    Kind = "validation",
+                    Uri = "evidence://validation/pass"
+                }
+            ],
+            SuccessfulValidationIdentity = identity,
+            Provenance = new global::RimDev.Contracts.ContractProvenance
+            {
+                Source = "fixture"
+            }
+        };
+        var store = new ImpactLearningStore(storePath);
+        Assert(store.RecordValidatedRemediation(precedent), "validated remediation is stored");
+        AssertEqual(
+            1,
+            store.ReadRemediationPrecedents("missing-reference", subject).Count,
+            "matching proven remediation is reusable");
+        Assert(
+            !store.RecordValidatedRemediation(precedent with { Status = "tentative" }),
+            "unvalidated remediation is not promoted");
+        AssertEqual(
+            1,
+            store.ReadRemediationPrecedents("missing-reference", subject).Count,
+            "unvalidated remediation remains excluded");
+    }
 
     private sealed class TempWorkspace : IDisposable
     {

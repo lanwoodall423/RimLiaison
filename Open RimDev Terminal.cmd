@@ -1,17 +1,19 @@
 @echo off
 setlocal EnableExtensions
-set "RIMDEV_ROOT=%~dp0"
+set "RIMDEV_REPO_ROOT=%~dp0"
+if "%RIMDEV_REPO_ROOT:~-1%"=="\" set "RIMDEV_REPO_ROOT=%RIMDEV_REPO_ROOT:~0,-1%"
+set "RIMDEV_ROOT=%RIMDEV_REPO_ROOT%\..\.."
 
 pushd "%RIMDEV_ROOT%" >nul 2>&1
 if errorlevel 1 goto startup_failed
 
-set "PATH=%RIMDEV_ROOT%;%PATH%"
+set "PATH=%RIMDEV_REPO_ROOT%;%RIMDEV_ROOT%;%PATH%"
 title RimDev Terminal
 
 set "RIMDEV_READY=1"
-if not exist "%RIMDEV_ROOT%rimdev.cmd" set "RIMDEV_READY=0"
-if exist "%RIMDEV_ROOT%src\RimLiaison.Cli\bin\Release\net8.0\rimliaison.exe" goto show_banner
-if exist "%RIMDEV_ROOT%src\RimLiaison.Cli\bin\Debug\net8.0\rimliaison.exe" goto show_banner
+if not exist "%RIMDEV_REPO_ROOT%\rimdev.cmd" set "RIMDEV_READY=0"
+if exist "%RIMDEV_REPO_ROOT%\src\RimLiaison.Cli\bin\Release\net8.0\rimliaison.exe" goto show_banner
+if exist "%RIMDEV_REPO_ROOT%\src\RimLiaison.Cli\bin\Debug\net8.0\rimliaison.exe" goto show_banner
 where dotnet >nul 2>&1
 if errorlevel 1 set "RIMDEV_READY=0"
 
@@ -40,7 +42,7 @@ popd
 endlocal & exit /b %RIMDEV_EXIT%
 
 :startup_failed
-echo RimDev could not start in its repository folder:
+echo RimDev could not start in its workspace folder:
 echo   %RIMDEV_ROOT%
 echo The terminal will stay open so you can read this message.
 cmd /k

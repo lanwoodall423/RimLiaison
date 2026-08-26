@@ -1,3 +1,5 @@
+using RimContext.Core.Content;
+
 using RimContext.Core.Configuration;
 using RimContext.Core.Context;
 using RimContext.Core.Contracts;
@@ -5,6 +7,8 @@ using RimContext.Core.Logging;
 using RimContext.Core.Model;
 using RimContext.Core.Semantics;
 using RimContext.Core.Storage;
+
+using RimContext.Core.Impact;
 
 namespace RimContext.Core;
 
@@ -127,6 +131,192 @@ public sealed class RimContextService
             selected,
             selectedProviders,
             cancellationToken);
+    }
+    public ImpactGraph BuildImpactGraph(
+        ImpactGraphBuildRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ImpactGraph result = new ImpactGraphService().Build(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ExecutionPacket CreateExecutionPacket(
+        ImpactGraph graph,
+        ExecutionPacketRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ExecutionPacket result = new ExecutionPacketBuilder().Build(graph, request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ActualImpact AnalyzeActualImpact(
+        ImpactGraph graph,
+        IReadOnlyList<string> changedPaths,
+        string? rootPath = null,
+        PredictedImpact? prediction = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(changedPaths);
+        cancellationToken.ThrowIfCancellationRequested();
+        ActualImpact result = new ImpactGraphService().AnalyzeDiff(
+            graph,
+            changedPaths,
+            rootPath,
+            prediction);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ImpactStatusResult EvaluateExecutionPacket(
+        ExecutionPacket packet,
+        ImpactGraph currentGraph,
+        IReadOnlyList<string>? changedPaths = null,
+        string? rootPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(packet);
+        ArgumentNullException.ThrowIfNull(currentGraph);
+        cancellationToken.ThrowIfCancellationRequested();
+        ImpactStatusResult result = new ImpactGraphService().EvaluatePacket(
+            packet,
+            currentGraph,
+            changedPaths,
+            rootPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+
+    public ContentBlueprint CaptureContentBlueprint(
+        ContentBlueprintCaptureRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ContentBlueprint result = (request.StorePath is null
+                ? new ContentIntelligenceService()
+                : new ContentIntelligenceService(new ContentIntelligenceStore(request.StorePath)))
+            .CaptureBlueprint(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ContentEvidence CaptureContentEvidence(
+        ContentEvidenceCaptureRequest request,
+        string? storePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ContentEvidence result = (storePath is null
+                ? new ContentIntelligenceService()
+                : new ContentIntelligenceService(new ContentIntelligenceStore(storePath)))
+            .CaptureEvidence(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ContentQueryResult QueryContent(
+        ContentQueryRequest request,
+        string? storePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ContentQueryResult result = (storePath is null
+                ? new ContentIntelligenceService()
+                : new ContentIntelligenceService(new ContentIntelligenceStore(storePath)))
+            .Query(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ContentAnalysisResult AnalyzeContent(
+        ContentAnalysisRequest request,
+        string? storePath = null,
+
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ContentAnalysisResult result = (storePath is null
+                ? new ContentIntelligenceService()
+                : new ContentIntelligenceService(new ContentIntelligenceStore(storePath)))
+            .Analyze(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+    public ValidationPlan BuildValidationPlan(
+        ValidationPlanRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidationPlan result = new MinimumSafeValidationPlanner().Build(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public ImpactLearningResult LearnImpact(
+        ImpactLearningObservation observation,
+        string? learningStorePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        cancellationToken.ThrowIfCancellationRequested();
+        ImpactLearningResult result = new ImpactLearningService(
+            new ImpactLearningStore(learningStorePath)).Observe(observation);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+    public IReadOnlyList<global::RimDev.Contracts.RemediationPrecedent> ReadRemediationPrecedents(
+        string failureFamily,
+        global::RimDev.Contracts.EntityReference? subject = null,
+        string? learningStorePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        IReadOnlyList<global::RimDev.Contracts.RemediationPrecedent> result =
+            new ImpactLearningStore(learningStorePath)
+                .ReadRemediationPrecedents(failureFamily, subject);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    public bool RecordValidatedRemediation(
+        global::RimDev.Contracts.RemediationPrecedent precedent,
+        string? learningStorePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(precedent);
+        cancellationToken.ThrowIfCancellationRequested();
+        bool recorded = new ImpactLearningStore(learningStorePath)
+            .RecordValidatedRemediation(precedent);
+        cancellationToken.ThrowIfCancellationRequested();
+        return recorded;
+    }
+
+    public ContentReuseDecision SelectContentReuse(
+        ContentReuseRequest request,
+        string? storePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        ContentReuseDecision result = (storePath is null
+                ? new ContentIntelligenceService()
+                : new ContentIntelligenceService(new ContentIntelligenceStore(storePath)))
+            .SelectReuse(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
     }
 
     private static (long Error, long Warning) CountDiagnostics(

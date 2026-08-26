@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>RimLiaison Qualification Fixture</name>
+  <author>RimLiaison</author>
+  <packageId>rimliaison.qualification.fixture</packageId>
+  <supportedVersions>
+    <li>1.5</li>
+  </supportedVersions>
+  <description>Small deterministic reference workload for qualifying the RimLiaison development stack. Not a production mod.</description>
+</ModMetaData>

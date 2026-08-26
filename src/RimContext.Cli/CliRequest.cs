@@ -19,7 +19,9 @@ public sealed record CliRequest(
     int Depth,
     string Direction,
     string? Kind,
-    string? File);
+    string? GameplayRole,
+    string? File,
+    bool IncludeFailures = false);
 
 public static class CliCommands
 {
@@ -35,6 +37,8 @@ public static class CliCommands
     public const string Summary = "summary";
     public const string Context = "context";
 
+    public const string Content = "content";
+
     public static readonly string[] All =
     [
         Index,
@@ -46,6 +50,7 @@ public static class CliCommands
         File,
         Summary,
         Context,
+        Content,
         Version
     ];
 

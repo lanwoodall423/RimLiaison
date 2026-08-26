@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'pinned-devbridge-worktree.ps1')
 $scriptRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $parentRoot = (Get-Item -LiteralPath $scriptRoot).Parent.FullName
 $RimLiaisonRoot = if ([string]::IsNullOrWhiteSpace($RimLiaisonRoot)) { $scriptRoot } else { [IO.Path]::GetFullPath($RimLiaisonRoot) }
@@ -16,6 +17,7 @@ $manifestPath = Join-Path $RimLiaisonRoot 'contracts\cross-stack-compatibility.j
 $manifest = $null
 $workspaceRoot = $null
 $auxiliaryRoot = $null
+$devBridgeResolution = $null
 $report = $null
 $exitCode = 0
 
@@ -203,6 +205,11 @@ try {
     Assert-True ($null -ne $manifest.repositories.rimLiaison) 'RimLiaison repository metadata exists'
     Assert-True ($null -ne $manifest.repositories.devBridge2) 'DevBridge2 compatibility pin exists'
     Assert-True ([string]$manifest.repositories.devBridge2.revision -match '^[0-9a-fA-F]{40}$') 'DevBridge2 uses a full pinned SHA'
+    $devBridgeResolution = Resolve-PinnedDevBridgeWorktree `
+        -RimLiaisonRoot $RimLiaisonRoot `
+        -DevBridgeRoot $DevBridgeRoot `
+        -ManifestPath $manifestPath
+    $DevBridgeRoot = [string]$devBridgeResolution.resolvedRoot
     $heads = [ordered]@{
         rimLiaison = Get-GitHead $RimLiaisonRoot 'RimLiaison'
         devBridge2 = Get-GitHead $DevBridgeRoot 'DevBridge2'
@@ -245,6 +252,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_CONFIG_FAILED' }
     & git -C $workspaceRoot add --all
     if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_ADD_FAILED' }
+    # Git global excludes commonly ignore DLLs; this fixture intentionally
+    # requires the deployed artifact to be tracked so transaction snapshots
+    # can prove an owner-only mutation.
+    & git -C $workspaceRoot add --force -- $trackedArtifactPath
+    if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_ARTIFACT_ADD_FAILED' }
     & git -C $workspaceRoot commit --quiet -m 'cross-stack fixture baseline'
     if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_COMMIT_FAILED' }
     $startingHead = ([string](& git -C $workspaceRoot rev-parse HEAD)).Trim()
@@ -587,6 +599,17 @@ try {
         schemaVersion = 'rimtest-cross-stack-gate/v1'
         status = 'pass'
         repositories = $heads
+        devBridge2Resolution = if ($null -eq $devBridgeResolution) {
+            $null
+        } else {
+            [ordered]@{
+                pinnedRevision = [string]$devBridgeResolution.pinnedRevision
+                resolvedRoot = [string]$devBridgeResolution.resolvedRoot
+                requestedRoot = [string]$devBridgeResolution.requestedRoot
+                materialization = [string]$devBridgeResolution.materialization
+                usedNormalCheckout = [bool]$devBridgeResolution.usedNormalCheckout
+            }
+        }
         fixture = [ordered]@{
             id = 'cross-stack-fixture'
             changedPath = $changedPath
@@ -662,6 +685,17 @@ catch {
         repositories = [ordered]@{
             rimLiaison = $RimLiaisonRoot
             devBridge2 = $DevBridgeRoot
+        }
+        devBridge2Resolution = if ($null -eq $devBridgeResolution) {
+            $null
+        } else {
+            [ordered]@{
+                pinnedRevision = [string]$devBridgeResolution.pinnedRevision
+                resolvedRoot = [string]$devBridgeResolution.resolvedRoot
+                requestedRoot = [string]$devBridgeResolution.requestedRoot
+                materialization = [string]$devBridgeResolution.materialization
+                usedNormalCheckout = [bool]$devBridgeResolution.usedNormalCheckout
+            }
         }
     }
 }

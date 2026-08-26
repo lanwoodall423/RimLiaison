@@ -10,4 +10,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
     <PackageReference Include="System.Reflection.Metadata" Version="8.0.0" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
+  </ItemGroup>
 </Project>

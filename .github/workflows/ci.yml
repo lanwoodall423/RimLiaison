@@ -188,6 +188,9 @@ jobs:
           }
           "devBridge2=$revision" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Test pinned DevBridge2 isolated-worktree resolution
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\pinned-devbridge-worktree.tests.ps1
       - name: Check out pinned DevBridge2
         uses: actions/checkout@v4
         with:

@@ -55,6 +55,18 @@ public sealed class RimTestResult
     [JsonPropertyName("status")]
     public required string Status { get; init; }
 
+    [JsonPropertyName("validationClassification")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ValidationClassification { get; init; }
+
+    [JsonPropertyName("validationOutcome")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ValidationOutcome { get; init; }
+
+    [JsonPropertyName("blocking")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Blocking { get; init; }
+
     [JsonPropertyName("test")]
     public required string Test { get; init; }
 
@@ -116,7 +128,8 @@ public static class RimTestResultFactory
         string testId,
         DevBridgeRecipeRunResult run,
         long durationMs,
-        string? workflowId = null)
+        string? workflowId = null,
+        ValidationClassification? validationClassification = null)
     {
         string status = run.Status.Outcome switch
         {
@@ -130,6 +143,7 @@ public static class RimTestResultFactory
         return new RimTestResult
         {
             Status = status,
+            ValidationClassification = validationClassification?.ToString(),
             Test = testId,
             WorkflowId = workflowId ?? run.WorkflowId,
             DurationMs = BoundDuration(durationMs),
@@ -143,15 +157,9 @@ public static class RimTestResultFactory
                 .ToArray() is { Length: > 0 } operationIds
                 ? operationIds
                 : null,
-            FailureFingerprint = includeFailureDetails
-                ? run.FailureFingerprint
-                : null,
-            EvidenceId = includeFailureDetails
-                ? run.EvidenceId ?? run.Evidence
-                : null,
-            ErrorCode = includeFailureDetails
-                ? run.Status.ErrorCode
-                : null,
+            FailureFingerprint = includeFailureDetails ? run.FailureFingerprint : null,
+            EvidenceId = includeFailureDetails ? run.EvidenceId ?? run.Evidence : null,
+            ErrorCode = includeFailureDetails ? run.Status.ErrorCode : null,
             NextAction = NextActionFor(run.Status.Outcome)
         };
     }
@@ -173,9 +181,61 @@ public static class RimTestResultFactory
             ErrorCode = first.ErrorCode,
             FailureFingerprint = first.Fingerprint,
             CapabilityBlocker = evidence,
+            ValidationClassification = first.Classification.ToString(),
+            ValidationOutcome = "TOOLING_FAILURE",
+            Blocking = true,
             NextAction = "inspect-validation-capability"
         };
     }
+
+    public static RimTestResult CapabilityUnavailable(
+        string testId,
+        IReadOnlyList<ValidationCapabilityEvidence> evidence,
+        long durationMs = 0,
+        string? workflowId = null)
+    {
+        ValidationCapabilityEvidence first = evidence.FirstOrDefault() ??
+            throw new ArgumentException("Capability evidence is required.", nameof(evidence));
+        return new RimTestResult
+        {
+            Status = "not_available",
+            Test = testId,
+            WorkflowId = workflowId ?? first.WorkflowId,
+            DurationMs = BoundDuration(durationMs),
+            ErrorCode = first.ErrorCode,
+            FailureFingerprint = first.Fingerprint,
+            CapabilityBlocker = evidence,
+            ValidationClassification = first.Classification.ToString(),
+            ValidationOutcome = "OPTIONAL_VALIDATION_UNAVAILABLE",
+            Blocking = false,
+            NextAction = "record-validation-recommendation"
+        };
+    }
+    public static RimTestResult OptionalUnavailable(
+        RimTestResult result,
+        ValidationClassification classification)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return new RimTestResult
+        {
+            SchemaVersion = result.SchemaVersion,
+            Status = "not_available",
+            ValidationClassification = classification.ToString(),
+            ValidationOutcome = "OPTIONAL_VALIDATION_UNAVAILABLE",
+            Blocking = false,
+            Test = result.Test,
+            WorkflowId = result.WorkflowId,
+            DurationMs = result.DurationMs,
+            RunId = result.RunId,
+            Generation = result.Generation,
+            OperationIds = result.OperationIds,
+            FailureFingerprint = result.FailureFingerprint,
+            EvidenceId = result.EvidenceId,
+            ErrorCode = result.ErrorCode,
+            NextAction = "record-validation-recommendation"
+        };
+    }
+
 
     public static RimTestResult Invalid(
         string testId,
@@ -253,6 +313,9 @@ public static class RimTestResultFactory
         {
             SchemaVersion = result.SchemaVersion,
             Status = result.Status,
+            ValidationClassification = result.ValidationClassification,
+            ValidationOutcome = result.ValidationOutcome,
+            Blocking = result.Blocking,
             Test = result.Test,
             WorkflowId = result.WorkflowId,
             DurationMs = result.DurationMs,
@@ -262,6 +325,7 @@ public static class RimTestResultFactory
             FailureFingerprint = result.FailureFingerprint,
             EvidenceId = result.EvidenceId,
             ErrorCode = result.ErrorCode,
+            CapabilityBlocker = result.CapabilityBlocker,
             DiagnosticStatus = diagnosis.IsAvailable && diagnosis.Diagnosis is not null
                 ? null
                 : diagnosis.Outcome switch

@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.Reflection;
+using System.Text.Json;
 using RimLiaison;
 using RimLiaison.Observability;
-
+using RimLiaison.Desktop;
 namespace RimLiaison.Tests;
 
 internal static class DesktopObservabilityTests
@@ -165,6 +167,13 @@ internal static class DesktopObservabilityTests
             "Frontier",
             "frontier-two-session",
             "logical-frontier-two");
+        using AgentObservabilitySession third = run.CreateAgent(
+            "mod.frontier",
+            "Frontier",
+            "frontier-three-session",
+            "logical-frontier-three");
+        third.Start();
+        RecordSharedFailure(third, "three");
         first.Start();
         second.Start();
         RecordSharedFailure(first, "one");
@@ -172,14 +181,177 @@ internal static class DesktopObservabilityTests
 
         using var ui = new AgentObservabilityUi(store);
         AssertEqual(
-            2,
+            1,
             ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
         AgentObservabilityIssueRow firstIssue = ui.ShowIssues().Issues!.Issues
             .First(value => value.Issue.AgentId == first.AgentId);
-        AssertEqual(2, firstIssue.SharedAgentCount);
+        AssertEqual(3, firstIssue.SharedAgentCount);
+    }
+    public static void TopNavigationGroupsAllRimLiaisonSessions()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 4; index++)
+        {
+            store.RegisterAgent(IdentityAgent(
+                "tool-run-" + index,
+                "tool-agent-" + index,
+                ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison")));
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] items = ui.Snapshot.Navigation.Items
+            .Where(static item => item.Kind == "agent")
+            .ToArray();
+        AssertEqual(1, items.Length);
+        AssertEqual("tool:rimliaison", items[0].CanonicalEntityId);
+        AssertEqual("RimLiaison", items[0].FullLabel);
     }
 
-    public static void LegacyRecordsStayConservativelySeparate()
+    public static void ToolAliasesShareOneCanonicalIdentity()
+    {
+        using var store = new AgentObservabilityStore();
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = "alias-run-one",
+            AgentId = "alias-agent-one",
+            SessionId = "alias-session-one",
+            ModId = "[Tool] RimLiaison",
+            ModName = "[Tool] RimLiaison",
+            EntityType = ObservabilityEntityTypes.Tool
+        });
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = "alias-run-two",
+            AgentId = "alias-agent-two",
+            SessionId = "alias-session-two",
+            ModId = "RimLiaison-tests-alias",
+            ModName = "RimLiaison-tests-alias",
+            EntityType = ObservabilityEntityTypes.Tool,
+            CanonicalEntityId = "tool:RimLiaison-worktree-alias"
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            1,
+            ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        Assert(store.GetAgents().All(static agent =>
+            agent.EntityType == ObservabilityEntityTypes.Tool &&
+            agent.CanonicalEntityId == "tool:rimliaison"));
+    }
+
+    public static void QualificationFixtureIsHiddenFromProductionNavigation()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "qualification-ui-run",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "rimliaison.qualification.fixture",
+            "RimLiaison Qualification Fixture",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"),
+            workloadKind: "qualification",
+            qualificationProfile: "deterministic");
+        agent.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(0, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AssertEqual(1, ui.Snapshot.All!.Agents.Count);
+        AssertEqual(ObservabilityEntityTypes.Fixture, ui.Snapshot.All.Agents[0].EntityType);
+    }
+
+    public static void SyntheticFixtureModIsNotTopLevelProductionEntity()
+    {
+        using var store = new AgentObservabilityStore();
+        store.RegisterAgent(IdentityAgent(
+            "fixture-run",
+            "fixture-agent",
+            ObservabilityEntityIdentity.ForFixture("com.example.fixturemod", "FixtureMod")));
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(0, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AssertEqual(ObservabilityEntityTypes.Fixture, store.GetAgents()[0].EntityType);
+    }
+
+    public static void NonProductionIdentityTaxonomyIsHidden()
+    {
+        using var store = new AgentObservabilityStore();
+        (string Id, ObservabilityEntityIdentity Identity)[] identities =
+        [
+            ("agent", ObservabilityEntityIdentity.ForAgent("agent-1", "Agent")),
+            ("user", ObservabilityEntityIdentity.ForUser("lan", "Lan")),
+            ("process", ObservabilityEntityIdentity.ForProcess("process-1", "Process")),
+            ("run", ObservabilityEntityIdentity.ForRun("run-1", "Run")),
+            ("session", ObservabilityEntityIdentity.ForSession("session-1", "Session")),
+            ("activity", ObservabilityEntityIdentity.ForActivity("activity-1", "Activity")),
+            ("event", ObservabilityEntityIdentity.ForEvent("event-1", "Event"))
+        ];
+        foreach ((string id, ObservabilityEntityIdentity identity) in identities)
+        {
+            store.RegisterAgent(IdentityAgent(
+                "taxonomy-" + id,
+                "taxonomy-agent-" + id,
+                identity));
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(0, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AssertEqual(identities.Length, ui.Snapshot.All!.Agents.Count);
+    }
+
+    public static void RealModsAndEcosystemToolsRemainDistinct()
+    {
+        using var store = new AgentObservabilityStore();
+        store.RegisterAgent(IdentityAgent(
+            "mod-run-one",
+            "mod-agent-one",
+            ObservabilityEntityIdentity.ForMod("com.example.alpha", "Alpha")));
+        store.RegisterAgent(IdentityAgent(
+            "mod-run-two",
+            "mod-agent-two",
+            ObservabilityEntityIdentity.ForMod("com.example.beta", "Beta")));
+        store.RegisterAgent(IdentityAgent(
+            "tool-run",
+            "tool-agent",
+            ObservabilityEntityIdentity.ForTool("rimtest", "RimTest")));
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] items = ui.Snapshot.Navigation.Items
+            .Where(static item => item.Kind == "agent")
+            .ToArray();
+        AssertEqual(3, items.Length);
+        Assert(items.Any(static item => item.CanonicalEntityId == "mod:com.example.alpha"));
+        Assert(items.Any(static item => item.CanonicalEntityId == "mod:com.example.beta"));
+        Assert(items.Any(static item => item.CanonicalEntityId == "tool:rimtest"));
+    }
+
+    public static void MalformedLegacyIdentityStaysDiagnosticOnly()
+    {
+        using var store = new AgentObservabilityStore();
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = "malformed-run",
+            AgentId = "malformed-agent",
+            SessionId = "malformed-session",
+            ModId = "Lan",
+            ModName = "Lan"
+        });
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = "malformed-fixture-run",
+            AgentId = "malformed-fixture-agent",
+            SessionId = "malformed-fixture-session",
+            ModId = "Fixture",
+            ModName = "Fixture"
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(0, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count);
+    }
+
+
+    public static void LegacyRecordsUseStableFallbackEntity()
     {
         using var store = new AgentObservabilityStore();
         store.RegisterAgent(LegacyAgent("legacy-run-one", "legacy-agent-one"));
@@ -187,7 +359,7 @@ internal static class DesktopObservabilityTests
 
         using var ui = new AgentObservabilityUi(store);
         AssertEqual(
-            2,
+            1,
             ui.Snapshot.Navigation.Items.Count(item => item.Kind == "agent"));
     }
 
@@ -300,8 +472,8 @@ internal static class DesktopObservabilityTests
         using var ui = new AgentObservabilityUi(store);
         IReadOnlyList<AgentObservabilityActivityRow> activity = ui.Snapshot.All!.Activity;
         Assert(activity.Select(row => row.Sequence).SequenceEqual(
-            activity.Select(row => row.Sequence).OrderBy(value => value)),
-            "All activity must use stable sequence order");
+            activity.Select(row => row.Sequence).OrderByDescending(value => value)),
+            "All activity must use newest-first sequence order");
         Assert(activity.Any(row => row.ModName == "Alpha") && activity.Any(row => row.ModName == "Beta"),
             "interleaved rows must retain their originating mod");
     }
@@ -1025,9 +1197,18 @@ internal static class DesktopObservabilityTests
             "ui-shared-tooling",
             store,
             new NoopAgentObservabilityTelemetry());
-        using AgentObservabilitySession first = run.CreateAgent("mod.first", "First");
-        using AgentObservabilitySession second = run.CreateAgent("mod.second", "Second");
-        using AgentObservabilitySession unrelated = run.CreateAgent("mod.unrelated", "Unrelated");
+        using AgentObservabilitySession first = run.CreateAgent(
+            "mod.first",
+            "First",
+            logicalAgentId: "logical-first");
+        using AgentObservabilitySession second = run.CreateAgent(
+            "mod.second",
+            "Second",
+            logicalAgentId: "logical-second");
+        using AgentObservabilitySession unrelated = run.CreateAgent(
+            "mod.unrelated",
+            "Unrelated",
+            logicalAgentId: "logical-unrelated");
         first.Start();
         second.Start();
         unrelated.Start();
@@ -1174,6 +1355,1378 @@ internal static class DesktopObservabilityTests
         }
     }
 
+    public static void ProductionOverviewGroupsSessionsAndShowsCurrentState()
+    {
+        using var store = new AgentObservabilityStore();
+        using var historicalRun = new AgentObservabilityRun(
+            "ui-production-history",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession historical = historicalRun.CreateAgent(
+            "mod.production",
+            "Production Mod",
+            logicalAgentId: "logical-production");
+        historical.Start();
+        historical.Complete();
+
+        using var activeRun = new AgentObservabilityRun(
+            "ui-production-active",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession active = activeRun.CreateAgent(
+            "mod.production",
+            "Production Mod",
+            logicalAgentId: "logical-production");
+        active.Start("running Quicktest");
+        active.SetProductionState(
+            DevelopmentStage.Testing,
+            "quicktest",
+            "none");
+        active.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ProductionStateChanged,
+            "Quicktest is ready.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityProductionEntry entry = ui.Snapshot.All!.Production.Single();
+        AssertEqual(active.RunId, entry.RunId);
+        AssertEqual(DevelopmentStage.Testing, entry.CurrentStage);
+        AssertEqual("quicktest", entry.CurrentOperation);
+        AssertEqual("Quicktest is ready.", entry.LatestEvent);
+        Assert(!entry.IsHistorical);
+        AssertEqual(2, ui.Snapshot.All!.Agents.Count);
+    }
+
+    public static void RecommendationsHaveSeparateNonBlockingSurface()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-recommendations",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.recommendation",
+            "Recommendation Mod");
+        agent.Start();
+        agent.RecordToolingRecommendation(
+            "quicktest",
+            "Quicktest readiness is unavailable.",
+            "Expose a bounded readiness probe.",
+            "DevBridge2",
+            "evidence://quicktest",
+            affectedCurrentTask: false,
+            priority: "normal");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiSnapshot snapshot = ui.ShowRecommendations();
+        AssertEqual(AgentObservabilityUiView.Recommendations, snapshot.View);
+        Assert(snapshot.Recommendations is not null);
+        AgentObservabilityRecommendationRow recommendation =
+            snapshot.Recommendations!.Recommendations.Single();
+        AssertEqual("DevBridge2", recommendation.Owner);
+        AssertEqual("new", recommendation.Status);
+        Assert(!recommendation.ProductionAffected);
+        AgentObservabilityUiSnapshot filtered = ui.SetFilter(
+            new AgentObservabilityUiFilter(Query: "quicktest"));
+        AssertEqual(1, filtered.Recommendations!.Recommendations.Count);
+        AgentSnapshot persisted = store.GetAgents().Single();
+        AssertEqual(AgentStatus.Running, persisted.Status);
+        Assert(!persisted.FailureState);
+    }
+
+    public static void IssueCategoriesAreOperatorReadable()
+    {
+        static AgentIssue Issue(AgentIssueCategory category, bool blocking = false, bool recovered = false) =>
+            new()
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                RunId = "run",
+                AgentId = "agent",
+                ModId = "mod",
+                Summary = "summary",
+                Category = category,
+                Severity = blocking ? AgentIssueSeverity.Error : AgentIssueSeverity.Warning,
+                Blocking = blocking,
+                Recovered = recovered
+            };
+
+        AssertEqual(
+            "Mod defect",
+            new AgentObservabilityIssueRow(Issue(AgentIssueCategory.ModDefect), "Mod", null, false).CategoryLabel);
+        AssertEqual(
+            "Required-validation blocker",
+            new AgentObservabilityIssueRow(Issue(AgentIssueCategory.CapabilityGap, blocking: true), "Mod", null, false).CategoryLabel);
+        AssertEqual(
+            "Tooling/infrastructure incident",
+            new AgentObservabilityIssueRow(Issue(AgentIssueCategory.ToolingFailure), "Mod", null, false).CategoryLabel);
+        AssertEqual(
+            "Recovered infrastructure incident",
+            new AgentObservabilityIssueRow(Issue(AgentIssueCategory.ToolingFailure, recovered: true), "Mod", null, false).CategoryLabel);
+        AssertEqual(
+            "Optional validation unavailable",
+            new AgentObservabilityIssueRow(Issue(AgentIssueCategory.OptionalValidationUnavailable), "Mod", null, false).CategoryLabel);
+    }
+
+    public static void ToolingEntitiesAggregateAcrossRunsAndPersist()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 100; index++)
+        {
+            using var run = new AgentObservabilityRun(
+                "tool-run-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession session = run.CreateAgent(
+                "RimLiaison",
+                "RimLiaison",
+                agentId: "process-" + index,
+                logicalAgentId: "worker-" + index,
+                sessionId: "session-" + index,
+                entityIdentity: ObservabilityEntityIdentity.ForTool(
+                    "rimliaison",
+                    "RimLiaison"));
+            session.Start();
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.InformationalProductionEvent,
+                "Activity from process " + index);
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] tooling = ui.Snapshot.Navigation.Items
+            .Where(item => item.EntityType == ObservabilityEntityTypes.Tool)
+            .ToArray();
+        AssertEqual(1, tooling.Length);
+        AssertEqual("tool:rimliaison", tooling[0].CanonicalEntityId);
+        AssertEqual(100, ui.Snapshot.All!.Agents.Count);
+
+        AgentEvent firstActivity = store.GetEvents().First();
+        AgentObservabilityAgentView detail = ui.ShowAgent("RimLiaison").Agent!;
+        AssertEqual(99, detail.PastSessions.Count);
+        Assert(detail.RecentActivity.Any(row => row.Event.Id == firstActivity.Id) == false,
+            "bounded recent activity may omit old events");
+        AgentObservabilityAgentView selected = ui.SelectEvent(firstActivity.Id).Agent!;
+        AssertEqual(firstActivity.Id, selected.SelectedEventId);
+        Assert(selected.SelectedEvent is not null, "aggregated activity must remain drillable");
+    }
+
+    public static void EntityRoutingKeepsModsAndToolsDistinct()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "entity-routing",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession rimliaison = run.CreateAgent(
+            "RimLiaison",
+            "RimLiaison",
+            agentId: "tool-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"));
+        using AgentObservabilitySession rimcontext = run.CreateAgent(
+            "RimContext",
+            "RimContext",
+            agentId: "context-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimcontext", "RimContext"));
+        using AgentObservabilitySession firstMod = run.CreateAgent(
+            "mod.alpha",
+            "Alpha",
+            agentId: "alpha-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("mod.alpha", "Alpha"));
+        using AgentObservabilitySession secondMod = run.CreateAgent(
+            "mod.beta",
+            "Beta",
+            agentId: "beta-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("mod.beta", "Beta"));
+        using AgentObservabilitySession unknown = run.CreateAgent(
+            "opaque-source",
+            "Opaque Source",
+            agentId: "unknown-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForUnknown(
+                "opaque-source",
+                "Opaque Source"));
+        rimliaison.Start();
+        rimcontext.Start();
+        firstMod.Start();
+        secondMod.Start();
+        unknown.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] entities = ui
+            .Snapshot.Navigation.Items
+            .Where(item => item.Kind == "agent")
+            .ToArray();
+        AssertEqual(2, entities.Count(item => item.EntityType == ObservabilityEntityTypes.Tool));
+        AssertEqual(0, entities.Count(item => item.EntityType == ObservabilityEntityTypes.Unknown));
+        AssertEqual(2, entities.Count(item => item.EntityType == ObservabilityEntityTypes.Mod));
+        Assert(entities.Any(item => item.CanonicalEntityId == "mod:mod.alpha"));
+        Assert(entities.Any(item => item.CanonicalEntityId == "mod:mod.beta"));
+    }
+
+    public static void PersistedToolingIdentityDoesNotDuplicateOnReload()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-entity-reload-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var writer = new AgentObservabilityStore(directory))
+            {
+                for (int index = 0; index < 3; index++)
+                {
+                    using var run = new AgentObservabilityRun(
+                        "persisted-run-" + index,
+                        writer,
+                        new NoopAgentObservabilityTelemetry());
+                    using AgentObservabilitySession session = run.CreateAgent(
+                        "RimLiaison",
+                        "RimLiaison",
+                        agentId: "persisted-process-" + index,
+                        sessionId: "persisted-session-" + index,
+                        entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"));
+                    session.Start();
+                    session.Record(
+                        DevelopmentStage.Testing,
+                        AgentEventTypes.InformationalProductionEvent,
+                        "Persisted tooling activity " + index);
+                }
+            }
+
+            using var reader = new AgentObservabilityStore(directory);
+            using var ui = new AgentObservabilityUi(reader);
+            AgentObservabilityUiNavigationItem[] tooling = ui.Snapshot.Navigation.Items
+                .Where(item => item.EntityType == ObservabilityEntityTypes.Tool)
+                .ToArray();
+            AssertEqual(1, tooling.Length);
+            AgentObservabilityAgentView detail = ui.ShowAgent("RimLiaison").Agent!;
+            AssertEqual(2, detail.PastSessions.Count);
+            Assert(detail.RecentActivity.Count > 0);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public static void ConcurrentToolingActivitiesRemainOneEntity()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "concurrent-tooling",
+            store,
+            new NoopAgentObservabilityTelemetry());
+
+        Parallel.For(0, 2_000, index =>
+        {
+            using AgentObservabilitySession session = run.CreateAgent(
+                "RimLiaison",
+                "RimLiaison",
+                agentId: "concurrent-process-" + index,
+                logicalAgentId: "concurrent-worker-" + index,
+                sessionId: "concurrent-session-" + index,
+                entityIdentity: ObservabilityEntityIdentity.ForTool(
+                    "rimliaison",
+                    "RimLiaison"));
+            session.Start();
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.InformationalProductionEvent,
+                "Concurrent RimLiaison activity " + index);
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] tooling = ui.Snapshot.Navigation.Items
+            .Where(item => item.EntityType == ObservabilityEntityTypes.Tool)
+            .ToArray();
+        AssertEqual(1, tooling.Length);
+        AssertEqual("tool:rimliaison", tooling[0].CanonicalEntityId);
+        AssertEqual(2_000, store.GetAgents(limit: 3_000).Count);
+        Assert(store.GetEvents(limit: 10_000).Count >= 2_000);
+        Assert(ui.ShowAgent("RimLiaison").Agent!.RecentActivity.Count > 0);
+    }
+
+    public static void WindowsPathIdentityNormalizationIsStable()
+    {
+        ObservabilityEntityIdentity backslash = ObservabilityEntityIdentity.ForMod(
+            @"C:\RimDev\Repos\ExampleMod\",
+            "Example Mod");
+        ObservabilityEntityIdentity slash = ObservabilityEntityIdentity.ForMod(
+            "c:/rimdev/repos/examplemod",
+            "Example Mod");
+
+        AssertEqual(backslash.CanonicalEntityId, slash.CanonicalEntityId);
+        AssertEqual("mod:c:/rimdev/repos/examplemod", backslash.CanonicalEntityId);
+
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "path-variant-run",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent(
+            @"C:\RimDev\Repos\ExampleMod\",
+            "Example Mod");
+        using AgentObservabilitySession second = run.CreateAgent(
+            "c:/rimdev/repos/examplemod",
+            "Example Mod");
+        Assert(ReferenceEquals(first, second), "path variants must reuse the canonical session");
+    }
+
+    public static void KnownToolFallbackUsesToolIdentity()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "tool-fallback",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession session = run.CreateAgent(
+            "RimTest",
+            "RimTest",
+            agentId: "fallback-agent");
+        session.Start();
+
+        AssertEqual(ObservabilityEntityTypes.Tool, session.EntityType);
+        AssertEqual("tool:rimtest", session.CanonicalEntityId);
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            1,
+            ui.Snapshot.Navigation.Items.Count(item =>
+                item.EntityType == ObservabilityEntityTypes.Tool));
+    }
+
+    public static void MultipleToolIdentitiesAggregateAcrossRuns()
+    {
+        string[] toolIds =
+        [
+            "rimliaison",
+            "rimtest",
+            "rimcontext",
+            "rimcontent",
+            "rimerror",
+            "rimbench",
+            "devbridge2"
+        ];
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 140; index++)
+        {
+            string toolId = toolIds[index % toolIds.Length];
+            using var run = new AgentObservabilityRun(
+                "multi-tool-run-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession session = run.CreateAgent(
+                toolId,
+                toolId,
+                agentId: "multi-tool-agent-" + index,
+                entityIdentity: ObservabilityEntityIdentity.ForTool(toolId, toolId));
+            session.Start();
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.InformationalProductionEvent,
+                "Tool activity " + index);
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        var counts = ui.Snapshot.Navigation.Items
+            .Where(item => item.EntityType == ObservabilityEntityTypes.Tool)
+            .GroupBy(
+                item => item.CanonicalEntityId ?? string.Empty,
+                StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Count(),
+                StringComparer.Ordinal);
+        AssertEqual(toolIds.Length, counts.Count);
+        Assert(counts.Values.All(count => count == 1));
+    }
+
+    public static void ProductionAndActivitySortByRealTimestamp()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentSnapshot missing = TestAgent("timestamp-missing", "agent-missing", "Missing", 0);
+        AgentSnapshot older = TestAgent("timestamp-old", "agent-old", "Older", 1_704_067_200_000);
+        AgentSnapshot newer = TestAgent("timestamp-new", "agent-new", "Newer", 1_704_153_600_000);
+        store.RegisterAgent(missing);
+        store.RegisterAgent(older);
+        store.RegisterAgent(newer);
+        store.AppendEvent(new AgentEventRequest(
+            missing.RunId,
+            missing.AgentId,
+            missing.ModId,
+            DevelopmentStage.Analysis,
+            AgentEventTypes.InformationalProductionEvent,
+            "Missing activity.",
+            Timestamp: 0));
+        store.AppendEvent(new AgentEventRequest(
+            older.RunId,
+            older.AgentId,
+            older.ModId,
+            DevelopmentStage.Analysis,
+            AgentEventTypes.InformationalProductionEvent,
+            "Older activity.",
+            Timestamp: 1_704_067_201_000));
+        store.AppendEvent(new AgentEventRequest(
+            newer.RunId,
+            newer.AgentId,
+            newer.ModId,
+            DevelopmentStage.Analysis,
+            AgentEventTypes.InformationalProductionEvent,
+            "Newer activity.",
+            Timestamp: 1_704_153_601_000));
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityAllView all = ui.Snapshot.All!;
+        AssertEqual("Newer", all.Production[0].ModName);
+        AssertEqual(1_704_153_601_000, all.Production[0].LatestTimestamp);
+        Assert(all.Activity.Select(row => row.Event.Timestamp).SequenceEqual(
+            all.Activity.Select(row => row.Event.Timestamp).OrderByDescending(value => value)),
+            "activity must sort by the underlying timestamp");
+        AssertEqual("Missing", all.Production[^1].ModName);
+        Assert(!all.Production[^1].LatestTimestamp.HasValue);
+        AssertEqual("—", AgentObservabilityTime.FormatLocal(0));
+        Assert(AgentObservabilityTime.SortValue(null) < AgentObservabilityTime.SortValue(1),
+            "missing timestamps must sort below current activity");
+    }
+
+    public static void RecommendationDuplicatesNestByStableOperation()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 3; index++)
+        {
+            using var run = new AgentObservabilityRun(
+                "recommendation-run-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession session = run.CreateAgent(
+                "mod.recommendation",
+                "Recommendation",
+                logicalAgentId: "recommendation-agent-" + index);
+            session.Start();
+            session.RecordToolingRecommendation(
+                index == 2 ? " Validation:cleanup " : "validation:cleanup",
+                "Improve cleanup validation.",
+                "Run cleanup validation before packaging.",
+                "RimLiaison",
+                null,
+                affectedCurrentTask: false);
+        }
+
+        using var distinctRun = new AgentObservabilityRun(
+            "recommendation-distinct",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession distinct = distinctRun.CreateAgent(
+            "mod.recommendation",
+            "Recommendation",
+            logicalAgentId: "recommendation-distinct-agent");
+        distinct.Start();
+        distinct.RecordToolingRecommendation(
+            "validation:cleanup-other",
+            "Improve cleanup validation.",
+            "Run cleanup validation before testing.",
+            "RimLiaison",
+            null,
+            affectedCurrentTask: false);
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityRecommendationsView view = ui.ShowRecommendations().Recommendations!;
+        AssertEqual(2, view.Recommendations.Count);
+        AgentObservabilityRecommendationRow grouped = view.Recommendations
+            .Single(row => row.OccurrenceCount == 3);
+        AssertEqual(
+            grouped.Occurrences.Max(value => value.Issue.Timestamp),
+            grouped.Issue.Timestamp);
+        AssertEqual(3, grouped.Occurrences.Count);
+        Assert(grouped.Occurrences.Select(value => value.Issue.Timestamp).SequenceEqual(
+            grouped.Occurrences.Select(value => value.Issue.Timestamp).OrderByDescending(value => value)),
+            "nested recommendations must be newest first");
+    }
+
+    public static void IssueDuplicatesNestWithoutMergingDistinctFailures()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 2; index++)
+        {
+            using var run = new AgentObservabilityRun(
+                "issue-run-" + index,
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession session = run.CreateAgent(
+                "mod.issue",
+                "Issue",
+                logicalAgentId: "issue-agent-" + index);
+            session.Start();
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandFailed,
+                "The command failed.",
+                new { operationKey = "command:shared", errorCode = "SHARED_FAILURE", exitCode = 1 });
+        }
+
+        using var rootCauseRun = new AgentObservabilityRun(
+            "issue-root-cause",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession rootCause = rootCauseRun.CreateAgent(
+            "mod.issue",
+            "Issue",
+            logicalAgentId: "issue-root-cause-agent");
+        rootCause.Start();
+        rootCause.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "The command failed.",
+            new { operationKey = "command:shared", errorCode = "DIFFERENT_FAILURE", exitCode = 1 });
+
+        using var distinctRun = new AgentObservabilityRun(
+            "issue-distinct",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession distinct = distinctRun.CreateAgent(
+            "mod.issue",
+            "Issue",
+            logicalAgentId: "issue-distinct-agent");
+        distinct.Start();
+        distinct.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "The command failed.",
+            new { operationKey = "command:different-root-cause", errorCode = "SHARED_FAILURE", exitCode = 1 });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityIssueRow[] rows = ui.ShowIssues().Issues!.Issues.ToArray();
+        AgentObservabilityIssueRow[] sharedRows = rows
+            .Where(row => row.Issue.OperationKey == "command:shared")
+            .ToArray();
+        AssertEqual(2, sharedRows.Length);
+        AssertEqual(2, sharedRows.Max(row => row.Occurrences.Count));
+        AssertEqual(1, sharedRows.Min(row => row.Occurrences.Count));
+        AgentObservabilityIssueRow grouped = sharedRows.Single(row => row.Occurrences.Count == 2);
+        AssertEqual(
+            grouped.Occurrences.Max(value => value.Issue.Timestamp),
+            grouped.Issue.Timestamp);
+        Assert(rows.Any(row => row.Issue.OperationKey == "command:different-root-cause"),
+            "a distinct operation must remain a distinct issue");
+        Assert(rows.All(row => row.Issue.Timestamp > 0), "issue timestamps must be real data");
+    }
+    public static void OneActiveAgentAndHistoricalSessionsExposeOneWorkingAgent()
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using var store = new AgentObservabilityStore(
+            options: new AgentObservabilityOptions
+            {
+                WorkingStalenessThreshold = TimeSpan.FromSeconds(1)
+            },
+            nowMilliseconds: () => now);
+        using var run = new AgentObservabilityRun(
+            "lifecycle-active",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession active = run.CreateAgent(
+            "mod.fixture",
+            "Fixture",
+            logicalAgentId: "logical-fixture");
+        active.Start();
+
+        for (int index = 0; index < 20; index++)
+        {
+            store.RegisterAgent(new AgentSnapshot
+            {
+                RunId = "lifecycle-history-" + index,
+                AgentId = "history-agent-" + index,
+                SessionId = "history-session-" + index,
+                LogicalAgentId = "logical-fixture",
+                ModId = "mod.fixture",
+                ModName = "Fixture",
+                Status = AgentStatus.Running,
+                StartTime = now - 10_000
+            });
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiSnapshot snapshot = ui.Snapshot;
+        AgentObservabilityAllView all = snapshot.All!;
+        AssertEqual(1, all.Agents.Count(agent => agent.Status == AgentStatus.Running));
+        AssertEqual(1, all.Production.Count(entry => entry.Status == AgentStatus.Running));
+        AssertEqual(
+            1,
+            snapshot.Navigation.Items.Count(item =>
+                item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
+    }
+
+    public static void LiveActivityInsertionInvalidatesAllProjection()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "live-activity",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.live-activity",
+            "Live Activity");
+        agent.Start();
+        using var ui = new AgentObservabilityUi(store);
+        int initialCount = ui.Snapshot.All!.Activity.Count;
+
+        agent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Live activity one.");
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "Live activity two.");
+
+        AgentObservabilityAllView all = ui.Snapshot.All!;
+        AssertEqual(initialCount + 2, all.Activity.Count);
+        AssertEqual("Live activity two.", all.Activity[0].Activity);
+        AssertEqual("Live activity one.", all.Activity[1].Activity);
+    }
+
+    public static void FrontierAgentTabSelectionResolvesAgentEntity()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "frontier-agent-selection",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "Frontier",
+            "Frontier",
+            agentId: "frontier-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("frontier", "Frontier"));
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Research,
+            AgentEventTypes.FileInspected,
+            "Frontier research activity.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent" && item.Label == "Frontier");
+        AgentObservabilityUiSnapshot selected = ui.ShowAgent(tab.AgentId!, tab.RunId);
+
+        AssertEqual(AgentObservabilityUiView.Agent, selected.View);
+        Assert(selected.Agent is not null, "Frontier tab must resolve an agent view");
+        AssertEqual(agent.AgentId, selected.Agent!.Agent.AgentId);
+        AssertEqual(ObservabilityEntityTypes.Mod, tab.EntityType);
+    }
+
+    public static void FrontierAgentTabDoesNotUseModDisplayTextAsKey()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "frontier-agent-key",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "Frontier",
+            "Frontier",
+            agentId: "frontier-agent-keyed");
+        agent.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.FullLabel == "Frontier");
+        AgentObservabilityUiSnapshot selected = ui.ShowAgent(tab.AgentId!, tab.RunId);
+
+        AssertEqual("frontier-agent-keyed", selected.Selection.View.AgentId);
+        AssertEqual("frontier-agent-keyed", selected.Agent!.Agent.AgentId);
+        Assert(selected.Selection.View.AgentId != selected.Agent.Agent.ModId);
+    }
+
+    public static void ClickingFrontierAgentTabRendersAgentDetailData()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "frontier-agent-render",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("Frontier", "Frontier");
+        agent.Start("Inspecting Frontier");
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "Frontier tests started.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.FullLabel == "Frontier");
+        AgentObservabilityAgentView detail = ui.ShowAgent(tab.AgentId!, tab.RunId).Agent!;
+
+        AssertEqual(AgentStatus.Running, detail.Agent.Status);
+        AssertEqual("Frontier", detail.Agent.DisplayName);
+        Assert(detail.RecentActivity.Any(row => row.Activity == "Frontier tests started."));
+        Assert(string.IsNullOrWhiteSpace(detail.EmptyState));
+    }
+
+    public static void GenericSecondAgentRendersThroughTheSameRoute()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "generic-agent-render",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent("Frontier", "Frontier");
+        using AgentObservabilitySession second = run.CreateAgent("Harbor", "Harbor");
+        first.Start();
+        second.Start();
+        second.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Harbor changed a file.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.FullLabel == "Harbor");
+        AgentObservabilityAgentView detail = ui.ShowAgent(tab.AgentId!, tab.RunId).Agent!;
+
+        AssertEqual(second.AgentId, detail.Agent.AgentId);
+        Assert(detail.RecentActivity.Any(row => row.Activity == "Harbor changed a file."));
+    }
+
+    public static void SameDisplayNameDoesNotMergeAgentTabs()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "same-display-name",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent(
+            "mod.frontier.one",
+            "Frontier",
+            agentId: "frontier-one");
+        using AgentObservabilitySession second = run.CreateAgent(
+            "mod.frontier.two",
+            "Frontier",
+            agentId: "frontier-two");
+        first.Start();
+        second.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] tabs = ui.Snapshot.Navigation.Items
+            .Where(item => item.Kind == "agent" && item.FullLabel == "Frontier")
+            .ToArray();
+
+        AssertEqual(2, tabs.Length);
+        Assert(tabs.Select(tab => tab.AgentId).Distinct(StringComparer.Ordinal).Count() == 2);
+        Assert(ui.ShowAgent("frontier-one", run.RunId).Agent!.Agent.AgentId == "frontier-one");
+        Assert(ui.ShowAgent("frontier-two", run.RunId).Agent!.Agent.AgentId == "frontier-two");
+    }
+
+    public static void CanonicalAgentRouteDoesNotDependOnDisplayText()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "canonical-agent-route",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "package-alias",
+            "Changed display",
+            agentId: "canonical-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.frontier",
+                "Changed display"));
+        agent.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityAgentView detail =
+            ui.ShowAgent("mod:com.example.frontier", run.RunId).Agent!;
+
+        AssertEqual("canonical-agent", detail.Agent.AgentId);
+        AssertEqual("mod:com.example.frontier", detail.Agent.CanonicalEntityId);
+    }
+
+    public static void AgentWithActivityShowsRecentActivity()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "agent-activity-detail",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.activity", "Activity");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Research,
+            AgentEventTypes.FileInspected,
+            "Inspected activity source.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityAgentView detail = ui.ShowAgent(agent.AgentId, run.RunId).Agent!;
+        Assert(detail.RecentActivity.Count > 0);
+        Assert(detail.RecentActivity.Any(row => row.Event.AgentId == agent.AgentId));
+        Assert(detail.Agent.LastActivityAt is not null);
+    }
+
+    public static void AgentWithoutDetailHistoryShowsExplicitEmptyState()
+    {
+        using var store = new AgentObservabilityStore();
+        const string runId = "agent-empty-detail";
+        const string agentId = "empty-agent";
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = runId,
+            AgentId = agentId,
+            SessionId = "empty-session",
+            ModId = "mod.empty",
+            ModName = "Empty Agent",
+            DisplayName = "Empty Agent",
+            EntityType = ObservabilityEntityTypes.Mod,
+            CanonicalEntityId = "mod:empty",
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiSnapshot snapshot = ui.ShowAgent(agentId, runId);
+
+        Assert(snapshot.Agent is not null);
+        AssertEqual(
+            "No activity has been reported for this agent yet.",
+            snapshot.Agent!.EmptyState);
+        Assert(!string.IsNullOrWhiteSpace(snapshot.EmptyState));
+    }
+
+    public static void NewActivityAppearsForSelectedAgentWithoutRefresh()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "selected-agent-live-activity",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.live-agent", "Live Agent");
+        agent.Start();
+        using var ui = new AgentObservabilityUi(store);
+        ui.ShowAgent(agent.AgentId, run.RunId);
+
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "New live activity.");
+        AgentObservabilityAgentView detail = ui.Snapshot.Agent!;
+
+        Assert(detail.RecentActivity.Any(row => row.Activity == "New live activity."));
+    }
+
+    public static void SelectedAgentStatusUpdatesLive()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "selected-agent-live-status",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.live-status", "Live Status");
+        agent.Start();
+        using var ui = new AgentObservabilityUi(store);
+        ui.ShowAgent(agent.AgentId, run.RunId);
+
+        agent.Complete();
+        AgentObservabilityAgentView detail = ui.Snapshot.Agent!;
+
+        AssertEqual(AgentStatus.Completed, detail.Agent.Status);
+        AssertEqual(AgentCompletionState.Succeeded, detail.Agent.CompletionState);
+    }
+
+    public static void MalformedAgentRouteShowsDiagnosticState()
+    {
+        using var store = new AgentObservabilityStore();
+        using var ui = new AgentObservabilityUi(store);
+
+        AgentObservabilityUiSnapshot snapshot = ui.ShowAgent("missing-agent", "missing-run");
+
+        AssertEqual(AgentObservabilityUiView.Agent, snapshot.View);
+        Assert(snapshot.Agent is null);
+        Assert(!string.IsNullOrWhiteSpace(snapshot.EmptyState));
+        Assert(snapshot.EmptyState!.Contains("not found", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static void AgentSelectionSurvivesStoreReloadByCanonicalIdentity()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-agent-selection-reload-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            const string runId = "agent-selection-reload";
+            const string agentId = "reload-agent";
+            using (var writer = new AgentObservabilityStore(directory))
+            {
+                writer.RegisterAgent(new AgentSnapshot
+                {
+                    RunId = runId,
+                    AgentId = agentId,
+                    SessionId = "reload-session",
+                    ModId = "frontier-alias",
+                    ModName = "Frontier",
+                    DisplayName = "Frontier",
+                    EntityType = ObservabilityEntityTypes.Mod,
+                    CanonicalEntityId = "mod:com.example.frontier",
+                    StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                });
+            }
+
+            using var reader = new AgentObservabilityStore(directory);
+            using var ui = new AgentObservabilityUi(reader);
+            AgentObservabilityUiSnapshot snapshot =
+                ui.ShowAgent("mod:com.example.frontier", runId);
+
+            Assert(snapshot.Agent is not null);
+            AssertEqual(agentId, snapshot.Selection.View.AgentId);
+            AssertEqual("mod:com.example.frontier", snapshot.Agent!.Agent.CanonicalEntityId);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public static void DesktopFrontierClickShowsAgentDetailPanel()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "desktop-frontier-click",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("Frontier", "Frontier");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Frontier validation failed.",
+            new { operationKey = "validation:frontier", exitCode = 1 });
+
+        using var form = new ObservabilityMainForm(store);
+        form.Show();
+        Application.DoEvents();
+        Button button = form.Controls
+            .OfType<FlowLayoutPanel>()
+            .Single()
+            .Controls
+            .OfType<Panel>()
+            .SelectMany(panel => panel.Controls.OfType<Button>())
+            .Single(value => value.Text == "! Frontier");
+        button.PerformClick();
+
+        Control agentPanel = (Control)typeof(ObservabilityMainForm)
+            .GetField("agentPanel", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(form)!;
+        TabControl tabs = Descendants(agentPanel).OfType<TabControl>().Single();
+        ListView activity = Descendants(agentPanel)
+            .OfType<ListView>()
+            .Single(value => value.Columns.Count == 4 &&
+                value.Columns[2].Text == "Activity");
+        TextBox details = tabs.TabPages[0].Controls.OfType<TextBox>().Single();
+
+        Assert(agentPanel.Parent is not null, "agent detail panel must be attached");
+        Assert(agentPanel.Visible, "agent detail panel must be visible");
+        Assert(activity.Items.Count > 0, "Frontier detail must render activity rows");
+        Assert(!string.IsNullOrWhiteSpace(details.Text), "Frontier detail must render content");
+    }
+
+    private static IEnumerable<Control> Descendants(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            yield return child;
+            foreach (Control descendant in Descendants(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    public static void ToolDetailWithDataUsesCanonicalToolIdentity()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "tool-detail-data",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession tool = run.CreateAgent(
+            "tool-alias",
+            "RimLiaison",
+            agentId: "tool-detail-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"));
+        tool.Start();
+        tool.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "Tool validation started.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.EntityType == ObservabilityEntityTypes.Tool);
+        AgentObservabilityAgentView detail =
+            ui.ShowAgent(tab.CanonicalEntityId!, tab.RunId).Agent!;
+
+        AssertEqual(ObservabilityEntityTypes.Tool, detail.Agent.EntityType);
+        AssertEqual("tool:rimliaison", detail.Agent.CanonicalEntityId);
+        Assert(detail.RecentActivity.Any(row => row.Activity == "Tool validation started."));
+    }
+
+    public static void ToolDetailWithoutDataShowsExplicitEmptyState()
+    {
+        using var store = new AgentObservabilityStore();
+        const string runId = "tool-detail-empty";
+        store.RegisterAgent(new AgentSnapshot
+        {
+            RunId = runId,
+            AgentId = "tool-empty-agent",
+            SessionId = "tool-empty-session",
+            ModId = "RimContext",
+            ModName = "RimContext",
+            DisplayName = "RimContext",
+            EntityType = ObservabilityEntityTypes.Tool,
+            CanonicalEntityId = "tool:rimcontext",
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiSnapshot snapshot =
+            ui.ShowAgent("tool:rimcontext", runId);
+
+        Assert(snapshot.Agent is not null);
+        AssertEqual(
+            "No activity has been reported for this agent yet.",
+            snapshot.Agent!.EmptyState);
+        Assert(!string.IsNullOrWhiteSpace(snapshot.EmptyState));
+    }
+
+    public static void DuplicateDisplayNamesAcrossEntityTypesStaySeparate()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "cross-namespace-display-name",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession mod = run.CreateAgent(
+            "mod.rimliaison",
+            "RimLiaison",
+            agentId: "mod-name-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "mod.rimliaison",
+                "RimLiaison"));
+        using AgentObservabilitySession tool = run.CreateAgent(
+            "tool-alias",
+            "RimLiaison",
+            agentId: "tool-name-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForTool(
+                "rimliaison",
+                "RimLiaison"));
+        mod.Start();
+        tool.Start();
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem[] tabs = ui.Snapshot.Navigation.Items
+            .Where(item => item.FullLabel == "RimLiaison")
+            .ToArray();
+
+        AssertEqual(2, tabs.Length);
+        Assert(tabs.Any(item => item.EntityType == ObservabilityEntityTypes.Mod));
+        Assert(tabs.Any(item => item.EntityType == ObservabilityEntityTypes.Tool));
+        foreach (AgentObservabilityUiNavigationItem tab in tabs)
+        {
+            AgentObservabilityAgentView detail =
+                ui.ShowAgent(tab.CanonicalEntityId!, tab.RunId).Agent!;
+            AssertEqual(tab.EntityType, detail.Agent.EntityType);
+            AssertEqual(tab.CanonicalEntityId, detail.Agent.CanonicalEntityId);
+        }
+    }
+
+    public static void RepeatedEntitySwitchingDoesNotLeakDetailState()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "repeated-entity-switch",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession alpha = run.CreateAgent("mod.alpha", "Alpha");
+        using AgentObservabilitySession beta = run.CreateAgent("mod.beta", "Beta");
+        using AgentObservabilitySession tool = run.CreateAgent(
+            "tool-alias",
+            "RimLiaison",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"));
+        alpha.Start();
+        beta.Start();
+        tool.Start();
+        alpha.Record(DevelopmentStage.Research, AgentEventTypes.FileInspected, "Alpha only.");
+        beta.Record(DevelopmentStage.Testing, AgentEventTypes.TestStarted, "Beta only.");
+        tool.Record(DevelopmentStage.Testing, AgentEventTypes.CommandStarted, "Tool only.");
+
+        using var ui = new AgentObservabilityUi(store);
+        for (int index = 0; index < 4; index++)
+        {
+            AgentObservabilityAgentView alphaView =
+                ui.ShowAgent(alpha.AgentId, run.RunId).Agent!;
+            Assert(alphaView.RecentActivity.All(row => row.Event.AgentId == alpha.AgentId));
+            AgentObservabilityAgentView toolView =
+                ui.ShowAgent(tool.CanonicalEntityId, run.RunId).Agent!;
+            Assert(toolView.RecentActivity.All(row => row.Event.AgentId == tool.AgentId));
+            AgentObservabilityAgentView betaView =
+                ui.ShowAgent(beta.AgentId, run.RunId).Agent!;
+            Assert(betaView.RecentActivity.All(row => row.Event.AgentId == beta.AgentId));
+        }
+
+        beta.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Beta live update.");
+        AgentObservabilityAgentView finalBeta = ui.Snapshot.Agent!;
+        Assert(finalBeta.RecentActivity.Any(row => row.Activity == "Beta live update."));
+        Assert(finalBeta.RecentActivity.All(row => row.Event.AgentId == beta.AgentId));
+    }
+
+    public static void DesktopMalformedSelectionShowsDiagnosticInsteadOfBlank()
+    {
+        using var store = new AgentObservabilityStore();
+        using var form = new ObservabilityMainForm(store);
+        form.Show();
+        Application.DoEvents();
+
+        AgentObservabilityUi ui = (AgentObservabilityUi)typeof(ObservabilityMainForm)
+            .GetField("observabilityUi", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(form)!;
+        AgentObservabilityUiSnapshot snapshot = ui.ShowAgent("missing-agent", "missing-run");
+        typeof(ObservabilityMainForm)
+            .GetMethod("RefreshFromSnapshot", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(form, [snapshot]);
+
+        Control agentPanel = (Control)typeof(ObservabilityMainForm)
+            .GetField("agentPanel", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(form)!;
+        TabControl tabs = Descendants(agentPanel).OfType<TabControl>().Single();
+        TextBox details = tabs.TabPages[0].Controls.OfType<TextBox>().Single();
+
+        Assert(agentPanel.Visible);
+        Assert(details.Text.Contains("not found", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static void CanonicalModTabLoadsAliasActivityAndRealEmptyState()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "canonical-mod-tab",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession activity = run.CreateAgent(
+            "package-alias",
+            "Example Mod",
+            agentId: "example-agent",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.mod",
+                "Example Mod"));
+        activity.Start();
+        activity.Record(
+            DevelopmentStage.Research,
+            AgentEventTypes.FileInspected,
+            "Activity stored under a raw package alias.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityAgentView detail =
+            ui.ShowAgent("mod:com.example.mod", run.RunId).Agent!;
+        AssertEqual("mod:com.example.mod", detail.Agent.CanonicalEntityId);
+        Assert(detail.RecentActivity.Any(row =>
+            row.Activity == "Activity stored under a raw package alias."));
+
+        AgentSnapshot empty = new()
+        {
+            RunId = "canonical-empty",
+            AgentId = "canonical-empty-agent",
+            SessionId = "canonical-empty-session",
+            ModId = "empty-alias",
+            ModName = "Empty Mod",
+            EntityType = ObservabilityEntityTypes.Mod,
+            CanonicalEntityId = "mod:com.example.empty",
+            DisplayName = "Empty Mod",
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+        store.RegisterAgent(empty);
+        AgentObservabilityUiSnapshot emptySnapshot =
+            ui.ShowAgent("mod:com.example.empty", empty.RunId);
+        AssertEqual(
+            "No activity has been reported for this agent yet.",
+            emptySnapshot.Agent!.EmptyState);
+    }
+
+    public static void PersistedWorkingStateIsReconciledOnRestart()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-lifecycle-restart-" + Guid.NewGuid().ToString("N"));
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        try
+        {
+            using (var writer = new AgentObservabilityStore(directory))
+            {
+                writer.RegisterAgent(new AgentSnapshot
+                {
+                    RunId = "restart-stale",
+                    AgentId = "restart-stale-agent",
+                    SessionId = "restart-stale-session",
+                    ModId = "mod.restart",
+                    ModName = "Restart Mod",
+                    Status = AgentStatus.Running,
+                    StartTime = now - 60_000
+                });
+            }
+
+            using var reader = new AgentObservabilityStore(
+                directory,
+                new AgentObservabilityOptions
+                {
+                    WorkingStalenessThreshold = TimeSpan.FromSeconds(1)
+                },
+                nowMilliseconds: () => now);
+            AgentSnapshot reconciled = reader.GetAgents().Single();
+            Assert(reconciled.Status is AgentStatus.Failed or AgentStatus.Completed);
+            AssertEqual(AgentCompletionState.Cancelled, reconciled.CompletionState);
+            AssertEqual("STALE", reconciled.CompletionResult);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static AgentSnapshot IdentityAgent(
+        string runId,
+        string agentId,
+        ObservabilityEntityIdentity identity,
+        string workloadKind = "production",
+        string? qualificationProfile = null) =>
+        new()
+        {
+            RunId = runId,
+            AgentId = agentId,
+            SessionId = "session-" + agentId,
+            ModId = identity.DisplayName,
+            ModName = identity.DisplayName,
+            EntityType = identity.EntityType,
+            CanonicalEntityId = identity.CanonicalEntityId,
+            DisplayName = identity.DisplayName,
+            WorkloadKind = workloadKind,
+            QualificationProfile = qualificationProfile,
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+
+
+    public static void UnknownAgentIdentityUsesOccurrenceFallback()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "unknown-agent-run",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession session = run.CreateAgent("mod.unknown", "Unknown");
+        session.Start();
+        for (int index = 0; index < 96; index++)
+        {
+            session.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.CommandFailed,
+                "Repeated command failure.",
+                new { operationKey = "command:repeated", errorCode = "REPEATED_FAILURE", exitCode = 1 });
+        }
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityIssueRow row = ui.ShowIssues().Issues!.Issues
+            .Single(value => value.Issue.Category == AgentIssueCategory.Error);
+        AssertEqual(0, row.SharedAgentCount);
+        Assert(row.OccurrenceCount >= 96, "repeated events must remain occurrences, not agents");
+    }
+
+    public static void RecommendationDuplicateArrivesLive()
+    {
+        using var store = new AgentObservabilityStore();
+        using var firstRun = new AgentObservabilityRun(
+            "recommendation-live-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "mod.live-recommendation",
+            "Live Recommendation",
+            logicalAgentId: "logical-live-first");
+        first.Start();
+        first.RecordToolingRecommendation(
+            "validation:live",
+            "Improve live validation.",
+            "Run the live validation.",
+            "RimLiaison",
+            null,
+            affectedCurrentTask: false);
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(1, ui.ShowRecommendations().Recommendations!.Recommendations.Count);
+
+        using var secondRun = new AgentObservabilityRun(
+            "recommendation-live-second",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "mod.live-recommendation",
+            "Live Recommendation",
+            logicalAgentId: "logical-live-second");
+        second.Start();
+        second.RecordToolingRecommendation(
+            " VALIDATION:LIVE ",
+            "Improve live validation.",
+            "Run the live validation.",
+            "RimLiaison",
+            null,
+            affectedCurrentTask: false);
+
+        AgentObservabilityRecommendationRow row =
+            ui.Snapshot.Recommendations!.Recommendations.Single();
+        AssertEqual(2, row.Occurrences.Count);
+    }
+
+    public static void IssueDuplicateArrivesLive()
+    {
+        using var store = new AgentObservabilityStore();
+        using var firstRun = new AgentObservabilityRun(
+            "issue-live-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "mod.live-issue",
+            "Live Issue",
+            logicalAgentId: "logical-live-first");
+        first.Start();
+        first.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Live command failed.",
+            new { operationKey = "command:live", errorCode = "LIVE_FAILURE", exitCode = 1 });
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(1, ui.ShowIssues().Issues!.Issues.Count);
+
+        using var secondRun = new AgentObservabilityRun(
+            "issue-live-second",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "mod.live-issue",
+            "Live Issue",
+            logicalAgentId: "logical-live-second");
+        second.Start();
+        second.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Live command failed.",
+            new { operationKey = "command:live", errorCode = "LIVE_FAILURE", exitCode = 1 });
+
+        AgentObservabilityIssueRow row = ui.Snapshot.Issues!.Issues.Single();
+        AssertEqual(2, row.Occurrences.Count);
+    }
+
     private static void RecordSharedFailure(
         AgentObservabilitySession agent,
         string suffix)
@@ -1191,6 +2744,23 @@ internal static class DesktopObservabilityTests
                 exitCode = 1
             });
     }
+
+    private static AgentSnapshot TestAgent(
+        string runId,
+        string agentId,
+        string modName,
+        long startTime,
+        string? logicalAgentId = null) =>
+        new()
+        {
+            RunId = runId,
+            AgentId = agentId,
+            LogicalAgentId = logicalAgentId,
+            SessionId = "session-" + agentId,
+            ModId = "mod." + modName.ToLowerInvariant(),
+            ModName = modName,
+            StartTime = startTime
+        };
 
     private static AgentSnapshot LegacyAgent(string runId, string agentId) =>
         new()

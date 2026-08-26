@@ -1,3 +1,5 @@
+using RimDev.Contracts;
+
 namespace RimError.Core;
 
 /// <summary>
@@ -21,6 +23,14 @@ public sealed class RimErrorService
             .ConfigureAwait(false);
         return await CompleteAsync(request, ingestion, cancellationToken)
             .ConfigureAwait(false);
+    }
+    public ValueTask<StructuredFailureDiagnosisResult> DiagnoseAsync(
+        FailureEvidencePacket packet,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(packet);
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(FailurePacketDiagnosis.Diagnose(packet));
     }
 
     public async ValueTask<RimErrorIngestResult> IngestFilesAsync(

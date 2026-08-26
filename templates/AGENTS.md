@@ -1,17 +1,57 @@
 # RimWorld Development
 
-Use `rimliaison` as the workflow entrypoint. `rimtest` remains a silent compatibility alias for
-older target repositories and automation.
+Use the narrow Golden Path for ordinary mod-development tasks:
 
-Active edit loop:
+1. Run `rimliaison preflight --json`.
+2. Establish task and repository requirements.
+3. Edit the mod.
+4. Run `rimliaison golden-path --json` (also available as `rimliaison develop --json`).
 
-1. Edit the smallest necessary change.
-2. Run `rimliaison affected --run --fail-fast --json`.
-3. Fix the first failure immediately and repeat.
+Golden Path owns affected selection, build/deploy, Quicktest startup/readiness when required,
+supported runtime validation, evidence, classification, Observability publication, and the
+completion result. Continuously rely on structured production state; do not scrape natural-language
+output.
 
-Once the change is stable, run `rimliaison affected --run --json` as the complete pre-submit
-validation. A fail-fast PASS still proves that every selected test executed; it only shortens a
-failure path.
+Do not independently redesign, patch, or mutate supporting tooling repositories during a mod task.
+RimLiaison may perform one bounded safe recovery retry. Persistent infrastructure problems become
+separate structured incidents/recommendations. Continue unaffected validation and finish the mod
+whenever defined requirements and REQUIRED validation permit it.
+
+For a short edit loop when preflight is already known:
+
+```text
+rimliaison affected --run --fail-fast --json
+```
+
+Once stable, run the complete Golden Path.
+
+For content-development tasks, provide only the semantic input that cannot be inferred:
+
+```text
+rimliaison affected --run --content-kind ThingDef --content-role "early-game ranged weapon" --json
+```
+
+RimLiaison automatically captures `content-blueprint/v1` before selection and `content-evidence/v1`
+after validation. Phase 2 fingerprints structure before reuse, requires independent objective
+qualification and historical replay, and promotes only data-only archetypes. Attributable failures
+quarantine the active archetype while preserving usage evidence; fallback is
+`RimContent -> precedent -> vanilla/reference -> novel`. Project exclusions, private assumptions,
+and constraints remain local.
+
+Query shared proven references with:
+
+```text
+rimliaison content query --content-kind ThingDef --content-role "early-game ranged weapon" --json
+```
+
+Use `rimctx content` only for direct static drill-down. Do not manually copy source into precedent
+records; the system stores bounded metadata and stable source references.
+
+The desktop Content Intelligence projection is incremental and bounded. It groups sessions by
+durable `logicalAgentId`, retains run/session drill-down, and reports only exact recorded elapsed
+and token metrics; unavailable values stay unavailable. Emergency quarantine, rollback, project
+exclusion, and source-ineligibility controls write audit events and never replace normal validation
+or add an approval gate.
 
 Run `rimliaison doctor --json` only when readiness is unknown. If it is blocked, follow its JSON
 `nextAction` and use `rimliaison init --json` with the explicit missing manifest values until it

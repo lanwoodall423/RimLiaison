@@ -20,8 +20,15 @@ goto run_compiled
 :run_compiled
 "%OBSERVABILITY_EXE%"
 set "OBSERVABILITY_EXIT=%ERRORLEVEL%"
+if not "%OBSERVABILITY_EXIT%"=="0" goto executable_failed
 popd
-endlocal & exit /b %OBSERVABILITY_EXIT%
+endlocal & exit /b 0
+
+:executable_failed
+echo The RimLiaison Observability UI exited unsuccessfully.
+echo Exit code: %OBSERVABILITY_EXIT%
+popd
+goto finish_with_pause
 
 :dotnet_missing
 echo The observability UI is not built and the .NET 8 SDK was not found.

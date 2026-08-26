@@ -7,4 +7,7 @@
     <RootNamespace>RimError.Core</RootNamespace>
     <AssemblyName>RimError.Core</AssemblyName>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
+  </ItemGroup>
 </Project>

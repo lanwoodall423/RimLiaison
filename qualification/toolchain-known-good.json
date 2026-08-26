@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "rimliaison-toolchain-manifest/v1",
+  "version": "2025.02.qualification.1",
+  "state": "promoted",
+  "profile": "burn-in-25",
+  "components": {
+    "rimliaison": "repository-qualified-head",
+    "rimcontext": "repository-qualified-head",
+    "rimerror": "repository-qualified-head",
+    "devbridge2": "stack-managed-compatible",
+    "rimbridgeserver": "stack-managed-compatible"
+  },
+  "promotionCriteria": [
+    "all deterministic qualification scenarios pass",
+    "25 consecutive Golden Path burn-in runs pass",
+    "zero unexplained infrastructure failures",
+    "restart and recovery coverage passes",
+    "clean-start qualification passes",
+    "parallel coverage passes when supported"
+  ],
+  "qualificationArtifact": ".rimdev/qualification/latest.json",
+  "updatedAt": "2025-02-01T00:00:00Z"
+}

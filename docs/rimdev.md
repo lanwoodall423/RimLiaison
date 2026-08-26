@@ -25,13 +25,14 @@ make the set and deployment metadata explicit with `.rimdev/workspace.json`:
 ```json
 {
   "schemaVersion": "rimdev-workspace/v1",
-  "deploymentRoot": "..\\1.6\\Mods",
+  "deploymentRoot": "Staging",
   "repositories": [
     {
-      "path": "Frontier",
+      "path": "Repos/Frontier",
       "dependsOn": [],
-      "deploymentTarget": "Frontier\\Assemblies\\Frontier.dll",
-      "buildProject": "Source\\Frontier.csproj",
+      "deploymentRoot": "Staging/Frontier",
+      "deploymentTarget": "1.6/Assemblies/Frontier.dll",
+      "buildProject": "Source/Frontier.csproj",
       "configuration": "Release"
     }
   ]

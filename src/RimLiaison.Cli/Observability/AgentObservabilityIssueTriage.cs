@@ -239,8 +239,17 @@ public static class AgentObservabilityIssueTriageBuilder
             : AgentObservabilityData.GetString(lastSuccess.Data, "operationKey") ??
               AgentObservabilityData.GetString(lastSuccess.Data, "operation") ??
               lastSuccess.Summary;
-        bool blocked = issue.Category == AgentIssueCategory.CapabilityGap ||
-            !issue.Recovered && agent is not null && agent.Status != AgentStatus.Completed;
+        bool optionalUnavailable =
+            issue.Category == AgentIssueCategory.OptionalValidationUnavailable;
+        bool nonBlocking = optionalUnavailable ||
+            issue.Category is AgentIssueCategory.ToolingImprovement or
+                AgentIssueCategory.InformationalProductionEvent or
+                AgentIssueCategory.ToolLimitation;
+        bool blocked = issue.Blocking ||
+            (!nonBlocking &&
+                !issue.Recovered &&
+                agent is not null &&
+                agent.Status != AgentStatus.Completed);
         string? capabilityId = issue.CapabilityId ??
             FirstValue(supportingEvents, ["requiredCapabilityId", "capabilityId"]);
         return new AgentObservabilityIssueTriage
@@ -250,8 +259,14 @@ public static class AgentObservabilityIssueTriageBuilder
                     "Validation blocked: required capability " + (capabilityId ?? "unknown") +
                     " is unavailable. No product failure was observed.",
                     512)
-                : AgentObservabilityData.BoundText(issue.Summary, 512),
-            AttemptedOperation = issue.Category == AgentIssueCategory.CapabilityGap
+                : optionalUnavailable
+                    ? AgentObservabilityData.BoundText(
+                        "Optional validation unavailable: " + (capabilityId ?? "unknown") +
+                        ". No product failure was observed.",
+                        512)
+                    : AgentObservabilityData.BoundText(issue.Summary, 512),
+            AttemptedOperation = issue.Category is AgentIssueCategory.CapabilityGap or
+                    AgentIssueCategory.OptionalValidationUnavailable
                 ? "Validation capability preflight (recipe execution not attempted)"
                 : AgentObservabilityData.BoundText(operation, 512) is { Length: > 0 } value
                     ? value

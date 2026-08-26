@@ -8,6 +8,7 @@ internal enum CliCommand
     List,
     ShowTest,
     Suites,
+    SuiteRun,
     ShowSuite,
     Validate,
     RunTest,
@@ -15,15 +16,18 @@ internal enum CliCommand
     RecipePlan,
     RecipeRun,
     Affected,
-    SuiteRun,
+    GoldenPath,
     Capabilities,
     UiTargets,
     UiScreenshot,
     Doctor,
+    Preflight,
     Init,
     Context,
     PublishCheck,
     Benchmarks,
+    Qualification,
+    Content,
     RimDev
 }
 
@@ -73,7 +77,13 @@ internal sealed record CliRequest(
     bool FallbackSuiteExplicit,
     bool DevBridgeProjectExplicit,
     StackManifestResolution StackManifest,
-    bool HelpRequested);
+    int QualificationRuns,
+    string? QualificationOutputPath,
+    bool HelpRequested,
+    string? ContentKind,
+    string? ContentRole,
+    string? ContentReuseSource,
+    int ContentMaxBytes);
 
 internal sealed class CliParseException : Exception
 {
@@ -136,6 +146,12 @@ internal static class CliParser
         bool rimDevJson = false;
         bool helpRequested = false;
         var dependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
+        int qualificationRuns = 1;
+        string? qualificationOutputPath = null;
+        string? contentKind = null;
+        string? contentRole = null;
+        string? contentReuseSource = null;
+        int contentMaxBytes = 65_536;
         var positionals = new List<string>();
 
         for (int index = 0; index < args.Count; index++)
@@ -234,11 +250,14 @@ internal static class CliParser
                 case "--lease":
                     uiLeaseId = ReadOptionValue(args, ref index, argument);
                     break;
-                case "--check-input":
-                    uiInputCheck = true;
+                case "--content-kind":
+                    contentKind = ReadOptionValue(args, ref index, argument);
                     break;
-                case "--explain":
-                    explain = true;
+                case "--content-role":
+                    contentRole = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--content-reuse-source":
+                    contentReuseSource = ReadOptionValue(args, ref index, argument);
                     break;
                 case "--verbose":
                     contextVerbose = true;
@@ -280,6 +299,20 @@ internal static class CliParser
                 case "--yes":
                 case "--confirm":
                     rimDevConfirm = true;
+                    break;
+                case "--runs":
+                    string runsValue = ReadOptionValue(args, ref index, argument);
+                    if (!int.TryParse(runsValue, out qualificationRuns) || qualificationRuns < 1)
+                    {
+                        throw new CliParseException("Option --runs must be a positive integer.");
+                    }
+                    break;
+                case "--qualification-output":
+                    qualificationOutputPath = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--max-bytes":
+                    contentMaxBytes = ReadPositiveBoundedInt(
+                        args, ref index, argument, 256, 1_048_576);
                     break;
                 case "--json":
                     // RimLiaison's machine-readable contract is the default;
@@ -354,7 +387,13 @@ internal static class CliParser
                 fallbackSuiteExplicit,
                 devBridgeProjectExplicit,
                 stackManifest,
-                true);
+                qualificationRuns,
+                qualificationOutputPath,
+                true,
+                contentKind,
+                contentRole,
+                contentReuseSource,
+                contentMaxBytes);
         }
 
         if (positionals.Count == 0)
@@ -386,11 +425,30 @@ internal static class CliParser
             case "affected" when positionals.Count >= 1:
                 command = CliCommand.Affected;
                 break;
+            case "golden-path" when positionals.Count == 1:
+            case "develop" when positionals.Count == 1:
+                command = CliCommand.GoldenPath;
+                break;
+            case "preflight" when positionals.Count == 1:
+                command = CliCommand.Preflight;
+                break;
             case "doctor" when positionals.Count == 1:
                 command = CliCommand.Doctor;
                 break;
             case "context" when positionals.Count == 1:
                 command = CliCommand.Context;
+                break;
+            case "content" when positionals.Count == 1:
+                command = CliCommand.Content;
+                break;
+            case "content" when positionals.Count == 2 &&
+                string.Equals(positionals[1], "query", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.Content;
+                break;
+            case "content" when positionals.Count == 3 &&
+                string.Equals(positionals[1], "query", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.Content;
+                id = positionals[2];
                 break;
             case "publish" when positionals.Count == 2 &&
                 string.Equals(positionals[1], "check", StringComparison.OrdinalIgnoreCase):
@@ -440,6 +498,12 @@ internal static class CliParser
                 command = ParseRecipeCommand(positionals[2]);
                 id = positionals[3];
                 break;
+            case "qualification" when positionals.Count is 1 or 2 &&
+                (positionals.Count == 1 ||
+                    string.Equals(positionals[1], "burn-in", StringComparison.OrdinalIgnoreCase)):
+                command = CliCommand.Qualification;
+                id = positionals.Count == 2 ? "burn-in" : "qualification";
+                break;
             case "list":
             case "show":
             case "suites":
@@ -449,6 +513,9 @@ internal static class CliParser
             case "recipe":
             case "test":
             case "affected":
+            case "golden-path":
+            case "develop":
+            case "preflight":
             case "doctor":
             case "context":
             case "publish":
@@ -457,23 +524,26 @@ internal static class CliParser
             case "capabilities":
             case "ui":
             case "init":
+            case "qualification":
+            case "content":
                 throw new CliParseException("The command arguments are invalid.");
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
         }
 
         if (fallbackSuite is null &&
-            command is (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context or CliCommand.Init))
+            command is (CliCommand.Affected or CliCommand.GoldenPath or CliCommand.Preflight or
+                CliCommand.Doctor or CliCommand.Context or CliCommand.Init))
         {
             fallbackSuite = stackManifest.Manifest?.FallbackSuite;
         }
 
         if (command is not (CliCommand.Affected or CliCommand.Doctor or
-                CliCommand.Capabilities or CliCommand.Init) &&
+                CliCommand.Capabilities or CliCommand.Init or CliCommand.Content) &&
             (explain || depthSpecified || limitSpecified || runSelected))
         {
             throw new CliParseException(
-                "RimContext selection options are only valid for affected.");
+                "RimContext selection options are only valid for affected or content.");
         }
 
         if (affectedBase is not null &&
@@ -593,6 +663,18 @@ internal static class CliParser
             throw new CliParseException("--manifest-only is only valid for init.");
         }
 
+        if (contentMaxBytes != 65_536 && command != CliCommand.Content)
+        {
+            throw new CliParseException("--max-bytes is only valid for content.");
+        }
+
+        if ((contentKind is not null || contentRole is not null || contentReuseSource is not null) &&
+            command is not (CliCommand.Affected or CliCommand.GoldenPath or CliCommand.Content))
+        {
+            throw new CliParseException(
+                "Content blueprint options are only valid for affected, golden-path, or content.");
+        }
+
         if (command != CliCommand.RimDev &&
             (rimDevRootPath is not null || rimDevConfirm))
         {
@@ -609,13 +691,13 @@ internal static class CliParser
             throw new CliParseException("--yes/--confirm is only valid for rimdev merge.");
         }
 
-        if (command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context) &&
+        if (command is not (CliCommand.Affected or CliCommand.Doctor or CliCommand.Context or CliCommand.Content) &&
             (rimContextPath is not null ||
              rimContextRootPath is not null ||
              rimContextStorePath is not null))
         {
             throw new CliParseException(
-                "RimContext configuration options are only valid for affected, doctor, or context.");
+                "RimContext configuration options are only valid for affected, doctor, context, or content.");
         }
 
         if (catalogPath is null)
@@ -674,9 +756,7 @@ internal static class CliParser
             explain,
             contextVerbose,
             affectedBase,
-            positionals
-                .Skip(1)
-                .ToArray(),
+            positionals.Skip(1).ToArray(),
             dependencyFingerprints,
             runSelected,
             failFast,
@@ -686,7 +766,13 @@ internal static class CliParser
             fallbackSuiteExplicit,
             devBridgeProjectExplicit,
             stackManifest,
-            false);
+            qualificationRuns,
+            qualificationOutputPath,
+            false,
+            contentKind,
+            contentRole,
+            contentReuseSource,
+            contentMaxBytes);
     }
 
     public static void WriteHelp(TextWriter stdout)
@@ -694,7 +780,7 @@ internal static class CliParser
         var help = new
         {
             progressiveDisclosure =
-                "Canonical loop: edit, rimliaison affected --run --fail-fast --json, inspect the result, fix immediately on failure, and repeat; once stable, run rimliaison affected --run --json for complete validation. Run rimliaison doctor --json only when readiness is unknown; affected source changes automatically build, hash, deploy when needed, establish a DevBridge generation, prove artifact freshness, and then run selected recipes. Failed recipes automatically use DevBridge's bounded generation-scoped diagnostics; do not read Player.log directly. Use rimliaison capabilities --json for live-game authoring and ui targets / ui screenshot for visual validation; add ui screenshot --viewport narrow|wide|current for transactional, lease-bound live viewport evidence.",
+                "Canonical mod path: rimliaison preflight, edit, rimliaison golden-path --json. Supporting-tool details remain in structured diagnostics.",
             commands = new[]
             {
                 "list",
@@ -705,13 +791,17 @@ internal static class CliParser
                 "validate",
                 "run <test>",
                 "affected [<changed-path> ...]",
+                "golden-path (or develop)",
+                "preflight",
                 "capabilities",
                 "ui targets",
                 "ui screenshot",
                 "doctor",
                 "context",
+                "content query [<selector>]",
                 "publish check",
                 "benchmarks",
+                "qualification [burn-in]",
                 "rimdev [status|sync|build|test|deploy|push|merge|all|help]",
                 "init",
                 "recipe show <recipe>",
@@ -733,6 +823,10 @@ internal static class CliParser
                 "--rimcontext-store <RimContext store>",
                 "--fallback-suite <suite>",
                 "--depth <1..8>",
+                "--max-bytes <256..1048576> (with content)",
+                "--content-kind <kind>",
+                "--content-role <role>",
+                "--content-reuse-source <source>",
                 "--limit <1..100>",
                 "--query <text> (with capabilities)",
                 "--category <category> (with capabilities)",
@@ -750,6 +844,8 @@ internal static class CliParser
                 "--dependency-fingerprint <name=value> (with affected validation)",
                 "--json (default output)",
                 "--run (with affected)",
+                "--runs <positive integer> (with qualification)",
+                "--qualification-output <path> (with qualification)",
                 "--fail-fast (with affected --run or suite run)",
                 "--force/--update (with init)",
                 "--manifest-only (with init)",

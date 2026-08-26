@@ -16,20 +16,31 @@ records:
   optional durable logical-agent identity, a sequence for deterministic
   ordering, lifecycle stage, summary, bounded structured data, and optional
   trace/span IDs.
-- `AgentIssue` records have stable issue IDs, run/session/mod identity, the
-  optional logical-agent identity, supporting event IDs, category, severity,
-  related tools/commands/files, retry/occurrence counts, and an explicit
-  recovery event when recovered.
-- `AgentSnapshot` exposes the logical-agent identity when available, the mod
-  display name, status, current stage/activity, start/completion state, and
-  failure state.
-
-The store supports all-event, issues-only, and agent-scoped queries. Its
-subscription callback drives the desktop presentation layer; the CLI and
-desktop both display and persist these records without a telemetry backend.
+- `AgentIssue` records have stable issue IDs, run/session/mod identity, the optional logical
+  agent identity, timestamp, category, severity, component owner, blocking state, current and
+  resolution state, concise summary, supporting event/evidence references, affected validation,
+  recommendation, related tools/commands/files, retry/occurrence counts, and an explicit recovery
+  event when recovered.
+`AgentSnapshot` exposes the logical-agent identity when available, the mod display name, status,
+current stage/activity, last credible activity timestamp, start/completion state, and failure state.
+Working state is current evidence only: an active lifecycle snapshot must have activity within the
+bounded `WorkingStalenessThreshold`; startup and reload reconcile terminal events and stale
+snapshots instead of trusting persisted `running` state.
+The store subscription callback drives the desktop presentation layer; the CLI and desktop both
+display and persist these records without a telemetry backend.
 Selected issue IDs can be converted to a bounded
 `AgentDiagnosticBundle` containing only their supporting events and related
 evidence.
+
+`AgentObservabilityIntegrityValidator.Validate` is the cheap deterministic
+development/qualification check for these invariants. A canonical entity
+identity is shared by agents, events, issues, navigation, and detail queries;
+logical-agent identity aggregates sessions and runs for lifecycle purposes;
+legacy records without a supplied logical identity remain separate rather than
+being guessed together. It reports unresolved owners, disconnected aliases,
+missing activity evidence, duplicate Working snapshots, broken issue/event
+references, and unresolvable top-level navigation instead of repairing them
+silently.
 
 Diagnostic exports use the `rimliaison-agent-diagnostic-bundle/v2` contract.
 `selectedIssueIds` and `selectedIssues` preserve the exact checkbox selection;
@@ -64,19 +75,71 @@ desktop process therefore hydrates the same persisted records written by a
 runtime process and receives cross-process updates without a local service or
 telemetry backend.
 
+## Retention and degraded state
+
+The store is bounded by `MaximumEvents`, `MaximumIssues`, `MaximumAgents`,
+`MaximumPersistedBytes`, `MaximumEvidenceEntries`, and the per-value byte limits
+in `AgentObservabilityOptions`. JSONL compaction is threshold-triggered with
+hysteresis rather than rewriting on every event; shutdown performs one final
+maintenance pass. Compaction writes a bounded temporary file and atomically
+replaces the primary file. Per-file locks serialize writers and compaction.
+
+Retention prefers unresolved issues, active agents, recent events, and evidence
+referenced by unresolved issues. Recovered issues and terminal agents remain
+available while within the configured limits; older history is the first
+candidate for removal. Missing, malformed, truncated, oversized, or temporarily
+locked records are skipped without invalidating current runtime state. The
+desktop reports this as degraded or partially unavailable state instead of
+presenting incomplete history as complete.
+
+The desktop starts with a bounded recent hydration so the window remains
+responsive. The `History` action explicitly requests older records. Live records
+continue through the watcher/fallback refresh path, and the status line exposes
+loading, delayed, and degraded storage health.
+
+Desktop startup failures are written as bounded text diagnostics under
+`%LOCALAPPDATA%\\RimLiaison\\diagnostics`, outside any repository or mod
+worktree. The UI displays that location and exits nonzero. `Open Observability
+UI.cmd` treats a nonzero compiled-UI exit as abnormal, prints the exit code,
+and pauses so the diagnostic location remains visible.
+
 An unscoped desktop view aggregates sessions from all runs in that shared
 store, including runs that arrive while the window is open. Navigation groups
-sessions by `(logicalAgentId, modId)`, so repeated sessions for one logical
-`Frontier` agent remain one tab while distinct logical agents remain separate.
-The tab represents the newest active session, or the newest finished session
-when none remain active. Callers that need a single-run history view can
-construct `AgentObservabilityUi` with an explicit `runId`; that scope is
-preserved for both initial hydration and live updates.
+top-level workspaces by `(entityType, canonicalEntityId)`, never by run,
+session, process, correlation ID, timestamp, or display name. Canonical IDs are
+trimmed, case-folded, and use `/` separators so normal Windows path spelling
+variations remain one identity. Mod workspaces use canonical mod identity;
+RimLiaison and related infrastructure use stable tooling identities. The tab
+represents the newest active session, or the newest finished session when none
+remain active. Callers that need a single-run history view can construct
+`AgentObservabilityUi` with an explicit `runId`; that scope is preserved for
+both initial hydration and live updates.
 
+The persisted entity schema is carried by each agent, event, and issue:
+`entityType`, `canonicalEntityId`, and `displayName`. The taxonomy is explicit:
+`mod`, `tool`, `infrastructure`, `fixture`, `test`, `agent`, `user`,
+`operator`, `process`, `session`, `run`, `activity`, `event`, `runtime`, and
+`unknown`. Only a structurally valid `mod:<id>` or `tool:<id>` with
+`workloadKind=production` can appear as a top-level navigation workspace;
+qualification/test records remain available in activity and diagnostics but
+cannot create production tabs. This rule is structural, not a display-name
+blacklist.
+
+Runtime/session/run identifiers remain separate fields for drill-down and
+history. Legacy records are normalized through the centralized entity resolver
+during load; known RimLiaison aliases, including `[Tool]` and temporary
+worktree/test forms, become `tool:rimliaison`. Unclassified labels remain
+`unknown` and are never promoted to a top-level workspace. Entity records are
+upgraded to the current `v2` schema during migration. When normalization or
+repeated record snapshots are found, startup rewrites the canonical JSONL files
+under their existing per-file locks. It retains distinct sessions, events, and
+issues while collapsing repeated snapshots by their existing record identity; a
+locked or read-only store is left usable in memory and retried on the next
+startup. A second startup is a no-op once the files are normalized.
 The CLI carries an upstream worker identity from
 `RIMLIAISON_LOGICAL_AGENT_ID` (or the compatibility alias
 `RIMLIAISON_WORKER_ID`) into each new session. Separate concurrent workers
-must use different values; the same value is scoped with the mod ID.
+retain different session identities beneath the same tooling workspace.
 
 ## Desktop surface
 
@@ -86,19 +149,43 @@ C#/.NET Windows toolchain and has no existing web or cross-platform frontend
 runtime to reuse. The form keeps navigation and filtering local to the
 store-backed `AgentObservabilityUi` presentation layer:
 
-One `AgentObservabilitySession` is created per mod/logical-agent pair within
-a run. A caller without an explicit identity retains the existing one-session
-per-mod behavior for that run; callers can supply distinct logical identities
-for genuinely concurrent agents working on the same mod.
+Each `AgentObservabilitySession` represents one runtime activity within a run.
+Sessions may have distinct logical worker, process, and correlation identities,
+but those values are never navigation/workspace identities.
 
-- `All` is the default chronological activity view and shows concurrent mod
-  agents together.
+- `All` is the default production overview. It groups top-level workspaces by
+  stable entity identity, shows workload (`production` or `qualification`),
+  toolchain state (`promoted` or `experimental`), current stage/operation,
+  blocking state, elapsed time, latest event, and completion outcome, while
+  retaining the chronological activity stream below.
 - `Issues` shows unresolved and recovered structured issues, supports multiple
   selection, opens supporting activity, and prepares/copies/exports assessment
-  bundles.
-- Each logical agent/mod pair gets one navigation item and an end-to-end agent
-  view with stage progress, current activity, files, tools, commands,
-  build/test results, issue state, and selectable current/past sessions.
+  bundles. Categories are rendered as mod defects, required-validation blockers,
+  tooling/infrastructure incidents, recovered incidents, or optional validation
+  gaps.
+- `Recommendations` is a separate non-blocking surface for tooling and validation
+  improvements. It shows owner, originating identity, recommendation text,
+  evidence, status, and whether production was affected; recommendations never
+  inherit failed-run styling.
+- Each `(entityType, canonicalEntityId)` gets one navigation item and an
+  end-to-end entity view with stage progress, current activity, files, tools,
+  commands, build/test results, issue state, and selectable current/past
+  sessions. Aggregated activity remains selectable by stable event ID.
+- The Issues and Recommendations surfaces accept a bounded text filter for mod,
+  tool, agent, stage, category, operation, owner, and evidence terms.
+
+The desktop presentation uses persisted Unix-millisecond timestamps from events,
+issues, and agent snapshots. Production and activity rows sort by the numeric
+timestamp descending; invalid or missing values sort last, with stable identity
+tie-breakers. Local date/time formatting is applied only after sorting.
+
+Issues and recommendations are projected as groups, not repeated display rows.
+Grouping uses a centralized identity: normalized persisted fingerprint first,
+then capability or operation identity; records without a trustworthy stable key
+remain separate. Each parent retains the newest record and exposes occurrence
+records in newest-first order. Agent-sharing counts use only distinct supplied
+logical-agent identities. Generated session/agent IDs and unknown identities do
+not become agents; those records use occurrence wording instead.
 
 The store subscription is coalesced through a bounded WinForms refresh timer,
 so new authoritative runtime events update the window without forcing the

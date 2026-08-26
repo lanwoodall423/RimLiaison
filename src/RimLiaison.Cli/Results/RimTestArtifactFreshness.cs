@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using RimDev.Contracts;
 using RimLiaison.DevBridge;
 
 namespace RimLiaison.Results;
@@ -22,7 +23,8 @@ public sealed record RimTestArtifactFreshness
     [JsonPropertyName("sourceFingerprint")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SourceFingerprint { get; init; }
-
+    [JsonIgnore]
+    public ExecutionIdentity? ExecutionIdentity { get; init; }
     [JsonPropertyName("builtArtifactSha256")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? BuiltArtifactSha256 { get; init; }
@@ -124,6 +126,28 @@ public sealed record RimTestArtifactFreshness
             LeaseId = result.LeaseId ?? result.Freshness?.LeaseId,
             LoadedArtifactFreshnessProven = result.Freshness?.LoadedArtifactFreshnessProven == true,
             Proof = result.Freshness?.Proof,
+            ExecutionIdentity = result.Freshness is null
+                ? null
+                : new ExecutionIdentity
+                {
+                    SourceFingerprint = result.Freshness.SourceFingerprint,
+                    BuildIdentity = result.Freshness.BuiltArtifactSha256,
+                    ArtifactHash = result.Freshness.DeployedArtifactSha256 ??
+                        result.Freshness.BuiltArtifactSha256,
+                    DeploymentIdentity = result.TransactionId ??
+                        result.Freshness.TransactionId,
+                    ProcessGeneration = result.Freshness.Generation ?? result.Generation,
+                    ExecutionId = result.WorkflowId
+                },
             ErrorCode = result.Freshness?.ErrorCode ?? result.Status.ErrorCode
         };
+    public ExecutionIdentity ToExecutionIdentity() => ExecutionIdentity ?? new ExecutionIdentity
+    {
+        SourceFingerprint = SourceFingerprint,
+        BuildIdentity = BuiltArtifactSha256,
+        ArtifactHash = DeployedArtifactSha256 ?? BuiltArtifactSha256,
+        DeploymentIdentity = TransactionId,
+        ProcessGeneration = Generation,
+        ExecutionId = RunId
+    };
 }

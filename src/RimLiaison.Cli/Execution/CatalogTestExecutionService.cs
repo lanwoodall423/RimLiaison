@@ -78,17 +78,39 @@ public sealed class CatalogTestExecutionService
                 target: testId,
                 scope: "test")
             .ConfigureAwait(false);
-        RimTestResult normalized = run.CapabilityPreflight is { IsBlocked: true } preflight
-            ? RimTestResultFactory.CapabilityBlocked(
+        RimTestResult normalized = run.CapabilityPreflight switch
+        {
+            { IsBlocked: true } preflight => RimTestResultFactory.CapabilityBlocked(
                 run.TestId,
                 preflight.Evidence,
                 ElapsedMilliseconds(started),
-                workflowId)
-            : RimTestResultFactory.FromRun(
+                workflowId),
+            { IsUnavailableOptional: true } preflight => RimTestResultFactory.CapabilityUnavailable(
+                run.TestId,
+                preflight.Evidence,
+                ElapsedMilliseconds(started),
+                workflowId),
+            _ => RimTestResultFactory.FromRun(
                 run.TestId,
                 run.RecipeResult,
                 ElapsedMilliseconds(started),
-                workflowId);
+                workflowId,
+                run.CapabilityPreflight is null
+                    ? null
+                    : CatalogNavigator.FindTest(catalog, run.TestId)?.ValidationClassification
+                        is ValidationClassification.REQUIRED
+                        ? null
+                        : CatalogNavigator.FindTest(catalog, run.TestId)?.ValidationClassification)
+        };
+        CatalogTest? definition = CatalogNavigator.FindTest(catalog, run.TestId);
+        if (definition is not null &&
+            definition.ValidationClassification != ValidationClassification.REQUIRED &&
+            normalized.Status == "infrastructure")
+        {
+            normalized = RimTestResultFactory.OptionalUnavailable(
+                normalized,
+                definition.ValidationClassification);
+        }
 
         if (run.RecipeResult.Status.Outcome == DevBridgeOutcomeKind.TestFailure)
         {

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using RimLiaison;
 using RimLiaison.Observability;
 
@@ -371,29 +372,121 @@ internal static class ObservabilityIsolationTests
         string directory = CreateTemporaryDirectory("rimliaison-observability-migration-");
         try
         {
-            using (var writer = new AgentObservabilityStore(directory))
+            AgentSnapshot legacyAgent = new()
             {
-                writer.RegisterAgent(new AgentSnapshot
-                {
-                    AgentId = "agent-polluted",
-                    RunId = "run-polluted",
-                    ModId = "RimLiaison-tests-3f2a",
-                    ModName = "RimLiaison-tests-3f2a",
-                    StartTime = 1
-                });
+                AgentId = "agent-polluted",
+                RunId = "run-polluted",
+                ModId = "[Tool] RimLiaison",
+                ModName = "[Tool] RimLiaison",
+                StartTime = 1
+            };
+            AgentEvent legacyEvent = new()
+            {
+                Id = "event-polluted",
+                AgentId = legacyAgent.AgentId,
+                RunId = legacyAgent.RunId,
+                ModId = "RimLiaison-tests-3f2a",
+                Type = AgentEventTypes.FileInspected,
+                Summary = "Legacy activity.",
+                Timestamp = 1,
+                Sequence = 1,
+                Stage = DevelopmentStage.Analysis
+            };
+            File.WriteAllText(
+                Path.Combine(directory, "agents.jsonl"),
+                JsonSerializer.Serialize(
+                    new { kind = "agent", value = legacyAgent },
+                    AgentObservabilityJson.Options) + Environment.NewLine);
+            File.WriteAllText(
+                Path.Combine(directory, "events.jsonl"),
+                JsonSerializer.Serialize(
+                    new { kind = "event", value = legacyEvent },
+                    AgentObservabilityJson.Options) + Environment.NewLine);
+
+            string firstAgents;
+            string firstEvents;
+            using (var reader = new AgentObservabilityStore(directory))
+            {
+                AgentSnapshot migrated = reader.GetAgents().Single();
+                AgentEvent migratedEvent = reader.GetEvents().Single();
+                AssertEqual("RimLiaison", migrated.ModId);
+                AssertEqual("tool:rimliaison", migrated.CanonicalEntityId);
+                AssertEqual("tool:rimliaison", migratedEvent.CanonicalEntityId);
+                firstAgents = File.ReadAllText(Path.Combine(directory, "agents.jsonl"));
+                firstEvents = File.ReadAllText(Path.Combine(directory, "events.jsonl"));
             }
 
-            using var reader = new AgentObservabilityStore(directory);
-            AgentSnapshot migrated = reader.GetAgents().Single();
-            AssertEqual("RimLiaison", migrated.ModId);
-            AssertEqual("agent-polluted", migrated.AgentId);
-            AssertEqual("run-polluted", migrated.RunId);
+            using (var reader = new AgentObservabilityStore(directory))
+            {
+                AssertEqual(firstAgents, File.ReadAllText(Path.Combine(directory, "agents.jsonl")));
+                AssertEqual(firstEvents, File.ReadAllText(Path.Combine(directory, "events.jsonl")));
+            }
         }
         finally
         {
             DeleteTemporaryDirectory(directory);
         }
     }
+
+    public static void QualificationRecordsPersistAsFixtureClassification()
+    {
+        string directory = CreateTemporaryDirectory("rimliaison-observability-qualification-");
+        try
+        {
+            using (var writer = new AgentObservabilityStore(directory))
+            using (var run = new AgentObservabilityRun(
+                       "qualification-persisted-run",
+                       writer,
+                       new NoopAgentObservabilityTelemetry()))
+            using (AgentObservabilitySession agent = run.CreateAgent(
+                       "rimliaison.qualification.fixture",
+                       "RimLiaison Qualification Fixture",
+                       entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"),
+                       workloadKind: "qualification",
+                       qualificationProfile: "deterministic"))
+            {
+                agent.Start();
+                agent.Complete();
+            }
+
+            string agents = File.ReadAllText(Path.Combine(directory, "agents.jsonl"));
+            Assert(agents.Contains("\"entityType\":\"fixture\"", StringComparison.Ordinal));
+            Assert(!agents.Contains("\"entityType\":\"tool\"", StringComparison.Ordinal));
+            using var reader = new AgentObservabilityStore(directory);
+            using var ui = new AgentObservabilityUi(reader);
+            AssertEqual(0, ui.Snapshot.All!.Production.Count);
+            AssertEqual(0, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(directory);
+        }
+    }
+
+    public static void ConcurrentToolAliasesRemainOneCanonicalEntity()
+    {
+        using var store = new AgentObservabilityStore();
+        Parallel.For(0, 16, index =>
+        {
+            store.RegisterAgent(new AgentSnapshot
+            {
+                AgentId = "concurrent-agent-" + index,
+                RunId = "concurrent-run-" + index,
+                SessionId = "concurrent-session-" + index,
+                ModId = index % 2 == 0
+                    ? "[Tool] RimLiaison"
+                    : "RimLiaison-worktree-" + index,
+                ModName = "RimLiaison",
+                EntityType = ObservabilityEntityTypes.Tool
+            });
+        });
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(1, ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        Assert(store.GetAgents().All(static agent =>
+            agent.CanonicalEntityId == "tool:rimliaison"));
+    }
+
     public static void CliFixtureStoreCannotWriteCanonicalRoot()
     {
         string canonical = CreateTemporaryDirectory("rimliaison-observability-canonical-");
@@ -435,6 +528,236 @@ internal static class ObservabilityIsolationTests
         }
     }
 
+    public static void IntegrityValidatorAcceptsCoherentStore()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "integrity-valid-run",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "integrity.alias",
+            "Integrity",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.integrity",
+                "Integrity"));
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Integrity activity.");
+        agent.Complete();
+
+        AgentObservabilityIntegrityReport report =
+            AgentObservabilityIntegrityValidator.Validate(store);
+        Assert(report.IsValid, string.Join(
+            "; ",
+            report.Findings.Select(static finding => finding.Code)));
+    }
+
+    public static void IntegrityValidatorReportsUnresolvedActivity()
+    {
+        string directory = CreateTemporaryDirectory("rimliaison-observability-integrity-");
+        try
+        {
+            AgentEvent orphan = new()
+            {
+                Id = "orphan-event",
+                RunId = "orphan-run",
+                AgentId = "orphan-agent",
+                ModId = "orphan-mod",
+                EntityType = ObservabilityEntityTypes.Mod,
+                CanonicalEntityId = "mod:orphan",
+                DisplayName = "Orphan",
+                Timestamp = 1,
+                Sequence = 1,
+                Stage = DevelopmentStage.Analysis,
+                Type = AgentEventTypes.FileInspected,
+                Summary = "Orphan activity."
+            };
+            File.WriteAllText(
+                Path.Combine(directory, "events.jsonl"),
+                JsonSerializer.Serialize(
+                    new { kind = "event", value = orphan },
+                    AgentObservabilityJson.Options));
+
+            using var store = new AgentObservabilityStore(directory);
+            AgentObservabilityIntegrityReport report =
+                AgentObservabilityIntegrityValidator.Validate(store);
+            Assert(report.Findings.Any(finding =>
+                finding.Code == "event.owner.unresolved"),
+                "unresolved activity must become an integrity diagnostic");
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(directory);
+        }
+    }
+
+    public static void MultiModLogicalAgentRetainsAttribution()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "multi-mod-integrity",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession alpha = run.CreateAgent(
+            "alpha-alias",
+            "Alpha",
+            logicalAgentId: "worker-multi-mod",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.alpha",
+                "Alpha"));
+        using AgentObservabilitySession beta = run.CreateAgent(
+            "beta-alias",
+            "Beta",
+            logicalAgentId: "worker-multi-mod",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.beta",
+                "Beta"));
+        alpha.Start();
+        beta.Start();
+        alpha.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Alpha-only activity.");
+        beta.Record(
+            DevelopmentStage.Implementation,
+            AgentEventTypes.FileModified,
+            "Beta-only activity.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            2,
+            ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AgentObservabilityAgentView alphaView =
+            ui.ShowAgent("mod:com.example.alpha", run.RunId).Agent!;
+        AgentObservabilityAgentView betaView =
+            ui.ShowAgent("mod:com.example.beta", run.RunId).Agent!;
+        Assert(alphaView.RecentActivity.Any(row => row.Activity == "Alpha-only activity."));
+        Assert(!alphaView.RecentActivity.Any(row => row.Activity == "Beta-only activity."));
+        Assert(betaView.RecentActivity.Any(row => row.Activity == "Beta-only activity."));
+        Assert(!betaView.RecentActivity.Any(row => row.Activity == "Alpha-only activity."));
+
+        alpha.Complete();
+        beta.Complete();
+        AssertEqual(
+            0,
+            ui.Snapshot.Navigation.Items.Count(item =>
+                item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
+    }
+
+    public static void ConcurrentCanonicalRegistrationDoesNotDuplicate()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentSnapshot snapshot = new()
+        {
+            RunId = "concurrent-canonical",
+            AgentId = "concurrent-agent",
+            SessionId = "concurrent-session",
+            ModId = "alias",
+            ModName = "Concurrent",
+            EntityType = ObservabilityEntityTypes.Mod,
+            CanonicalEntityId = "mod:com.example.concurrent",
+            DisplayName = "Concurrent",
+            Status = AgentStatus.Running,
+            StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+        Parallel.For(0, 32, _ => store.RegisterAgent(snapshot));
+        Parallel.For(0, 32, index => store.AppendEvent(new AgentEventRequest(
+            snapshot.RunId,
+            snapshot.AgentId,
+            snapshot.ModId,
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "Concurrent event " + index,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            SessionId: snapshot.SessionId)));
+
+        AssertEqual(1, store.GetAgents().Count);
+        AssertEqual(32, store.GetEvents(limit: 100).Count);
+        using var ui = new AgentObservabilityUi(store);
+        AssertEqual(
+            1,
+            ui.Snapshot.Navigation.Items.Count(static item => item.Kind == "agent"));
+        AssertEqual(32, ui.Snapshot.All!.Activity.Count);
+    }
+
+
+    public static void LifecycleReconnectKeepsOneCanonicalAgent()
+    {
+        using var store = new AgentObservabilityStore();
+        using var firstRun = new AgentObservabilityRun(
+            "lifecycle-first",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "lifecycle-alias",
+            "Lifecycle",
+            logicalAgentId: "lifecycle-worker",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.lifecycle",
+                "Lifecycle"));
+        first.Start();
+        using (AgentOperationScope operation = first.BeginOperation(
+                   "implementation",
+                   "implementation",
+                   DevelopmentStage.Implementation)!)
+        {
+            first.Record(
+                DevelopmentStage.Implementation,
+                AgentEventTypes.FileModified,
+                "First operation activity.");
+            operation.Complete("First operation complete.");
+        }
+        using (AgentOperationScope operation = first.BeginOperation(
+                   "testing",
+                   "testing",
+                   DevelopmentStage.Testing)!)
+        {
+            operation.Complete("Second operation complete.");
+        }
+        AssertEqual(AgentStatus.Running, first.Snapshot.Status);
+        first.Complete();
+        AssertEqual(AgentStatus.Completed, first.Snapshot.Status);
+
+        using var secondRun = new AgentObservabilityRun(
+            "lifecycle-reconnect",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession reconnected = secondRun.CreateAgent(
+            "lifecycle-alias",
+            "Lifecycle",
+            logicalAgentId: "lifecycle-worker",
+            entityIdentity: ObservabilityEntityIdentity.ForMod(
+                "com.example.lifecycle",
+                "Lifecycle"));
+        reconnected.Start();
+        reconnected.Record(
+            DevelopmentStage.Research,
+            AgentEventTypes.FileInspected,
+            "Reconnected activity.");
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+            .Single(item => item.Kind == "agent");
+        AssertEqual(secondRun.RunId, tab.RunId);
+        AssertEqual(AgentStatus.Running, tab.Status);
+        AssertEqual(
+            1,
+            ui.Snapshot.Navigation.Items.Count(item =>
+                item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
+        AgentObservabilityAgentView detail =
+            ui.ShowAgent("mod:com.example.lifecycle", secondRun.RunId).Agent!;
+        Assert(detail.RecentActivity.Any(row => row.Activity == "Reconnected activity."));
+        Assert(detail.RecentActivity.Any(row => row.Activity == "First operation activity."));
+
+        reconnected.Complete();
+        AssertEqual(
+            0,
+            ui.Snapshot.Navigation.Items.Count(item =>
+                item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
+    }
 
     private static void WriteGitOrigin(string root, string remote)
     {

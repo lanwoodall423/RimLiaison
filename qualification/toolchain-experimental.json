@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "rimliaison-toolchain-manifest/v1",
+  "version": "working-tree",
+  "state": "experimental",
+  "profile": "single",
+  "components": {
+    "rimliaison": "working-tree",
+    "rimcontext": "working-tree",
+    "rimerror": "working-tree",
+    "devbridge2": "stack-managed-compatible",
+    "rimbridgeserver": "stack-managed-compatible"
+  },
+  "promotionCriteria": [
+    "qualify --runs 1 for iteration",
+    "qualification burn-in --runs 25 before promotion"
+  ],
+  "qualificationArtifact": ".rimdev/qualification/latest.json",
+  "updatedAt": "2025-02-01T00:00:00Z"
+}

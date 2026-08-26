@@ -1,18 +1,28 @@
 # RimLiaison agent usage
 
-RimLiaison is the default agent-facing workflow. Use the bounded recovery entrypoint when
-readiness is unknown, then use the short feedback loop while editing:
+Use the narrow Golden Path for ordinary mod work:
 
 ```text
-rimliaison doctor --json                 # only when readiness is unknown
+rimliaison preflight --json
+establish task and repository requirements
 edit
-rimliaison affected --run --fail-fast --json
-fix immediately on failure
-repeat
-
-# once stable, run the complete pre-submit validation
-rimliaison affected --run --json
+rimliaison golden-path --json       # alias: rimliaison develop --json
 ```
+
+Golden Path coordinates affected selection, build/deploy, Quicktest readiness and runtime
+validation, evidence collection, classification, publication state, and completion. It emits
+structured production state continuously; agents should not scrape prose or repair supporting
+repositories.
+
+For an edit loop where readiness is already known, use:
+
+```text
+rimliaison affected --run --fail-fast --json
+```
+
+Once stable, run `rimliaison golden-path --json` as the complete production path. Use
+`rimliaison preflight --json` for a compact readiness answer; use `doctor` only when diagnosis
+is needed.
 
 Both affected commands own changed-file impact selection, test selection, execution,
 DevBridge2 coordination, and bounded results. It calls `RimContext.Core` and `RimError.Core`
@@ -53,6 +63,79 @@ Do not run tests manually to replace the selector, launch RimWorld outside DevBr
 DevBridge2/lease/bridge/readiness error as a mod failure. Runtime-required validation uses the
 catalog's Quicktest recipe and its artifact-freshness/generation evidence. Publication reuses
 matching evidence and does not rerun expensive validation merely because Git is being published.
+
+RimLiaison also produces a compact Execution Packet as part of preflight when the static index is
+available. Consume it before broad repository reads, expand only its `rimctx://impact/<id>` handles
+when needed, and let the affected command compare the predicted scope with the actual diff. The
+packet is byte/entry bounded, provenance-backed, revision-aware, and advisory; actual diff impact
+is authoritative for validation. A missing packet is explicit static-context unavailability, not a
+runtime or mod failure.
+
+Affected selection also emits a minimum-safe validation plan when current indexed impact is available.
+The plan is actual-diff-driven and may only add catalog-required tests to the ordinary selector result.
+Read `validationPlan.status`, `tier`, `required`, `additional`, source identity, and expansion reasons;
+`incomplete` or `broader_canonical` means stay conservative. Do not remove a required entry without
+the explicit accepted override recorded in the plan. Learned relationships are not assumptions:
+they require causal evidence, are project-local by default, and must match current source/index and
+framework/RimWorld identity. Prediction is useful for preparation, never proof of validation.
+
+Generators may emit bounded shared `rimdev-validation-requirement/v1` records beside an
+artifact. RimContext carries them into the plan without generator-specific execution code;
+runtime-required records produce compact runtime requests containing the assertion, prerequisites,
+required evidence, and excluded work. Exact current PASS evidence is attached to matching
+requirements before scheduling; source, plan, index, project, and repository identity mismatches
+never qualify for reuse.
+
+### Lifecycle observability
+
+The existing agent event stream records packet status and expansion, predicted versus actual
+impact, why validation was required, validation outcomes, stale evidence, and learned or
+administrative relationship changes. The desktop exposes these facts in the existing
+`Execution / impact / validation` agent detail tab; it does not add an approval gate. Treat
+unavailable metrics as unavailable. Stable task, project, source, index, packet, plan, relationship,
+run, session, and logical-agent identities are the correlation keys for persistent history.
+
+### Failure diagnosis and remediation precedents
+
+Validation failures are represented as bounded `rimdev-failure-packet/v1` records. The packet
+contains the failed subject, current execution identity, classification, error summary, changed
+files, affected entities, dependencies, frameworks, and references to raw stack/log evidence.
+RimError consumes this structured packet for diagnosis and reproduction/reduction guidance; it does
+not rediscover repository state, execute tests, or own lifecycle/deployment decisions.
+
+Only a completed PASS with matching repository, project, source, build, runtime, and test identity
+may be stored as a `rimdev-remediation-precedent/v1`. Tentative or mismatched remediation is
+never reused. Proven precedents are bounded in the same RimContext impact-learning JSONL store,
+remain auditable, and may be marked ineligible through the exceptional administration API. The
+observability stream records failure, diagnosis, precedent storage/reuse, identity, and
+administrative decisions; the desktop surfaces these events as read-only diagnostic history.
+
+### Content Intelligence
+
+Content-development runs can capture reusable intent and validation without a second workflow:
+
+```text
+rimliaison affected --run --content-kind ThingDef --content-role "early-game ranged weapon" --json
+rimliaison content query --content-kind ThingDef --content-role "early-game ranged weapon" --json
+```
+
+The first command automatically writes `content-blueprint/v1` before affected selection and
+`content-evidence/v1` after validation. Derived source, entity, dependency, source-identity, run,
+session, and measured elapsed fields are attached when available; missing facts remain `null`.
+Phase 2 fingerprints structural shape before semantic reuse, qualifies only with independent
+objective evidence, replays history, and automatically promotes only data-only archetypes. An
+attributable failure records usage evidence and quarantines the active archetype; fallback is
+`RimContent -> precedent -> vanilla/reference -> novel`.
+Shared proven precedent is the default across canonical-workspace projects. Project exclusions,
+private assumptions, and constraints remain local metadata. The query is ranked and byte/limit
+bounded and returns source references rather than source contents. See
+[content-intelligence.md](content-intelligence.md).
+
+The desktop Content Intelligence section is read-only during normal runs and updates
+incrementally from the same events. Its administrative controls are bounded emergency actions
+with audit events: quarantine, rollback, project exclusion, and source ineligibility. They do not
+replace affected-test selection or introduce a human approval gate. Durable grouping uses the
+producer's `logicalAgentId`; run/session IDs remain visible for diagnosis.
 Generated observability, profiles, indexes, and proof records belong to their ignored or external
 owners; they are not source changes and should not be committed.
 
@@ -93,18 +176,66 @@ refusal or exhaustion reports `INFRASTRUCTURE_FAILURE` with `NOT_RUN`, the misma
 the recovery attempt count. The old generation, lease, artifact proof, and runtime evidence are
 never reused. Agents must not kill, restart, or take over another valid DevBridge/RimWorld owner.
 
+### Production-first validation policy
+
+Validation has exactly three classifications:
+
+- `REQUIRED`: declared by task requirements, repository policy, or an explicit toolchain contract
+  before validation starts. A failure blocks production. If infrastructure cannot execute it, the
+  result is `VALIDATION_INCOMPLETE` with the owning blocker; it is never misreported as a mod
+  failure.
+- `BEST_EFFORT`: execute when available and relevant. An executed check that finds a genuine mod
+  defect remains a mod failure. Missing tooling or unavailable execution is
+  `OPTIONAL_VALIDATION_UNAVAILABLE` and does not block production.
+- `RECOMMENDED`: newly discovered tests, deeper evidence, fault injection, observability,
+  isolation, or efficiency opportunities. Record them as recommendations; they never block the
+  current task.
+
+Agents MUST NOT promote a discovered validation idea to `REQUIRED` during the same task. The
+original task/repository/toolchain contract must have made it mandatory. The completion contract is
+`PASS`: defined requirements satisfied and all executable `REQUIRED` validation passed. PASS does
+not claim that every desirable validation exists or ran.
+
+The default is: **Produce the mod; report tooling improvements separately.**
+
 ### Validation capability gaps
 
 Catalog tests may declare `requiredCapabilities`. RimLiaison negotiates these through the
 read-only DevBridge capability registry before recipe execution. A missing or incompatible
-capability is `status: "blocked"` / `CAPABILITY GAP`, not a mod failure:
+capability is `CAPABILITY GAP` for `REQUIRED`, and `OPTIONAL_VALIDATION_UNAVAILABLE` for
+`BEST_EFFORT`/`RECOMMENDED`:
+
 
 - Never change mod production behavior to compensate for an unavailable validation capability.
 - Never claim a mod failed when `operationAttempted` is `false`.
-- Report the exact capability ID and probable owner from `capabilityBlocker`.
+- Report the exact capability ID, validation classification, component owner, evidence reference,
+  and recommendation from the structured result.
 - Do not repeatedly retry a capability discovery result that proves the capability absent.
-- A capability blocker prevents claiming validation completion, but is not negative evidence about the mod.
+- A required capability blocker prevents claiming PASS; an optional capability gap does not.
 
+Observability persists issue/recommendation records in its JSONL store after the run ends. Each
+record includes identity, category, owner, severity, blocking state, resolution state, evidence,
+affected validation, and recommendation so the UI and later queries retain the distinction between
+mod defects, tooling failures, unavailable optional checks, improvements, and production events.
+### Production state and tooling separation
+
+Every Golden Path run carries stable `modId`, `agentId`, `runId`, `sessionId`, current stage,
+operation, blocking state, and completion result. RimLiaison emits state-change events to the
+Observability store as work progresses; the UI does not need to scrape agent output. Lifecycle
+generations, coordinator roots, handshake details, evidence paths, and process ownership remain
+expandable diagnostic evidence.
+
+RimLiaison owns orchestration; DevBridge2 owns lifecycle, deployment, and readiness; RimTest owns
+selection and validation; RimContext owns compact static context; RimError owns diagnosis and
+classification. A bounded safe retry may run once. Persistent infrastructure failure creates a
+tooling incident and never starts tooling-repository development or mutates a supporting repo.
+Unrelated deterministic validation continues, and successful evidence remains credited. Optional
+runtime capability gaps can still produce `PASS` with a visible recommendation; required gaps
+block only the claims that depend on them.
+
+Agents must finish the mod whenever defined requirements and REQUIRED validation permit it.
+Report tooling opportunities separately with owner, capability gap, impact, evidence/reproduction,
+and priority; do not promote a discovered recommendation to REQUIRED during the current task.
 ## Human multi-repository workflow
 
 For routine work that does not need an agent to perform each Git/build/deploy step, use the

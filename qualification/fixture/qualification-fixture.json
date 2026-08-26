@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "rimliaison-qualification-fixture/v1",
+  "id": "rimliaison.qualification.fixture",
+  "purpose": "deterministic-toolchain-qualification",
+  "productionMod": false,
+  "requiredScenarios": [
+    "build.success",
+    "build.failure",
+    "deployment",
+    "quicktest.launch",
+    "readiness",
+    "runtime.success",
+    "runtime.failure",
+    "restart.recovery",
+    "evidence.structured",
+    "optional.validation",
+    "recommendation",
+    "cleanup"
+  ],
+  "source": "Source/QualificationFixture.cs",
+  "metadata": "About/About.xml"
+}

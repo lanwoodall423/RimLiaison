@@ -2,6 +2,8 @@ using System.Collections;
 using System.Diagnostics;
 using System.Text.Json;
 
+using RimLiaison.Validation;
+
 namespace RimLiaison.Observability;
 
 public static class AgentObservabilityRuntime
@@ -103,25 +105,40 @@ public sealed class AgentObservabilityRun : IDisposable
 
     public string RunId { get; }
 
+    public string SessionId => "session-" + RunId;
+
     public IAgentObservabilityStore Store => store;
 
     public AgentObservabilitySession CreateAgent(
         string modId,
         string modName,
         string? agentId = null,
-        string? logicalAgentId = null)
+        string? logicalAgentId = null,
+        string? sessionId = null,
+        string workloadKind = "production",
+        string toolchainState = "promoted",
+        string? qualificationProfile = null,
+        ObservabilityEntityIdentity? entityIdentity = null)
     {
         if (Volatile.Read(ref disposed) != 0)
         {
             throw new ObjectDisposedException(nameof(AgentObservabilityRun));
         }
 
+        ObservabilityEntityIdentity resolvedEntityIdentity =
+            IsFixtureWorkload(workloadKind, qualificationProfile)
+                ? ObservabilityEntityIdentity.ForFixture(
+                    "qualification",
+                    "Qualification fixture")
+                : entityIdentity ??
+                    ObservabilityEntityIdentityResolver.ForProducer(modId, modName);
         lock (sessions)
         {
-            if (agentId is null && logicalAgentId is null)
+            if (agentId is null && logicalAgentId is null && sessionId is null)
             {
                 AgentObservabilitySession? existing = sessions.FirstOrDefault(session =>
-                    string.Equals(session.ModId, modId, StringComparison.Ordinal));
+                    string.Equals(session.EntityType, resolvedEntityIdentity.EntityType, StringComparison.Ordinal) &&
+                    string.Equals(session.CanonicalEntityId, resolvedEntityIdentity.CanonicalEntityId, StringComparison.Ordinal));
                 if (existing is not null)
                 {
                     return existing;
@@ -129,29 +146,70 @@ public sealed class AgentObservabilityRun : IDisposable
             }
 
             string resolvedAgentId = agentId ?? "agent-" + Guid.NewGuid().ToString("N");
-            string resolvedLogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId)
-                ? resolvedAgentId
+            string? resolvedLogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId)
+                ? null
                 : logicalAgentId.Trim();
+            string resolvedSessionId = string.IsNullOrWhiteSpace(sessionId)
+                ? SessionId
+                : sessionId.Trim();
             AgentObservabilitySession? logicalExisting = sessions.FirstOrDefault(session =>
-                string.Equals(session.ModId, modId, StringComparison.Ordinal) &&
-                string.Equals(session.LogicalAgentId, resolvedLogicalAgentId, StringComparison.Ordinal));
+                string.Equals(session.EntityType, resolvedEntityIdentity.EntityType, StringComparison.Ordinal) &&
+                string.Equals(session.CanonicalEntityId, resolvedEntityIdentity.CanonicalEntityId, StringComparison.Ordinal) &&
+                string.Equals(session.LogicalAgentId, resolvedLogicalAgentId, StringComparison.Ordinal) &&
+                string.Equals(session.SessionId, resolvedSessionId, StringComparison.Ordinal) &&
+                (resolvedLogicalAgentId is not null ||
+                    string.Equals(session.AgentId, resolvedAgentId, StringComparison.Ordinal)));
             if (logicalExisting is not null)
             {
                 return logicalExisting;
             }
 
+            string resolvedModId = SessionModId(resolvedEntityIdentity, modId);
+            string resolvedModName = resolvedEntityIdentity.DisplayName;
             AgentObservabilitySession session = new(
                 this,
                 store,
                 telemetry,
-                modId,
-                modName,
+                resolvedModId,
+                resolvedModName,
+                resolvedEntityIdentity,
                 resolvedAgentId,
                 resolvedLogicalAgentId,
+                resolvedSessionId,
+                workloadKind,
+                toolchainState,
+                qualificationProfile,
                 runActivity);
             sessions.Add(session);
             return session;
         }
+    }
+
+    private static bool IsFixtureWorkload(
+        string workloadKind,
+        string? qualificationProfile) =>
+        !string.IsNullOrWhiteSpace(qualificationProfile) ||
+        workloadKind.Trim().ToLowerInvariant() is
+            "qualification" or "fixture" or "test";
+    private static string SessionModId(
+        ObservabilityEntityIdentity identity,
+        string fallback)
+    {
+        if (identity.EntityType == ObservabilityEntityTypes.Tool)
+        {
+            return identity.DisplayName;
+        }
+
+        if (identity.EntityType is ObservabilityEntityTypes.Fixture or
+            ObservabilityEntityTypes.Test)
+        {
+            int separator = identity.CanonicalEntityId.IndexOf(':');
+            return separator >= 0
+                ? identity.CanonicalEntityId[(separator + 1)..]
+                : identity.CanonicalEntityId;
+        }
+
+        return fallback;
     }
 
     internal long ElapsedMilliseconds =>
@@ -217,15 +275,19 @@ public sealed class AgentObservabilitySession : IDisposable
     private AgentSnapshot snapshot;
     private int disposed;
     private int started;
-
     internal AgentObservabilitySession(
         AgentObservabilityRun run,
         IAgentObservabilityStore store,
         IAgentObservabilityTelemetry telemetry,
         string modId,
         string modName,
+        ObservabilityEntityIdentity entityIdentity,
         string agentId,
-        string logicalAgentId,
+        string? logicalAgentId,
+        string sessionId,
+        string workloadKind,
+        string toolchainState,
+        string? qualificationProfile,
         Activity? runActivity)
     {
         this.run = run;
@@ -234,23 +296,36 @@ public sealed class AgentObservabilitySession : IDisposable
         ValidateIdentity(modId, modName, agentId, logicalAgentId);
         AgentId = agentId;
         LogicalAgentId = logicalAgentId;
+        SessionId = sessionId;
         ModId = modId;
         ModName = modName;
+        EntityType = entityIdentity.EntityType;
+        CanonicalEntityId = entityIdentity.CanonicalEntityId;
+        DisplayName = entityIdentity.DisplayName;
         long startTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         startedTimestamp = Stopwatch.GetTimestamp();
         snapshot = new AgentSnapshot
         {
             AgentId = AgentId,
             LogicalAgentId = LogicalAgentId,
+            SessionId = SessionId,
             RunId = run.RunId,
             ModId = ModId,
             ModName = ModName,
+            EntityType = EntityType,
+            CanonicalEntityId = CanonicalEntityId,
+            DisplayName = DisplayName,
+            WorkloadKind = workloadKind,
+            ToolchainState = toolchainState,
+            QualificationProfile = qualificationProfile,
             Status = AgentStatus.Created,
             CurrentStage = DevelopmentStage.Analysis,
+            CurrentOperation = "created",
             CurrentActivity = "created",
+            BlockingState = "none",
             StartTime = startTime
         };
-        store.RegisterAgent(snapshot);
+        snapshot = store.RegisterAgent(snapshot);
         try
         {
             agentActivity = telemetry.StartActivity(
@@ -263,6 +338,8 @@ public sealed class AgentObservabilitySession : IDisposable
                     [AgentObservabilityTags.LogicalAgentId] = LogicalAgentId,
                     [AgentObservabilityTags.ModId] = ModId,
                     [AgentObservabilityTags.ModName] = ModName,
+                    [AgentObservabilityTags.EntityType] = EntityType,
+                    [AgentObservabilityTags.CanonicalEntityId] = CanonicalEntityId,
                     [AgentObservabilityTags.Stage] = "analysis"
                 });
         }
@@ -274,20 +351,30 @@ public sealed class AgentObservabilitySession : IDisposable
             DevelopmentStage.Analysis,
             AgentEventTypes.AgentCreated,
             "Mod agent created.",
-            new { activity = "created" });
+            new { activity = "created", sessionId = SessionId });
     }
 
     public string AgentId { get; }
 
-    public string LogicalAgentId { get; }
+    public string? LogicalAgentId { get; }
 
     public string RunId => run.RunId;
 
+    public string SessionId { get; }
+
+
+    public string EntityType { get; }
+
+    public string CanonicalEntityId { get; }
+
+    public string DisplayName { get; }
     public string ModId { get; }
 
     public string ModName { get; }
 
     public AgentSnapshot Snapshot => snapshot;
+
+    public IAgentObservabilityStore Store => store;
 
     public IDisposable Activate() => AgentObservabilityRuntime.Activate(this);
 
@@ -320,6 +407,7 @@ public sealed class AgentObservabilitySession : IDisposable
         string? activity = null)
     {
         if (Volatile.Read(ref disposed) != 0 || IsTerminal)
+
         {
             return null;
         }
@@ -363,6 +451,44 @@ public sealed class AgentObservabilitySession : IDisposable
         {
             CurrentActivity = AgentObservabilityData.BoundText(activity, 256)
         });
+    }
+
+    public AgentEvent? SetProductionState(
+        DevelopmentStage stage,
+        string operation,
+        string blockingState = "none",
+        string? completionResult = null)
+    {
+        if (Volatile.Read(ref disposed) != 0 || IsTerminal)
+        {
+            return null;
+        }
+
+        string boundedOperation = AgentObservabilityData.BoundText(operation, 256);
+        string boundedBlockingState = AgentObservabilityData.BoundText(
+            string.IsNullOrWhiteSpace(blockingState) ? "none" : blockingState,
+            64);
+        UpdateSnapshot(snapshot with
+        {
+            Status = AgentStatus.Running,
+            CurrentStage = stage,
+            CurrentOperation = boundedOperation,
+            CurrentActivity = boundedOperation,
+            BlockingState = boundedBlockingState,
+            CompletionResult = completionResult
+        });
+        return Record(
+            stage,
+            AgentEventTypes.ProductionStateChanged,
+            "Production state changed.",
+            new
+            {
+                sessionId = SessionId,
+                stage = stage.ToString().ToLowerInvariant(),
+                operation = boundedOperation,
+                blockingState = boundedBlockingState,
+                completionResult
+            });
     }
 
     public AgentEvent? Waiting(
@@ -423,9 +549,12 @@ public sealed class AgentObservabilitySession : IDisposable
         {
             Status = AgentStatus.Completed,
             CurrentStage = DevelopmentStage.Complete,
+            CurrentOperation = "complete",
             CurrentActivity = "complete",
+            BlockingState = "none",
             CompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             CompletionState = AgentCompletionState.Succeeded,
+            CompletionResult = ValidationPolicySchema.Pass,
             FailureState = false,
             FailureSummary = null
         });
@@ -433,9 +562,28 @@ public sealed class AgentObservabilitySession : IDisposable
             DevelopmentStage.Complete,
             AgentEventTypes.AgentCompleted,
             summary ?? "Mod agent completed.",
-            new { outcome = "success" });
+            new { outcome = "success", validationStatus = ValidationPolicySchema.Pass });
         StopActivity("success");
         return result;
+    }
+
+    public AgentEvent? Complete(
+        ValidationPolicyResult validation,
+        string? summary = null)
+    {
+        ArgumentNullException.ThrowIfNull(validation);
+        return validation.Status switch
+        {
+            ValidationPolicySchema.Pass => Complete(summary),
+            ValidationPolicySchema.ValidationIncomplete => Fail(
+                summary ?? "Production is valid, but required validation is incomplete.",
+                "VALIDATION_INCOMPLETE",
+                AgentCompletionState.ValidationIncomplete),
+            _ => Fail(
+                summary ?? "Required validation failed; production is blocked.",
+                "VALIDATION_REQUIRED_FAILED",
+                AgentCompletionState.Failed)
+        };
     }
 
     public AgentEvent? Fail(
@@ -453,9 +601,16 @@ public sealed class AgentObservabilitySession : IDisposable
         UpdateSnapshot(snapshot with
         {
             Status = AgentStatus.Failed,
+            CurrentOperation = "failed",
             CurrentActivity = "failed",
+            BlockingState = completionState == AgentCompletionState.ValidationIncomplete
+                ? "required"
+                : "none",
             CompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             CompletionState = completionState,
+            CompletionResult = completionState == AgentCompletionState.ValidationIncomplete
+                ? ValidationPolicySchema.ValidationIncomplete
+                : ValidationPolicySchema.Fail,
             FailureState = true,
             FailureSummary = boundedSummary
         });
@@ -465,12 +620,20 @@ public sealed class AgentObservabilitySession : IDisposable
             boundedSummary,
             new
             {
-                outcome = completionState == AgentCompletionState.Cancelled
-                    ? "cancelled"
-                    : "failure",
+                outcome = completionState switch
+                {
+                    AgentCompletionState.Cancelled => "cancelled",
+                    AgentCompletionState.ValidationIncomplete => "validation-incomplete",
+                    _ => "failure"
+                },
                 errorCode
             });
-        StopActivity(completionState == AgentCompletionState.Cancelled ? "cancelled" : "failure");
+        StopActivity(completionState switch
+        {
+            AgentCompletionState.Cancelled => "cancelled",
+            AgentCompletionState.ValidationIncomplete => "validation-incomplete",
+            _ => "failure"
+        });
         return result;
     }
 
@@ -500,7 +663,8 @@ public sealed class AgentObservabilitySession : IDisposable
                 data,
                 TraceId: correlation?.TraceId.ToString(),
                 SpanId: correlation?.SpanId.ToString(),
-                LogicalAgentId: LogicalAgentId));
+                LogicalAgentId: LogicalAgentId,
+                SessionId: SessionId));
             try
             {
                 telemetry.RecordEvent(type);
@@ -560,8 +724,93 @@ public sealed class AgentObservabilitySession : IDisposable
             activityName,
             stage,
             operationKey,
+
             data,
             agentActivity);
+    }
+
+    public AgentEvent? RecordValidationRecommendation(
+        string validationId,
+        string summary,
+        string recommendation,
+        string? componentOwner = null,
+        string? evidenceReference = null)
+    {
+        return Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ValidationRecommendationRecorded,
+            summary,
+            new
+            {
+                operationKey = "validation:" + validationId,
+                validationId,
+                validationClassification = ValidationClassification.RECOMMENDED.ToString(),
+                issueKind = "TOOLING_IMPROVEMENT",
+                blocking = false,
+                componentOwner,
+                evidenceReference,
+                recommendation
+            });
+    }
+
+    public AgentEvent? RecordToolingRecommendation(
+        string operationKey,
+        string summary,
+        string recommendation,
+        string? componentOwner,
+        string? evidenceReference,
+        bool affectedCurrentTask,
+        string priority = "normal",
+        object? evidence = null)
+    {
+        return Record(
+            snapshot.CurrentStage,
+            AgentEventTypes.ValidationRecommendationRecorded,
+            summary,
+            new
+            {
+                operationKey,
+                issueKind = "TOOLING_IMPROVEMENT",
+                validationClassification = ValidationClassification.RECOMMENDED.ToString(),
+                blocking = false,
+                componentOwner,
+                evidenceReference,
+                affectedCurrentTask,
+                priority,
+                recommendation,
+                evidence
+            });
+    }
+
+    public AgentEvent? RecordToolingIncident(
+        string operationKey,
+        string summary,
+        string? errorCode,
+        string componentOwner,
+        ValidationClassification validationClassification,
+        string affectedValidation,
+        string? evidenceReference,
+        string recoveryState)
+    {
+        return Record(
+            snapshot.CurrentStage,
+            AgentEventTypes.ToolFailed,
+            summary,
+            new
+            {
+                operationKey,
+                issueKind = "TOOLING_FAILURE",
+                classification = "TOOLING_FAILURE",
+                validationClassification = validationClassification.ToString(),
+                blocking = validationClassification == ValidationClassification.REQUIRED,
+                componentOwner,
+                affectedValidation,
+                evidenceReference,
+                errorCode,
+                recoveryState,
+                automaticToolRepair = false,
+                recommendation = "Triage the supporting-tool capability separately; do not modify the mod to compensate."
+            });
     }
 
     public void Dispose()
@@ -704,13 +953,13 @@ public sealed class AgentObservabilitySession : IDisposable
 
     private void UpdateSnapshot(AgentSnapshot value)
     {
-        snapshot = value;
         try
         {
-            store.UpdateAgent(snapshot);
+            snapshot = store.UpdateAgent(value);
         }
         catch
         {
+            snapshot = value;
         }
     }
 
@@ -773,7 +1022,7 @@ public sealed class AgentObservabilitySession : IDisposable
         string modId,
         string modName,
         string agentId,
-        string logicalAgentId)
+        string? logicalAgentId)
     {
         if (string.IsNullOrWhiteSpace(modId) || modId.Length > 256 || modId.Any(char.IsControl))
         {
@@ -787,9 +1036,8 @@ public sealed class AgentObservabilitySession : IDisposable
         {
             throw new ArgumentException("A bounded agent id is required.", nameof(agentId));
         }
-        if (string.IsNullOrWhiteSpace(logicalAgentId) ||
-            logicalAgentId.Length > 256 ||
-            logicalAgentId.Any(char.IsControl))
+        if (logicalAgentId is not null &&
+            (logicalAgentId.Length > 256 || logicalAgentId.Any(char.IsControl)))
         {
             throw new ArgumentException(
                 "A bounded logical agent id is required.",

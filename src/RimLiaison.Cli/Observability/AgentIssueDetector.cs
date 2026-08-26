@@ -88,10 +88,11 @@ internal sealed class AgentIssueDetector
 
         if (failure)
         {
-            AgentIssue? errorIssue = Find(AgentIssueCategory.Error, operationKey);
+            AgentIssueCategory failureCategory = FailureCategory(eventRecord);
+            AgentIssue? errorIssue = Find(failureCategory, operationKey);
             AgentIssue primary = AddOrUpdate(
                 errorIssue,
-                AgentIssueCategory.Error,
+                failureCategory,
                 FailureSeverity(eventRecord),
                 FailureSummary(eventRecord),
                 operationKey,
@@ -141,7 +142,6 @@ internal sealed class AgentIssueDetector
                     occurrenceIncrement: 1);
             }
         }
-
         if (IsExplicitIssue(eventRecord, out AgentIssueCategory category, out AgentIssueSeverity severity))
         {
             AgentIssue? existing = Find(category, operationKey);
@@ -299,6 +299,8 @@ internal sealed class AgentIssueDetector
             EventIds = AddEventId(issue.EventIds, resolution.Id, maximumEventReferences),
             Recovered = true,
             ResolutionEventId = resolution.Id,
+            CurrentState = "resolved",
+            ResolutionState = "resolved",
             SpanIds = MergeSpanIds(issue.SpanIds, resolution.SpanId),
             TraceId = issue.TraceId ?? resolution.TraceId,
             Occurrences = Math.Max(1, issue.Occurrences)
@@ -343,7 +345,11 @@ internal sealed class AgentIssueDetector
             RunId = eventRecord.RunId,
             AgentId = eventRecord.AgentId,
             LogicalAgentId = eventRecord.LogicalAgentId,
+            SessionId = eventRecord.SessionId,
             ModId = eventRecord.ModId,
+            EntityType = eventRecord.EntityType,
+            CanonicalEntityId = eventRecord.CanonicalEntityId,
+            DisplayName = eventRecord.DisplayName,
             Timestamp = eventRecord.Timestamp,
             Category = category,
             Severity = severity,
@@ -361,7 +367,40 @@ internal sealed class AgentIssueDetector
             SpanIds = MergeSpanIds(null, eventRecord.SpanId),
             OperationKey = operationKey,
             RetryCount = eventRecord.Type is AgentEventTypes.RetryStarted or AgentEventTypes.RetryCompleted ? 1 : 0,
-            Classification = category == AgentIssueCategory.CapabilityGap ? "CAPABILITY_GAP" : null,
+            Classification = AgentObservabilityData.GetString(eventRecord.Data, "issueKind") ??
+                category switch
+                {
+                    AgentIssueCategory.CapabilityGap => "TOOLING_FAILURE",
+                    AgentIssueCategory.OptionalValidationUnavailable =>
+                        "OPTIONAL_VALIDATION_UNAVAILABLE",
+                    AgentIssueCategory.ToolingImprovement => "TOOLING_IMPROVEMENT",
+                    AgentIssueCategory.ModDefect => "MOD_DEFECT",
+                    AgentIssueCategory.ToolingFailure => "TOOLING_FAILURE",
+                    AgentIssueCategory.InformationalProductionEvent =>
+                        "INFORMATIONAL_PRODUCTION_EVENT",
+                    _ => null
+                },
+            ValidationClassification = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "validationClassification"),
+            Blocking = AgentObservabilityData.GetBoolean(eventRecord.Data, "blocking") ||
+                category is AgentIssueCategory.Error or AgentIssueCategory.ModDefect or
+                    AgentIssueCategory.ToolingFailure or AgentIssueCategory.CapabilityGap,
+            CurrentState = "open",
+            ResolutionState = "unresolved",
+            ComponentOwner = AgentObservabilityData.GetString(eventRecord.Data, "componentOwner") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
+            EvidenceReference = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "evidenceReference") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "evidenceLink"),
+            AffectedValidation = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "validationId"),
+            Recommendation = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "recommendation") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "recommendedRemediation"),
             CapabilityId = AgentObservabilityData.GetString(
                 eventRecord.Data,
                 "requiredCapabilityId") ??
@@ -430,6 +469,30 @@ internal sealed class AgentIssueDetector
             eventRecord.Type.EndsWith("passed", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static AgentIssueCategory FailureCategory(AgentEvent eventRecord)
+    {
+        string? issueKind = AgentObservabilityData.GetString(eventRecord.Data, "issueKind");
+        if (string.Equals(issueKind, "MOD_DEFECT", StringComparison.Ordinal))
+        {
+            return AgentIssueCategory.ModDefect;
+        }
+
+        if (string.Equals(issueKind, "TOOLING_FAILURE", StringComparison.Ordinal))
+        {
+            return AgentIssueCategory.ToolingFailure;
+        }
+
+        return AgentIssueCategory.Error;
+    }
+
+    private static bool IsBlockingCapabilityGap(AgentEvent eventRecord)
+    {
+        return AgentObservabilityData.GetBoolean(eventRecord.Data, "blocking") ||
+            AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "validationClassification") is null or "REQUIRED";
+    }
+
     private static AgentIssueSeverity FailureSeverity(AgentEvent eventRecord) =>
         eventRecord.Type is AgentEventTypes.CommandTimeout
             ? AgentIssueSeverity.Warning
@@ -463,8 +526,21 @@ internal sealed class AgentIssueDetector
                 severity = AgentIssueSeverity.Info;
                 return true;
             case AgentEventTypes.ValidationCapabilityBlocked:
-                category = AgentIssueCategory.CapabilityGap;
-                severity = AgentIssueSeverity.Warning;
+                bool blocking = IsBlockingCapabilityGap(eventRecord);
+                category = blocking
+                    ? AgentIssueCategory.CapabilityGap
+                    : AgentIssueCategory.OptionalValidationUnavailable;
+                severity = blocking
+                    ? AgentIssueSeverity.Warning
+                    : AgentIssueSeverity.Info;
+                return true;
+            case AgentEventTypes.ValidationRecommendationRecorded:
+                category = AgentIssueCategory.ToolingImprovement;
+                severity = AgentIssueSeverity.Info;
+                return true;
+            case AgentEventTypes.InformationalProductionEvent:
+                category = AgentIssueCategory.InformationalProductionEvent;
+                severity = AgentIssueSeverity.Info;
                 return true;
             case AgentEventTypes.ContextIssue:
                 category = AgentIssueCategory.ContextIssue;
@@ -490,6 +566,14 @@ internal sealed class AgentIssueDetector
         string bounded = AgentObservabilityData.BoundText(summary, 420);
         string prefix = category switch
         {
+            AgentIssueCategory.OptionalValidationUnavailable =>
+                "OPTIONAL VALIDATION NOT AVAILABLE: ",
+            AgentIssueCategory.ToolingImprovement =>
+                "TOOLING RECOMMENDATION: ",
+            AgentIssueCategory.InformationalProductionEvent =>
+                "PRODUCTION INFORMATION: ",
+            AgentIssueCategory.ModDefect => "MOD DEFECT: ",
+            AgentIssueCategory.ToolingFailure => "TOOLING FAILURE: ",
             AgentIssueCategory.ToolLimitation => "Possible tooling limitation: ",
             AgentIssueCategory.CapabilityGap => "CAPABILITY GAP / BLOCKED: ",
             AgentIssueCategory.ContextIssue => "Possible context issue: ",

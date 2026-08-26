@@ -9,6 +9,8 @@ using RimContext.Core.Model;
 using RimContext.Core.Output;
 using RimContext.Core.Semantics;
 using RimContext.Core.Storage;
+using RimContext.Core.Content;
+
 
 namespace RimContext.Cli;
 
@@ -76,6 +78,7 @@ public static class CliApplication
         CliCommands.Harmony => ExecuteHarmony(request),
         CliCommands.File => ExecuteFile(request),
         CliCommands.Affected => ExecuteAffected(request),
+        CliCommands.Content => ExecuteContent(request),
         _ when CliCommands.IsQuery(request.Command) => throw ErrorFactory.NotImplemented(request.Command),
         _ => throw ErrorFactory.InvalidArgument($"Unknown command '{request.Command}'.")
     };
@@ -261,6 +264,20 @@ public static class CliApplication
             meta: new JsonQueryMetadata(
                 result.Direct.Count + result.Dependent.Count + result.RuntimeRisk.Count,
                 result.Truncated));
+    }
+
+    private static JsonEnvelope ExecuteContent(CliRequest request)
+    {
+        ContentQueryResult result = new RimContextService().QueryContent(
+            new ContentQueryRequest(
+                request.Subject,
+                request.Kind,
+                request.GameplayRole,
+                Limit: request.Limit,
+                MaxBytes: request.MaxBytes ?? 65_536,
+                IncludeFailures: request.IncludeFailures),
+            request.Store);
+        return JsonOutput.Success(CliCommands.Content, result);
     }
 
     private static string GetCommandForError(IReadOnlyList<string> args)

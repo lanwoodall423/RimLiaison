@@ -76,6 +76,8 @@ function Get-ValidationProofStageDefinition {
                     'scripts/cross-stack-fake-devbridge.ps1',
                     'scripts/cross-stack-fake-mod-development.ps1',
                     'scripts/ci-validate.ps1',
+                    'scripts/pinned-devbridge-worktree.ps1',
+                    'scripts/pinned-devbridge-worktree.tests.ps1',
                     'scripts/devbridge-binary-cache.ps1',
                     '.github/workflows/ci.yml')
                 RequiresDevBridge = $true

@@ -671,6 +671,9 @@ internal static class ObservabilityTests
             "command completion should carry bounded real workflow telemetry");
         Assert(store.GetAgents().Any(value => value.ModName == "RimLiaison"),
             "the CLI should expose the mod display name as the agent identity");
+        AgentSnapshot cliAgent = store.GetAgents().Single();
+        AssertEqual(ObservabilityEntityTypes.Tool, cliAgent.EntityType);
+        AssertEqual("tool:rimliaison", cliAgent.CanonicalEntityId);
     }
 
     public static void RealWorkflowTelemetryAggregatesBoundedEvents()

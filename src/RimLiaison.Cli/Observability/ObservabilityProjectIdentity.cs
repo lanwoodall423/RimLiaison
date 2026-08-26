@@ -291,3 +291,245 @@ public static class ObservabilityProjectIdentityResolver
         return display.Length == 0 ? "RimWorldMod" : display;
     }
 }
+
+public static class ObservabilityEntityIdentityResolver
+{
+    private static readonly string[] LegacyToolNames =
+    [
+        "rimliaison",
+        "rimbench",
+        "rimtest",
+        "rimcontext",
+        "rimcontent",
+        "rimerror",
+        "devbridge2"
+    ];
+
+    public static ObservabilityEntityIdentity ForPersisted(
+        string? entityType,
+        string? canonicalEntityId,
+        string modId,
+        string modName,
+        string? workloadKind = null,
+        string? qualificationProfile = null)
+    {
+        string type = NormalizeEntityType(entityType);
+        if (IsFixtureWorkload(workloadKind, qualificationProfile))
+        {
+            return ObservabilityEntityIdentity.ForFixture(
+                "qualification",
+                "Qualification fixture");
+        }
+
+        if (!string.IsNullOrWhiteSpace(canonicalEntityId))
+        {
+            string resolvedType = ResolvePersistedEntityType(type, canonicalEntityId);
+            return CreatePersistedIdentity(
+                resolvedType,
+                canonicalEntityId,
+                modName);
+        }
+
+        if (type == ObservabilityEntityTypes.Tool &&
+            TryToolAlias(modId, out string typedToolId))
+        {
+            return ObservabilityEntityIdentity.ForTool(
+                typedToolId,
+                ToolDisplayName(typedToolId));
+        }
+
+        if (type == ObservabilityEntityTypes.Mod)
+        {
+            return ObservabilityEntityIdentity.ForMod(modId, modName);
+        }
+
+        if (type == ObservabilityEntityTypes.Tool)
+        {
+            return ObservabilityEntityIdentity.ForUnknown(modId, modName);
+        }
+
+        if (type != ObservabilityEntityTypes.Unknown)
+        {
+            return ObservabilityEntityIdentity.Create(type, modId, modName);
+        }
+
+        if (TryToolAlias(modId, out string legacyToolId))
+        {
+            return ObservabilityEntityIdentity.ForTool(
+                legacyToolId,
+                ToolDisplayName(legacyToolId));
+        }
+
+        if (modId.Trim().StartsWith("mod.", StringComparison.OrdinalIgnoreCase))
+        {
+            return ObservabilityEntityIdentity.ForMod(modId, modName);
+        }
+
+        return ObservabilityEntityIdentity.ForUnknown(modId, modName);
+    }
+    public static bool Matches(
+        AgentSnapshot agent,
+        string candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        if (string.Equals(agent.AgentId, candidate, StringComparison.Ordinal) ||
+            string.Equals(agent.ModId, candidate, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        ObservabilityEntityIdentity identity = ForPersisted(
+            agent.EntityType,
+            candidate,
+            agent.ModId,
+            agent.ModName,
+            agent.WorkloadKind,
+            agent.QualificationProfile);
+        return string.Equals(
+            agent.CanonicalEntityId,
+            identity.CanonicalEntityId,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+
+    public static ObservabilityEntityIdentity ForProducer(
+        string modId,
+        string modName)
+    {
+        ObservabilityEntityIdentity identity = ForPersisted(
+            null,
+            null,
+            modId,
+            modName);
+        return identity.EntityType == ObservabilityEntityTypes.Unknown
+            ? ObservabilityEntityIdentity.ForMod(modId, modName)
+            : identity;
+    }
+
+    public static ObservabilityEntityIdentity ForMod(ObservabilityProjectIdentity project) =>
+        ObservabilityEntityIdentity.ForMod(project.ModId, project.ModName);
+
+    private static ObservabilityEntityIdentity CreatePersistedIdentity(
+        string entityType,
+        string canonicalEntityId,
+        string displayName)
+    {
+        if (entityType == ObservabilityEntityTypes.Tool)
+        {
+            string candidate = canonicalEntityId;
+            int separator = candidate.IndexOf(':');
+            if (separator >= 0)
+            {
+                candidate = candidate[(separator + 1)..];
+            }
+
+            if (TryToolAlias(candidate, out string toolId))
+            {
+                return ObservabilityEntityIdentity.ForTool(
+                    toolId,
+                    ToolDisplayName(toolId));
+            }
+        }
+
+        ObservabilityEntityIdentity identity = ObservabilityEntityIdentity.Create(
+            entityType,
+            canonicalEntityId,
+            displayName);
+        if (identity.EntityType == ObservabilityEntityTypes.Tool &&
+            identity.CanonicalEntityId == "tool:rimliaison")
+        {
+            return ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison");
+        }
+
+        return identity;
+    }
+
+    private static string ResolvePersistedEntityType(
+        string entityType,
+        string canonicalEntityId)
+    {
+        if (entityType != ObservabilityEntityTypes.Unknown)
+        {
+            return entityType;
+        }
+
+        int separator = canonicalEntityId.IndexOf(':');
+        if (separator > 0)
+        {
+            string prefix = canonicalEntityId[..separator].ToLowerInvariant();
+            if (IsKnownEntityType(prefix))
+            {
+                return prefix;
+            }
+        }
+
+        return ObservabilityEntityTypes.Unknown;
+    }
+
+    private static string NormalizeEntityType(string? entityType)
+    {
+        string value = entityType?.Trim().ToLowerInvariant() ?? string.Empty;
+        return IsKnownEntityType(value)
+            ? value
+            : ObservabilityEntityTypes.Unknown;
+    }
+
+    private static bool IsKnownEntityType(string value) =>
+        value is ObservabilityEntityTypes.Mod or
+            ObservabilityEntityTypes.Tool or
+            ObservabilityEntityTypes.Infrastructure or
+            ObservabilityEntityTypes.Fixture or
+            ObservabilityEntityTypes.Test or
+            ObservabilityEntityTypes.Agent or
+            ObservabilityEntityTypes.User or
+            ObservabilityEntityTypes.Operator or
+            ObservabilityEntityTypes.Process or
+            ObservabilityEntityTypes.Session or
+            ObservabilityEntityTypes.Run or
+            ObservabilityEntityTypes.Activity or
+            ObservabilityEntityTypes.Event or
+            ObservabilityEntityTypes.Runtime or
+            ObservabilityEntityTypes.Unknown;
+
+    private static bool IsFixtureWorkload(
+        string? workloadKind,
+        string? qualificationProfile) =>
+        !string.IsNullOrWhiteSpace(qualificationProfile) ||
+        workloadKind?.Trim().ToLowerInvariant() is
+            "qualification" or "fixture" or "test";
+
+    private static bool TryToolAlias(string value, out string toolId)
+    {
+        string normalized = value.Trim().ToLowerInvariant();
+        if (normalized.StartsWith("[tool]", StringComparison.Ordinal))
+        {
+            normalized = normalized["[tool]".Length..].Trim();
+        }
+
+        if (normalized.StartsWith("rimliaison-tests-", StringComparison.Ordinal) ||
+            normalized.StartsWith("rimliaison-worktree-", StringComparison.Ordinal))
+        {
+            toolId = "rimliaison";
+            return true;
+        }
+
+        foreach (string name in LegacyToolNames)
+        {
+            if (normalized == name)
+            {
+                toolId = name;
+                return true;
+            }
+        }
+
+        toolId = string.Empty;
+        return false;
+    }
+
+    private static string ToolDisplayName(string toolId) =>
+        toolId == "rimliaison" ? "RimLiaison" : toolId;
+}

@@ -1,3 +1,5 @@
+using RimDev.Contracts;
+using RimLiaison.Validation;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -62,6 +64,29 @@ public interface IAgentObservabilityLiveStore
 
     void Refresh();
 }
+public interface IAgentObservabilityHydrationStore
+{
+    bool InitialHydrationPending { get; }
+    bool UseWatcherForLiveRefresh { get; }
+
+    Task<AgentObservabilityHydrationResult> HydrateRecentAsync(
+        int maximumEvents = 2_000,
+        int maximumIssues = 500,
+        int maximumAgents = 250,
+        CancellationToken cancellationToken = default);
+
+    Task<AgentObservabilityHydrationResult> HydrateHistoryAsync(
+        CancellationToken cancellationToken = default);
+}
+
+public sealed record AgentObservabilityHydrationResult(
+    bool Completed,
+    bool Degraded,
+    int EventsLoaded,
+    int IssuesLoaded,
+    int AgentsLoaded,
+    string? Message = null);
+
 
 /// <summary>
 /// The authoritative RimLiaison activity and issue store. With a storage
@@ -71,6 +96,7 @@ public interface IAgentObservabilityLiveStore
 public sealed class AgentObservabilityStore :
     IAgentObservabilityStore,
     IAgentObservabilityLiveStore,
+    IAgentObservabilityHydrationStore,
     IDisposable
 {
     private const string EventsFileName = "events.jsonl";
@@ -81,10 +107,14 @@ public sealed class AgentObservabilityStore :
     private const string EventRecordKind = "event";
     private const string IssueRecordKind = "issue";
     private const string AgentRecordKind = "agent";
+    private const int EvidenceMaintenanceSlack = 128;
 
     private readonly object gate = new();
+    private int initialHydrationPending;
+    private readonly bool useWatcherForLiveRefresh;
     private readonly object refreshGate = new();
     private readonly AgentObservabilityOptions options;
+    private readonly Func<long> nowMilliseconds;
     private readonly string? storageDirectory;
     private readonly string? eventsPath;
     private readonly string? issuesPath;
@@ -105,13 +135,18 @@ public sealed class AgentObservabilityStore :
     private int refreshRequested;
     private int refreshQueued;
     private int disposed;
+    private bool identityMigrationPending;
 
     public AgentObservabilityStore(
         string? storageDirectory = null,
-        AgentObservabilityOptions? options = null)
+        AgentObservabilityOptions? options = null,
+        bool loadPersistedRecords = true,
+        Func<long>? nowMilliseconds = null)
     {
         this.options = options ?? new AgentObservabilityOptions();
         this.options.Validate();
+        this.nowMilliseconds = nowMilliseconds ??
+            (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         if (!string.IsNullOrWhiteSpace(storageDirectory))
         {
             this.storageDirectory = Path.GetFullPath(storageDirectory);
@@ -125,27 +160,42 @@ public sealed class AgentObservabilityStore :
         }
 
         issueDetector = new AgentIssueDetector(this.options);
-        LoadPersistedRecords();
+        useWatcherForLiveRefresh = this.storageDirectory is not null && !loadPersistedRecords;
+        initialHydrationPending = useWatcherForLiveRefresh ? 1 : 0;
+        if (loadPersistedRecords)
+        {
+            LoadPersistedRecords();
+        }
         storageWatcher = CreateStorageWatcher();
     }
 
     public static AgentObservabilityStore CreateDefault(
-        AgentObservabilityOptions? options = null)
+        AgentObservabilityOptions? options = null,
+        bool loadPersistedRecords = true)
     {
         string directory = AgentObservabilityStorage.ResolveCanonicalRoot();
         try
         {
-            return new AgentObservabilityStore(directory, options);
+            return new AgentObservabilityStore(
+                directory,
+                options,
+                loadPersistedRecords);
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or
             UnauthorizedAccessException or NotSupportedException)
         {
             // Observability must never prevent the owning command from running.
-            return new AgentObservabilityStore(options: options);
+            return new AgentObservabilityStore(
+                options: options,
+                loadPersistedRecords: loadPersistedRecords);
         }
     }
 
     public string? StorageDirectory => storageDirectory;
+
+    public bool InitialHydrationPending =>
+        Volatile.Read(ref initialHydrationPending) != 0;
+    public bool UseWatcherForLiveRefresh => useWatcherForLiveRefresh;
     public long DiagnosticBundleCreationCount
     {
         get
@@ -163,6 +213,7 @@ public sealed class AgentObservabilityStore :
     public AgentSnapshot RegisterAgent(AgentSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        snapshot = NormalizePersistedAgent(snapshot);
         ValidateIdentity(snapshot.RunId, snapshot.AgentId, snapshot.ModId);
         ValidateOptionalLogicalAgentId(snapshot.LogicalAgentId);
         ValidateText(snapshot.ModName, nameof(snapshot.ModName), 256);
@@ -194,10 +245,23 @@ public sealed class AgentObservabilityStore :
         Notify(notification);
         return snapshot;
     }
-
     public AgentSnapshot UpdateAgent(AgentSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        snapshot = NormalizePersistedAgent(snapshot);
+        long now = Math.Max(0, nowMilliseconds());
+        if (snapshot.Status is (AgentStatus.Created or AgentStatus.Running or AgentStatus.Waiting) &&
+            snapshot.StartTime > 0 &&
+            now - snapshot.StartTime <=
+                (long)options.WorkingStalenessThreshold.TotalMilliseconds)
+        {
+            snapshot = snapshot with
+            {
+                LastActivityAt = Math.Max(
+                    snapshot.LastActivityAt.GetValueOrDefault(),
+                    Math.Max(0, nowMilliseconds()))
+            };
+        }
         ValidateIdentity(snapshot.RunId, snapshot.AgentId, snapshot.ModId);
         ValidateOptionalLogicalAgentId(snapshot.LogicalAgentId);
         ValidateText(snapshot.ModName, nameof(snapshot.ModName), 256);
@@ -229,6 +293,120 @@ public sealed class AgentObservabilityStore :
         Notify(notification);
         return snapshot;
     }
+    private void ReconcileLifecycleStateLocked()
+    {
+        if (agents.Count == 0)
+        {
+            return;
+        }
+
+        var latestActivity = new Dictionary<AgentObservabilityAgentIdentity, long>();
+        var terminalEvents = new Dictionary<AgentObservabilityAgentIdentity, AgentEvent>();
+        foreach (AgentEvent eventRecord in events)
+        {
+            AgentObservabilityAgentIdentity identity =
+                new(eventRecord.RunId, eventRecord.AgentId);
+            if (!latestActivity.TryGetValue(identity, out long latest) ||
+                eventRecord.Timestamp > latest)
+            {
+                latestActivity[identity] = eventRecord.Timestamp;
+            }
+
+            if (eventRecord.Type is AgentEventTypes.AgentCompleted or AgentEventTypes.AgentFailed &&
+                (!terminalEvents.TryGetValue(identity, out AgentEvent? previous) ||
+                 eventRecord.Sequence > previous.Sequence))
+            {
+                terminalEvents[identity] = eventRecord;
+            }
+        }
+
+        long now = Math.Max(0, nowMilliseconds());
+        long stalenessMilliseconds = Math.Max(
+            1,
+            (long)options.WorkingStalenessThreshold.TotalMilliseconds);
+        foreach ((AgentObservabilityAgentIdentity identity, AgentSnapshot agent) in agents.ToArray())
+        {
+            if (agent.Status is not (AgentStatus.Created or AgentStatus.Running or AgentStatus.Waiting))
+            {
+                continue;
+            }
+
+            AgentSnapshot? reconciled = null;
+            if (terminalEvents.TryGetValue(identity, out AgentEvent? terminal))
+            {
+                bool failed = terminal.Type == AgentEventTypes.AgentFailed;
+                bool cancelled = failed &&
+                    string.Equals(
+                        AgentObservabilityData.GetString(terminal.Data, "outcome"),
+                        "cancelled",
+                        StringComparison.OrdinalIgnoreCase);
+                reconciled = agent with
+                {
+                    Status = failed ? AgentStatus.Failed : AgentStatus.Completed,
+                    CurrentStage = failed ? agent.CurrentStage : DevelopmentStage.Complete,
+                    CurrentOperation = failed ? "failed" : "complete",
+                    CurrentActivity = failed ? "failed" : "complete",
+                    CompletedAt = terminal.Timestamp,
+                    CompletionState = failed
+                        ? cancelled
+                            ? AgentCompletionState.Cancelled
+                            : AgentCompletionState.Failed
+                        : AgentCompletionState.Succeeded,
+                    CompletionResult = failed
+                        ? cancelled ? "CANCELLED" : ValidationPolicySchema.Fail
+                        : ValidationPolicySchema.Pass,
+                    FailureState = failed,
+                    FailureSummary = failed
+                        ? terminal.Summary
+                        : null,
+                    LastActivityAt = Math.Max(
+                        agent.LastActivityAt.GetValueOrDefault(),
+                        terminal.Timestamp)
+                };
+            }
+            else
+            {
+                long lastActivity = Math.Max(
+                    agent.StartTime,
+                    Math.Max(
+                        agent.LastActivityAt.GetValueOrDefault(),
+                        latestActivity.GetValueOrDefault(identity)));
+                if (agent.Status is (AgentStatus.Running or AgentStatus.Waiting) &&
+                    lastActivity > 0 &&
+                    now - lastActivity > stalenessMilliseconds)
+                {
+                    reconciled = agent with
+                    {
+                        Status = AgentStatus.Failed,
+                        CurrentOperation = "stale",
+                        CurrentActivity = "stale",
+                        CompletedAt = now,
+                        CompletionState = AgentCompletionState.Cancelled,
+                        CompletionResult = "STALE",
+                        FailureState = true,
+                        FailureSummary =
+                            "Observability session became stale without a terminal lifecycle event.",
+                        LastActivityAt = lastActivity
+                    };
+                }
+                else if (agent.LastActivityAt.GetValueOrDefault() < lastActivity)
+                {
+                    reconciled = agent with { LastActivityAt = lastActivity };
+                }
+            }
+
+            if (reconciled is not null && !RecordsEqual(agent, reconciled))
+            {
+                agents[identity] = reconciled;
+                if (storageDirectory is not null)
+                {
+                    PersistRecord(agentsPath, AgentRecordKind, reconciled);
+                }
+                identityMigrationPending = true;
+            }
+        }
+    }
+
 
     public AgentEvent AppendEvent(AgentEventRequest request)
     {
@@ -263,10 +441,12 @@ public sealed class AgentObservabilityStore :
                         logicalAgentId,
                         request.RunId,
                         request.AgentId),
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal) ||
+                (request.SessionId is not null &&
+                 !string.Equals(request.SessionId, agent.SessionId, StringComparison.Ordinal)))
             {
                 throw new InvalidOperationException(
-                    "An event cannot cross run, agent, logical-agent, or mod boundaries.");
+                    "An event cannot cross run, agent, session, logical-agent, or mod boundaries.");
             }
 
             long requestedTimestamp = request.Timestamp.GetValueOrDefault(
@@ -283,13 +463,52 @@ public sealed class AgentObservabilityStore :
             long timestamp = Math.Max(requestedTimestamp, lastTimestamp);
             lastTimestamp = timestamp;
             long sequence = AllocateSequence();
+            string eventId = "evt-" + Guid.NewGuid().ToString("N");
+            JsonElement? boundedData = AgentObservabilityData.ToElement(
+                request.Data,
+                options.MaximumEventDataBytes);
+            ToolEventEnvelope contractEvent = ToolEventEnvelope.Create(
+                producer: "RimLiaison.Observability",
+                eventType: request.Type,
+                timestampUtc: DateTimeOffset.FromUnixTimeMilliseconds(timestamp),
+                identity: new ExecutionIdentity
+                {
+                    ExecutionId = request.RunId
+                },
+                subjects:
+                [
+                    new EntityReference
+                    {
+                        Kind = agent.EntityType switch
+                        {
+                            ObservabilityEntityTypes.Tool => EntityReferenceKinds.Tool,
+                            ObservabilityEntityTypes.Runtime => EntityReferenceKinds.RuntimeSubject,
+                            ObservabilityEntityTypes.Mod => EntityReferenceKinds.Mod,
+                            _ => "unknown"
+                        },
+                        Id = request.ModId
+                    }
+                ],
+                payload: boundedData,
+                provenance: new ContractProvenance
+                {
+                    Source = AgentObservabilitySchemas.Event
+                },
+                eventId: eventId,
+                maximumPayloadBytes: options.MaximumEventDataBytes);
             eventRecord = new AgentEvent
             {
-                Id = "evt-" + Guid.NewGuid().ToString("N"),
+                Id = eventId,
                 RunId = request.RunId,
                 AgentId = request.AgentId,
-                LogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId) ? null : logicalAgentId,
+                LogicalAgentId = string.IsNullOrWhiteSpace(logicalAgentId)
+                    ? null
+                    : logicalAgentId,
+                SessionId = request.SessionId ?? agent.SessionId,
                 ModId = request.ModId,
+                EntityType = agent.EntityType,
+                CanonicalEntityId = agent.CanonicalEntityId,
+                DisplayName = agent.DisplayName,
                 Timestamp = timestamp,
                 Sequence = sequence,
                 Stage = request.Stage,
@@ -297,11 +516,19 @@ public sealed class AgentObservabilityStore :
                 Summary = AgentObservabilityData.BoundText(request.Summary, 1024),
                 TraceId = AgentObservabilityData.BoundIdentifier(request.TraceId, 128),
                 SpanId = AgentObservabilityData.BoundIdentifier(request.SpanId, 128),
-                Data = AgentObservabilityData.ToElement(
-                    request.Data,
-                    options.MaximumEventDataBytes)
+                Data = contractEvent.Payload?.Data
             };
             events.Add(eventRecord);
+            ReconcileLifecycleStateLocked();
+            if (agents.TryGetValue(
+                    new AgentObservabilityAgentIdentity(request.RunId, request.AgentId),
+                    out AgentSnapshot? updatedAgent) &&
+                !RecordsEqual(agent, updatedAgent))
+            {
+                notifications.Add(new AgentObservabilityNotification(
+                    AgentObservabilityNotificationKind.AgentChanged,
+                    Agent: updatedAgent));
+            }
             TrimEvents();
             PersistRecord(eventsPath, EventRecordKind, eventRecord);
             notifications.Add(new AgentObservabilityNotification(
@@ -341,6 +568,7 @@ public sealed class AgentObservabilityStore :
         ValidateLimit(limit, 10_000);
         lock (gate)
         {
+            ReconcileLifecycleStateLocked();
             return agents.Values
                 .Where(agent => Matches(agent.RunId, runId) &&
                     Matches(agent.AgentId, agentId) &&
@@ -449,10 +677,12 @@ public sealed class AgentObservabilityStore :
             {
                 return null;
             }
-
             evidence[value.Id] = value;
             PersistEvidenceFile(value);
-            TrimEvidence();
+            if (evidence.Count > options.MaximumEvidenceEntries + EvidenceMaintenanceSlack)
+            {
+                TrimEvidence();
+            }
         }
 
         return new AgentDiagnosticEvidenceReference(
@@ -1594,6 +1824,162 @@ public sealed class AgentObservabilityStore :
             }
         }
     }
+    public Task<AgentObservabilityHydrationResult> HydrateRecentAsync(
+        int maximumEvents = 2_000,
+        int maximumIssues = 500,
+        int maximumAgents = 250,
+        CancellationToken cancellationToken = default) =>
+        HydratePersistedAsync(
+            recentOnly: true,
+            maximumEvents,
+            maximumIssues,
+            maximumAgents,
+            cancellationToken);
+
+    public Task<AgentObservabilityHydrationResult> HydrateHistoryAsync(
+        CancellationToken cancellationToken = default) =>
+        HydratePersistedAsync(
+            recentOnly: false,
+            maximumEvents: options.MaximumEvents,
+            maximumIssues: options.MaximumIssues,
+            maximumAgents: options.MaximumAgents,
+            cancellationToken);
+
+    private async Task<AgentObservabilityHydrationResult> HydratePersistedAsync(
+        bool recentOnly,
+        int maximumEvents,
+        int maximumIssues,
+        int maximumAgents,
+        CancellationToken cancellationToken)
+    {
+        if (maximumEvents <= 0 || maximumIssues <= 0 || maximumAgents <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEvents));
+        }
+
+        try
+        {
+            return await Task.Run(
+                    () => HydratePersistedRecords(
+                        recentOnly,
+                        maximumEvents,
+                        maximumIssues,
+                        maximumAgents,
+                        cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (recentOnly)
+            {
+                Interlocked.Exchange(ref initialHydrationPending, 0);
+            }
+        }
+    }
+
+    private AgentObservabilityHydrationResult HydratePersistedRecords(
+        bool recentOnly,
+        int maximumEvents,
+        int maximumIssues,
+        int maximumAgents,
+        CancellationToken cancellationToken)
+    {
+        if (storageDirectory is null)
+        {
+            return new AgentObservabilityHydrationResult(true, false, 0, 0, 0);
+        }
+
+        lock (refreshGate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PersistedReadResult persistedEvents = ReadPersistedRecords(
+                eventsPath,
+                EventRecordKind,
+                recentOnly ? maximumEvents : null,
+                cancellationToken);
+            PersistedReadResult persistedIssues = ReadPersistedRecords(
+                issuesPath,
+                IssueRecordKind,
+                recentOnly ? maximumIssues : null,
+                cancellationToken);
+            PersistedReadResult persistedAgents = ReadPersistedRecords(
+                agentsPath,
+                AgentRecordKind,
+                recentOnly ? maximumAgents : null,
+                cancellationToken);
+
+            List<AgentObservabilityNotification> notifications = [];
+            bool loadDegraded = false;
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                Dictionary<string, AgentEvent> previousEvents = events
+                    .ToDictionary(static value => value.Id, StringComparer.Ordinal);
+                Dictionary<string, AgentIssue> previousIssues = new(issues, StringComparer.Ordinal);
+                Dictionary<AgentObservabilityAgentIdentity, AgentSnapshot> previousAgents =
+                    new(agents);
+
+                if (!recentOnly)
+                {
+                    if (CanReplaceHydratedState(persistedEvents))
+                    {
+                        events.Clear();
+                    }
+
+                    if (CanReplaceHydratedState(persistedIssues))
+                    {
+                        issues.Clear();
+                    }
+
+                    if (CanReplaceHydratedState(persistedAgents))
+                    {
+                        agents.Clear();
+                    }
+                }
+
+                LoadAgents(persistedAgents.Records);
+                loadDegraded |= LoadEvents(persistedEvents.Records);
+                loadDegraded |= LoadIssues(persistedIssues.Records);
+                ReconcileLifecycleStateLocked();
+                nextSequence = events.Count == 0
+                    ? 0
+                    : events.Max(static value => value.Sequence);
+                lastTimestamp = events.Count == 0
+                    ? 0
+                    : events.Max(static value => value.Timestamp);
+                TrimEvents();
+                TrimIssues();
+                TrimAgents();
+                TrimEvidence();
+                AddChangedNotificationsLocked(
+                    previousEvents,
+                    previousIssues,
+                    previousAgents,
+                    notifications);
+            }
+
+            foreach (AgentObservabilityNotification notification in notifications)
+            {
+                Notify(notification);
+            }
+
+            bool degraded = loadDegraded ||
+                persistedEvents.Degraded ||
+                persistedIssues.Degraded ||
+                persistedAgents.Degraded;
+            string? message = degraded
+                ? "Some historical observability records were skipped or unavailable."
+                : null;
+            return new AgentObservabilityHydrationResult(
+                true,
+                degraded,
+                persistedEvents.Records.Count,
+                persistedIssues.Records.Count,
+                persistedAgents.Records.Count,
+                message);
+        }
+    }
 
     public void Dispose()
     {
@@ -1605,9 +1991,11 @@ public sealed class AgentObservabilityStore :
         lock (gate)
         {
             subscribers.Clear();
+            TrimEvidence();
         }
 
         storageWatcher?.Dispose();
+        CompactPersistedFiles();
     }
 
     private FileSystemWatcher? CreateStorageWatcher()
@@ -1707,8 +2095,60 @@ public sealed class AgentObservabilityStore :
 
         lock (gate)
         {
-            ReloadPersistedRecordsLocked();
+            if (ReloadPersistedRecordsLocked())
+            {
+                TrimEvidence();
+                MigratePersistedIdentityStateLocked();
+            }
         }
+    }
+
+    private void MigratePersistedIdentityStateLocked()
+    {
+        if (!identityMigrationPending || storageDirectory is null)
+        {
+            return;
+        }
+
+        try
+        {
+            RewritePersistedStateFile(
+                eventsPath,
+                EventRecordKind,
+                events.OrderBy(static value => value.Sequence)
+                    .ThenBy(static value => value.Id, StringComparer.Ordinal));
+            RewritePersistedStateFile(
+                issuesPath,
+                IssueRecordKind,
+                issues.Values.OrderBy(static value => value.Timestamp)
+                    .ThenBy(static value => value.Id, StringComparer.Ordinal));
+            RewritePersistedStateFile(
+                agentsPath,
+                AgentRecordKind,
+                agents.Values.OrderBy(static value => value.StartTime)
+                    .ThenBy(static value => value.AgentId, StringComparer.Ordinal));
+            identityMigrationPending = false;
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or NotSupportedException or JsonException)
+        {
+            // A locked or read-only legacy store remains usable in memory.
+            // The next process start retries the idempotent migration.
+        }
+    }
+
+    private void RewritePersistedStateFile<T>(
+        string? path,
+        string kind,
+        IEnumerable<T> values)
+    {
+        if (path is null || !File.Exists(path))
+        {
+            return;
+        }
+
+        using FileStream lockStream = AcquireFileLock(path + ".lock");
+        Rewrite(path, kind, values, enforceMaximumBytes: false);
     }
 
     private bool ReloadPersistedRecordsLocked()
@@ -1730,9 +2170,10 @@ public sealed class AgentObservabilityStore :
         events.Clear();
         issues.Clear();
         agents.Clear();
+        LoadAgents(persistedAgents);
         LoadEvents(persistedEvents);
         LoadIssues(persistedIssues);
-        LoadAgents(persistedAgents);
+        ReconcileLifecycleStateLocked();
         nextSequence = events.Count == 0
             ? 0
             : events.Max(static eventRecord => eventRecord.Sequence);
@@ -1744,31 +2185,238 @@ public sealed class AgentObservabilityStore :
         TrimAgents();
         return true;
     }
-
-    private void LoadEvents(IReadOnlyList<JsonElement> records)
+    private PersistedReadResult ReadPersistedRecords(
+        string? path,
+        string expectedKind,
+        int? maximumRecords,
+        CancellationToken cancellationToken)
     {
+        if (path is null || !File.Exists(path))
+        {
+            return new PersistedReadResult([], false, true);
+        }
+
+        FileStream? lockStream = null;
+        try
+        {
+            lockStream = TryAcquireFileLock(path + ".lock");
+            if (lockStream is null)
+            {
+                return new PersistedReadResult([], true, false);
+            }
+
+            return ReadPersistedRecordsUnlocked(
+                path,
+                expectedKind,
+                maximumRecords,
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+            return new PersistedReadResult([], true, false);
+        }
+        finally
+        {
+            lockStream?.Dispose();
+        }
+    }
+
+    private PersistedReadResult ReadPersistedRecordsUnlocked(
+        string path,
+        string expectedKind,
+        int? maximumRecords,
+        CancellationToken cancellationToken)
+    {
+        const long maximumInitialReadBytes = 4L * 1024 * 1024;
+        var records = new List<JsonElement>();
+        bool degraded = false;
+
+        using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        long start = maximumRecords is null
+            ? 0
+            : Math.Max(0, stream.Length - maximumInitialReadBytes);
+        stream.Seek(start, SeekOrigin.Begin);
+        using var reader = new StreamReader(
+            stream,
+            new UTF8Encoding(false, false),
+            detectEncodingFromByteOrderMarks: true);
+        if (start > 0)
+        {
+            _ = ReadBoundedLine(
+                reader,
+                options.MaximumPersistedBytes,
+                cancellationToken,
+                out _);
+        }
+        string? line;
+        while ((line = ReadBoundedLine(
+                   reader,
+                   options.MaximumPersistedBytes,
+                   cancellationToken,
+                   out bool oversized)) is not null)
+        {
+            if (oversized)
+            {
+                degraded = true;
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(
+                    line,
+                    new JsonDocumentOptions { MaxDepth = 16 });
+                JsonElement root = document.RootElement;
+                if (!root.TryGetProperty("kind", out JsonElement kind) ||
+                    !string.Equals(kind.GetString(), expectedKind, StringComparison.Ordinal) ||
+                    !root.TryGetProperty("value", out JsonElement value))
+                {
+                    degraded = true;
+                    continue;
+                }
+
+                records.Add(value.Clone());
+                if (maximumRecords is int limit && records.Count > limit)
+                {
+                    records.RemoveAt(0);
+                }
+            }
+            catch (JsonException)
+            {
+                degraded = true;
+            }
+        }
+
+        return new PersistedReadResult(records, degraded, true);
+    }
+
+    private static string? ReadBoundedLine(
+        StreamReader reader,
+        int maximumCharacters,
+        CancellationToken cancellationToken,
+        out bool oversized)
+    {
+        var builder = new StringBuilder(Math.Min(maximumCharacters, 4_096));
+        oversized = false;
+        while (true)
+        {
+            int next = reader.Read();
+            if (next < 0)
+            {
+                return builder.Length == 0 && !oversized
+                    ? null
+                    : builder.ToString();
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            char value = (char)next;
+            if (value is '\r' or '\n')
+            {
+                return oversized ? string.Empty : builder.ToString();
+            }
+
+            if (builder.Length < maximumCharacters)
+            {
+                builder.Append(value);
+            }
+            else
+            {
+                oversized = true;
+            }
+        }
+    }
+    private void AddChangedNotificationsLocked(
+        IReadOnlyDictionary<string, AgentEvent> previousEvents,
+        IReadOnlyDictionary<string, AgentIssue> previousIssues,
+        IReadOnlyDictionary<AgentObservabilityAgentIdentity, AgentSnapshot> previousAgents,
+        ICollection<AgentObservabilityNotification> notifications)
+    {
+        foreach (AgentSnapshot agent in agents.Values)
+        {
+            AgentObservabilityAgentIdentity identity =
+                new(agent.RunId, agent.AgentId);
+            if (!previousAgents.TryGetValue(identity, out AgentSnapshot? previous) ||
+                !RecordsEqual(previous, agent))
+            {
+                notifications.Add(new AgentObservabilityNotification(
+                    AgentObservabilityNotificationKind.AgentChanged,
+                    Agent: agent));
+            }
+        }
+
+        foreach (AgentEvent eventRecord in events)
+        {
+            if (!previousEvents.ContainsKey(eventRecord.Id))
+            {
+                notifications.Add(new AgentObservabilityNotification(
+                    AgentObservabilityNotificationKind.EventAppended,
+                    Event: eventRecord));
+            }
+        }
+
+        foreach (AgentIssue issue in issues.Values)
+        {
+            if (!previousIssues.TryGetValue(issue.Id, out AgentIssue? previous) ||
+                !RecordsEqual(previous, issue))
+            {
+                notifications.Add(new AgentObservabilityNotification(
+                    AgentObservabilityNotificationKind.IssueChanged,
+                    Issue: issue));
+            }
+        }
+    }
+    private static bool CanReplaceHydratedState(PersistedReadResult result) =>
+        result.Available && result.Records.Count > 0;
+
+
+    private bool LoadEvents(IReadOnlyList<JsonElement> records)
+    {
+        bool degraded = false;
+        HashSet<string> existingIds = events
+            .Select(static value => value.Id)
+            .ToHashSet(StringComparer.Ordinal);
         foreach (JsonElement value in records)
         {
             try
             {
                 AgentEvent? valueRecord = value.Deserialize<AgentEvent>(
                     AgentObservabilityJson.Options);
-                if (valueRecord is not null &&
-                    !string.IsNullOrWhiteSpace(valueRecord.Id) &&
-                    valueRecord.Sequence > 0)
+                if (valueRecord is null ||
+                    string.IsNullOrWhiteSpace(valueRecord.Id) ||
+                    valueRecord.Sequence <= 0)
                 {
-                    events.Add(valueRecord with
-                    {
-                        ModId = NormalizePersistedModId(valueRecord.ModId),
-                        Summary = AgentObservabilityData.BoundText(valueRecord.Summary, 1024),
-                        Data = AgentObservabilityData.ToElement(
-                            valueRecord.Data,
-                            options.MaximumEventDataBytes)
-                    });
+                    degraded = true;
+                    continue;
+                }
+
+                AgentEvent normalized = NormalizePersistedEvent(valueRecord);
+                if (!RecordsEqual(valueRecord, normalized))
+                {
+                    identityMigrationPending = true;
+                }
+
+                if (existingIds.Add(valueRecord.Id))
+                {
+                    events.Add(normalized);
+                }
+                else
+                {
+                    identityMigrationPending = true;
                 }
             }
             catch (JsonException)
             {
+                degraded = true;
                 // A corrupt historical line is ignored; current runtime state
                 // remains available and new lines are still appendable.
             }
@@ -1780,45 +2428,73 @@ public sealed class AgentObservabilityStore :
                 ? sequence
                 : string.CompareOrdinal(left.Id, right.Id);
         });
+        return degraded;
     }
 
-    private void LoadIssues(IReadOnlyList<JsonElement> records)
+    private bool LoadIssues(IReadOnlyList<JsonElement> records)
     {
+        bool degraded = false;
         foreach (JsonElement value in records)
         {
             try
             {
                 AgentIssue? issue = value.Deserialize<AgentIssue>(AgentObservabilityJson.Options);
-                if (issue is not null && !string.IsNullOrWhiteSpace(issue.Id))
+                if (issue is null || string.IsNullOrWhiteSpace(issue.Id))
                 {
-                    issues[issue.Id] = NormalizePersistedIssue(issue);
+                    degraded = true;
+                    continue;
                 }
+
+                AgentIssue normalized = NormalizePersistedIssue(issue);
+                if (!RecordsEqual(issue, normalized) ||
+                    issues.ContainsKey(issue.Id))
+                {
+                    identityMigrationPending = true;
+                }
+
+                issues[issue.Id] = normalized;
             }
             catch (JsonException)
             {
+                degraded = true;
             }
         }
+        return degraded;
     }
 
-    private void LoadAgents(IReadOnlyList<JsonElement> records)
+    private bool LoadAgents(IReadOnlyList<JsonElement> records)
     {
+        bool degraded = false;
         foreach (JsonElement value in records)
         {
             try
             {
                 AgentSnapshot? agent = value.Deserialize<AgentSnapshot>(
                     AgentObservabilityJson.Options);
-                if (agent is not null && !string.IsNullOrWhiteSpace(agent.AgentId))
+                if (agent is null || string.IsNullOrWhiteSpace(agent.AgentId))
                 {
-                    agents[new AgentObservabilityAgentIdentity(agent.RunId, agent.AgentId)] =
-                        NormalizePersistedAgent(agent);
+                    degraded = true;
+                    continue;
                 }
+
+                AgentSnapshot normalized = NormalizePersistedAgent(agent);
+                AgentObservabilityAgentIdentity identity =
+                    new(agent.RunId, agent.AgentId);
+                if (!RecordsEqual(agent, normalized) || agents.ContainsKey(identity))
+                {
+                    identityMigrationPending = true;
+                }
+
+                agents[identity] = normalized;
             }
             catch (JsonException)
             {
+                degraded = true;
             }
         }
+        return degraded;
     }
+
 
     private IReadOnlyList<JsonElement>? ReadRecords(string? path, string expectedKind)
     {
@@ -1852,39 +2528,12 @@ public sealed class AgentObservabilityStore :
         string path,
         string expectedKind)
     {
-        var records = new List<JsonElement>();
-        foreach (string line in File.ReadLines(path))
-        {
-            if (string.IsNullOrWhiteSpace(line) || line.Length > options.MaximumPersistedBytes)
-            {
-                continue;
-            }
-
-            JsonElement? parsedValue = null;
-            try
-            {
-                using JsonDocument document = JsonDocument.Parse(
-                    line,
-                    new JsonDocumentOptions { MaxDepth = 16 });
-                JsonElement root = document.RootElement;
-                if (!root.TryGetProperty("kind", out JsonElement kind) ||
-                    !string.Equals(kind.GetString(), expectedKind, StringComparison.Ordinal) ||
-                    !root.TryGetProperty("value", out JsonElement value))
-                {
-                    continue;
-                }
-                parsedValue = value.Clone();
-            }
-            catch (JsonException)
-            {
-            }
-            if (parsedValue.HasValue)
-            {
-                records.Add(parsedValue.Value);
-            }
-        }
-
-        return records;
+        return ReadPersistedRecordsUnlocked(
+                path,
+                expectedKind,
+                maximumRecords: null,
+                CancellationToken.None)
+            .Records;
     }
 
     private long AllocateSequence()
@@ -2088,10 +2737,21 @@ public sealed class AgentObservabilityStore :
 
     private void TrimEvidence()
     {
+        HashSet<string> protectedIds = issues.Values
+            .Where(static issue => !issue.Recovered)
+            .Select(static issue => issue.EvidenceReference)
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Select(static id => id!)
+            .ToHashSet(StringComparer.Ordinal);
+
         if (evidence.Count > options.MaximumEvidenceEntries)
         {
+            int removableCount = Math.Max(
+                0,
+                evidence.Count - options.MaximumEvidenceEntries);
             foreach (string id in evidence.Keys
-                         .Take(evidence.Count - options.MaximumEvidenceEntries)
+                         .Where(id => !protectedIds.Contains(id))
+                         .Take(removableCount)
                          .ToArray())
             {
                 evidence.Remove(id);
@@ -2110,8 +2770,27 @@ public sealed class AgentObservabilityStore :
                 .OrderByDescending(static file => file.LastWriteTimeUtc)
                 .ThenByDescending(static file => file.Name, StringComparer.Ordinal)
                 .ToArray();
-            foreach (FileInfo file in files.Skip(options.MaximumEvidenceEntries))
+            HashSet<string> protectedFileNames = protectedIds
+                .Select(static id => id + ".json")
+                .ToHashSet(StringComparer.Ordinal);
+            int unprotectedSlots = Math.Max(
+                0,
+                options.MaximumEvidenceEntries -
+                    files.Count(file => protectedFileNames.Contains(file.Name)));
+            foreach (FileInfo file in files)
             {
+
+                if (protectedFileNames.Contains(file.Name))
+                {
+                    continue;
+                }
+
+                if (unprotectedSlots > 0)
+                {
+                    unprotectedSlots--;
+                    continue;
+                }
+
                 try
                 {
                     file.Delete();
@@ -2129,12 +2808,49 @@ public sealed class AgentObservabilityStore :
         {
         }
     }
+    private void CompactPersistedFiles()
+    {
+        if (storageDirectory is null)
+        {
+            return;
+        }
 
-    private void CompactIfNeeded(string path, string kind)
+        CompactPersistedFile(eventsPath, EventRecordKind);
+        CompactPersistedFile(issuesPath, IssueRecordKind);
+        CompactPersistedFile(agentsPath, AgentRecordKind);
+    }
+
+    private void CompactPersistedFile(string? path, string kind)
+    {
+        if (path is null)
+        {
+            return;
+        }
+
+        try
+        {
+            using FileStream lockStream = AcquireFileLock(path + ".lock");
+            CompactIfNeeded(path, kind, force: true);
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+        }
+    }
+
+    private void CompactIfNeeded(
+        string path,
+        string kind,
+        bool force = false)
     {
         try
         {
-            if (new FileInfo(path).Length <= options.MaximumPersistedBytes)
+            long triggerBytes = force
+                ? options.MaximumPersistedBytes
+                : Math.Max(
+                    options.MaximumPersistedBytes + 1L,
+                    Math.Min(long.MaxValue / 2, options.MaximumPersistedBytes * 2L));
+            if (new FileInfo(path).Length <= triggerBytes)
             {
                 return;
             }
@@ -2145,11 +2861,7 @@ public sealed class AgentObservabilityStore :
                     Rewrite(
                         path,
                         kind,
-                        ReadPersistedEventsForCompaction(path)
-                            .Values
-                            .OrderBy(static eventRecord => eventRecord.Sequence)
-                            .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
-                            .TakeLast(options.MaximumEvents));
+                        SelectEventsForCompaction(path));
                     break;
                 case IssueRecordKind:
                     Rewrite(
@@ -2157,9 +2869,12 @@ public sealed class AgentObservabilityStore :
                         kind,
                         ReadPersistedIssuesForCompaction(path)
                             .Values
-                            .OrderBy(static issue => issue.Timestamp)
+                            .OrderByDescending(static issue => !issue.Recovered)
+                            .ThenByDescending(static issue => issue.Timestamp)
                             .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
-                            .TakeLast(options.MaximumIssues));
+                            .Take(options.MaximumIssues)
+                            .OrderBy(static issue => issue.Timestamp)
+                            .ThenBy(static issue => issue.Id, StringComparer.Ordinal));
                     break;
                 case AgentRecordKind:
                     Rewrite(
@@ -2167,19 +2882,58 @@ public sealed class AgentObservabilityStore :
                         kind,
                         ReadPersistedAgentsForCompaction(path)
                             .Values
-                            .OrderBy(static agent => agent.StartTime)
+                            .OrderByDescending(static agent => agent.Status is not
+                                (AgentStatus.Completed or AgentStatus.Failed))
+                            .ThenByDescending(static agent => agent.StartTime)
                             .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal)
-                            .TakeLast(options.MaximumAgents));
+                            .Take(options.MaximumAgents)
+                            .OrderBy(static agent => agent.StartTime)
+                            .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal));
                     break;
             }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-            NotSupportedException)
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or NotSupportedException)
         {
         }
     }
 
-    private void Rewrite<T>(string path, string kind, IEnumerable<T> values)
+    private IEnumerable<AgentEvent> SelectEventsForCompaction(string path)
+    {
+        Dictionary<string, AgentEvent> allEvents = ReadPersistedEventsForCompaction(path);
+        Dictionary<string, AgentIssue> allIssues =
+            issuesPath is string issuePath && File.Exists(issuePath)
+                ? ReadPersistedIssuesForCompaction(issuePath)
+                : new(issues, StringComparer.Ordinal);
+        HashSet<string> requiredIds = allIssues.Values
+            .Where(static issue => !issue.Recovered)
+            .OrderByDescending(static issue => issue.Timestamp)
+            .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
+            .SelectMany(static issue => issue.EventIds ?? [])
+            .Distinct(StringComparer.Ordinal)
+            .Take(options.MaximumEvents)
+            .ToHashSet(StringComparer.Ordinal);
+
+        AgentEvent[] required = allEvents.Values
+            .Where(eventRecord => requiredIds.Contains(eventRecord.Id))
+            .OrderBy(static eventRecord => eventRecord.Sequence)
+            .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
+            .ToArray();
+        int remaining = Math.Max(0, options.MaximumEvents - required.Length);
+        AgentEvent[] recent = allEvents.Values
+            .Where(eventRecord => !requiredIds.Contains(eventRecord.Id))
+            .OrderBy(static eventRecord => eventRecord.Sequence)
+            .ThenBy(static eventRecord => eventRecord.Id, StringComparer.Ordinal)
+            .TakeLast(remaining)
+            .ToArray();
+        return required.Concat(recent);
+    }
+
+    private void Rewrite<T>(
+        string path,
+        string kind,
+        IEnumerable<T> values,
+        bool enforceMaximumBytes = true)
     {
         string temporaryPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
@@ -2194,9 +2948,12 @@ public sealed class AgentObservabilityStore :
                 int bytes = Encoding.UTF8.GetByteCount(json) + Environment.NewLine.Length;
                 lines.Enqueue((json, bytes));
                 totalBytes += bytes;
-                while (totalBytes > options.MaximumPersistedBytes && lines.Count > 1)
+                if (enforceMaximumBytes)
                 {
-                    totalBytes -= lines.Dequeue().Bytes;
+                    while (totalBytes > options.MaximumPersistedBytes && lines.Count > 1)
+                    {
+                        totalBytes -= lines.Dequeue().Bytes;
+                    }
                 }
             }
 
@@ -2209,7 +2966,11 @@ public sealed class AgentObservabilityStore :
                     writer.WriteLine(value);
                 }
             }
-            File.Move(temporaryPath, path, true);
+            File.Replace(
+                temporaryPath,
+                path,
+                destinationBackupFileName: null,
+                ignoreMetadataErrors: true);
         }
         finally
         {
@@ -2407,45 +3168,127 @@ public sealed class AgentObservabilityStore :
         }
     }
 
-    // Normalize only deterministic, known test/temp prefixes while loading;
-    // ambiguous history remains untouched and no records are deleted.
-    private static string NormalizePersistedModId(string modId) =>
+    private static AgentSnapshot NormalizePersistedAgent(AgentSnapshot agent)
+    {
+        ObservabilityEntityIdentity identity =
+            ObservabilityEntityIdentityResolver.ForPersisted(
+                agent.EntityType,
+                agent.CanonicalEntityId,
+                agent.ModId,
+                agent.ModName,
+                agent.WorkloadKind,
+                agent.QualificationProfile);
+        return agent with
+        {
+            SchemaVersion = AgentObservabilitySchemas.Agent,
+            ModId = NormalizeEntityModId(identity, agent.ModId),
+            ModName = NormalizeEntityDisplayName(identity, agent.ModName),
+            EntityType = identity.EntityType,
+            CanonicalEntityId = identity.CanonicalEntityId,
+            DisplayName = identity.DisplayName
+        };
+    }
+
+    private AgentEvent NormalizePersistedEvent(AgentEvent eventRecord)
+    {
+        agents.TryGetValue(
+            new AgentObservabilityAgentIdentity(eventRecord.RunId, eventRecord.AgentId),
+            out AgentSnapshot? owner);
+        ObservabilityEntityIdentity identity =
+            ObservabilityEntityIdentityResolver.ForPersisted(
+                owner?.EntityType ?? eventRecord.EntityType,
+                owner?.CanonicalEntityId ?? eventRecord.CanonicalEntityId,
+                eventRecord.ModId,
+                eventRecord.DisplayName,
+                owner?.WorkloadKind,
+                owner?.QualificationProfile);
+        return eventRecord with
+        {
+            SchemaVersion = AgentObservabilitySchemas.Event,
+            ModId = NormalizeEntityModId(identity, eventRecord.ModId),
+            EntityType = identity.EntityType,
+            CanonicalEntityId = identity.CanonicalEntityId,
+            DisplayName = identity.DisplayName,
+            Summary = AgentObservabilityData.BoundText(eventRecord.Summary, 1024),
+            Data = AgentObservabilityData.ToElement(
+                eventRecord.Data,
+                options.MaximumEventDataBytes)
+        };
+    }
+
+    private AgentIssue NormalizePersistedIssue(AgentIssue issue)
+    {
+        agents.TryGetValue(
+            new AgentObservabilityAgentIdentity(issue.RunId, issue.AgentId),
+            out AgentSnapshot? owner);
+        ObservabilityEntityIdentity identity =
+            ObservabilityEntityIdentityResolver.ForPersisted(
+                owner?.EntityType ?? issue.EntityType,
+                owner?.CanonicalEntityId ?? issue.CanonicalEntityId,
+                issue.ModId,
+                issue.DisplayName,
+                owner?.WorkloadKind,
+                owner?.QualificationProfile);
+        return issue with
+        {
+            SchemaVersion = AgentObservabilitySchemas.Issue,
+            ModId = NormalizeEntityModId(identity, issue.ModId),
+            EntityType = identity.EntityType,
+            CanonicalEntityId = identity.CanonicalEntityId,
+            DisplayName = identity.DisplayName,
+            Summary = AgentObservabilityData.BoundText(issue.Summary, 512),
+            EventIds = issue.EventIds
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .Take(options.MaximumIssueEventReferences)
+                .ToArray(),
+            RelatedFiles = NormalizeValues(issue.RelatedFiles),
+            RelatedToolCalls = NormalizeValues(issue.RelatedToolCalls),
+            RelatedCommands = NormalizeCommands(issue.RelatedCommands),
+            TraceId = AgentObservabilityData.BoundIdentifier(issue.TraceId, 128),
+            SpanIds = NormalizeValues(issue.SpanIds, 128),
+            OperationKey = AgentObservabilityData.BoundIdentifier(issue.OperationKey, 256),
+            RetryCount = Math.Max(0, issue.RetryCount),
+            Occurrences = Math.Max(1, issue.Occurrences)
+        };
+    }
+
+    private static string NormalizeEntityModId(
+        ObservabilityEntityIdentity identity,
+        string fallback)
+    {
+        if (identity.EntityType == ObservabilityEntityTypes.Tool)
+        {
+            return identity.DisplayName;
+        }
+
+        if (identity.EntityType is ObservabilityEntityTypes.Fixture or
+            ObservabilityEntityTypes.Test)
+        {
+            int separator = identity.CanonicalEntityId.IndexOf(':');
+            return separator >= 0
+                ? identity.CanonicalEntityId[(separator + 1)..]
+                : identity.CanonicalEntityId;
+        }
+
+        return NormalizeLegacyModId(fallback);
+    }
+
+    private static string NormalizeEntityDisplayName(
+        ObservabilityEntityIdentity identity,
+        string fallback) =>
+        identity.EntityType is ObservabilityEntityTypes.Tool or
+            ObservabilityEntityTypes.Fixture or
+            ObservabilityEntityTypes.Test
+            ? identity.DisplayName
+            : fallback;
+
+    private static string NormalizeLegacyModId(string modId) =>
         ObservabilityProjectIdentityResolver.TryNormalizeKnownTemporaryIdentity(
             modId,
             out string canonicalModId)
             ? canonicalModId
             : modId;
-
-    private static AgentSnapshot NormalizePersistedAgent(AgentSnapshot agent)
-    {
-        string modId = NormalizePersistedModId(agent.ModId);
-        return string.Equals(modId, agent.ModId, StringComparison.Ordinal)
-            ? agent
-            : agent with
-            {
-                ModId = modId,
-                ModName = "RimLiaison"
-            };
-    }
-
-    private AgentIssue NormalizePersistedIssue(AgentIssue issue) => issue with
-    {
-        ModId = NormalizePersistedModId(issue.ModId),
-        Summary = AgentObservabilityData.BoundText(issue.Summary, 512),
-        EventIds = issue.EventIds
-            .Where(static value => !string.IsNullOrWhiteSpace(value))
-            .Distinct(StringComparer.Ordinal)
-            .Take(options.MaximumIssueEventReferences)
-            .ToArray(),
-        RelatedFiles = NormalizeValues(issue.RelatedFiles),
-        RelatedToolCalls = NormalizeValues(issue.RelatedToolCalls),
-        RelatedCommands = NormalizeCommands(issue.RelatedCommands),
-        TraceId = AgentObservabilityData.BoundIdentifier(issue.TraceId, 128),
-        SpanIds = NormalizeValues(issue.SpanIds, 128),
-        OperationKey = AgentObservabilityData.BoundIdentifier(issue.OperationKey, 256),
-        RetryCount = Math.Max(0, issue.RetryCount),
-        Occurrences = Math.Max(1, issue.Occurrences)
-    };
 
     private static IReadOnlyList<string>? NormalizeValues(
         IReadOnlyList<string>? values,
@@ -2470,6 +3313,11 @@ public sealed class AgentObservabilityStore :
             .ToArray();
         return normalized.Length == 0 ? null : normalized;
     }
+
+    private sealed record PersistedReadResult(
+        IReadOnlyList<JsonElement> Records,
+        bool Degraded,
+        bool Available);
 
     private void Notify(AgentObservabilityNotification? notification)
     {
@@ -2516,6 +3364,8 @@ public sealed class AgentObservabilityStore :
         string.Equals(left.AgentId, right.AgentId, StringComparison.Ordinal) &&
         string.Equals(left.RunId, right.RunId, StringComparison.Ordinal) &&
         string.Equals(left.ModId, right.ModId, StringComparison.Ordinal) &&
+        string.Equals(left.EntityType, right.EntityType, StringComparison.Ordinal) &&
+        string.Equals(left.CanonicalEntityId, right.CanonicalEntityId, StringComparison.Ordinal) &&
         string.Equals(
             AgentObservabilityLogicalIdentity.For(left),
             AgentObservabilityLogicalIdentity.For(right),

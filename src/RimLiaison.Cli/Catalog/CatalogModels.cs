@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
 
+using RimLiaison.Validation;
+
 namespace RimLiaison.Catalog;
 
 public static class CatalogSchema
@@ -85,6 +87,15 @@ public sealed class CatalogTest
     [JsonPropertyName("requiredCapabilities")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<CatalogCapabilityRequirement>? RequiredCapabilities { get; init; }
+
+    [JsonPropertyName("validationClassification")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public ValidationClassification ValidationClassification { get; init; } =
+        ValidationClassification.REQUIRED;
+
+    [JsonPropertyName("validationSource")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ValidationRequirementSource? ValidationSource { get; init; }
 }
 
 public sealed class CatalogCapabilityRequirement

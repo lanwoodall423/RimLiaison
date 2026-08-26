@@ -1,0 +1,162 @@
+{
+  "SchemaVersion": "rimliaison-qualification-aggregate/v1",
+  "Profile": "single",
+  "WorkloadKind": "qualification",
+  "ToolchainState": "experimental",
+  "TotalRuns": 1,
+  "Passes": 1,
+  "InfrastructureFailures": 0,
+  "FixtureFailures": 0,
+  "RecoverySuccesses": 2,
+  "RecommendationCount": 2,
+  "FailureSignatures": {
+    "fixture.build.failure": 1,
+    "artifact-stale-invalidation": 1,
+    "readiness.identity-mismatch": 1,
+    "fixture.runtime.failure": 1
+  },
+  "Runs": [
+    {
+      "SchemaVersion": "rimliaison-qualification-run/v1",
+      "RunNumber": 1,
+      "RunId": "qualification-e9501aab87d0480c851507cefe0bffd9",
+      "Profile": "single",
+      "WorkloadKind": "qualification",
+      "ToolchainState": "experimental",
+      "Outcome": 0,
+      "Scenarios": [
+        {
+          "Id": "build.success",
+          "Name": "successful build",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": null
+        },
+        {
+          "Id": "build.failure",
+          "Name": "expected build failure classification",
+          "Outcome": 0,
+          "ExpectedFailure": true,
+          "Recovered": false,
+          "FailureSignature": "fixture.build.failure",
+          "Evidence": null
+        },
+        {
+          "Id": "deployment",
+          "Name": "deployment and artifact freshness",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": "artifact-fresh"
+        },
+        {
+          "Id": "deployment.stale",
+          "Name": "stale or changed deployment artifact",
+          "Outcome": 0,
+          "ExpectedFailure": true,
+          "Recovered": false,
+          "FailureSignature": "artifact-stale-invalidation",
+          "Evidence": null
+        },
+        {
+          "Id": "quicktest.launch",
+          "Name": "Quicktest launch",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": null
+        },
+        {
+          "Id": "readiness",
+          "Name": "readiness and identity",
+          "Outcome": 0,
+          "ExpectedFailure": true,
+          "Recovered": true,
+          "FailureSignature": "readiness.identity-mismatch",
+          "Evidence": null
+        },
+        {
+          "Id": "runtime.success",
+          "Name": "successful runtime validation",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": null
+        },
+        {
+          "Id": "runtime.failure",
+          "Name": "expected runtime failure classification",
+          "Outcome": 0,
+          "ExpectedFailure": true,
+          "Recovered": false,
+          "FailureSignature": "fixture.runtime.failure",
+          "Evidence": null
+        },
+        {
+          "Id": "restart.recovery",
+          "Name": "restart and recovery",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": true,
+          "FailureSignature": null,
+          "Evidence": "restart-recovered"
+        },
+        {
+          "Id": "evidence.structured",
+          "Name": "structured evidence collection",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": "evidence://qualification/structured"
+        },
+        {
+          "Id": "optional.validation",
+          "Name": "optional validation unavailable",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": "qualification://optional-validation"
+        },
+        {
+          "Id": "recommendation",
+          "Name": "non-blocking recommendation",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": "qualification://parallel-recommendation"
+        },
+        {
+          "Id": "cleanup",
+          "Name": "clean completion and cleanup",
+          "Outcome": 0,
+          "ExpectedFailure": false,
+          "Recovered": false,
+          "FailureSignature": null,
+          "Evidence": null
+        }
+      ],
+      "InfrastructureFailures": 0,
+      "FixtureFailures": 0,
+      "RecoverySuccesses": 2,
+      "RecommendationCount": 2,
+      "FailureSignatures": [
+        "fixture.build.failure",
+        "artifact-stale-invalidation",
+        "readiness.identity-mismatch",
+        "fixture.runtime.failure"
+      ],
+      "StartedAt": "2026-08-25T21:05:53.0768363+00:00",
+      "CompletedAt": "2026-08-25T21:06:06.5654558+00:00"
+    }
+  ],
+  "StartedAt": "2026-08-25T21:05:53.075974+00:00",
+  "CompletedAt": "2026-08-25T21:06:07.1744946+00:00"
+}

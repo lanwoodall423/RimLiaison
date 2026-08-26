@@ -1,9 +1,10 @@
 using System.Text;
+using System.Globalization;
 using System.Text.Json;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using RimContext.Core.Content;
 using RimLiaison.Observability;
-
 namespace RimLiaison.Desktop;
 
 public readonly record struct AgentObservabilityDesktopMutationCounts(
@@ -20,7 +21,12 @@ public sealed class ObservabilityMainForm : Form
 {
     private readonly IAgentObservabilityStore store;
     private readonly bool ownsStore;
+    private readonly AgentObservabilityStore? hydrationStore;
+    private readonly CancellationTokenSource hydrationCancellation = new();
+    private Task? hydrationTask;
+    private string? hydrationStatus;
     private readonly AgentObservabilityUi observabilityUi;
+    private readonly ContentIntelligenceObservabilityAdministration? contentAdministration;
     private readonly IDisposable uiSubscription;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly FlowLayoutPanel navigationPanel;
@@ -29,9 +35,19 @@ public sealed class ObservabilityMainForm : Form
     private readonly Panel contentPanel;
     private readonly Panel allPanel;
     private readonly Panel issuesPanel;
+    private readonly Panel contentIntelligencePanel;
     private readonly Panel agentPanel;
+    private readonly ListView productionList;
     private readonly ListView allActivity;
     private readonly ListView agentActivity;
+    private readonly ListView contentList;
+    private readonly TextBox contentDetails;
+    private readonly Label contentSummary;
+    private readonly FlowLayoutPanel contentActions;
+    private readonly Button contentQuarantineButton;
+    private readonly Button contentRollbackButton;
+    private readonly Button contentExcludeButton;
+    private readonly Button contentIneligibleButton;
     private readonly ListView issueList;
     private readonly TextBox allDetails;
     private readonly TextBox agentDetails;
@@ -44,6 +60,7 @@ public sealed class ObservabilityMainForm : Form
     private readonly ListView pastSessions;
     private readonly Button viewActivityButton;
     private readonly Button issueDetailsButton;
+    private readonly TextBox filterBox;
     private readonly Button loadMoreIssuesButton;
     private readonly Button prepareAssessmentButton;
     private readonly Button copyChatButton;
@@ -63,6 +80,8 @@ public sealed class ObservabilityMainForm : Form
     private string? bundleJson;
     private string? bundleStatusMessage;
     private string? renderedNavigationSignature;
+    private string? renderedContentSignature;
+    private ContentIntelligenceObservabilityView? renderedContentView;
     private string? renderedPastSessionsSignature;
     private bool suppressIssueSelection;
     private bool suppressActivitySelection;
@@ -77,10 +96,27 @@ public sealed class ObservabilityMainForm : Form
     private long issueItemClears;
     private int disposed;
 
-    public ObservabilityMainForm(IAgentObservabilityStore? store = null)
+    public ObservabilityMainForm(
+        IAgentObservabilityStore? store = null,
+        ContentIntelligenceObservabilityAdministration? contentAdministration = null)
     {
-        this.store = store ?? AgentObservabilityStore.CreateDefault();
-        ownsStore = store is null;
+        bool useDefaultStore = store is null;
+        AgentObservabilityStore? defaultStore = useDefaultStore
+            ? AgentObservabilityStore.CreateDefault(loadPersistedRecords: false)
+            : null;
+        this.store = store ?? defaultStore!;
+        hydrationStore = defaultStore;
+        hydrationStatus = hydrationStore is null
+            ? null
+            : "Loading recent observability state...";
+        ownsStore = useDefaultStore;
+        this.contentAdministration = contentAdministration ??
+            (useDefaultStore
+                ? new ContentIntelligenceObservabilityAdministration(
+                    new ContentIntelligenceAdministration(
+                        new ContentIntelligenceStore(ContentIntelligenceStorage.ResolveDefaultPath())),
+                    this.store)
+                : null);
         observabilityUi = new AgentObservabilityUi(
             this.store,
             new AgentObservabilityUiOptions
@@ -129,11 +165,23 @@ public sealed class ObservabilityMainForm : Form
         };
         contentPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 0, 8, 4) };
 
+        productionList = CreateListView(
+            ("Mod / project", 180),
+            ("Agent", 150),
+            ("Workload", 112),
+            ("Toolchain", 112),
+            ("Stage", 112),
+            ("Operation", 180),
+            ("Status", 100),
+            ("Block", 100),
+            ("Latest Date/Time", 150),
+            ("Latest event", 270),
+            ("Outcome", 120));
         allActivity = CreateListView(
-            ("Time", 84),
+            ("Date/Time", 150),
             ("Mod", 180),
             ("Stage", 112),
-            ("Activity", 520),
+            ("Activity", 430),
             ("Status", 100));
         allActivity.SelectedIndexChanged += OnAllActivitySelected;
         allDetails = CreateDetailsBox();
@@ -149,16 +197,23 @@ public sealed class ObservabilityMainForm : Form
         issueList = CreateListView(
             ("State", 92),
             ("Severity", 92),
-            ("Shared", 92),
+            ("Shared", 160),
+            ("Date/Time", 150),
             ("Mod", 180),
             ("Category", 150),
-            ("Summary", 510),
+            ("Summary", 450),
             ("Issue", 220));
         issueList.CheckBoxes = true;
         issueList.MultiSelect = false;
         issueList.ItemChecked += OnIssueChecked;
         issueList.SelectedIndexChanged += OnIssueSelected;
         issueDetails = CreateDetailsBox();
+        filterBox = new TextBox
+        {
+            Width = 180,
+            PlaceholderText = "Filter mod / agent / issue"
+        };
+        filterBox.TextChanged += OnFilterChanged;
         viewActivityButton = CreateButton("View activity", OnViewIssueActivity);
         issueDetailsButton = CreateButton("Details", OnViewIssueDetails);
         loadMoreIssuesButton = CreateButton("Load older issues", OnLoadMoreIssues);
@@ -170,6 +225,44 @@ public sealed class ObservabilityMainForm : Form
         copyBundleButton.Enabled = false;
         exportBundleButton.Enabled = false;
         issuesPanel = BuildIssuesPanel();
+        contentList = CreateListView(
+            ("Time", 84),
+            ("State", 110),
+            ("Project", 150),
+            ("Blueprint", 190),
+            ("Reuse", 130),
+            ("Archetype", 170),
+            ("Activity", 520));
+        contentList.SelectedIndexChanged += OnContentSelected;
+        contentDetails = CreateDetailsBox();
+        contentSummary = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 58,
+            Padding = new Padding(4, 4, 4, 4),
+            AutoEllipsis = true,
+            ForeColor = Color.DimGray
+        };
+        contentActions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 34,
+            Padding = new Padding(4, 2, 4, 2),
+            WrapContents = false
+        };
+        contentQuarantineButton = CreateButton("Quarantine archetype", OnContentQuarantine);
+        contentRollbackButton = CreateButton("Rollback archetype", OnContentRollback);
+        contentExcludeButton = CreateButton("Exclude for project", OnContentExclude);
+        contentIneligibleButton = CreateButton("Mark source ineligible", OnContentIneligible);
+        contentQuarantineButton.Enabled = contentAdministration is not null;
+        contentRollbackButton.Enabled = contentAdministration is not null;
+        contentExcludeButton.Enabled = contentAdministration is not null;
+        contentIneligibleButton.Enabled = contentAdministration is not null;
+        contentActions.Controls.Add(contentQuarantineButton);
+        contentActions.Controls.Add(contentRollbackButton);
+        contentActions.Controls.Add(contentExcludeButton);
+        contentActions.Controls.Add(contentIneligibleButton);
+        contentIntelligencePanel = BuildContentPanel();
 
         agentHeader = new Label
         {
@@ -206,13 +299,14 @@ public sealed class ObservabilityMainForm : Form
         pastSessions.SelectedIndexChanged += OnPastSessionSelected;
         agentPanel = BuildAgentPanel();
 
-        contentPanel.Controls.Add(agentPanel);
+        contentPanel.Controls.Add(contentIntelligencePanel);
         contentPanel.Controls.Add(issuesPanel);
         contentPanel.Controls.Add(allPanel);
-        Controls.Add(contentPanel);
+        contentPanel.Controls.Add(agentPanel);
         Controls.Add(streamStatus);
         Controls.Add(viewTitle);
         Controls.Add(navigationPanel);
+        Shown += OnFormShown;
         FormClosed += OnFormClosed;
 
         RefreshFromSnapshot(observabilityUi.Snapshot);
@@ -244,6 +338,8 @@ public sealed class ObservabilityMainForm : Form
     {
         if (disposing && Interlocked.Exchange(ref disposed, 1) == 0)
         {
+            hydrationCancellation.Cancel();
+            hydrationCancellation.Dispose();
             refreshTimer.Stop();
             refreshTimer.Dispose();
             uiSubscription.Dispose();
@@ -256,10 +352,28 @@ public sealed class ObservabilityMainForm : Form
 
         base.Dispose(disposing);
     }
+    private Panel BuildContentPanel()
+    {
+        var panel = new Panel { Dock = DockStyle.Fill };
+        var split = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterDistance = 390
+        };
+        split.Panel1.Controls.Add(contentList);
+        split.Panel2.Controls.Add(contentDetails);
+        panel.Controls.Add(split);
+        panel.Controls.Add(contentActions);
+        panel.Controls.Add(contentSummary);
+        return panel;
+    }
 
     private Panel BuildAllPanel()
     {
         var panel = new Panel { Dock = DockStyle.Fill };
+        productionList.Dock = DockStyle.Top;
+        productionList.Height = 150;
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -270,6 +384,7 @@ public sealed class ObservabilityMainForm : Form
         split.Panel1.Controls.Add(allActivity);
         split.Panel2.Controls.Add(allDetails);
         panel.Controls.Add(split);
+        panel.Controls.Add(productionList);
         panel.Controls.Add(allAgentSummary);
         return panel;
     }
@@ -293,6 +408,13 @@ public sealed class ObservabilityMainForm : Form
             Padding = new Padding(0, 4, 0, 4),
             WrapContents = false
         };
+        actions.Controls.Add(new Label
+        {
+            Text = "Filter:",
+            AutoSize = true,
+            Padding = new Padding(4, 7, 2, 0)
+        });
+        actions.Controls.Add(filterBox);
         actions.Controls.Add(viewActivityButton);
         actions.Controls.Add(issueDetailsButton);
         actions.Controls.Add(loadMoreIssuesButton);
@@ -319,7 +441,7 @@ public sealed class ObservabilityMainForm : Form
         agentDetailTabs = new TabControl { Dock = DockStyle.Fill };
         agentDetailTabs.TabPages.Add(CreateTab("Event details", agentDetails));
         agentDetailTabs.TabPages.Add(CreateTab("Files / tools / commands", agentEvidence));
-        agentDetailTabs.TabPages.Add(CreateTab("Build / test / issues", agentResults));
+        agentDetailTabs.TabPages.Add(CreateTab("Execution / impact / validation", agentResults));
         agentDetailTabs.TabPages.Add(CreateTab("Past sessions", pastSessions));
         agentDetailTabs.SelectedIndexChanged += OnAgentDetailTabChanged;
         split.Panel2.Controls.Add(agentDetailTabs);
@@ -397,6 +519,67 @@ public sealed class ObservabilityMainForm : Form
         button.Click += handler;
         return button;
     }
+    private async void OnFormShown(object? sender, EventArgs e)
+    {
+        if (hydrationStore is null ||
+            hydrationTask is not null ||
+            Volatile.Read(ref disposed) != 0)
+        {
+            return;
+        }
+
+        hydrationStatus = "Loading recent observability state...";
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+        hydrationTask = HydrateStoreAsync(hydrationStore, hydrationCancellation.Token);
+        await hydrationTask.ConfigureAwait(true);
+    }
+
+    private async Task HydrateStoreAsync(
+        AgentObservabilityStore store,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            AgentObservabilityHydrationResult result =
+                await store.HydrateRecentAsync(
+                        maximumEvents: 2_000,
+                        maximumIssues: 500,
+                        maximumAgents: 250,
+                        cancellationToken)
+                    .ConfigureAwait(true);
+            if (Volatile.Read(ref disposed) != 0)
+            {
+                return;
+            }
+
+            hydrationStatus = result.Degraded
+                ? "Live · historical state partially unavailable: " + result.Message
+                : "Live · recent state loaded; older history loads on demand.";
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            NotSupportedException or InvalidOperationException)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                hydrationStatus = "Live · historical hydration degraded: " + exception.Message;
+                RefreshFromSnapshot(observabilityUi.Snapshot);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                hydrationStatus = "Live · historical hydration degraded: " + exception.Message;
+                RefreshFromSnapshot(observabilityUi.Snapshot);
+            }
+        }
+    }
+
 
     private void OnObservabilityUpdate(AgentObservabilityUiUpdate _)
     {
@@ -442,20 +625,25 @@ public sealed class ObservabilityMainForm : Form
         RefreshNavigation(snapshot);
         string liveStatus = snapshot.Stream.Delayed
             ? "Live stream delayed" + (snapshot.Stream.Message is null ? string.Empty : ": " + snapshot.Stream.Message)
-            : $"Live · revision {snapshot.Stream.Revision} · sequence {snapshot.Stream.LatestSequence?.ToString() ?? "—"}";
+            : hydrationStatus ??
+                $"Live · revision {snapshot.Stream.Revision} · sequence {snapshot.Stream.LatestSequence?.ToString() ?? "—"}";
         SetText(streamStatus, bundleStatusMessage ?? liveStatus);
-
         SetVisible(allPanel, snapshot.View == AgentObservabilityUiView.All);
         SetVisible(
             issuesPanel,
-            snapshot.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue);
+            snapshot.View is AgentObservabilityUiView.Issues or
+                AgentObservabilityUiView.Issue or
+                AgentObservabilityUiView.Recommendations);
+        SetVisible(contentIntelligencePanel, snapshot.View == AgentObservabilityUiView.Content);
         SetVisible(agentPanel, snapshot.View == AgentObservabilityUiView.Agent);
         SetText(
             viewTitle,
             snapshot.View switch
             {
-                AgentObservabilityUiView.All => "All",
+                AgentObservabilityUiView.All => "Production overview",
                 AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Issues",
+                AgentObservabilityUiView.Recommendations => "Recommendations",
+                AgentObservabilityUiView.Content => "Content Intelligence",
                 AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Agent",
                 _ => "RimLiaison"
             });
@@ -470,10 +658,48 @@ public sealed class ObservabilityMainForm : Form
             RefreshIssues(snapshot.Issues, snapshot.Issue, snapshot);
         }
 
+        if (snapshot.Recommendations is not null)
+        {
+            RefreshRecommendations(snapshot.Recommendations, snapshot);
+        }
+
+        if (snapshot.Content is not null)
+        {
+            RefreshContent(snapshot.Content);
+        }
+
         if (snapshot.Agent is not null)
         {
             RefreshAgent(snapshot.Agent, snapshot);
         }
+        else if (snapshot.View == AgentObservabilityUiView.Agent)
+        {
+            RefreshUnavailableAgent(
+                snapshot.EmptyState ?? "The selected agent could not be resolved.");
+        }
+    }
+
+    private void RefreshUnavailableAgent(string message)
+    {
+        SetText(agentHeader, "Agent detail unavailable");
+        RefreshStageProgress([]);
+        suppressActivitySelection = true;
+        try
+        {
+            RefreshActivityList(agentActivity, [], includeMod: false);
+        }
+        finally
+        {
+            suppressActivitySelection = false;
+        }
+
+        RefreshPastSessions([]);
+        SetText(agentDetails, message);
+        SetText(agentEvidence, "No agent evidence is available.");
+        SetText(agentResults, "No agent execution or validation results are available.");
+        renderedAgentDataRevision = -1;
+        renderedAgentEventId = null;
+        renderedAgentDetailRevision = -1;
     }
 
     private void RefreshNavigation(AgentObservabilityUiSnapshot snapshot)
@@ -481,11 +707,12 @@ public sealed class ObservabilityMainForm : Form
         string navigationSignature = string.Join(
             '\u001E',
             snapshot.Navigation.Items.Select(item => string.Join(
-                '\u001F',
                 item.Key,
                 item.Label,
                 item.FullLabel,
                 item.Kind,
+                item.EntityType,
+                item.CanonicalEntityId,
                 item.AgentId,
                 item.RunId,
                 item.Selected,
@@ -581,7 +808,14 @@ public sealed class ObservabilityMainForm : Form
             AgentObservabilityAgentNavigationStatus.Working => "> ",
             _ => string.Empty
         };
-        string displayLabel = statusMarker + item.Label;
+        string entityMarker = item.EntityType switch
+        {
+            ObservabilityEntityTypes.Tool => "[Tool] ",
+            ObservabilityEntityTypes.Runtime => "[Runtime] ",
+            ObservabilityEntityTypes.Unknown => "[Unknown] ",
+            _ => string.Empty
+        };
+        string displayLabel = statusMarker + entityMarker + item.Label;
         int fullWidth = Math.Min(240, Math.Max(96, displayLabel.Length * 9 + 28));
         if (container.Width != fullWidth)
         {
@@ -600,7 +834,13 @@ public sealed class ObservabilityMainForm : Form
             button.Tag = item;
         }
 
-        string accessibleName = item.FullLabel + " · " + item.NavigationStatus;
+        string accessibleName = (item.EntityType switch
+        {
+            ObservabilityEntityTypes.Tool => "Tool",
+            ObservabilityEntityTypes.Runtime => "Runtime",
+            ObservabilityEntityTypes.Unknown => "Unknown entity",
+            _ => "Mod"
+        }) + " · " + item.FullLabel + " · " + item.NavigationStatus;
         if (!string.Equals(button.AccessibleName, accessibleName, StringComparison.Ordinal))
         {
             button.AccessibleName = accessibleName;
@@ -647,6 +887,15 @@ public sealed class ObservabilityMainForm : Form
             case "issues":
                 observabilityUi.ShowIssues();
                 break;
+            case "recommendations":
+                observabilityUi.ShowRecommendations();
+                break;
+            case "content":
+                observabilityUi.ShowContent();
+                break;
+            case "agent" when item.CanonicalEntityId is not null:
+                observabilityUi.ShowAgent(item.CanonicalEntityId, item.RunId);
+                break;
             case "agent" when item.AgentId is not null:
                 observabilityUi.ShowAgent(item.AgentId, item.RunId);
                 break;
@@ -654,6 +903,82 @@ public sealed class ObservabilityMainForm : Form
 
         RefreshFromSnapshot(observabilityUi.Snapshot);
     }
+    private void RefreshProductionOverview(
+        IReadOnlyList<AgentObservabilityProductionEntry> entries)
+    {
+        string? selectedKey = productionList.SelectedItems.Count == 0
+            ? null
+            : productionList.SelectedItems[0].Tag as string;
+        int topIndex = TopIndex(productionList);
+        productionList.BeginUpdate();
+        try
+        {
+            Dictionary<string, ListViewItem> current = productionList.Items
+                .Cast<ListViewItem>()
+                .Where(item => item.Tag is string)
+                .ToDictionary(item => (string)item.Tag!, StringComparer.Ordinal);
+            for (int index = productionList.Items.Count - 1; index >= 0; index--)
+            {
+                if (productionList.Items[index].Tag is string key &&
+                    !entries.Any(entry => string.Equals(entry.Key, key, StringComparison.Ordinal)))
+                {
+                    productionList.Items.RemoveAt(index);
+                }
+            }
+
+            for (int index = 0; index < entries.Count; index++)
+            {
+                AgentObservabilityProductionEntry entry = entries[index];
+                if (!current.TryGetValue(entry.Key, out ListViewItem? item))
+                {
+                    item = new ListViewItem(new string[11]);
+                    item.Tag = entry.Key;
+                    productionList.Items.Insert(Math.Min(index, productionList.Items.Count), item);
+                }
+                int currentIndex = productionList.Items.IndexOf(item);
+                if (currentIndex != index)
+                {
+                    productionList.Items.RemoveAt(currentIndex);
+                    productionList.Items.Insert(Math.Min(index, productionList.Items.Count), item);
+                }
+
+                SetSubItem(item, 0, entry.ModName);
+                SetSubItem(item, 1, entry.AgentId);
+                SetSubItem(item, 2, entry.WorkloadKind);
+                SetSubItem(item, 3, entry.ToolchainState);
+                SetSubItem(item, 4, entry.CurrentStage.ToString());
+                SetSubItem(item, 5, entry.CurrentOperation ?? "—");
+                SetSubItem(item, 6, StatusText(entry.Status));
+                SetSubItem(item, 7, entry.BlockingState);
+                SetSubItem(item, 8, AgentObservabilityTime.FormatLocal(entry.LatestTimestamp));
+                SetSubItem(item, 9, entry.LatestEvent ?? "—");
+                SetSubItem(item, 10, entry.CompletionResult ?? "—");
+                Color color = entry.BlockingState == "required"
+                    ? Color.DarkRed
+                    : entry.Status == AgentStatus.Completed
+                        ? Color.DarkGreen
+                        : Color.DarkBlue;
+                if (item.ForeColor != color)
+                {
+                    item.ForeColor = color;
+                }
+            }
+        }
+        finally
+        {
+            productionList.EndUpdate();
+        }
+
+        RestoreTopIndex(productionList, topIndex);
+        if (selectedKey is not null)
+        {
+            foreach (ListViewItem item in productionList.Items)
+            {
+                item.Selected = string.Equals(item.Tag as string, selectedKey, StringComparison.Ordinal);
+            }
+        }
+    }
+
 
 
     private void RefreshAll(AgentObservabilityAllView view)
@@ -663,6 +988,7 @@ public sealed class ObservabilityMainForm : Form
             return;
         }
 
+        RefreshProductionOverview(view.Production);
         renderedAllView = view;
         SetText(
             allAgentSummary,
@@ -679,6 +1005,223 @@ public sealed class ObservabilityMainForm : Form
                 allDetails,
                 view.EmptyState ?? "Select an activity row to inspect bounded details.");
         }
+    }
+
+    private void RefreshContent(ContentIntelligenceObservabilityView view)
+    {
+        string signature = string.Join(
+            '\u001E',
+            view.LiveActivity.Select(row => string.Join(
+                '\u001F',
+                row.EventId,
+                row.Timestamp,
+                row.State,
+                row.ProjectId,
+                row.BlueprintId,
+                row.ReuseSource,
+                row.ArchetypeId,
+                row.Summary)));
+        if (!string.Equals(renderedContentSignature, signature, StringComparison.Ordinal) ||
+            !ReferenceEquals(renderedContentView, view))
+        {
+            string? selectedEventId = contentList.SelectedItems.Count == 0
+                ? null
+                : contentList.SelectedItems[0].Tag as string;
+            Dictionary<string, ListViewItem> current = contentList.Items
+                .Cast<ListViewItem>()
+                .Where(item => item.Tag is string)
+                .ToDictionary(item => (string)item.Tag!, StringComparer.Ordinal);
+            HashSet<string> desired = view.LiveActivity
+                .Select(row => row.EventId)
+                .ToHashSet(StringComparer.Ordinal);
+            contentList.BeginUpdate();
+            try
+            {
+                for (int index = contentList.Items.Count - 1; index >= 0; index--)
+                {
+                    if (contentList.Items[index].Tag is string id && !desired.Contains(id))
+                    {
+                        contentList.Items.RemoveAt(index);
+                    }
+                }
+
+                for (int index = 0; index < view.LiveActivity.Count; index++)
+                {
+                    ContentActivityRow row = view.LiveActivity[index];
+                    if (!current.TryGetValue(row.EventId, out ListViewItem? item))
+                    {
+                        item = CreateContentItem(row);
+                        contentList.Items.Insert(index, item);
+                    }
+                    else
+                    {
+                        int currentIndex = contentList.Items.IndexOf(item);
+                        if (currentIndex != index)
+                        {
+                            contentList.Items.RemoveAt(currentIndex);
+                            contentList.Items.Insert(index, item);
+                        }
+                        UpdateContentItem(item, row);
+                    }
+                }
+
+                if (selectedEventId is not null)
+                {
+                    ListViewItem? selected = contentList.Items.Cast<ListViewItem>()
+                        .FirstOrDefault(item => string.Equals(
+                            item.Tag as string,
+                            selectedEventId,
+                            StringComparison.Ordinal));
+                    if (selected is not null)
+                    {
+                        selected.Selected = true;
+                    }
+                }
+            }
+            finally
+            {
+                contentList.EndUpdate();
+            }
+
+            renderedContentSignature = signature;
+            renderedContentView = view;
+        }
+
+        ContentEfficiencyView efficiency = view.Efficiency;
+        SetText(
+            contentSummary,
+            $"Features completed: {efficiency.CompletedFeatures}   " +
+            $"Reuse: RimContent {efficiency.ReuseDistribution.RimContent}, " +
+            $"precedent {efficiency.ReuseDistribution.ProvenPrecedent}, " +
+            $"vanilla {efficiency.ReuseDistribution.VanillaReference}, " +
+            $"novel {efficiency.ReuseDistribution.Novel}   " +
+            $"Attempts: {efficiency.ValidationAttempts} · repairs {efficiency.RepairCount}   " +
+            $"Tokens: {efficiency.TokenAvailability}   " +
+            $"Median time: {(efficiency.MedianElapsedMilliseconds?.ToString(CultureInfo.InvariantCulture) ?? "unavailable")} ms   " +
+            $"Error rate: {(efficiency.ErrorRate?.ToString("P1", CultureInfo.InvariantCulture) ?? "unavailable")}   " +
+            $"RimContent success: {(efficiency.RimContentGenerationSuccessRate?.ToString("P1", CultureInfo.InvariantCulture) ?? "unavailable")}   " +
+            $"Precedent success: {(efficiency.PrecedentReuseSuccessRate?.ToString("P1", CultureInfo.InvariantCulture) ?? "unavailable")}   " +
+            $"Regressions: {efficiency.RegressionCount} / rollbacks: {efficiency.RollbackCount}");
+
+        ContentBlueprintRow? selectedBlueprint = view.Blueprints.FirstOrDefault(row =>
+            string.Equals(row.BlueprintId, view.SelectedBlueprintId, StringComparison.Ordinal));
+        SetText(
+            contentDetails,
+            selectedBlueprint is null
+                ? view.EmptyState ?? "Select a content lifecycle event to inspect its evidence and decision path."
+                : FormatContentBlueprint(selectedBlueprint, view));
+    }
+
+    private static ListViewItem CreateContentItem(ContentActivityRow row)
+    {
+        var item = new ListViewItem();
+        UpdateContentItem(item, row);
+        item.Tag = row.EventId;
+        return item;
+    }
+
+    private static void UpdateContentItem(ListViewItem item, ContentActivityRow row)
+    {
+        string time = DateTimeOffset.FromUnixTimeMilliseconds(row.Timestamp)
+            .ToLocalTime()
+            .ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        string archetype = row.ArchetypeId is null
+            ? string.Empty
+            : row.ArchetypeId + (row.ArchetypeVersion is null ? string.Empty : " v" + row.ArchetypeVersion);
+        string[] values =
+        [
+            time,
+            row.State,
+            row.ProjectId ?? string.Empty,
+            row.BlueprintId ?? string.Empty,
+            row.ReuseSource ?? string.Empty,
+            archetype,
+            row.Summary
+        ];
+        while (item.SubItems.Count < values.Length)
+        {
+            item.SubItems.Add(string.Empty);
+        }
+        for (int index = 0; index < values.Length; index++)
+        {
+            SetSubItem(item, index, values[index]);
+        }
+        item.BackColor = row.State is "regression" or "quarantined" or "rejected"
+            ? Color.MistyRose
+            : row.State is "promoted" or "proven" or "succeeded"
+                ? Color.Honeydew
+                : SystemColors.Window;
+    }
+
+    private static string FormatContentBlueprint(
+        ContentBlueprintRow row,
+        ContentIntelligenceObservabilityView view)
+    {
+        ContentPrecedentRow? precedent = row.PrecedentId is null
+            ? null
+            : view.ProvenPrecedents.FirstOrDefault(value =>
+                value.PrecedentId == row.PrecedentId);
+        ContentArchetypeRow? archetype = row.ArchetypeId is null
+            ? null
+            : view.Archetypes.FirstOrDefault(value =>
+                value.ArchetypeId == row.ArchetypeId);
+        var builder = new StringBuilder();
+        builder.AppendLine($"Blueprint: {row.BlueprintId}");
+        builder.AppendLine($"Content: {row.ContentKind ?? "unavailable"} · {row.GameplayRole ?? "unavailable"}");
+        builder.AppendLine("Design parameters: " +
+            (row.DesignParameters is null
+                ? "unavailable"
+                : string.Join(", ", row.DesignParameters.Select(pair => pair.Key + "=" + pair.Value))));
+        builder.AppendLine("Vanilla/reference comparables: " +
+            (row.VanillaComparables is null ? "unavailable" : string.Join(", ", row.VanillaComparables)));
+        builder.AppendLine("Framework requirements: " +
+            (row.FrameworkRequirements is null ? "unavailable" : string.Join(", ", row.FrameworkRequirements)));
+        builder.AppendLine("Framework dependencies: " +
+            (row.FrameworkDependencies is null ? "unavailable" : string.Join(", ", row.FrameworkDependencies)));
+        builder.AppendLine("Validation expectations: " +
+            (row.ValidationExpectations is null ? "unavailable" : string.Join(", ", row.ValidationExpectations)));
+        builder.AppendLine($"Implementation structure: {row.ImplementationNovelty ?? "unavailable"}");
+        builder.AppendLine($"Project: {row.ProjectId ?? "unavailable"}");
+        builder.AppendLine($"Persistent agent: {row.LogicalAgentId ?? "unavailable"}");
+        builder.AppendLine($"Session/run: {row.SessionId ?? "unavailable"} / {row.RunId ?? "unavailable"}");
+        builder.AppendLine($"Reuse source: {row.ReuseSource ?? "unavailable"}");
+        builder.AppendLine($"Precedent: {row.PrecedentId ?? "none"}");
+        builder.AppendLine($"RimContent: {(row.ArchetypeId is null ? "none" : row.ArchetypeId + " v" + row.ArchetypeVersion)}");
+        builder.AppendLine($"State: {row.State ?? "unavailable"}");
+        builder.AppendLine($"Validation: {row.ValidationResult ?? "unavailable"} · evidence {row.EvidenceId ?? "unavailable"}");
+        builder.AppendLine($"Reason: {row.Reason ?? "unavailable"}");
+        builder.AppendLine($"Repairs: {row.RepairCount} · validation attempts: {row.ValidationAttempts}");
+        builder.AppendLine($"Elapsed: {(row.ElapsedMilliseconds?.ToString(CultureInfo.InvariantCulture) ?? "unavailable")} ms");
+        builder.AppendLine($"Input tokens: {row.InputTokens?.ToString(CultureInfo.InvariantCulture) ?? "unavailable"}");
+        ContentActivityRow[] timeline = view.LiveActivity
+            .Where(value => value.BlueprintId == row.BlueprintId)
+            .OrderBy(value => value.Timestamp)
+            .ThenBy(value => value.EventId, StringComparer.Ordinal)
+            .Take(32)
+            .ToArray();
+        if (timeline.Length > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("Lifecycle timeline:");
+            foreach (ContentActivityRow activity in timeline)
+            {
+                builder.AppendLine($"- {activity.Type}: {activity.State} — {activity.Reason}");
+            }
+        }
+        builder.AppendLine($"Output tokens: {row.OutputTokens?.ToString(CultureInfo.InvariantCulture) ?? "unavailable"}");
+        builder.AppendLine("References: " + (row.ReferenceIds.Count == 0 ? "unavailable" : string.Join(", ", row.ReferenceIds)));
+        if (precedent is not null)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"Precedent history: {precedent.State}; successful uses {precedent.SuccessfulUses}; " +
+                $"projects {precedent.DistinctProjects}; runs {precedent.DistinctRuns}; replay {precedent.ReplayPassed?.ToString() ?? "unavailable"}");
+        }
+        if (archetype is not null)
+        {
+            builder.AppendLine($"Archetype health: {archetype.State}; uses {archetype.SuccessfulUses} passed / {archetype.FailedUses} failed; " +
+                $"regressions {archetype.RegressionCount}; rollback {archetype.RollbackCount}; prior stable v{archetype.PriorStableVersion?.ToString() ?? "unavailable"}");
+        }
+        return builder.ToString();
     }
 
     private void RefreshIssues(
@@ -792,11 +1335,38 @@ public sealed class ObservabilityMainForm : Form
         SetEnabled(loadMoreIssuesButton, view.HasMoreIssues);
     }
 
+    private void RefreshRecommendations(
+        AgentObservabilityRecommendationsView view,
+        AgentObservabilityUiSnapshot snapshot)
+    {
+        AgentObservabilityIssueRow[] rows = view.Recommendations
+            .Select(row => new AgentObservabilityIssueRow(
+                row.Issue,
+                row.ModName,
+                null,
+                snapshot.SelectedIssueIds.Contains(row.Issue.Id, StringComparer.Ordinal))
+            {
+                Occurrences = row.Occurrences,
+                SharedAgentCount = row.SharedAgentCount
+            })
+            .ToArray();
+        RefreshIssues(
+            new AgentObservabilityIssuesView(
+                rows,
+                snapshot.SelectedIssueIds,
+                0,
+                rows.Length,
+                view.HasMore,
+                view.EmptyState),
+            null,
+            snapshot);
+    }
+
     private ListViewItem CreateIssueItem(
         AgentObservabilityIssueListItem state)
     {
         var item = new ListViewItem(state.Row.StateLabel);
-        for (int index = 1; index < 7; index++)
+        for (int index = 1; index < 8; index++)
         {
             item.SubItems.Add(string.Empty);
         }
@@ -816,23 +1386,28 @@ public sealed class ObservabilityMainForm : Form
             return;
         }
 
-        SetSubItem(item, 0, state.Row.StateLabel);
+        SetSubItem(item, 0, IsRecommendation(state.Row.Issue) ? "Recommendation" : state.Row.StateLabel);
         SetSubItem(item, 1, state.Row.Issue.Severity.ToString());
+        SetSubItem(item, 2, SharedText(state.Row));
+        SetSubItem(item, 3, AgentObservabilityTime.FormatLocal(state.Row.Issue.Timestamp));
+        SetSubItem(item, 4, state.Row.ModName);
+        SetSubItem(item, 5, state.Row.CategoryLabel);
+        string summary = state.Row.Issue.Summary;
         SetSubItem(
             item,
-            2,
-            state.Row.SharedAgentCount > 1
-                ? state.Row.SharedAgentCount + " agents"
-                : string.Empty);
-        SetSubItem(item, 3, state.Row.ModName);
-        SetSubItem(item, 4, state.Row.Issue.Category.ToString());
-        SetSubItem(item, 5, state.Row.Issue.Summary);
-        SetSubItem(item, 6, state.Row.Issue.Id);
-        Color foreColor = state.Row.Issue.Recovered
-            ? Color.DarkGreen
-            : state.Row.Issue.Severity == AgentIssueSeverity.Error
-                ? Color.DarkRed
-                : SystemColors.WindowText;
+            6,
+            state.Row.OccurrenceCount > 1
+                ? $"{summary} ({state.Row.OccurrenceCount} occurrences)"
+                : summary);
+        SetSubItem(item, 7, state.Row.Issue.Id);
+        bool recommendation = IsRecommendation(state.Row.Issue);
+        Color foreColor = recommendation
+            ? Color.DarkBlue
+            : state.Row.Issue.Recovered
+                ? Color.DarkGreen
+                : state.Row.Issue.Severity == AgentIssueSeverity.Error
+                    ? Color.DarkRed
+                    : SystemColors.WindowText;
         if (item.ForeColor != foreColor)
         {
             item.ForeColor = foreColor;
@@ -922,7 +1497,9 @@ public sealed class ObservabilityMainForm : Form
         SetText(
             agentHeader,
             $"{agent.ModName}   ·   {StatusText(agent.Status)}   ·   {agent.CurrentStage}   ·   " +
-            $"{view.ElapsedMilliseconds / 1000.0:0.0}s   ·   session {agent.RunId}   ·   {agent.CurrentActivity ?? "—"}");
+            $"{view.ElapsedMilliseconds / 1000.0:0.0}s   ·   session {agent.SessionId}   ·   " +
+            $"{agent.CurrentOperation ?? agent.CurrentActivity ?? "—"}   ·   block {agent.BlockingState}" +
+            $"{(agent.CompletionResult is null ? string.Empty : "   ·   result " + agent.CompletionResult)}");
         RefreshStageProgress(view.StageProgress);
 
         bool dataChanged =
@@ -961,7 +1538,7 @@ public sealed class ObservabilityMainForm : Form
         {
             SetText(agentDetails, FormatEventDetail(view.SelectedEvent));
             SetText(agentEvidence, FormatEventEvidence(view.SelectedEvent));
-            SetText(agentResults, FormatEventResults(view.SelectedEvent));
+            SetText(agentResults, FormatAgentResults(view));
             renderedAgentDetailRevision = snapshot.Stream.Revision;
         }
         else if (view.SelectedEvent is null)
@@ -974,7 +1551,7 @@ public sealed class ObservabilityMainForm : Form
                 "Select an activity row to inspect files, tools, and commands.");
             SetText(
                 agentResults,
-                "Select an activity row to inspect build, test, and issue data.");
+                FormatAgentResults(view));
             renderedAgentDetailRevision = snapshot.Stream.Revision;
         }
 
@@ -1150,9 +1727,7 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityActivityRow row,
         bool includeMod)
     {
-        string time = DateTimeOffset.FromUnixTimeMilliseconds(row.Event.Timestamp)
-            .ToLocalTime()
-            .ToString("HH:mm:ss");
+        string time = AgentObservabilityTime.FormatLocal(row.Event.Timestamp);
         var item = new ListViewItem(time);
         if (includeMod)
         {
@@ -1262,9 +1837,7 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityActivityRow row,
         bool includeMod)
     {
-        string time = DateTimeOffset.FromUnixTimeMilliseconds(row.Event.Timestamp)
-            .ToLocalTime()
-            .ToString("HH:mm:ss");
+        string time = AgentObservabilityTime.FormatLocal(row.Event.Timestamp);
         SetSubItem(item, 0, time);
         if (includeMod)
         {
@@ -1343,6 +1916,18 @@ public sealed class ObservabilityMainForm : Form
         }
     }
 
+    private void OnFilterChanged(object? sender, EventArgs e)
+    {
+        if (Volatile.Read(ref disposed) != 0)
+        {
+            return;
+        }
+
+        RefreshFromSnapshot(
+            observabilityUi.SetFilter(
+                new AgentObservabilityUiFilter(Query: filterBox.Text)));
+    }
+
     private void OnIssueSelected(object? sender, EventArgs e)
     {
         if (suppressIssueSelection ||
@@ -1388,9 +1973,59 @@ public sealed class ObservabilityMainForm : Form
         observabilityUi.ShowIssue(issue.Id);
         RefreshFromSnapshot(observabilityUi.Snapshot);
     }
-    private void OnLoadMoreIssues(object? sender, EventArgs e)
+    private async void OnLoadMoreIssues(object? sender, EventArgs e)
     {
-        RefreshFromSnapshot(observabilityUi.LoadMoreIssues());
+        if (hydrationStore is null)
+        {
+            RefreshFromSnapshot(observabilityUi.LoadMoreIssues());
+            return;
+        }
+
+        SetEnabled(loadMoreIssuesButton, false);
+        hydrationStatus = "Loading older observability history...";
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+        CancellationToken cancellationToken = hydrationCancellation.Token;
+        try
+        {
+            AgentObservabilityHydrationResult result =
+                await hydrationStore.HydrateHistoryAsync(cancellationToken)
+                    .ConfigureAwait(true);
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                hydrationStatus = result.Degraded
+                    ? "Live · historical state partially unavailable: " + result.Message
+                    : "Live · recent and historical state available.";
+                RefreshFromSnapshot(observabilityUi.LoadMoreIssues());
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+            NotSupportedException or InvalidOperationException)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                hydrationStatus = "Live · historical state partially unavailable: " + exception.Message;
+                RefreshFromSnapshot(observabilityUi.Snapshot);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                hydrationStatus = "Live · historical state partially unavailable: " + exception.Message;
+                RefreshFromSnapshot(observabilityUi.Snapshot);
+            }
+        }
+        finally
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                SetEnabled(loadMoreIssuesButton, true);
+            }
+        }
     }
 
     private void OnPrepareAssessment(object? sender, EventArgs e)
@@ -1438,6 +2073,102 @@ public sealed class ObservabilityMainForm : Form
             exception is InvalidOperationException or KeyNotFoundException)
         {
         }
+    }
+
+    private void OnContentSelected(object? sender, EventArgs e)
+    {
+        if (contentList.SelectedItems.Count == 0 ||
+            contentList.SelectedItems[0].Tag is not string eventId)
+        {
+            return;
+        }
+
+        ContentActivityRow? row = renderedContentView?.LiveActivity.FirstOrDefault(value =>
+            string.Equals(value.EventId, eventId, StringComparison.Ordinal));
+        if (row?.BlueprintId is null)
+        {
+            return;
+        }
+
+        observabilityUi.SelectContentBlueprint(row.BlueprintId);
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+    private ContentBlueprintRow? SelectedContentBlueprint()
+    {
+        return renderedContentView?.Blueprints.FirstOrDefault(row =>
+            string.Equals(row.BlueprintId, renderedContentView.SelectedBlueprintId, StringComparison.Ordinal));
+    }
+
+    private ContentArchetypeRow? SelectedContentArchetype()
+    {
+        ContentBlueprintRow? blueprint = SelectedContentBlueprint();
+        return blueprint?.ArchetypeId is null
+            ? null
+            : renderedContentView?.Archetypes.FirstOrDefault(row =>
+                row.ArchetypeId == blueprint.ArchetypeId &&
+                row.Version == blueprint.ArchetypeVersion);
+    }
+
+    private void OnContentQuarantine(object? sender, EventArgs e)
+    {
+        ContentArchetypeRow? archetype = SelectedContentArchetype();
+        if (contentAdministration is null || archetype is null)
+        {
+            return;
+        }
+
+        contentAdministration.QuarantineArchetype(
+            archetype.ArchetypeId,
+            archetype.Version,
+            "DESKTOP_ADMIN_QUARANTINE");
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnContentRollback(object? sender, EventArgs e)
+    {
+        ContentArchetypeRow? archetype = SelectedContentArchetype();
+        if (contentAdministration is null ||
+            archetype?.PriorStableVersion is not int targetVersion)
+        {
+            return;
+        }
+
+        contentAdministration.RollbackArchetype(
+            archetype.ArchetypeId,
+            targetVersion,
+            "DESKTOP_ADMIN_ROLLBACK");
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnContentExclude(object? sender, EventArgs e)
+    {
+        ContentBlueprintRow? blueprint = SelectedContentBlueprint();
+        if (contentAdministration is null ||
+            blueprint?.PrecedentId is null ||
+            blueprint.ProjectId is null)
+        {
+            return;
+        }
+
+        contentAdministration.ExcludeForProject(
+            blueprint.PrecedentId,
+            blueprint.ProjectId,
+            "DESKTOP_ADMIN_PROJECT_EXCLUSION");
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnContentIneligible(object? sender, EventArgs e)
+    {
+        ContentBlueprintRow? blueprint = SelectedContentBlueprint();
+        if (contentAdministration is null || blueprint is null)
+        {
+            return;
+        }
+
+        contentAdministration.MarkSourceIneligible(
+            blueprint.BlueprintId,
+            "DESKTOP_ADMIN_SOURCE_INELIGIBLE");
+        RefreshFromSnapshot(observabilityUi.Snapshot);
     }
 
     private void OnPastSessionSelected(object? sender, EventArgs e)
@@ -1702,6 +2433,143 @@ public sealed class ObservabilityMainForm : Form
         return builder.ToString();
     }
 
+    private static string FormatAgentResults(AgentObservabilityAgentView view)
+    {
+        var builder = new StringBuilder();
+        if (view.ExecutionImpact is AgentObservabilityExecutionImpact impact)
+        {
+            builder.Append(FormatExecutionImpact(impact));
+            builder.AppendLine();
+        }
+
+        if (view.SelectedEvent is AgentObservabilityEventDetail selected)
+        {
+            builder.Append(FormatEventResults(selected));
+            return builder.ToString();
+        }
+
+        builder.AppendLine("Build results:");
+        AppendBuildResults(builder, view.BuildResults);
+        builder.AppendLine("Test results:");
+        AppendTestResults(builder, view.TestResults);
+        builder.AppendLine("Related issues:");
+        if (view.Issues.Count == 0)
+        {
+            builder.AppendLine("  No issues.");
+        }
+        else
+        {
+            foreach (AgentIssue issue in view.Issues.Take(64))
+            {
+                builder.AppendLine(
+                    $"  {issue.Id} · {issue.Severity} · {(issue.Recovered ? "recovered" : "unresolved")} · {issue.Summary}");
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string FormatExecutionImpact(AgentObservabilityExecutionImpact impact)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("Execution / impact");
+        builder.AppendLine("------------------");
+        builder.AppendLine(
+            $"Packet: {impact.PacketStatus ?? "unavailable"} · {impact.PacketId ?? "unavailable"} · " +
+            $"{impact.Metrics.PacketBytes?.ToString(CultureInfo.InvariantCulture) ?? "Unavailable"} bytes · " +
+            $"{impact.Metrics.PacketGenerationMilliseconds?.ToString(CultureInfo.InvariantCulture) ?? "Unavailable"} ms");
+        builder.AppendLine(
+            $"Source: {impact.SourceRevision ?? "Unavailable"} · index {impact.IndexGeneration ?? "Unavailable"}");
+        AppendSection(builder, "Predicted files", impact.PredictedFiles);
+        AppendSection(builder, "Actual files", impact.ActualFiles);
+        AppendSection(builder, "Direct impacts", impact.DirectImpacts);
+        AppendSection(builder, "Declared impacts", impact.DeclaredImpacts);
+        AppendSection(builder, "Runtime impacts", impact.RuntimeImpacts);
+        AppendSection(builder, "Framework impacts", impact.FrameworkImpacts);
+        AppendSection(builder, "Dynamic/potential impacts", impact.DynamicImpacts);
+        AppendSection(builder, "Learned impacts", impact.LearnedImpacts);
+        builder.AppendLine($"Validation tier: {impact.ValidationTier ?? "Unavailable"}");
+        builder.AppendLine("Required validation:");
+        AppendValidationItems(builder, impact.RequiredValidation);
+        builder.AppendLine("Agent-added validation:");
+        AppendValidationItems(builder, impact.AgentValidation);
+        builder.AppendLine("Learning:");
+        if (impact.Learning.Count == 0)
+        {
+            builder.AppendLine("  Unavailable");
+        }
+        else
+        {
+            foreach (AgentObservabilityLearningItem item in impact.Learning)
+            {
+                builder.AppendLine(
+                    $"  {item.FromIdentity} -> {item.ToIdentity} · {item.Scope} · " +
+                    $"{(item.PromotedGlobal ? "global" : item.Project ?? "project")} · " +
+                    $"{(item.Invalidated ? "invalidated" : item.Evidence ?? "evidence unavailable")}");
+            }
+        }
+
+        AgentObservabilityEfficiencyMetrics metrics = impact.Metrics;
+        builder.AppendLine("Efficiency (authoritative event data):");
+        builder.AppendLine(
+            $"  validation {metrics.ValidationMilliseconds?.ToString(CultureInfo.InvariantCulture) ?? "Unavailable"} ms · " +
+            $"recipes {metrics.ValidationRecipes} · runtime {metrics.RuntimeValidations} · " +
+            $"broad fallbacks {metrics.BroadFallbacks}");
+        builder.AppendLine(
+            $"  failures {metrics.ValidationFailures} · stale evidence {metrics.StaleEvidenceRejections} · " +
+            $"replans {metrics.ValidationReplans} · deduplicated {metrics.DeduplicatedRequirements} · " +
+            $"deep expansions {metrics.DeepExpansions} · packet usable {metrics.PacketUsable?.ToString() ?? "Unavailable"}");
+        return builder.ToString();
+    }
+
+    private static void AppendValidationItems(
+        StringBuilder builder,
+        IReadOnlyList<AgentObservabilityValidationItem> items)
+    {
+        if (items.Count == 0)
+        {
+            builder.AppendLine("  Unavailable");
+            return;
+        }
+
+        foreach (AgentObservabilityValidationItem item in items)
+        {
+            builder.AppendLine("  " + item.Value);
+        }
+    }
+
+    private static void AppendBuildResults(
+        StringBuilder builder,
+        IReadOnlyList<AgentObservabilityBuildTestResult> results)
+    {
+        if (results.Count == 0)
+        {
+            builder.AppendLine("  No build data.");
+            return;
+        }
+
+        foreach (AgentObservabilityBuildTestResult result in results.Take(64))
+        {
+            builder.AppendLine($"  {result.Status}: {result.Summary}");
+        }
+    }
+
+    private static void AppendTestResults(
+        StringBuilder builder,
+        IReadOnlyList<AgentObservabilityBuildTestResult> results)
+    {
+        if (results.Count == 0)
+        {
+            builder.AppendLine("  No test data.");
+            return;
+        }
+
+        foreach (AgentObservabilityBuildTestResult result in results.Take(64))
+        {
+            builder.AppendLine($"  {result.Status}: {result.Summary}");
+        }
+    }
+
     private static string FormatEventResults(AgentObservabilityEventDetail detail)
     {
         var builder = new StringBuilder();
@@ -1777,7 +2645,9 @@ public sealed class ObservabilityMainForm : Form
             if (triage.SharedTooling is not null)
             {
                 builder.AppendLine(
-                    $"Shared tooling:          {triage.SharedTooling.AffectedAgentCount} logical agents affected by {triage.SharedTooling.FailureCode}");
+                    triage.SharedTooling.AffectedAgentCount > 0
+                        ? $"Shared tooling:          {triage.SharedTooling.AffectedAgentCount} logical agents affected by {triage.SharedTooling.FailureCode}"
+                        : $"Shared tooling:          stable agent identity unavailable; {triage.SharedTooling.AffectedSessionCount} sessions observed");
                 if (triage.SharedTooling.AffectedSessionCount > triage.SharedTooling.AffectedAgentCount)
                 {
                     builder.AppendLine(
@@ -1797,8 +2667,22 @@ public sealed class ObservabilityMainForm : Form
         builder.AppendLine($"Run:        {detail.Issue.RunId}");
         builder.AppendLine($"Category:   {detail.Issue.Category}");
         builder.AppendLine($"Severity:   {detail.Issue.Severity}");
-        builder.AppendLine($"Timestamp:  {DateTimeOffset.FromUnixTimeMilliseconds(detail.Issue.Timestamp):O}");
+        builder.AppendLine($"Timestamp:  {AgentObservabilityTime.FormatLocal(detail.Issue.Timestamp)}");
         builder.AppendLine($"Summary:    {detail.Issue.Summary}");
+        int occurrenceCount = Math.Max(detail.Issue.Occurrences, detail.Occurrences.Count);
+        if (occurrenceCount > 1)
+        {
+            builder.AppendLine();
+            builder.AppendLine($"Occurrences ({occurrenceCount}):");
+            foreach (AgentObservabilityIssueOccurrence occurrence in detail.Occurrences)
+            {
+                builder.AppendLine(
+                    $"  {AgentObservabilityTime.FormatLocal(occurrence.Issue.Timestamp)} · " +
+                    $"{occurrence.Issue.Id} · {occurrence.ModName} · " +
+                    $"{occurrence.Issue.RunId} · {occurrence.Issue.AgentId} · " +
+                    $"{occurrence.Issue.Summary}");
+            }
+        }
         builder.AppendLine();
         builder.AppendLine("Supporting events:");
         foreach (AgentEvent eventRecord in detail.SupportingEvents)
@@ -1836,8 +2720,20 @@ public sealed class ObservabilityMainForm : Form
 
         return builder.ToString();
     }
+    private static string SharedText(AgentObservabilityIssueRow row) =>
+        row.SharedAgentCount > 1
+            ? $"Shared {row.SharedAgentCount} agents"
+            : row.OccurrenceCount > 1
+                ? $"Shared across {row.OccurrenceCount} occurrences"
+                : string.Empty;
 
     private static string YesNo(bool value) => value ? "Yes" : "No";
+    private static bool IsRecommendation(AgentIssue issue) =>
+        !issue.Blocking &&
+        (issue.Recommendation is not null ||
+            issue.Category is AgentIssueCategory.ToolingImprovement or
+                AgentIssueCategory.OptionalValidationUnavailable or
+                AgentIssueCategory.ToolLimitation);
 
     private static string FormatEvidence(AgentObservabilityAgentView view)
     {
@@ -1897,9 +2793,7 @@ public sealed class ObservabilityMainForm : Form
         _ => status.ToString()
     };
     private static string FormatTimestamp(long timestamp) =>
-        DateTimeOffset.FromUnixTimeMilliseconds(timestamp)
-            .ToLocalTime()
-            .ToString("yyyy-MM-dd HH:mm:ss");
+        AgentObservabilityTime.FormatLocal(timestamp);
 
     private static string FormatDuration(long durationMilliseconds)
     {

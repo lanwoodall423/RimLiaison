@@ -2,7 +2,11 @@ using System.Text.Json;
 using System.Diagnostics;
 using System.Xml;
 using System.Xml.Linq;
+using RimContext.Core.Content;
+
 using RimContext.Core.Context;
+using RimContext.Core.Impact;
+
 using RimLiaison.Catalog;
 using RimLiaison.DevBridge;
 using RimLiaison.Doctor;
@@ -18,6 +22,8 @@ using RimLiaison.Observability;
 using RimLiaison.Provenance;
 using RimLiaison.Benchmarking;
 using RimLiaison.RimDev;
+using RimLiaison.Qualification;
+using RimLiaison.Validation;
 
 namespace RimLiaison;
 
@@ -125,12 +131,27 @@ public static class CliApplication
                 profiler.RunId,
                 eventStore,
                 observabilityTelemetry);
-            (string modId, string modName) = ResolveObservabilityMod(request);
+            ObservabilityEntityIdentity observabilityEntity =
+                ResolveObservabilityEntity(request);
+            string workloadKind = request.Command == CliCommand.Qualification
+                ? "qualification"
+                : "production";
+            string toolchainState = request.Command == CliCommand.Qualification
+                ? "experimental"
+                : "promoted";
+            string modId = observabilityEntity.EntityType == ObservabilityEntityTypes.Mod
+                ? observabilityEntity.CanonicalEntityId
+                : "RimLiaison";
             observabilityAgent = observabilityRun.CreateAgent(
                 modId,
-                modName,
-                logicalAgentId: ResolveLogicalAgentId());
-            observabilityActivation = observabilityAgent.Activate();
+                observabilityEntity.DisplayName,
+                logicalAgentId: ResolveLogicalAgentId(),
+                entityIdentity: observabilityEntity,
+                workloadKind: workloadKind,
+                toolchainState: toolchainState,
+                qualificationProfile: request.Command == CliCommand.Qualification
+                    ? request.Id
+                    : null);
             observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
             DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
             observabilityAgent.SetStage(
@@ -150,6 +171,36 @@ public static class CliApplication
                 ? WorkflowCorrelation.Create()
                 : null;
             profiler.SetWorkflow(workflowId);
+            if (request.Command == CliCommand.Qualification)
+            {
+                string profile = string.Equals(request.Id, "burn-in", StringComparison.OrdinalIgnoreCase)
+                    ? "burn-in-25"
+                    : "single";
+                QualificationAggregate aggregate = new QualificationHarness().Run(
+                    request.QualificationRuns,
+                    profile,
+                    eventStore,
+                    toolchainState: "experimental");
+                string outputPath = request.QualificationOutputPath ??
+                    Path.Combine(".rimdev", "qualification", "latest.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
+                string json = JsonSerializer.Serialize(
+                    aggregate,
+                    new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(outputPath, json);
+                string backlogPath = Path.Combine(
+                    Path.GetDirectoryName(outputPath) ?? ".",
+                    "tooling-improvement-backlog.json");
+                string backlogJson = JsonSerializer.Serialize(
+                    QualificationHarness.BuildBacklog(aggregate, eventStore),
+                    new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(backlogPath, backlogJson);
+                WriteJson(stdout, aggregate);
+                exitCode = aggregate.IsPromotionReady
+                    ? CliExitCodes.Success
+                    : CliExitCodes.TestFailure;
+                return exitCode;
+            }
 
             if (request.Command is CliCommand.RecipeShow or
                 CliCommand.RecipePlan or
@@ -188,6 +239,23 @@ public static class CliApplication
                     .ConfigureAwait(false);
                 return exitCode;
             }
+            if (request.Command == CliCommand.Preflight)
+            {
+                exitCode = await ProfilerActivity.ObserveAsync(
+                        "command.preflight",
+                        "preflight",
+                        () => ExecutePreflightCommandAsync(
+                            request,
+                            stdout,
+                            stderr,
+                            processTransport,
+                            cancellationToken),
+                        AnnotateExit,
+                        phase: "command",
+                        scope: "preflight")
+                    .ConfigureAwait(false);
+                return exitCode;
+            }
 
             if (request.Command == CliCommand.Context)
             {
@@ -204,6 +272,24 @@ public static class CliApplication
                         phase: "command",
                         scope: "context")
                     .ConfigureAwait(false);
+                return exitCode;
+            }
+            if (request.Command == CliCommand.Content)
+            {
+                ContentQueryResult result = new ContentIntelligenceService(
+                        new ContentIntelligenceStore(
+                            ContentIntelligenceStorage.ResolveDefaultPath(
+                                request.RimContextRootPath)))
+                    .Query(new ContentQueryRequest(
+                        request.Id,
+                        request.ContentKind,
+                        request.ContentRole,
+                        Limit: Math.Min(request.RimContextLimit, 100),
+                        MaxBytes: request.ContentMaxBytes,
+                        RootPath: request.RimContextRootPath,
+                        IndexStorePath: request.RimContextStorePath));
+                WriteJson(stdout, result);
+                exitCode = CliExitCodes.Success;
                 return exitCode;
             }
 
@@ -316,6 +402,67 @@ public static class CliApplication
                 return exitCode;
             }
 
+            if (request.Command == CliCommand.GoldenPath)
+            {
+                observabilityAgent.SetProductionState(
+                    DevelopmentStage.Analysis,
+                    "preflight",
+                    "required");
+                DoctorRunResult preflight = await new RimTestDoctorRunner(stderr)
+                    .RunAsync(
+                        request,
+                        processTransport ?? new SystemDevBridgeProcessTransport(),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (preflight.ExitCode != CliExitCodes.Success)
+                {
+                    WriteJson(
+                        stdout,
+                        new
+                        {
+                            schemaVersion = "rimliaison-golden-path/v1",
+                            status = "VALIDATION_INCOMPLETE",
+                            completionResult = "VALIDATION_INCOMPLETE",
+                            preflight = new
+                            {
+                                status = "blocked",
+                                ready = false,
+                                owner = "RimLiaison",
+                                details = preflight.Output
+                            }
+                        });
+                    observabilityAgent.Record(
+                        DevelopmentStage.Analysis,
+                        AgentEventTypes.ToolFailed,
+                        "Golden Path preflight is blocked.",
+                        new
+                        {
+                            operationKey = "preflight",
+                            issueKind = "TOOLING_FAILURE",
+                            blocking = true,
+                            componentOwner = "RimLiaison",
+                            details = preflight.Output
+                        });
+                    exitCode = preflight.ExitCode;
+                    return exitCode;
+                }
+
+                observabilityAgent.Record(
+                    DevelopmentStage.Analysis,
+                    AgentEventTypes.InformationalProductionEvent,
+                    "Golden Path preflight is ready.",
+                    new
+                    {
+                        operationKey = "preflight",
+                        owner = "RimLiaison",
+                        status = "ready"
+                    });
+                request = request with
+                {
+                    Command = CliCommand.Affected,
+                    RunSelected = true
+                };
+            }
             exitCode = await ProfilerActivity.ObserveAsync(
                     "command.catalog",
                     "command",
@@ -771,6 +918,70 @@ public static class CliApplication
                         }
                     }
 
+                    ContentIntelligenceCapture? contentCapture =
+                        await ContentIntelligenceCapture.TryCreateAsync(
+                                request,
+                                changedPaths,
+                                workflowId,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    string packetTask = Environment.GetEnvironmentVariable("RIMTEST_TASK") ??
+                        string.Join(" ", changedPaths);
+                    ExecutionPacketGenerationResult packetGeneration =
+                        ExecutionPacketCoordinator.TryGenerate(
+                            AffectedGitRoot(request),
+                            request.RimContextStorePath,
+                            packetTask,
+                            changedPaths,
+                            repository: request.StackManifest.Manifest?.Project,
+                            project: request.StackManifest.Manifest?.Project,
+                            additionalEvidence: CatalogImpactEvidence(request.CatalogPath));
+
+                    ValidationPlanGenerationResult planGeneration =
+                        MinimumSafeValidationCoordinator.TryBuild(
+                            packetGeneration,
+                            loaded.Catalog,
+                            AffectedGitRoot(request),
+                            repository: request.StackManifest.Manifest?.Project,
+                            project: request.StackManifest.Manifest?.Project,
+                            fallbackSuite: request.FallbackSuite);
+                    ValidationPlan? validationPlan = planGeneration.Plan;
+                    if (validationPlan is not null)
+                    {
+                        AgentImpactObservabilityRecorder.RecordValidationPlan(
+                            validationPlan,
+                            broadened: validationPlan.ScopeExpanded ||
+                                !string.Equals(
+                                    validationPlan.PredictionTier,
+                                    validationPlan.Tier,
+                                    StringComparison.Ordinal));
+                        string[] reusedEvidenceIds = validationPlan.Required
+                            .SelectMany(requirement => requirement.ReusedEvidenceIds ?? [])
+                            .Distinct(StringComparer.Ordinal)
+                            .ToArray();
+                        if (reusedEvidenceIds.Length > 0)
+                        {
+                            AgentImpactObservabilityRecorder.RecordEvidenceReused(
+                                validationPlan,
+                                validationPlan.Required
+                                    .Where(requirement => requirement.ReusedEvidenceIds is { Count: > 0 })
+                                    .Select(requirement => requirement.TestId)
+                                    .Where(testId => testId is not null)
+                                    .Select(testId => testId!)
+                                    .Distinct(StringComparer.Ordinal)
+                                    .ToArray(),
+                                reusedEvidenceIds);
+                        }
+                        if (validationPlan.RuntimeRequests is { Count: > 0 } runtimeRequests)
+                        {
+                            AgentImpactObservabilityRecorder.RecordRuntimeEscalation(
+                                validationPlan,
+                                runtimeRequests);
+                        }
+
+
+                    }
+
                     IRimContextImpactAdapter adapter = impactAdapter ?? CreateRimContextAdapter(request);
                     var selector = new RimContextTestSelector(adapter);
                     RimTestSelectionResult selection = await ProfilerActivity.ObserveAsync(
@@ -801,6 +1012,29 @@ public static class CliApplication
                             scope: "changed-paths")
                         .ConfigureAwait(false);
 
+                    if (validationPlan is not null &&
+                        selection.Status is "ok" or "conservative")
+                    {
+                        HashSet<string> reused = validationPlan.Required
+                            .Where(requirement => requirement.TestId is not null)
+                            .GroupBy(requirement => requirement.TestId!, StringComparer.Ordinal)
+                            .Where(group => group.All(requirement => requirement.ReusedEvidenceIds is { Count: > 0 }))
+                            .Select(group => group.Key)
+                            .ToHashSet(StringComparer.Ordinal);
+                        string[] required = validationPlan.TestsNeedingExecution
+                            .Where(testId => loaded.Catalog.Tests.Any(test => test.Id == testId))
+                            .ToArray();
+                        string[] merged = selection.Tests
+                            .Where(testId => !reused.Contains(testId))
+                            .Concat(required)
+                            .Distinct(StringComparer.Ordinal)
+                            .OrderBy(testId => testId, StringComparer.Ordinal)
+                            .ToArray();
+                        selection = selection.WithTests(
+                            merged,
+                            validationPlan.Status == "ready" ? selection.Status : "conservative");
+                    }
+
                     if (selection.Status == "ok" && selection.Tests.Count == 0)
                     {
                         selection = new RimTestSelectionResult
@@ -815,6 +1049,15 @@ public static class CliApplication
                             RecoveryAction = selection.RecoveryAction
                         };
                     }
+                    if (request.Explain)
+                    {
+                        selection = selection.WithImpact(
+                            packetGeneration.Packet,
+                            packetGeneration.Prediction,
+                            packetGeneration.Actual,
+                            request.Explain ? validationPlan : null);
+                    }
+
 
                     AgentObservabilityRuntime.Record(
                         DevelopmentStage.Analysis,
@@ -839,6 +1082,14 @@ public static class CliApplication
                             selectedSuites = new[] { request.FallbackSuite ?? "affected" },
                             fallbackSuite = request.FallbackSuite,
                             selectionStatus = selection.Status,
+                            executionPacketStatus = packetGeneration.Packet?.Status ?? "unavailable",
+                            packetBytes = packetGeneration.Packet?.Metrics.SizeBytes,
+                            packetGenerationMilliseconds = packetGeneration.Packet?.Metrics.GenerationElapsedMilliseconds,
+                            impactScopeExpanded = packetGeneration.Actual?.ScopeExpanded,
+                            validationPlanStatus = validationPlan?.Status,
+                            validationPlanTier = validationPlan?.Tier,
+                            validationRequiredCount = validationPlan?.RequiredTestIds.Count,
+                            validationAdditionalCount = validationPlan?.RequiredTestIds.Count,
                             owner = "RimTest/RimLiaison"
                         });
 
@@ -889,7 +1140,10 @@ public static class CliApplication
                                 validationChangedPaths: changedPaths,
                                 freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
                                 providedCapabilityAdapter: capabilityAdapter,
-                                protectRepositoryWorktree: true)
+                                contentCapture: contentCapture,
+                                validationPlan: validationPlan,
+                                protectRepositoryWorktree: true,
+                                impactGraph: packetGeneration.Graph)
                             .ConfigureAwait(false);
                     }
 
@@ -952,6 +1206,69 @@ public static class CliApplication
         Environment.GetEnvironmentVariable("RIMTEST_RIMCONTEXT_ROOT") ??
         Environment.GetEnvironmentVariable("RIMCONTEXT_ROOT") ??
         Environment.CurrentDirectory;
+    private static IReadOnlyList<ImpactGraphEvidence> CatalogImpactEvidence(string catalogPath)
+    {
+        try
+        {
+            CatalogLoadResult loaded = CatalogLoader.Load(catalogPath);
+            if (loaded.Catalog is null)
+            {
+                return [];
+            }
+
+            var evidence = new List<ImpactGraphEvidence>();
+            foreach (CatalogTest test in loaded.Catalog.Tests)
+            {
+                string testIdentity = "test/" + test.Id;
+                foreach (CatalogCoverage coverage in test.Covers ?? [])
+                {
+                    evidence.Add(new ImpactGraphEvidence(
+                        testIdentity,
+                        coverage.Name,
+                        ImpactRelationshipKinds.TestCoverage,
+                        ImpactClasses.Declared,
+                        new ImpactProvenance(
+                            "test-catalog",
+                            ImpactEvidenceClasses.Explicit,
+                            test.Id,
+                            "catalog test coverage"),
+                        "test",
+                        coverage.Kind,
+                        test.Id,
+                        coverage.Name));
+                }
+
+                foreach (CatalogCapabilityRequirement capability in test.RequiredCapabilities ?? [])
+                {
+                    evidence.Add(new ImpactGraphEvidence(
+                        "framework/" + capability.CapabilityId,
+                        testIdentity,
+                        ImpactRelationshipKinds.FrameworkConsumer,
+                        ImpactClasses.Framework,
+                        new ImpactProvenance(
+                            "test-catalog",
+                            ImpactEvidenceClasses.FrameworkKnown,
+                            capability.CapabilityId,
+                            capability.Purpose),
+                        "framework_capability",
+                        "test",
+                        capability.CapabilityId,
+                        test.Id));
+                }
+            }
+
+            return evidence;
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
 
     private static IReadOnlyDictionary<string, string>? DiscoverContextRelatedRepositoryRoots(
         string rootPath)
@@ -1006,6 +1323,70 @@ public static class CliApplication
                 cancellationToken)
             .ConfigureAwait(false);
         WriteJson(stdout, result.Output);
+        return result.ExitCode;
+    }
+
+    private static async Task<int> ExecutePreflightCommandAsync(
+        CliRequest request,
+        TextWriter stdout,
+        TextWriter stderr,
+        IDevBridgeProcessTransport? processTransport,
+        CancellationToken cancellationToken)
+    {
+        DoctorRunResult result = await new RimTestDoctorRunner(stderr)
+            .RunAsync(
+                request,
+                processTransport ?? new SystemDevBridgeProcessTransport(),
+                cancellationToken)
+            .ConfigureAwait(false);
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = "rimliaison-golden-path-preflight/v1",
+            ["status"] = result.ExitCode == CliExitCodes.Success ? "ready" : "blocked",
+            ["ready"] = result.ExitCode == CliExitCodes.Success,
+            ["owner"] = "RimLiaison",
+            ["nextAction"] = result.Output.TryGetValue("nextAction", out object? nextAction)
+                ? nextAction
+                : null
+        };
+        ExecutionPacketGenerationResult packet = ExecutionPacketCoordinator.TryGenerate(
+            AffectedGitRoot(request),
+            request.RimContextStorePath,
+            Environment.GetEnvironmentVariable("RIMTEST_TASK") ??
+                "substantive development task",
+            repository: request.StackManifest.Manifest?.Project,
+            project: request.StackManifest.Manifest?.Project,
+            additionalEvidence: CatalogImpactEvidence(request.CatalogPath));
+        output["executionPacketStatus"] = packet.Succeeded
+            ? ExecutionPacketStatuses.Valid
+            : ExecutionPacketStatuses.Unavailable;
+        if (packet.Packet is not null)
+        {
+            output["executionPacket"] = packet.Packet;
+            output["impactPrediction"] = packet.Prediction;
+        }
+        else
+        {
+            output["executionPacketError"] = new
+            {
+                code = packet.ErrorCode,
+                message = packet.Error
+            };
+        }
+        if (result.Output.TryGetValue("project", out object? project))
+        {
+            output["project"] = project;
+        }
+        if (result.ExitCode != CliExitCodes.Success)
+        {
+            output["code"] = result.Output.TryGetValue("code", out object? code)
+                ? code
+                : result.Output.TryGetValue("errorCode", out object? errorCode)
+                    ? errorCode
+                    : "PREFLIGHT_BLOCKED";
+            output["blockingState"] = "required";
+        }
+        WriteJson(stdout, output);
         return result.ExitCode;
     }
 
@@ -2766,8 +3147,26 @@ public static class CliApplication
         IReadOnlyList<string>? validationChangedPaths = null,
         bool protectRepositoryWorktree = false,
         IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null,
-        IDevBridgeCapabilityAdapter? providedCapabilityAdapter = null)
+        IDevBridgeCapabilityAdapter? providedCapabilityAdapter = null,
+        ContentIntelligenceCapture? contentCapture = null,
+        ValidationPlan? validationPlan = null,
+        ImpactGraph? impactGraph = null)
     {
+        string[] validationRecipeIds = testIds
+            .Select(testId => catalog.Tests.FirstOrDefault(test => test.Id == testId)?.Recipe)
+            .Where(recipe => !string.IsNullOrWhiteSpace(recipe))
+            .Select(recipe => recipe!)
+            .Distinct(StringComparer.Ordinal)
+            .Take(64)
+            .ToArray();
+        if (validationPlan is not null)
+        {
+            AgentImpactObservabilityRecorder.RecordValidationStarted(
+                validationPlan,
+                testIds,
+                workflowId,
+                validationRecipeIds);
+        }
         bool ownsRecipeAdapter = recipeAdapter is null;
         bool needsBridgeTransport = ownsRecipeAdapter || freshnessRequest is not null;
         DevBridgeAdapterOptions? bridgeOptions = needsBridgeTransport
@@ -2959,7 +3358,8 @@ public static class CliApplication
             workflowId,
             artifactFreshness,
             freshnessTransaction?.Status,
-            freshnessRequest is not null);
+            freshnessRequest is not null,
+            request.Explain ? validationPlan : null);
         RecordSuiteCompletion(
             execution,
             result,
@@ -2974,6 +3374,56 @@ public static class CliApplication
             request,
             freshnessRequest,
             validationChangedPaths);
+        if (validationPlan is not null)
+        {
+            AgentImpactObservabilityRecorder.RecordValidationCompleted(
+                validationPlan,
+                result,
+                testIds,
+                validationRecipeIds);
+            AgentImpactObservabilityRecorder.RecordRuntimeEvidenceCompleted(
+                validationPlan,
+                result);
+            foreach (RimTestSuiteFailure failure in (result.Failures ?? []).Take(16))
+            {
+                AgentImpactObservabilityRecorder.RecordFailurePacket(
+                    new global::RimDev.Contracts.FailureEvidencePacket
+                    {
+                        Identity = new global::RimDev.Contracts.ExecutionIdentity
+                        {
+                            RepositoryId = validationPlan.SourceIdentity.Repository,
+                            ProjectId = validationPlan.SourceIdentity.Project,
+                            SourceRevision = validationPlan.SourceIdentity.SourceRevision,
+                            BuildIdentity = validationPlan.SourceIdentity.IndexGeneration,
+                            ExecutionId = result.WorkflowId
+                        },
+                        FailedValidation = new global::RimDev.Contracts.EntityReference
+                        {
+                            Kind = global::RimDev.Contracts.EntityReferenceKinds.Test,
+                            Id = failure.Test
+                        },
+                        Classification = failure.ErrorCode ?? "validation-failed",
+                        Error = failure.ErrorCode ?? "validation failed",
+                        ChangedSourceFiles = validationPlan.ActualChangedFiles,
+                        PrecedingEvidence = string.IsNullOrWhiteSpace(failure.EvidenceId)
+                            ? []
+                            :
+                            [
+                                new global::RimDev.Contracts.EvidenceReference
+                                {
+                                    Kind = "validation",
+                                    Uri = failure.EvidenceId
+                                }
+                            ]
+                    });
+            }
+        }
+        contentCapture?.RecordEvidence(result);
+        MinimumSafeValidationCoordinator.LearnFromOutcome(
+            validationPlan,
+            impactGraph,
+            result,
+            AffectedGitRoot(request));
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
     }
@@ -3542,7 +3992,8 @@ public static class CliApplication
     private static bool NeedsWorkflowCorrelation(CliRequest request) =>
         request.Command is CliCommand.RecipeRun or
             CliCommand.RunTest or
-            CliCommand.SuiteRun ||
+            CliCommand.SuiteRun or
+            CliCommand.GoldenPath ||
         request.Command == CliCommand.Affected && request.RunSelected ||
         request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
 
@@ -3553,7 +4004,14 @@ public static class CliApplication
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
-    private static (string ModId, string ModName) ResolveObservabilityMod(CliRequest request)
+    private static ObservabilityEntityIdentity ResolveObservabilityEntity(
+        CliRequest request)
+    {
+        _ = request;
+        return ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison");
+    }
+    private static (string ModId, string ModName) ResolveObservabilityMod(
+        CliRequest request)
     {
         ObservabilityProjectIdentity identity =
             ObservabilityProjectIdentityResolver.Resolve(
@@ -3594,11 +4052,12 @@ public static class CliApplication
         command switch
         {
             CliCommand.RecipeRun or CliCommand.RunTest or CliCommand.SuiteRun or
-            CliCommand.Affected => DevelopmentStage.Testing,
+            CliCommand.Affected or CliCommand.GoldenPath => DevelopmentStage.Testing,
             CliCommand.Capabilities or CliCommand.UiTargets => DevelopmentStage.Research,
             CliCommand.UiScreenshot => DevelopmentStage.Testing,
-            CliCommand.Init or CliCommand.Doctor or CliCommand.Context or
-            CliCommand.PublishCheck or CliCommand.Benchmarks => DevelopmentStage.Analysis,
+            CliCommand.Init or CliCommand.Doctor or CliCommand.Preflight or
+            CliCommand.Context or CliCommand.PublishCheck or CliCommand.Benchmarks =>
+                DevelopmentStage.Analysis,
             _ => DevelopmentStage.Analysis
         };
 

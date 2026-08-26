@@ -30,6 +30,35 @@ returns bounded domain results directly, so the normal path does not spawn `rimc
 temporary JSON handoff. The direct `rimctx` executable remains a narrow drill-down/debugging
 surface over that same Core API and retains the versioned `rimctx/v1` contract.
 
+## Content Intelligence
+
+RimContext owns the compact `content-blueprint/v1` and `content-evidence/v1` contracts plus
+deterministic Phase 2 structural analysis. RimLiaison captures them automatically for content runs
+when the agent supplies `--content-kind` and/or `--content-role`; indexed file/entity/dependency and
+source-identity facts are derived from the selected RimContext index. Evidence is never merged into
+intent and is ignored when its source identity is stale.
+
+Structural fingerprints cluster shape before semantic reuse. Versioned qualification criteria require
+independent successful implementations, fresh evidence, applicable validation, and bounded repair
+rates. Qualified candidates undergo historical replay before automatic promotion to data-only
+`content-archetype/v1` records containing templates, defaults, constraints, validation expectations,
+and supporting IDs; no executable generator or opaque confidence score is stored.
+
+Shared precedents use the canonical workspace `.rimdev/content-intelligence.jsonl` by default. The
+append-only store keeps structured metadata, stable source/entity references, evidence, archetype
+versions, usage evidence, quarantine state, and project-scoped exclusion/constraint policies; it
+never copies source bodies. `rimliaison content query` and `rimctx content` provide bounded ranked
+references. Trust ordering and fallback are explicit:
+`RimContent proven archetype -> proven RimContext precedent -> vanilla/reference pattern -> novel`.
+
+
+RimLiaison projects this lifecycle into the existing observability store as canonical `content.*`
+events. The desktop Content Intelligence section is an incremental, bounded projection: it keeps
+blueprint/detail history, precedent and archetype history, regressions, reuse distribution, and
+measured efficiency separate from the validation owner. `logicalAgentId` joins sessions across
+runs without collapsing run/session drill-down. Exact elapsed/token fields are nullable and are
+never inferred. Scoped quarantine, rollback, project exclusion, and source-ineligibility writes
+use the Core administration API and append an audit event; they are not approval gates.
 ## Context Bundle foundation
 
 `rimctx-bundle/v1` is the cross-stack context snapshot consumed by agents and diagnostics. It is
@@ -114,11 +143,12 @@ rimctx file PATH_OR_ID
 rimctx summary
 rimctx version
 rimctx context
+rimctx content [QUERY]
 ```
 
 Common options are `--root`, `--store`, `--assembly-root` (repeatable for indexing), `--force`,
-`--json`, `--compact`, `--human`, `--limit`, and `--max-bytes`; `context` also accepts `--verbose`.
-`refs` accepts `--direction in|out|both`;
+`--json`, `--compact`, `--human`, `--limit`, and `--max-bytes`; `context` also accepts `--verbose`;
+`content` accepts `--kind`, `--role`, and `--include-failures`. `refs` accepts `--direction in|out|both`;
 `affected` accepts `--depth 1..8`; `find` accepts `--kind`. The parser defaults to compact agent
 output. `--json` is accepted for explicit agent command lines; output is JSON for every command.
 
@@ -354,3 +384,56 @@ size rather than hard-coding performance claims.
   a writable index command.
 - Query matching and projections are deterministic but currently materialize compact entity/relation
   records in memory; very large workspaces may need a later SQL/search-index optimization.
+
+## Impact graph and Execution Packet foundation
+
+`RimContext.Core.Impact` owns the shared `rimimpact-graph/v1` relationship contract and the
+`rimexecution-packet/v1` packet contract. `ImpactGraphService` projects the existing SQLite index
+into stable nodes and provenance-bearing edges; additional declared, runtime-observed, framework,
+learned, or uncertain evidence can be added without relabeling deterministic index facts. Harmony
+edges are `DYNAMIC/POTENTIAL`; serialization and unresolved relationships remain conservative.
+
+`ExecutionPacketBuilder` ranks indexed context from task intent, emits references and
+`rimctx://impact/<id>` drill-down handles rather than source bodies, retains recommendation
+provenance, and enforces a configurable byte/entry budget. `Predict`, `AnalyzeDiff`, and
+`EvaluatePacket` use the same graph for advisory pre-work scope, authoritative post-change scope,
+and valid/partially-stale/invalid packet status. Unrelated changes keep relevant packet sections
+reusable; dependency-boundary changes invalidate them. Packet token savings are intentionally
+not inferred when token telemetry is unavailable.
+
+`RimContextService` exposes graph, packet, actual-impact, and packet-status operations in-process.
+RimLiaison generates a packet during `preflight` when a readable index exists and attaches packet,
+predicted-impact, and actual-impact fields to affected selection without changing the existing
+selection schema or runtime ownership. Generation is static-index-only and does not launch
+RimWorld. Packet metrics retain elapsed time, bytes, indexed lookup count, and cache status.
+
+## Minimum-safe validation planning
+
+Phase 2 adds `rimtest-validation-plan/v1` planning beside, not instead of, canonical execution.
+`MinimumSafeValidationPlanner` consumes the actual indexed diff, catalog coverage, framework and
+RimWorld identity, and applicable learned relationships. It selects the smallest safe tier:
+targeted, affected component, affected project, framework dependents, or broader canonical fallback.
+Harmony/dynamic edges require runtime-sensitive coverage; serialization edges require save/load
+coverage; framework edges include consumer contracts; unknown or unmapped impact remains
+conservative.
+
+Required plan entries are additive to ordinary affected selection and are deduplicated by recipe.
+Agent-requested additions are allowed. Removals require an accepted, source-identity-matching
+override; stale evidence never authorizes reuse. Learning is append-only JSONL, causal-attribution
+gated, project-scoped by default, and promoted globally only after strong deterministic evidence.
+RimError attribution is an input boundary, not a second failure database. Prediction remains advisory;
+actual-diff scope and current artifact evidence remain authoritative.
+## Lifecycle observability and operator view
+
+`AgentImpactObservabilityRecorder` writes packet generation/bypass/expansion and validity,
+predicted-versus-actual impact, validation-plan rationale, validation execution, stale-evidence
+rejection, and learning/override lifecycle events into the existing persistent agent event store.
+Each event carries the existing run/agent/session envelope plus stable packet, plan, relationship,
+task, project, source, and index identities. Writes are bounded and non-fatal.
+
+The desktop uses the existing per-agent `Execution / impact / validation` detail surface rather
+than adding another top-level tab. It projects the latest packet and actual scope, required
+validation reasons, agent additions, learning state, and measured efficiency/safety counters.
+Unavailable telemetry remains unavailable; token savings, runtime cost, and other metrics are not
+fabricated. Persistent logical-agent history supplies prior sessions without merging unrelated
+agents. Administrative learning exclusions are append-only, project-scoped, and auditable.
