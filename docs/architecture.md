@@ -85,6 +85,14 @@ the full canonical arrays remain available for diagnostics. Repository-local gen
 audited separately from meaningful `.rimdev/stack.json` configuration; unclassified transaction,
 report, cache, temp, or diagnostic paths are surfaced for owner review rather than blindly ignored.
 
+DevBridge's `runtimeIdentity` projection is the authoritative identity record for live gates. It
+keeps the source checkout, installed `Mods\DevBridge2` runtime, optional pinned worktree, RimWorld
+root, and executable distinct. The provider preserves that bounded projection in
+`runtime.runtimeIdentity`; it never derives a game executable from the current directory or
+repository path. Source-only build, sync, and context operations remain usable when the live
+identity is unavailable, which is reported as `unknown` or `unavailable` with the owner error code
+and next action.
+
 ## Runtime, layout, and entrypoint
 
 The consolidated solution targets `net8.0`; the root `global.json` pins SDK `8.0.424` with

@@ -114,6 +114,7 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                 details["responseSchema"] = response.SchemaVersion;
                 details["protocolVersion"] = response.ProtocolVersion;
                 details["buildIdentity"] = response.BuildIdentity;
+                details["runtimeIdentity"] = response.RuntimeIdentity;
                 details["structuredResponse"] = new
                 {
                     success = response.Success,
@@ -126,7 +127,8 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                     schemaVersion = response.SchemaVersion,
                     protocolVersion = response.ProtocolVersion,
                     buildIdentity = response.BuildIdentity,
-                    findings = response.Findings
+                    findings = response.Findings,
+                    runtimeIdentity = response.RuntimeIdentity
                 };
             }
             if (stdoutEvidence is not null)

@@ -291,7 +291,12 @@ internal static class RimDevWorkspaceDiscoverer
             configuration = new RimDevWorkspaceConfiguration(
                 parsed.SchemaVersion,
                 repositories,
-                deploymentRoot);
+                deploymentRoot,
+                parsed.RimWorldRoot,
+                parsed.RimWorldExecutable,
+                parsed.DevBridgeRuntimeRoot,
+                parsed.DevBridgeSourceRoot,
+                parsed.DevBridgePinnedWorktreeRoot);
             return true;
         }
         catch (JsonException)
@@ -390,6 +395,20 @@ internal static class RimDevWorkspaceDiscoverer
 
         [JsonPropertyName("deploymentRoot")]
         public string? DeploymentRoot { get; init; }
+        [JsonPropertyName("rimWorldRoot")]
+        public string? RimWorldRoot { get; init; }
+
+        [JsonPropertyName("rimWorldExecutable")]
+        public string? RimWorldExecutable { get; init; }
+
+        [JsonPropertyName("devBridgeRuntimeRoot")]
+        public string? DevBridgeRuntimeRoot { get; init; }
+
+        [JsonPropertyName("devBridgeSourceRoot")]
+        public string? DevBridgeSourceRoot { get; init; }
+
+        [JsonPropertyName("devBridgePinnedWorktreeRoot")]
+        public string? DevBridgePinnedWorktreeRoot { get; init; }
     }
 
     private sealed class RimDevWorkspaceRepositoryDocument

@@ -44,6 +44,23 @@ configuration, not personal hard-coded defaults; the existing DevBridge developm
 is used when those fields are omitted. Use `--root <workspace-root>` when discovery should start
 from a particular workspace.
 
+The same machine-local manifest may also carry the runtime identity used by managed live gates:
+
+```json
+{
+  "rimWorldRoot": "C:/Games/Steam/steamapps/common/RimWorld",
+  "rimWorldExecutable": "C:/Games/Steam/steamapps/common/RimWorld/RimWorldWin64.exe",
+  "devBridgeRuntimeRoot": "C:/Games/Steam/steamapps/common/RimWorld/Mods/DevBridge2",
+  "devBridgeSourceRoot": "C:/RimDev/Repos/DevBridge2"
+}
+```
+
+These values identify the installed runtime, not a repository or pinned worktree. `RIMWORLD_ROOT`
+and `RIMWORLD_EXECUTABLE` are deliberate per-process overrides and take precedence over the
+manifest. A missing or invalid explicit override fails closed; there is no unrelated-install
+fallback. The manifest is next, followed only by DevBridge's validated installed-layout fallback.
+Publish, sync, and source-only build operations do not require these live identity values.
+
 ## Operations
 
 | Command | Behavior |

@@ -517,6 +517,52 @@ public sealed record RimContextRuntimeState
     [JsonPropertyName("failureCode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FailureCode { get; init; }
+
+    [JsonPropertyName("runtimeIdentity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimContextRuntimeIdentity? RuntimeIdentity { get; init; }
+}
+
+public sealed record RimContextRuntimeIdentity
+{
+    [JsonPropertyName("devBridgeSourceRoot")]
+    public string? DevBridgeSourceRoot { get; init; }
+
+    [JsonPropertyName("devBridgeRuntimeRoot")]
+    public string? DevBridgeRuntimeRoot { get; init; }
+
+    [JsonPropertyName("devBridgePinnedWorktreeRoot")]
+    public string? DevBridgePinnedWorktreeRoot { get; init; }
+
+    [JsonPropertyName("rimWorldRoot")]
+    public string? RimWorldRoot { get; init; }
+
+    [JsonPropertyName("rimWorldExecutable")]
+    public string? RimWorldExecutable { get; init; }
+
+    [JsonPropertyName("resolutionSource")]
+    public string? ResolutionSource { get; init; }
+
+    [JsonPropertyName("rimWorldRootExists")]
+    public bool? RimWorldRootExists { get; init; }
+
+    [JsonPropertyName("rimWorldExecutableExists")]
+    public bool? RimWorldExecutableExists { get; init; }
+
+    [JsonPropertyName("devBridgeRuntimeRootExists")]
+    public bool? DevBridgeRuntimeRootExists { get; init; }
+
+    [JsonPropertyName("installedRuntimeLayoutValid")]
+    public bool? InstalledRuntimeLayoutValid { get; init; }
+
+    [JsonPropertyName("runtimeBelongsToRimWorld")]
+    public bool? RuntimeBelongsToRimWorld { get; init; }
+
+    [JsonPropertyName("errorCode")]
+    public string? ErrorCode { get; init; }
+
+    [JsonPropertyName("nextAction")]
+    public string? NextAction { get; init; }
 }
 
 public sealed record RimContextTestingState

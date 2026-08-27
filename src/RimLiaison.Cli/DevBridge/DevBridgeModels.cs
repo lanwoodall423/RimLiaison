@@ -131,7 +131,8 @@ public sealed record DevBridgeProcessResponse(
     string? SchemaVersion = null,
     string? ProtocolVersion = null,
     string? BuildIdentity = null,
-    JsonElement? Findings = null)
+    JsonElement? Findings = null,
+    JsonElement? RuntimeIdentity = null)
 {
     public bool RepresentsFailure(int? processExitCode) =>
         ErrorCode is not null ||
@@ -202,6 +203,9 @@ public sealed record DevBridgeAdapterOptions
 {
     public required string CommandPath { get; init; }
     public required string RootPath { get; init; }
+    public string? SourceRootPath { get; init; }
+    public string? RuntimeRootPath { get; init; }
+    public string? PinnedWorktreeRootPath { get; init; }
     public TimeSpan ShowPlanTimeout { get; init; } = TimeSpan.FromSeconds(75);
     public TimeSpan RunTimeout { get; init; } = TimeSpan.FromMinutes(16);
     public int MaxStdoutBytes { get; init; } = 1024 * 1024;
@@ -217,11 +221,18 @@ public sealed record DevBridgeAdapterOptions
             Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
             Path.GetDirectoryName(fullPath) ??
             Environment.CurrentDirectory;
+        string fullRoot = Path.GetFullPath(selectedRoot);
 
         return new DevBridgeAdapterOptions
         {
             CommandPath = fullPath,
-            RootPath = Path.GetFullPath(selectedRoot)
+            RootPath = fullRoot,
+            SourceRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT") ??
+                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
+                fullRoot,
+            RuntimeRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_RUNTIME_ROOT"),
+            PinnedWorktreeRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_PINNED_WORKTREE_ROOT") ??
+                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_PINNED_ROOT")
         };
     }
 

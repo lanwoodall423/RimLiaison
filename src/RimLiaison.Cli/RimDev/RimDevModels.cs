@@ -34,7 +34,12 @@ public sealed record RimDevRunOptions(
 public sealed record RimDevWorkspaceConfiguration(
     string SchemaVersion,
     IReadOnlyList<RimDevWorkspaceRepository> Repositories,
-    string? DeploymentRoot);
+    string? DeploymentRoot,
+    string? RimWorldRoot = null,
+    string? RimWorldExecutable = null,
+    string? DevBridgeRuntimeRoot = null,
+    string? DevBridgeSourceRoot = null,
+    string? DevBridgePinnedWorktreeRoot = null);
 
 public sealed record RimDevWorkspaceRepository(
     string Path,

@@ -1089,7 +1089,7 @@ internal static class Program
                     "context runtime probe must not mutate lifecycle state");
                 string output = request.Arguments.Contains("snapshot", StringComparer.Ordinal)
                     ? "{\"generation\":7,\"phase\":\"READY\",\"quicktest\":{\"state\":\"idle\"},\"rimBridgeEndpoint\":{\"state\":\"ready\"}}"
-                    : "{\"healthy\":true,\"generation\":7,\"processId\":123,\"lifecycleState\":\"READY\"}";
+                    : "{\"healthy\":true,\"generation\":7,\"processId\":123,\"lifecycleState\":\"READY\",\"runtimeIdentity\":{\"devBridgeSourceRoot\":\"C:/src/DevBridge2\",\"devBridgeRuntimeRoot\":\"C:/Games/RimWorld/Mods/DevBridge2\",\"devBridgePinnedWorktreeRoot\":\"C:/pinned/DevBridge2\",\"rimWorldRoot\":\"C:/Games/RimWorld\",\"rimWorldExecutable\":\"C:/Games/RimWorld/RimWorldWin64.exe\",\"resolutionSource\":\"canonical-machine-configuration\",\"rimWorldRootExists\":true,\"rimWorldExecutableExists\":true,\"devBridgeRuntimeRootExists\":true,\"installedRuntimeLayoutValid\":true,\"runtimeBelongsToRimWorld\":true}}";
                 return new DevBridgeProcessResult(
                     0,
                     output,
@@ -1135,6 +1135,9 @@ internal static class Program
             AssertEqual("generated", bundle.Repository.Value.GeneratedFiles[0].Category);
             AssertEqual("available", bundle.Runtime.Status);
             AssertEqual(7, bundle.Runtime.Value!.Generation);
+            AssertEqual(
+                "C:/Games/RimWorld/Mods/DevBridge2",
+                bundle.Runtime.Value.RuntimeIdentity!.DevBridgeRuntimeRoot);
             AssertEqual("available", bundle.Testing.Status);
             Assert(
                 bundle.Testing.Value!.AdditionalValidationRequired is null,

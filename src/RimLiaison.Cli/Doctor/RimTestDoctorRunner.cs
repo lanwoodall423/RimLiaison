@@ -713,6 +713,7 @@ internal sealed class RimTestDoctorRunner
             details["protocolVersion"] = response.ProtocolVersion;
             details["buildIdentity"] = response.BuildIdentity;
             details["findings"] = response.Findings;
+            details["runtimeIdentity"] = response.RuntimeIdentity;
         }
         return details;
     }

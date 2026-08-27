@@ -46,7 +46,7 @@ The top-level fields are:
 | `relatedRepositories` | Read-only Git snapshots for explicitly configured companion roots, when available. |
 | `environment` | OS/runtime/tool/configuration facts with `secretsExcluded: true`. |
 | `deployment` | DevBridge2 build/deployment identity and artifact correspondence, when evidenced. |
-| `runtime` | DevBridge2/RimBridgeServer process, generation, bridge, game, map, and lease facts. |
+| `runtime` | DevBridge2/RimBridgeServer process, generation, bridge, game, map, lease, and bounded runtime-identity facts. |
 | `testing` | Catalog coverage, selection policy, evidence, cache/invalidation, benchmark summary, and validation need. |
 | `recentExecutions` | Bounded recent build, test, command, retry, and recovery activity. |
 | `failures` | Bounded failure signatures, recommended next actions, and reviewed knowledge matches when justified. |

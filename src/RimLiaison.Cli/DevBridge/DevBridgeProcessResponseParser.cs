@@ -45,6 +45,9 @@ internal static class DevBridgeProcessResponseParser
                     ReadString(root, "version"),
                 root.TryGetProperty("findings", out JsonElement findings)
                     ? findings.Clone()
+                    : null,
+                root.TryGetProperty("runtimeIdentity", out JsonElement runtimeIdentity)
+                    ? runtimeIdentity.Clone()
                     : null);
             return true;
         }

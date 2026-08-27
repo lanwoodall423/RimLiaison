@@ -116,6 +116,9 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
                 ? new RimContextSection<RimContextRuntimeState>
                 {
                     Status = runtime.Status,
+                    Value = runtime.RuntimeIdentity is null
+                        ? null
+                        : new RimContextRuntimeState { RuntimeIdentity = runtime.RuntimeIdentity },
                     Provider = "devbridge2/rimbridgeserver",
                     ReasonCode = runtime.ErrorCode,
                     Message = runtime.Message,
@@ -558,6 +561,10 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
             }
 
             parsed = parsed with { RootPath = bridge.RootPath };
+            if (parsed.State is null)
+            {
+                return parsed;
+            }
 
             // The agent snapshot is a synchronized, read-only DevBridge2
             // projection for lease, quicktest, bridge-endpoint, and loaded
@@ -648,6 +655,7 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
         JsonElement runtime = GetObject(root, "runtime");
         JsonElement rimBridge = GetObject(root, "rimBridge");
         JsonElement quicktest = GetObject(root, "quicktest");
+        JsonElement runtimeIdentity = GetObject(root, "runtimeIdentity");
         bool? healthy = FirstBoolean(root, "healthy") ??
             FirstBoolean(operational, "healthy");
         int? generation = FirstInt(root, "generation") ??
@@ -684,10 +692,26 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
             FirstInt(operational, "activeLeaseCount");
         bool? running = processRunning ??
             (processId.HasValue ? processId > 0 : IsLifecycleRunning(phase));
+        RimContextRuntimeIdentity? parsedIdentity = ParseRuntimeIdentity(runtimeIdentity);
+        if (healthy is null && generation is null && processId is null &&
+            phase is null && bridgeLifecycle is null && running is null &&
+            parsedIdentity is null)
+        {
+            return null;
+        }
         if (healthy is null && generation is null && processId is null &&
             phase is null && bridgeLifecycle is null && running is null)
         {
-            return null;
+            return new RuntimeProbe(
+                null,
+                RimContextBundleStatuses.Unavailable,
+                FirstString(root, "errorCode", "failureCode"),
+                FirstString(root, "error"),
+                FirstString(root, "nextAction"),
+                observedAtUtc,
+                ReadComponentVersions(root),
+                null,
+                parsedIdentity);
         }
 
         string? bridgeStatus = bridgeLifecycle ?? (healthy switch
@@ -737,14 +761,17 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
                 CurrentGenerationTrust = currentTrust,
                 FailureCode = FirstString(root, "errorCode", "failureCode") ??
                     FirstString(operational, "terminalFailureCode") ??
-                    FirstString(rimBridge, "errorCode")
+                    FirstString(rimBridge, "errorCode"),
+                RuntimeIdentity = parsedIdentity
             },
             stale ? RimContextBundleStatuses.Stale : RimContextBundleStatuses.Available,
             null,
             null,
             null,
             observedAtUtc,
-            componentVersions);
+            componentVersions,
+            null,
+            parsedIdentity);
     }
 
     private static RimContextRuntimeState MergeAgentSnapshot(
@@ -2033,6 +2060,31 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
         _ => RimContextDecisionActions.Run
     };
 
+    private static RimContextRuntimeIdentity? ParseRuntimeIdentity(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return new RimContextRuntimeIdentity
+        {
+            DevBridgeSourceRoot = GetString(data, "devBridgeSourceRoot"),
+            DevBridgeRuntimeRoot = GetString(data, "devBridgeRuntimeRoot"),
+            DevBridgePinnedWorktreeRoot = GetString(data, "devBridgePinnedWorktreeRoot"),
+            RimWorldRoot = GetString(data, "rimWorldRoot"),
+            RimWorldExecutable = GetString(data, "rimWorldExecutable"),
+            ResolutionSource = GetString(data, "resolutionSource"),
+            RimWorldRootExists = GetBoolean(data, "rimWorldRootExists"),
+            RimWorldExecutableExists = GetBoolean(data, "rimWorldExecutableExists"),
+            DevBridgeRuntimeRootExists = GetBoolean(data, "devBridgeRuntimeRootExists"),
+            InstalledRuntimeLayoutValid = GetBoolean(data, "installedRuntimeLayoutValid"),
+            RuntimeBelongsToRimWorld = GetBoolean(data, "runtimeBelongsToRimWorld"),
+            ErrorCode = GetString(data, "errorCode"),
+            NextAction = GetString(data, "nextAction")
+        };
+    }
+
     private static string? GetString(JsonElement data, string name) =>
         data.ValueKind == JsonValueKind.Object &&
         data.TryGetProperty(name, out JsonElement value) &&
@@ -2393,7 +2445,8 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
         string? NextAction,
         DateTimeOffset? ObservedAtUtc,
         IReadOnlyDictionary<string, string> ComponentVersions,
-        string? RootPath = null)
+        string? RootPath = null,
+        RimContextRuntimeIdentity? RuntimeIdentity = null)
     {
         public static RuntimeProbe Unavailable(
             string code,
@@ -2406,6 +2459,7 @@ public sealed class RimLiaisonContextBundleProvider : IRimContextBundleProvider
                 nextAction,
                 null,
                 new Dictionary<string, string>(StringComparer.Ordinal),
+                null,
                 null);
     }
 }
