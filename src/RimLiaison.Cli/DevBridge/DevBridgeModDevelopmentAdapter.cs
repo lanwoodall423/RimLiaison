@@ -704,7 +704,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         string? command = FirstString(build, failure, "command", "commandText");
         int? exitCode = FirstInt(build, failure, "exitCode");
         string? output = FirstString(build, null, "output", "stdout");
-        string? diagnosticOutput = FirstString(failure, build, "output", "diagnosticOutput", "error");
+        string? diagnosticOutput = FirstString(failure, build, "diagnosticOutput", "output", "error");
+        string? causalDiagnostic = FirstString(failure, build, "causalDiagnostic");
         string? errorOutput = FirstString(build, failure, "errorOutput", "stderr");
         string? sourceProject = FirstString(build, null, "sourceProject");
         string? stagingPath = FirstString(build, null, "stagingPath");
@@ -719,12 +720,44 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         string? workflowId = FirstString(build, failure, "workflowId", "workflow");
         string? errorCode = FirstString(failure, build, "errorCode", "code");
         bool? outputTruncated = FirstBoolean(build, failure, "outputTruncated");
+        bool? causalDiagnosticTruncated =
+            FirstBoolean(failure, build, "causalDiagnosticTruncated") ??
+            FirstBoolean(failure, build, "diagnosticOutputTruncated");
+        string? diagnosticSignature = FirstString(failure, build, "diagnosticSignature");
+        string? rawStdoutPath = FirstString(build, failure, "rawStdoutPath");
+        string? rawStderrPath = FirstString(build, failure, "rawStderrPath");
+        string? rawNativeStdoutPath = FirstString(build, failure, "rawNativeStdoutPath");
+        string? rawNativeStderrPath = FirstString(build, failure, "rawNativeStderrPath");
+        string? orchestrator = FirstString(build, failure, "orchestrator");
+        string? failureSurface = FirstString(build, failure, "failureSurface");
+        string? likelyOwner = FirstString(build, failure, "likelyOwner");
+        string? ownershipConfidence = FirstString(build, failure, "ownershipConfidence");
+        string? ownershipBasis = FirstString(build, failure, "ownershipBasis");
+        JsonElement? ownership = build is { ValueKind: JsonValueKind.Object } buildObject
+            ? GetObject(buildObject, "ownership")
+            : failure is { ValueKind: JsonValueKind.Object } failureObject
+                ? GetObject(failureObject, "ownership")
+                : null;
+        JsonElement? discrimination = root.TryGetProperty("buildDiscrimination", out JsonElement discriminator) &&
+            discriminator.ValueKind == JsonValueKind.Object
+            ? discriminator
+            : null;
+        // Ownership may be nested in the build/failure object.
+        if (ownership is { ValueKind: JsonValueKind.Object } ownershipObject)
+        {
+            likelyOwner ??= FirstString(ownershipObject, null, "likelyOwner");
+            ownershipConfidence ??= FirstString(ownershipObject, null, "confidence", "ownershipConfidence");
+            ownershipBasis ??= FirstString(ownershipObject, null, "basis", "ownershipBasis");
+            orchestrator ??= FirstString(ownershipObject, null, "orchestrator");
+            failureSurface ??= FirstString(ownershipObject, null, "failureSurface");
+        }
         if (command is null && exitCode is null && output is null &&
-            diagnosticOutput is null && errorOutput is null && sourceProject is null &&
+            diagnosticOutput is null && causalDiagnostic is null && errorOutput is null && sourceProject is null &&
             stagingPath is null && timedOut is null && cancelled is null &&
             builtSha256 is null && configuration is null && workingDirectory is null &&
             sourceFingerprint is null && failureMessage is null && transactionId is null &&
-            workflowId is null && errorCode is null && outputTruncated is null)
+            workflowId is null && errorCode is null && outputTruncated is null &&
+            diagnosticSignature is null && rawStdoutPath is null && rawStderrPath is null)
         {
             return null;
         }
@@ -747,7 +780,20 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             transactionId,
             workflowId,
             errorCode,
-            outputTruncated);
+            outputTruncated,
+            causalDiagnostic,
+            causalDiagnosticTruncated,
+            diagnosticSignature,
+            rawStdoutPath,
+            rawStderrPath,
+            rawNativeStdoutPath,
+            rawNativeStderrPath,
+            orchestrator,
+            failureSurface,
+            likelyOwner,
+            ownershipConfidence,
+            ownershipBasis,
+            discrimination);
     }
 
     private static void RecordBuildDiagnostics(
@@ -772,17 +818,23 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         AgentDiagnosticEvidenceReference? diagnosticEvidence =
             AgentObservabilityRuntime.PersistEvidence(
                 "devbridge.build.diagnostics",
-                build.DiagnosticOutput,
-                build.OutputTruncated ?? false);
+                build.CausalDiagnostic ?? build.DiagnosticOutput,
+                build.CausalDiagnosticTruncated ?? build.OutputTruncated ?? false);
         AgentDiagnosticEvidenceReference? errorEvidence =
             AgentObservabilityRuntime.PersistEvidence(
                 "devbridge.build.error",
                 build.ErrorOutput,
                 false);
+        AgentDiagnosticEvidenceReference? rawStdoutEvidence =
+            PersistRawEvidence("devbridge.build.raw-stdout", build.RawStdoutPath);
+        AgentDiagnosticEvidenceReference? rawStderrEvidence =
+            PersistRawEvidence("devbridge.build.raw-stderr", build.RawStderrPath);
         var data = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["operationKey"] = "build:" + project,
             ["project"] = project,
+            ["orchestrator"] = build.Orchestrator ?? "DevBridge2",
+            ["failureSurface"] = build.FailureSurface ?? "project-build",
             ["sourceFingerprint"] = build.SourceFingerprint ?? sourceFingerprint,
             ["transactionId"] = transactionId ?? build.TransactionId,
             ["workflowId"] = workflowId ?? build.WorkflowId,
@@ -794,14 +846,19 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             ["exitCode"] = build.ExitCode ?? process.ExitCode,
             ["timedOut"] = build.TimedOut ?? process.TimedOut,
             ["cancelled"] = build.Cancelled ?? process.Cancelled,
-            // Keep the structured event below MaximumEventDataBytes. The complete
-            // bounded owner output lives in the evidence records referenced below.
             ["output"] = AgentObservabilityData.BoundText(build.Output, 1_024),
+            ["causalDiagnostic"] = AgentObservabilityData.BoundText(build.CausalDiagnostic, 4_096),
             ["diagnosticOutput"] = AgentObservabilityData.BoundText(build.DiagnosticOutput, 1_024),
             ["errorOutput"] = AgentObservabilityData.BoundText(build.ErrorOutput, 1_024),
             ["outputTruncated"] = build.OutputTruncated ?? outputEvidence?.Truncated ?? false,
+            ["causalDiagnosticTruncated"] = build.CausalDiagnosticTruncated ?? false,
             ["diagnosticOutputTruncated"] = diagnosticEvidence?.Truncated ?? false,
             ["errorOutputTruncated"] = errorEvidence?.Truncated ?? false,
+            ["diagnosticSignature"] = build.DiagnosticSignature,
+            ["likelyOwner"] = build.LikelyOwner,
+            ["ownershipConfidence"] = build.OwnershipConfidence,
+            ["ownershipBasis"] = build.OwnershipBasis,
+            ["buildDiscrimination"] = build.Discrimination,
             ["builtSha256"] = build.BuiltSha256,
             ["deployedArtifactSha256"] = freshness?.DeployedArtifactSha256,
             ["deploymentDecision"] = freshness?.DeploymentDecision,
@@ -821,9 +878,22 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         {
             data["diagnosticEvidenceId"] = diagnosticEvidence.Id;
         }
+        if (diagnosticEvidence is not null &&
+            !string.IsNullOrWhiteSpace(build.CausalDiagnostic))
+        {
+            data["causalDiagnosticEvidenceId"] = diagnosticEvidence.Id;
+        }
         if (errorEvidence is not null)
         {
             data["errorOutputEvidenceId"] = errorEvidence.Id;
+        }
+        if (rawStdoutEvidence is not null)
+        {
+            data["rawStdoutEvidenceId"] = rawStdoutEvidence.Id;
+        }
+        if (rawStderrEvidence is not null)
+        {
+            data["rawStderrEvidenceId"] = rawStderrEvidence.Id;
         }
 
         AgentObservabilityRuntime.Record(
@@ -831,6 +901,31 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             AgentEventTypes.BuildDiagnostics,
             "DevBridge returned structured build diagnostics.",
             data);
+    }
+
+    private static AgentDiagnosticEvidenceReference? PersistRawEvidence(
+        string kind,
+        string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return File.Exists(path)
+                ? AgentObservabilityRuntime.PersistEvidence(
+                    kind,
+                    File.ReadAllText(path),
+                    false)
+                : null;
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private static JsonElement? GetObject(JsonElement parent, string name)

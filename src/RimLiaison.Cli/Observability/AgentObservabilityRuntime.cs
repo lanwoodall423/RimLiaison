@@ -589,7 +589,8 @@ public sealed class AgentObservabilitySession : IDisposable
     public AgentEvent? Fail(
         string summary,
         string? errorCode = null,
-        AgentCompletionState completionState = AgentCompletionState.Failed)
+        AgentCompletionState completionState = AgentCompletionState.Failed,
+        object? data = null)
     {
         if (Volatile.Read(ref disposed) != 0 ||
             snapshot.Status is AgentStatus.Completed or AgentStatus.Failed)
@@ -618,16 +619,17 @@ public sealed class AgentObservabilitySession : IDisposable
             snapshot.CurrentStage,
             AgentEventTypes.AgentFailed,
             boundedSummary,
-            new
-            {
-                outcome = completionState switch
+            MergeData(
+                data ?? new { },
+                null,
+                0,
+                completionState switch
                 {
                     AgentCompletionState.Cancelled => "cancelled",
                     AgentCompletionState.ValidationIncomplete => "validation-incomplete",
                     _ => "failure"
                 },
-                errorCode
-            });
+                errorCode));
         StopActivity(completionState switch
         {
             AgentCompletionState.Cancelled => "cancelled",
@@ -1085,6 +1087,9 @@ public sealed class AgentOperationScope : IDisposable
                     [AgentObservabilityTags.LogicalAgentId] = session.LogicalAgentId,
                     [AgentObservabilityTags.ModId] = session.ModId,
                     [AgentObservabilityTags.ModName] = session.ModName,
+                    [AgentObservabilityTags.EntityType] = session.EntityType,
+                    [AgentObservabilityTags.CanonicalEntityId] = session.CanonicalEntityId,
+                    [AgentObservabilityTags.ToolName] = "RimLiaison",
                     [AgentObservabilityTags.Stage] = stage.ToString().ToLowerInvariant(),
                     [AgentObservabilityTags.OperationType] = OperationType
                 });

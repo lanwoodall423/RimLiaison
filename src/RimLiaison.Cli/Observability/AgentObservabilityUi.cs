@@ -1082,20 +1082,49 @@ public sealed class AgentObservabilityUi : IDisposable
             throw new ArgumentException("An issue id is required.", nameof(issueId));
         }
 
+        return CreateChatPacket([issueId]).Text;
+    }
+
+    public AgentObservabilityChatPacket CreateChatPacket(IEnumerable<string> issueIds)
+    {
+        ArgumentNullException.ThrowIfNull(issueIds);
+        string[] requested = issueIds
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (requested.Length == 0)
+        {
+            throw new InvalidOperationException("Select at least one issue before copying to ChatGPT.");
+        }
+        if (requested.Length > AgentObservabilityIssueTriageBuilder.MaximumChatPacketIssues)
+        {
+            throw new InvalidOperationException(
+                $"Select at most {AgentObservabilityIssueTriageBuilder.MaximumChatPacketIssues} issues before copying to ChatGPT.");
+        }
+
         lock (gate)
         {
             ThrowIfDisposedLocked();
-            AgentObservabilityIssueDetail? detail = BuildIssueDetailLocked(issueId.Trim());
-            if (detail?.Triage is null)
+            var items = new List<(
+                AgentIssue Issue,
+                AgentObservabilityIssueTriage Triage,
+                AgentDiagnosticBundle Bundle)>(requested.Length);
+            foreach (string issueId in requested)
             {
-                throw new KeyNotFoundException("Unknown observability issue id: " + issueId);
+                AgentObservabilityIssueDetail? detail = BuildIssueDetailLocked(issueId);
+                if (detail?.Triage is null)
+                {
+                    throw new KeyNotFoundException("Unknown observability issue id: " + issueId);
+                }
+
+                items.Add((
+                    detail.Issue,
+                    detail.Triage,
+                    GetDiagnosticBundleLocked(detail.Issue.Id)));
             }
 
-            AgentDiagnosticBundle bundle = GetDiagnosticBundleLocked(detail.Issue.Id);
-            return AgentObservabilityIssueTriageBuilder.FormatChatPacket(
-                detail.Triage,
-                detail.Issue,
-                bundle);
+            return AgentObservabilityIssueTriageBuilder.FormatChatPacket(items);
         }
     }
 
@@ -1648,8 +1677,8 @@ public sealed class AgentObservabilityUi : IDisposable
             .OrderByDescending(static group => AgentObservabilityTime.SortValue(group[0].Timestamp))
             .ThenBy(static group => group[0].Id, StringComparer.Ordinal)
             .ToArray();
-        int recoveredCount = candidates.Count(static issue => issue.Recovered);
-        int unresolvedCount = candidates.Length - recoveredCount;
+        int recoveredCount = groups.Count(group => group[0].Recovered);
+        int unresolvedCount = groups.Length - recoveredCount;
         bool hasMore = groups.Length > visibleIssueLimit;
         AgentIssueRowBuilder rowBuilder = new(agents);
         AgentObservabilityIssueRow[] rows = groups
@@ -1730,8 +1759,8 @@ public sealed class AgentObservabilityUi : IDisposable
                     issue.ValidationClassification is "REQUIRED";
                 return new AgentObservabilityRecommendationRow(
                     issue,
-                    agent?.ModName ?? issue.ModId,
-                    issue.ComponentOwner ?? issue.ProbableOwner,
+                    issue.AffectedProject ?? agent?.ModName ?? issue.ModId,
+                    issue.ComponentOwner ?? issue.CausalComponent ?? issue.ProbableOwner,
                     issue.Recommendation ?? issue.Summary,
                     issue.Recovered ? "resolved" : "new",
                     affected)
@@ -2494,7 +2523,7 @@ public sealed class AgentObservabilityUi : IDisposable
         AgentSnapshot? agent = FindAgentLocked(issue.AgentId, issue.RunId);
         return new AgentObservabilityIssueOccurrence(
             issue,
-            agent?.ModName ?? issue.ModId,
+            issue.AffectedProject ?? agent?.ModName ?? issue.ModId,
             agent?.Status);
     }
 
@@ -2507,18 +2536,22 @@ public sealed class AgentObservabilityUi : IDisposable
 
     private string? TrustworthyAgentIdentityLocked(AgentIssue issue)
     {
-        if (!string.IsNullOrWhiteSpace(issue.LogicalAgentId))
-        {
-            return issue.LogicalAgentId.Trim();
-        }
-
-        return agents.TryGetValue(
-                new AgentObservabilityAgentIdentity(issue.RunId, issue.AgentId),
-                out AgentSnapshot? agent) &&
-            !string.IsNullOrWhiteSpace(agent.LogicalAgentId)
-                ? agent.LogicalAgentId.Trim()
+        string? value = !string.IsNullOrWhiteSpace(issue.LogicalAgentId)
+            ? issue.LogicalAgentId.Trim()
+            : agents.TryGetValue(
+                    new AgentObservabilityAgentIdentity(issue.RunId, issue.AgentId),
+                    out AgentSnapshot? agent)
+                ? agent.LogicalAgentId?.Trim()
                 : null;
+        return IsDurableLogicalAgentId(value) ? value : null;
     }
+
+    private static bool IsDurableLogicalAgentId(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !value.Equals("unknown", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("agent-", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("session-", StringComparison.OrdinalIgnoreCase) &&
+        !value.StartsWith("legacy:", StringComparison.OrdinalIgnoreCase);
 
     private static long? MaxTimestamp(params long?[] timestamps)
     {

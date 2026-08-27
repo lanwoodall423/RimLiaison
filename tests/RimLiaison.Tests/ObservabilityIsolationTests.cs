@@ -647,6 +647,51 @@ internal static class ObservabilityIsolationTests
                 item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
     }
 
+    public static void ConcurrentProjectSubjectsRetainToolOwnership()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "concurrent-project-subjects",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession frontier = run.CreateAgent(
+            "com.frontier",
+            "Frontier",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("com.frontier", "Frontier"));
+        using AgentObservabilitySession wildlife = run.CreateAgent(
+            "com.wildlife",
+            "Wildlife",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("com.wildlife", "Wildlife"));
+        frontier.Start();
+        wildlife.Start();
+
+        Task.WhenAll(
+            Task.Run(() => RecordToolFailure(frontier, "RimTest")),
+            Task.Run(() => RecordToolFailure(wildlife, "DevBridge2")))
+            .GetAwaiter()
+            .GetResult();
+
+        AgentEvent[] events = store.GetEvents(runId: run.RunId).ToArray();
+        Assert(events.Where(value => value.AgentId == frontier.AgentId).All(
+                value => value.CanonicalEntityId == "mod:com.frontier"),
+            "Frontier tool events must retain Frontier");
+        Assert(events.Where(value => value.AgentId == wildlife.AgentId).All(
+                value => value.CanonicalEntityId == "mod:com.wildlife"),
+            "Wildlife tool events must retain Wildlife");
+        Assert(store.GetIssues(runId: run.RunId).All(issue =>
+                issue.CanonicalEntityId is "mod:com.frontier" or "mod:com.wildlife"),
+            "shared tooling issues must remain subject-scoped");
+        Assert(store.GetIssues(agentId: frontier.AgentId).All(
+                issue => issue.ComponentOwner == "RimTest"));
+        Assert(store.GetIssues(agentId: wildlife.AgentId).All(
+                issue => issue.ComponentOwner == "DevBridge2"));
+        Assert(!events.Any(value => value.CanonicalEntityId == "tool:rimliaison"),
+            "shared RimLiaison orchestration must not become the active subject");
+
+        frontier.Complete();
+        wildlife.Complete();
+    }
+
     public static void ConcurrentCanonicalRegistrationDoesNotDuplicate()
     {
         using var store = new AgentObservabilityStore();
@@ -759,6 +804,66 @@ internal static class ObservabilityIsolationTests
                 item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
     }
 
+    public static void IntegrityValidatorDetectsToolSubjectInversion()
+    {
+        string directory = CreateTemporaryDirectory("rimliaison-observability-integrity-inversion-");
+        try
+        {
+            AgentSnapshot toolAgent = new()
+            {
+                AgentId = "inversion-agent",
+                RunId = "inversion-run",
+                SessionId = "inversion-session",
+                ModId = "RimLiaison",
+                ModName = "RimLiaison",
+                EntityType = ObservabilityEntityTypes.Tool,
+                CanonicalEntityId = "tool:rimliaison",
+                DisplayName = "RimLiaison",
+                StartTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+            AgentEvent inversion = new()
+            {
+                Id = "inversion-event",
+                AgentId = toolAgent.AgentId,
+                RunId = toolAgent.RunId,
+                SessionId = toolAgent.SessionId,
+                ModId = toolAgent.ModId,
+                EntityType = toolAgent.EntityType,
+                CanonicalEntityId = toolAgent.CanonicalEntityId,
+                DisplayName = toolAgent.DisplayName,
+                Type = AgentEventTypes.FileInspected,
+                Summary = "Tool activity with a project target.",
+                Timestamp = toolAgent.StartTime,
+                Sequence = 1,
+                Stage = DevelopmentStage.Analysis,
+                Data = JsonSerializer.SerializeToElement(
+                    new { project = "Frontier", toolName = "RimLiaison" })
+            };
+            File.WriteAllText(
+                Path.Combine(directory, "agents.jsonl"),
+                JsonSerializer.Serialize(
+                    new { kind = "agent", value = toolAgent },
+                    AgentObservabilityJson.Options) + Environment.NewLine);
+            File.WriteAllText(
+                Path.Combine(directory, "events.jsonl"),
+                JsonSerializer.Serialize(
+                    new { kind = "event", value = inversion },
+                    AgentObservabilityJson.Options) + Environment.NewLine);
+
+            using var store = new AgentObservabilityStore(directory);
+            AgentObservabilityIntegrityReport report =
+                AgentObservabilityIntegrityValidator.Validate(store);
+            Assert(report.Findings.Any(finding =>
+                    finding.Code == "subject.tool-inversion.suspected" &&
+                    finding.EventId == inversion.Id),
+                "tool subjects with project targets must be diagnosable");
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(directory);
+        }
+    }
+
     private static void WriteGitOrigin(string root, string remote)
     {
         string git = Path.Combine(root, ".git");
@@ -766,6 +871,23 @@ internal static class ObservabilityIsolationTests
         File.WriteAllText(
             Path.Combine(git, "config"),
             "[remote \"origin\"]\n\turl = " + remote + "\n");
+    }
+
+    private static void RecordToolFailure(
+        AgentObservabilitySession agent,
+        string componentOwner)
+    {
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ToolFailed,
+            componentOwner + " failed.",
+            new
+            {
+                operationKey = "tool:" + componentOwner,
+                toolName = componentOwner,
+                componentOwner,
+                errorCode = "TOOL_FAILURE"
+            });
     }
 
     private static void EmitEvents(AgentObservabilitySession agent, string suffix)

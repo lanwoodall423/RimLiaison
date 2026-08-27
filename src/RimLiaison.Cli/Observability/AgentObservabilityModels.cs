@@ -202,6 +202,8 @@ public static class ObservabilityEntityTypes
 /// Canonical entity identity shared by agent snapshots, events, issues, and
 /// navigation. Runtime/session/process/run identifiers remain separate
 /// correlation namespaces and must never become entity keys.
+/// The workflow owns the subject identity; tool/component ownership is
+/// attribution metadata and must not replace that subject.
 public sealed record ObservabilityEntityIdentity(
     string EntityType,
     string CanonicalEntityId,
@@ -482,6 +484,30 @@ public sealed record AgentIssue
     [JsonPropertyName("modId")]
     public required string ModId { get; init; }
 
+    [JsonPropertyName("reportingTool")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportingTool { get; init; }
+
+    [JsonPropertyName("reportingModId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportingModId { get; init; }
+
+    [JsonPropertyName("causalComponent")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalComponent { get; init; }
+
+    [JsonPropertyName("affectedProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AffectedProject { get; init; }
+
+    [JsonPropertyName("affectedValidations")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AffectedValidations { get; init; }
+
+    [JsonPropertyName("causalIssueKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalIssueKey { get; init; }
+
     [JsonPropertyName("entityType")]
     public string EntityType { get; init; } = ObservabilityEntityTypes.Unknown;
 
@@ -733,7 +759,18 @@ public sealed record AgentDiagnosticBuildEvidence(
     bool? LoadedArtifactFreshnessProven,
     string? FreshnessState,
     string? ErrorCode,
-    string? FailureMessage);
+    string? FailureMessage,
+    string? CausalDiagnostic = null,
+    bool CausalDiagnosticTruncated = false,
+    string? DiagnosticSignature = null,
+    string? Orchestrator = null,
+    string? FailureSurface = null,
+    string? CausalOwner = null,
+    string? OwnershipConfidence = null,
+    string? OwnershipBasis = null,
+    string? RawStdoutEvidenceId = null,
+    string? RawStderrEvidenceId = null,
+    JsonElement? Discrimination = null);
 
 public sealed record AgentDiagnosticToolOperationEvidence(
     string EventId,

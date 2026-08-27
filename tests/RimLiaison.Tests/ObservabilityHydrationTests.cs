@@ -141,6 +141,73 @@ internal static class ObservabilityHydrationTests
             DeleteDirectory(directory);
         }
     }
+    public static void LegacyToolTargetWithStructuredProjectEvidenceIsReassociated()
+    {
+        string directory = CreateDirectory();
+        try
+        {
+            AgentSnapshot knownMod = Agent("known-frontier-run", "known-frontier-agent") with
+            {
+                ModId = "Frontier",
+                ModName = "Frontier",
+                EntityType = ObservabilityEntityTypes.Mod,
+                CanonicalEntityId = "mod:frontier",
+                DisplayName = "Frontier"
+            };
+            AgentSnapshot legacyTool = Agent("legacy-frontier-run", "legacy-frontier-agent") with
+            {
+                ModId = "RimLiaison",
+                ModName = "RimLiaison",
+                EntityType = ObservabilityEntityTypes.Tool,
+                CanonicalEntityId = "tool:rimliaison",
+                DisplayName = "RimLiaison"
+            };
+            AgentEvent legacyEvent = Event(legacyTool, 1) with
+            {
+                ModId = "RimLiaison",
+                EntityType = ObservabilityEntityTypes.Tool,
+                CanonicalEntityId = "tool:rimliaison",
+                DisplayName = "RimLiaison",
+                Data = JsonSerializer.SerializeToElement(
+                    new { project = "Frontier", repository = "Frontier" })
+            };
+            WriteRecords(directory, "agents", "agent", [knownMod, legacyTool]);
+            WriteRecords(directory, "events", "event", [legacyEvent]);
+
+            string firstAgents;
+            string firstEvents;
+            using (var store = new AgentObservabilityStore(directory))
+            {
+                AgentSnapshot migratedAgent = store.GetAgents()
+                    .Single(value => value.RunId == legacyTool.RunId);
+                AgentEvent migratedEvent = store.GetEvents().Single();
+                AssertEqual("mod:frontier", migratedAgent.CanonicalEntityId);
+                AssertEqual("mod:frontier", migratedEvent.CanonicalEntityId);
+                firstAgents = File.ReadAllText(Path.Combine(directory, "agents.jsonl"));
+                firstEvents = File.ReadAllText(Path.Combine(directory, "events.jsonl"));
+            }
+
+            using (var reopened = new AgentObservabilityStore(directory))
+            {
+                AssertEqual("mod:frontier", reopened.GetAgents()
+                    .Single(value => value.RunId == legacyTool.RunId)
+                    .CanonicalEntityId);
+                AssertEqual("mod:frontier", reopened.GetEvents().Single().CanonicalEntityId);
+            }
+
+            AssertEqual(
+                firstAgents,
+                File.ReadAllText(Path.Combine(directory, "agents.jsonl")));
+            AssertEqual(
+                firstEvents,
+                File.ReadAllText(Path.Combine(directory, "events.jsonl")));
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
 
     public static void TemporaryPersistenceContentionIsBounded()
     {

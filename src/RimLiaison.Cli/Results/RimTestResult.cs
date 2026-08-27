@@ -47,6 +47,21 @@ public sealed class RimTestDiagnosticSummary
         };
 }
 
+/// Canonical per-test states. A test is "executed" only when its body reached
+/// the validation boundary and produced pass/fail; infrastructure and blocked
+/// states are outcomes of the surrounding chain, not test failures.
+public static class RimTestValidationStates
+{
+    public const string Pass = "pass";
+    public const string Fail = "fail";
+    public const string Blocked = "blocked";
+    public const string Skipped = "skipped";
+    public const string NotRun = "not_run";
+    public const string Infrastructure = "infrastructure";
+    public const string Cancelled = "cancelled";
+    public const string NotAvailable = "not_available";
+}
+
 public sealed class RimTestResult
 {
     [JsonPropertyName("schemaVersion")]
@@ -66,6 +81,18 @@ public sealed class RimTestResult
     [JsonPropertyName("blocking")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Blocking { get; init; }
+    [JsonPropertyName("blockedBy")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BlockedBy { get; init; }
+
+    [JsonPropertyName("causalFailureId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalFailureId { get; init; }
+
+    [JsonPropertyName("prerequisite")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Prerequisite { get; init; }
+
 
     [JsonPropertyName("test")]
     public required string Test { get; init; }
@@ -100,6 +127,9 @@ public sealed class RimTestResult
     [JsonPropertyName("errorCode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ErrorCode { get; init; }
+    [JsonPropertyName("componentOwner")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ComponentOwner { get; init; }
 
     [JsonPropertyName("diagnosticStatus")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -160,6 +190,9 @@ public static class RimTestResultFactory
             FailureFingerprint = includeFailureDetails ? run.FailureFingerprint : null,
             EvidenceId = includeFailureDetails ? run.EvidenceId ?? run.Evidence : null,
             ErrorCode = includeFailureDetails ? run.Status.ErrorCode : null,
+            ComponentOwner = run.Status.Response is not null
+                ? "DevBridge2"
+                : null,
             NextAction = NextActionFor(run.Status.Outcome)
         };
     }
@@ -277,7 +310,7 @@ public static class RimTestResultFactory
     {
         return new RimTestResult
         {
-            Status = "cancelled",
+            Status = RimTestValidationStates.Cancelled,
             Test = testId,
             WorkflowId = workflowId,
             DurationMs = BoundDuration(durationMs),
@@ -285,18 +318,66 @@ public static class RimTestResultFactory
         };
     }
 
-    public static RimTestResult ArtifactFreshnessFailure(
+    public static RimTestResult PrerequisiteBlocked(
         string testId,
         string errorCode,
-        string? workflowId = null) =>
+        string? workflowId = null,
+        string prerequisite = "validation prerequisite",
+        string? causalFailureId = null,
+        string? componentOwner = "DevBridge2") =>
         new()
         {
-            Status = "infrastructure",
+            Status = RimTestValidationStates.Blocked,
+            ValidationClassification = "INFRASTRUCTURE",
+            ValidationOutcome = "PREREQUISITE_BLOCKED",
+            Blocking = true,
+            BlockedBy = errorCode,
+            CausalFailureId = causalFailureId,
+            Prerequisite = prerequisite,
             Test = testId,
             WorkflowId = workflowId,
             ErrorCode = errorCode,
-            NextAction = "inspect-artifact-freshness"
+            ComponentOwner = componentOwner,
+            NextAction = "inspect-validation-prerequisite"
         };
+
+    public static RimTestResult ArtifactFreshnessFailure(
+        string testId,
+        string errorCode,
+        string? workflowId = null)
+    {
+        if (!string.Equals(
+                errorCode,
+                "RIMTEST_WORKTREE_CHANGED_DURING_TRANSACTION",
+                StringComparison.Ordinal))
+        {
+            return PrerequisiteBlocked(
+                testId,
+                errorCode,
+                workflowId,
+                "artifact freshness transaction",
+                $"shared-prerequisite:{errorCode}",
+                errorCode.StartsWith("RIMTEST_", StringComparison.Ordinal)
+                    ? "RimLiaison"
+                    : "DevBridge2");
+        }
+
+        return new RimTestResult
+        {
+            Status = RimTestValidationStates.Infrastructure,
+            ValidationClassification = "INFRASTRUCTURE",
+            ValidationOutcome = "PREREQUISITE_BLOCKED",
+            Blocking = true,
+            BlockedBy = errorCode,
+            CausalFailureId = $"shared-prerequisite:{errorCode}",
+            Prerequisite = "artifact freshness transaction",
+            Test = testId,
+            WorkflowId = workflowId,
+            ErrorCode = errorCode,
+            ComponentOwner = "RimLiaison",
+            NextAction = "inspect-validation-prerequisite"
+        };
+    }
 
     public static RimTestResult AttachDiagnosis(
         RimTestResult result,

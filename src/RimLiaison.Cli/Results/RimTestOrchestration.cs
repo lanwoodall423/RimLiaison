@@ -47,6 +47,11 @@ public sealed class RimTestOrchestrationSummary
     public RimTestCleanupSummary? Cleanup { get; init; }
 }
 
+public sealed record RimTestCausalAttribution(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("component")] string Component,
+    [property: JsonPropertyName("entity")] string Entity);
+
 public sealed class RimTestOrchestrationFailure
 {
     [JsonPropertyName("owner")]
@@ -57,6 +62,42 @@ public sealed class RimTestOrchestrationFailure
 
     [JsonPropertyName("errorCode")]
     public required string ErrorCode { get; init; }
+
+    [JsonPropertyName("summary")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Summary { get; init; }
+
+    [JsonPropertyName("orchestrator")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Orchestrator { get; init; }
+
+    [JsonPropertyName("failureSurface")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FailureSurface { get; init; }
+
+    [JsonPropertyName("underlyingErrorCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UnderlyingErrorCode { get; init; }
+
+    [JsonPropertyName("affectedProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AffectedProject { get; init; }
+
+    [JsonPropertyName("affectedModIds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? AffectedModIds { get; init; }
+
+    [JsonPropertyName("reportingTool")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportingTool { get; init; }
+
+    [JsonPropertyName("causalComponent")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalComponent { get; init; }
+
+    [JsonPropertyName("causalChain")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RimTestCausalAttribution>? CausalChain { get; init; }
 
     [JsonPropertyName("error")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -138,9 +179,12 @@ internal static class RimTestOrchestrationProjector
         DevBridgeAdapterStatus? freshnessStatus,
         string? workflowId)
     {
-        bool hasTestFailure = execution.Tests.Any(static test => test.Status == "fail");
+        bool hasTestFailure = execution.Tests.Any(static test =>
+            test.Status == RimTestValidationStates.Fail);
+        bool hasBlockedTests = execution.Tests.Any(static test =>
+            test.Status == RimTestValidationStates.Blocked);
         bool hasInfrastructureFailure = execution.Tests.Any(static test =>
-            test.Status is "infrastructure" or "invalid");
+            test.Status is RimTestValidationStates.Infrastructure or "invalid");
         bool hasCancelled = execution.Cancelled || execution.Tests.Any(static test =>
             test.Status == "cancelled") ||
             string.Equals(selectionStatus, "cancelled", StringComparison.Ordinal);
@@ -188,7 +232,7 @@ internal static class RimTestOrchestrationProjector
             ? "NOT_RUN"
             : hasTestFailure
                 ? "FAIL"
-                : hasInfrastructureFailure || hasCancelled
+                : hasInfrastructureFailure || hasBlockedTests || hasCancelled
                     ? "NOT_RUN"
                     : "PASS";
         string sourceBuild = !freshnessRequested
@@ -200,11 +244,13 @@ internal static class RimTestOrchestrationProjector
                     : "NOT_RUN";
         string deployment = !freshnessRequested
             ? "NOT_EVALUATED"
-            : freshness?.EvaluationStatus ?? "NOT_EVALUATED";
+            : sourceBuildFailure
+                ? "BLOCKED"
+                : freshness?.EvaluationStatus ?? "NOT_EVALUATED";
         string runtime = hasTestFailure
             ? "FAIL"
             : freshnessFailed || freshnessStale || hasSelectionFailure ||
-              hasInfrastructureFailure || hasCancelled
+              hasInfrastructureFailure || hasBlockedTests || hasCancelled
                 ? "BLOCKED"
                 : execution.Tests.Count == 0
                     ? "NOT_RUN"
@@ -229,9 +275,9 @@ internal static class RimTestOrchestrationProjector
                 : sourceBuildFailure
                     ? "SOURCE_BUILD_FAILURE"
                     : hasSelectionFailure || freshnessFailed || freshnessStale ||
-                      hasInfrastructureFailure || cleanupFailed
-                    ? "INFRASTRUCTURE_FAILURE"
-                    : "PASS";
+                      hasInfrastructureFailure || hasBlockedTests || cleanupFailed
+                        ? "INFRASTRUCTURE_FAILURE"
+                        : "PASS";
 
         RimTestOrchestrationFailure? failure = overall == "PASS"
             ? null
@@ -274,7 +320,7 @@ internal static class RimTestOrchestrationProjector
         bool sourceBuildFailure,
         bool cleanupFailed)
     {
-        string? freshnessErrorCode = freshnessStatus?.ErrorCode ?? freshness?.ErrorCode;
+        string? freshnessErrorCode = freshness?.ErrorCode ?? freshnessStatus?.ErrorCode;
         string? testErrorCode = execution.Tests
             .Select(static test => test.ErrorCode)
             .FirstOrDefault(static code => !string.IsNullOrWhiteSpace(code));
@@ -296,7 +342,9 @@ internal static class RimTestOrchestrationProjector
             ? "RIMTEST_TEST_FAILURE"
             : "RIMTEST_ORCHESTRATION_FAILED";
 
-        string owner = OwnerFor(errorCode);
+        RimTestResult? child = execution.Tests.FirstOrDefault(test =>
+            string.Equals(test.ErrorCode, errorCode, StringComparison.Ordinal));
+        string owner = freshness?.LikelyOwner ?? child?.ComponentOwner ?? OwnerFor(errorCode);
         string stage = StageFor(errorCode, hasSelectionFailure, freshnessStatus is not null);
         bool recoveryAttempted =
             freshnessStatus?.RecoveryAttempts > 0 ||
@@ -306,14 +354,32 @@ internal static class RimTestOrchestrationProjector
             execution.PrerequisiteRecovery,
             recoveryAttempted);
         bool retrySafe = RetrySafeFor(errorCode, recoveryResult);
-
-        RimTestResult? child = execution.Tests.FirstOrDefault(test =>
-            string.Equals(test.ErrorCode, errorCode, StringComparison.Ordinal));
+        string? project = freshness?.Project;
+        string summary = FailureSummary(
+            errorCode,
+            project,
+            freshness?.FailureMessage,
+            sourceBuildFailure);
+        string orchestrator = freshness?.Orchestrator ??
+            (sourceBuildFailure ? "DevBridge2" : "RimTest");
+        string failureSurface = freshness?.FailureSurface ?? stage;
+        string[] affectedModIds = string.IsNullOrWhiteSpace(project)
+            ? []
+            : [project];
         return new RimTestOrchestrationFailure
         {
             Owner = owner,
             Stage = stage,
             ErrorCode = errorCode,
+            Summary = summary,
+            Orchestrator = orchestrator,
+            FailureSurface = failureSurface,
+            UnderlyingErrorCode = freshness?.UnderlyingErrorCode,
+            AffectedProject = project,
+            AffectedModIds = affectedModIds.Length == 0 ? null : affectedModIds,
+            ReportingTool = "RimLiaison",
+            CausalComponent = owner,
+            CausalChain = CausalChainFor(execution.SuiteId, owner, failureSurface, project),
             RecoveryAttempted = recoveryAttempted,
             RecoveryResult = recoveryResult,
             RetrySafe = retrySafe,
@@ -321,10 +387,7 @@ internal static class RimTestOrchestrationProjector
             NextAction = selectionNextAction ?? child?.NextAction ??
                 freshnessStatus?.RecoveryAction ??
                 (owner == "DevBridge2" ? "DevBridge.cmd doctor --json" : null),
-            Error = freshnessStatus?.Error ??
-                (cleanupFailed
-                    ? "The canonical affected-run cleanup did not produce authoritative restoration evidence."
-                    : null),
+            Error = summary,
             WorkflowId = workflowId ?? freshness?.WorkflowId ?? child?.WorkflowId,
             TransactionId = freshness?.TransactionId,
             LeaseId = freshness?.LeaseId,
@@ -335,6 +398,55 @@ internal static class RimTestOrchestrationProjector
         };
     }
 
+    private static string FailureSummary(
+        string errorCode,
+        string? project,
+        string? failureMessage,
+        bool sourceBuildFailure)
+    {
+        string target = string.IsNullOrWhiteSpace(project) ? "Frontier" : project;
+        if (sourceBuildFailure &&
+            (errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase) ||
+             errorCode.Contains("ENVIRONMENT", StringComparison.OrdinalIgnoreCase) ||
+             errorCode.Contains("PREREQUISITE", StringComparison.OrdinalIgnoreCase) ||
+             errorCode.Contains("MISSING", StringComparison.OrdinalIgnoreCase) ||
+             failureMessage?.Contains("environment", StringComparison.OrdinalIgnoreCase) == true ||
+             failureMessage?.Contains("executable", StringComparison.OrdinalIgnoreCase) == true ||
+             failureMessage?.Contains("unavailable", StringComparison.OrdinalIgnoreCase) == true))
+        {
+            return $"{target} build blocked: required RimWorld build environment unavailable";
+        }
+
+        if (!string.IsNullOrWhiteSpace(failureMessage))
+        {
+            return $"{target} build failed: {failureMessage.Trim()}";
+        }
+
+        return sourceBuildFailure
+            ? $"{target} build failed ({errorCode})"
+            : $"Validation orchestration failed ({errorCode})";
+    }
+
+    private static IReadOnlyList<RimTestCausalAttribution> CausalChainFor(
+        string suiteId,
+        string owner,
+        string failureSurface,
+        string? project) =>
+        project is null
+            ?
+            [
+                new("reporter", "RimLiaison", "command"),
+                new("orchestrator", "RimTest", suiteId),
+                new("causal", owner, failureSurface)
+            ]
+            :
+            [
+                new("reporter", "RimLiaison", "command"),
+                new("orchestrator", "RimTest", suiteId),
+                new("causal", owner, failureSurface),
+                new("affected", project, project)
+            ];
+
     private static bool HasRecoveryState(
         IReadOnlyList<RimTestPrerequisiteRecovery>? recoveries,
         params string[] states) =>
@@ -344,9 +456,12 @@ internal static class RimTestOrchestrationProjector
 
     private static bool IsSourceBuildFailure(string? errorCode) =>
         errorCode is not null &&
-        (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.Ordinal) ||
-         errorCode.StartsWith("BUILD_", StringComparison.Ordinal) ||
-         errorCode.StartsWith("MSBUILD_", StringComparison.Ordinal));
+        (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("DEVBRIDGE_BUILD", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.Contains("COMPIL", StringComparison.OrdinalIgnoreCase));
 
     private static string OwnerFor(string errorCode) =>
         errorCode.StartsWith("RIMCONTEXT_", StringComparison.Ordinal)
@@ -374,9 +489,12 @@ internal static class RimTestOrchestrationProjector
                 : "selection";
         }
 
-        if (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.Ordinal) ||
-            errorCode.StartsWith("BUILD_", StringComparison.Ordinal) ||
-            errorCode.StartsWith("MSBUILD_", StringComparison.Ordinal))
+        if (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.StartsWith("DEVBRIDGE_BUILD", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("COMPIL", StringComparison.OrdinalIgnoreCase))
         {
             return "build";
         }

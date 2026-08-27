@@ -4,6 +4,7 @@ using System.Text.Json;
 using RimLiaison;
 using RimLiaison.Observability;
 using RimLiaison.Desktop;
+using System.Runtime.InteropServices;
 namespace RimLiaison.Tests;
 
 internal static class DesktopObservabilityTests
@@ -1166,6 +1167,7 @@ internal static class DesktopObservabilityTests
                 filePath = "Source/Compiler.cs",
                 errorCode = "CS0246",
                 diagnosticOutput = "error CS0246: missing type",
+                causalDiagnostic = "error CS0246: missing type",
                 exitCode = 1
             });
         ambiguous.Record(
@@ -1247,6 +1249,44 @@ internal static class DesktopObservabilityTests
         Assert(!ordered.Issues[0].Issue.Recovered,
             "unresolved issue must outrank recovered shared-tooling history");
     }
+    public static void GenericWrapperCodesDoNotCreateSharedToolingCounts()
+    {
+        using var store = new AgentObservabilityStore();
+        using var firstRun = new AgentObservabilityRun(
+            "run-generic-wrapper-1",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using var secondRun = new AgentObservabilityRun(
+            "run-generic-wrapper-2",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = firstRun.CreateAgent(
+            "mod.generic.first",
+            "First");
+        using AgentObservabilitySession second = secondRun.CreateAgent(
+            "mod.generic.second",
+            "Second");
+        first.Start();
+        second.Start();
+        first.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "RimLiaison command failed.",
+            new { errorCode = "RIMLIAISON_COMMAND_FAILED", exitCode = 1 });
+        second.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "RimLiaison command failed.",
+            new { errorCode = "RIMLIAISON_COMMAND_FAILED", exitCode = 1 });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityIssuesView issues = ui.ShowIssues().Issues!;
+        Assert(issues.Issues.All(row =>
+            row.SharedAgentCount == 0 &&
+            (row.SharedTooling is null || row.SharedTooling.AffectedAgentCount == 0)),
+            "generic wrapper codes alone must not claim shared tooling impact");
+    }
+
 
     public static void ChatPacketContainsBoundedTriageAndMissingEvidence()
     {
@@ -1302,6 +1342,122 @@ internal static class DesktopObservabilityTests
         Assert(packet.Contains("Missing evidence:", StringComparison.Ordinal));
         Assert(!packet.Contains("Unrelated history must not be copied", StringComparison.Ordinal));
         Assert(packet.Length <= 8_000);
+    }
+
+    public static void ChatGPTActionSupportsCheckedIssuesAndPreservesCausalEvidence()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "ui-chat-selection",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession first = run.CreateAgent(
+            "mod.chat.first",
+            "Chat First",
+            logicalAgentId: "logical-chat-first");
+        using AgentObservabilitySession second = run.CreateAgent(
+            "mod.chat.second",
+            "Chat Second",
+            logicalAgentId: "logical-chat-second");
+        first.Start();
+        second.Start();
+        first.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "DevBridge validation failed.",
+            new
+            {
+                operationKey = "affected:doctor:first",
+                toolName = "DevBridge2",
+                command = "rimliaison doctor --token supersecret --json",
+                errorCode = "RIMLIAISON_COMMAND_FAILED",
+                underlyingErrorCode = "OUTPUT_TOO_LARGE",
+                outerErrorCode = "RIMLIAISON_COMMAND_FAILED",
+                error = "The DevBridge response exceeded the output limit.",
+                exitCode = 2,
+                workingDirectory = "C:/RimDev/Repos/RimTest",
+                processEvidence = new
+                {
+                    resolvedExecutablePath = "C:/RimDev/Tools/rimliaison.cmd",
+                    resolvedToolRoot = "C:/RimDev/Tools"
+                },
+                stdout = "doctor output",
+                stderr = "bounded stderr"
+            });
+        second.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Compiler validation failed.",
+            new
+            {
+                operationKey = "build:second",
+                toolName = "compiler",
+                command = "dotnet build Chat.csproj",
+                errorCode = "CS0246",
+                exitCode = 1,
+                project = "Chat.csproj"
+            });
+
+        AgentIssue firstIssue = store.GetIssues(agentId: first.AgentId).Single();
+        AgentIssue secondIssue = store.GetIssues(agentId: second.AgentId).Single();
+        using var ui = new AgentObservabilityUi(store, runId: run.RunId);
+        IReadOnlyList<string> before = ui.Snapshot.SelectedIssueIds;
+        AgentObservabilityChatPacket packet = ui.CreateChatPacket(
+            [firstIssue.Id, secondIssue.Id]);
+
+        AssertEqual(before, ui.Snapshot.SelectedIssueIds);
+        Assert(packet.Text.Length <= AgentObservabilityIssueTriageBuilder.MaximumChatPacketCharacters);
+        Assert(packet.Text.Contains("Selected issues: 2", StringComparison.Ordinal));
+        Assert(packet.Text.Contains(firstIssue.Id, StringComparison.Ordinal));
+        Assert(packet.Text.Contains(secondIssue.Id, StringComparison.Ordinal));
+        Assert(packet.Text.Contains("Primary/root failure: code=OUTPUT_TOO_LARGE", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("Propagation: outerCode=RIMLIAISON_COMMAND_FAILED", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("Top-level workflow:", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("resolvedExecutablePath", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("exitCode=2", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("Affected occurrences:", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("Distinct durable logical agents:", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("CS0246", StringComparison.Ordinal));
+        Assert(packet.Text.Contains("[REDACTED]", StringComparison.Ordinal));
+        Assert(!packet.Text.Contains("supersecret", StringComparison.Ordinal));
+
+        using var form = new ObservabilityMainForm(store);
+        form.Show();
+        Application.DoEvents();
+        SelectNavigation(form, "issues", "Issues");
+        ListView issueList = GetPrivateField<ListView>(form, "issueList");
+        issueList.Items[0].Selected = true;
+        Application.DoEvents();
+        Button chatButton = Descendants(form)
+            .OfType<Button>()
+            .Single(button => button.Text == "Copy to ChatGPT");
+        Assert(issueList.CheckBoxes, "Issues must expose checkbox selection.");
+        Assert(issueList.MultiSelect, "Issues must support multi-selection.");
+        Assert(chatButton.Enabled, "Copy to ChatGPT must be enabled for a current issue.");
+        using var failingForm = new ObservabilityMainForm(
+            store,
+            clipboardWriter: _ => throw new ExternalException("clipboard unavailable"));
+        failingForm.Show();
+        Application.DoEvents();
+        SelectNavigation(failingForm, "issues", "Issues");
+        ListView failingIssueList = GetPrivateField<ListView>(failingForm, "issueList");
+        failingIssueList.Items[0].Selected = true;
+        Application.DoEvents();
+        AgentObservabilityUi formUi = GetPrivateField<AgentObservabilityUi>(
+            failingForm,
+            "observabilityUi");
+        IReadOnlyList<string> selectionBeforeClipboardFailure = formUi.Snapshot.SelectedIssueIds;
+        Button failingChatButton = Descendants(failingForm)
+            .OfType<Button>()
+            .Single(button => button.Text == "Copy to ChatGPT");
+        failingChatButton.PerformClick();
+        Label streamStatus = GetPrivateField<Label>(failingForm, "streamStatus");
+        Assert(
+            selectionBeforeClipboardFailure.SequenceEqual(formUi.Snapshot.SelectedIssueIds),
+            "clipboard failure must not change issue selection");
+        Assert(
+            streamStatus.Text.Contains("could not be copied", StringComparison.Ordinal),
+            "clipboard failure must be reported without throwing");
     }
 
     public static void IssuesProjectionIsIndexedCachedAndLazy()
@@ -2327,6 +2483,115 @@ internal static class DesktopObservabilityTests
         Assert(!string.IsNullOrWhiteSpace(details.Text), "Frontier detail must render content");
     }
 
+    public static void DesktopContentHostMountsEveryPrimaryView()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "desktop-content-host",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession frontier = run.CreateAgent("Frontier", "Frontier");
+        using AgentObservabilitySession tool = run.CreateAgent(
+            "rimliaison-tool",
+            "RimLiaison",
+            entityIdentity: ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison"));
+        frontier.Start();
+        frontier.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.CommandFailed,
+            "Frontier validation failed.",
+            new { operationKey = "validation:frontier", exitCode = 1 });
+        frontier.RecordToolingRecommendation(
+            "quicktest",
+            "Quicktest readiness is unavailable.",
+            "Expose a bounded readiness probe.",
+            "DevBridge2",
+            "evidence://quicktest",
+            affectedCurrentTask: false,
+            priority: "normal");
+        frontier.Record(
+            DevelopmentStage.Implementation,
+            ContentObservabilityEventTypes.BlueprintCreated,
+            "Content lifecycle created.",
+            new ContentObservabilityEventData(
+                ContentObservabilitySchemas.EventData,
+                "created",
+                ProjectId: "frontier",
+                BlueprintId: "blueprint-frontier",
+                ContentKind: "ThingDef",
+                GameplayRole: "early-game ranged weapon",
+                Reason: "visual-tree regression fixture"));
+        tool.Start();
+        tool.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestStarted,
+            "RimLiaison tooling validation started.");
+
+        using var form = new ObservabilityMainForm(store);
+        Panel contentPanel = GetPrivateField<Panel>(form, "contentPanel");
+        Panel allPanel = GetPrivateField<Panel>(form, "allPanel");
+        Panel issuesPanel = GetPrivateField<Panel>(form, "issuesPanel");
+        Panel contentIntelligencePanel =
+            GetPrivateField<Panel>(form, "contentIntelligencePanel");
+        Panel agentPanel = GetPrivateField<Panel>(form, "agentPanel");
+        ListView allActivity = GetPrivateField<ListView>(form, "allActivity");
+        ListView issueList = GetPrivateField<ListView>(form, "issueList");
+        ListView contentList = GetPrivateField<ListView>(form, "contentList");
+        ListView agentActivity = GetPrivateField<ListView>(form, "agentActivity");
+
+        Assert(ReferenceEquals(contentPanel.Parent, form),
+            "content host must be attached to the form");
+        Assert(form.Controls.Contains(contentPanel),
+            "form controls must contain the content host");
+        AssertEqual(DockStyle.Fill, contentPanel.Dock);
+        Assert(Descendants(contentPanel).Contains(allPanel),
+            "All panel must descend from the mounted content host");
+        Assert(Descendants(contentPanel).Contains(issuesPanel),
+            "Issues panel must descend from the mounted content host");
+        Assert(Descendants(contentPanel).Contains(contentIntelligencePanel),
+            "Content Intelligence panel must descend from the mounted content host");
+        Assert(Descendants(contentPanel).Contains(agentPanel),
+            "agent panel must descend from the mounted content host");
+
+        form.Show();
+        Application.DoEvents();
+
+        SelectNavigation(form, "all", "All");
+        Assert(allPanel.Visible);
+        Assert(allActivity.Items.Count > 0, "All must render activity rows");
+        Assert(HasDisplayRectangle(allActivity), "All activity must have a display rectangle");
+
+        SelectNavigation(form, "issues", "Issues");
+        Assert(issuesPanel.Visible);
+        Assert(issueList.Items.Count > 0, "Issues must render issue rows");
+        Assert(HasDisplayRectangle(issueList), "Issues must have a display rectangle");
+
+        SelectNavigation(form, "recommendations", "Recommendations");
+        Assert(issuesPanel.Visible, "Recommendations must use the Issues host");
+        Assert(issueList.Items.Count > 0, "Recommendations must render recommendation rows");
+        Assert(HasDisplayRectangle(issueList),
+            "Recommendations must have a display rectangle through the Issues host");
+
+        SelectNavigation(form, "content", "Content Intelligence");
+        Assert(contentIntelligencePanel.Visible);
+        Assert(contentList.Items.Count > 0,
+            "Content Intelligence must render lifecycle rows");
+        Assert(HasDisplayRectangle(contentList),
+            "Content Intelligence must have a display rectangle");
+
+        SelectNavigation(form, "agent", "Frontier");
+        Assert(agentPanel.Visible, "Frontier must expose the agent panel");
+        Assert(agentActivity.Items.Count > 0, "Frontier must render activity rows");
+        Assert(HasDisplayRectangle(agentActivity),
+            "Frontier detail must have a display rectangle");
+
+        SelectNavigation(form, "agent", "RimLiaison", ObservabilityEntityTypes.Tool);
+        Assert(agentPanel.Visible, "RimLiaison must expose the agent panel");
+        Assert(agentActivity.Items.Count > 0, "RimLiaison must render activity rows");
+        Assert(HasDisplayRectangle(agentActivity),
+            "RimLiaison detail must have a display rectangle");
+    }
+
     private static IEnumerable<Control> Descendants(Control root)
     {
         foreach (Control child in root.Controls)
@@ -2338,6 +2603,39 @@ internal static class DesktopObservabilityTests
             }
         }
     }
+    private static T GetPrivateField<T>(ObservabilityMainForm form, string name)
+    {
+        return (T)(typeof(ObservabilityMainForm)
+            .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(form)!);
+    }
+
+    private static void SelectNavigation(
+        ObservabilityMainForm form,
+        string kind,
+        string fullLabel,
+        string? entityType = null)
+    {
+        FlowLayoutPanel navigation = form.Controls
+            .OfType<FlowLayoutPanel>()
+            .Single();
+        Button button = navigation.Controls
+            .OfType<Panel>()
+            .SelectMany(static panel => panel.Controls.OfType<Button>())
+            .Single(value => value.Tag is AgentObservabilityUiNavigationItem item &&
+                item.Kind == kind &&
+                item.FullLabel == fullLabel &&
+                (entityType is null || item.EntityType == entityType));
+        button.PerformClick();
+        Application.DoEvents();
+        Assert(button.Tag is AgentObservabilityUiNavigationItem { Selected: true },
+            $"{fullLabel} navigation item must be selected");
+    }
+
+    private static bool HasDisplayRectangle(Control control) =>
+        control.DisplayRectangle.Width > 0 &&
+        control.DisplayRectangle.Height > 0;
+
 
     public static void ToolDetailWithDataUsesCanonicalToolIdentity()
     {

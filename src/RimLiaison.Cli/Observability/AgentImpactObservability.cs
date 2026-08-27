@@ -318,7 +318,16 @@ public static class AgentImpactObservabilityRecorder
                     .Select(failure => failure.EvidenceId ?? failure.DiagnosticId)
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Take(64)
-                    .ToArray()
+                    .ToArray(),
+                selectedTestCount = result.SelectedTestCount,
+                executedTestCount = result.ExecutedTestCount,
+                blockedTestCount = result.BlockedTestCount,
+                failedTestCount = result.FailedTestCount,
+                selectedTests = result.SelectedTests,
+                executedTests = result.ExecutedTests,
+                blockedTestIds = (result.BlockedTests ?? [])
+                    .Select(blocked => blocked.Test)
+                    .ToArray(),
             });
 
     public static AgentEvent? RecordStaleEvidenceRejected(
@@ -490,15 +499,32 @@ public static class AgentImpactObservabilityRecorder
         return AgentObservabilityRuntime.Record(
             DevelopmentStage.Testing,
             AgentEventTypes.FailureDetected,
-            "Structured validation failure packet recorded.",
+            normalized.FailureSummary ??
+                AgentObservabilityData.BoundText(normalized.Error, 512),
             new
             {
                 schemaVersion = AgentImpactObservabilitySchemas.Current,
                 classification = normalized.Classification,
                 error = AgentObservabilityData.BoundText(normalized.Error, 512),
                 failedValidation = normalized.FailedValidation?.Id,
+                failedValidationKind = normalized.FailedValidation?.Kind,
                 changedSourceFiles = normalized.ChangedSourceFiles.Take(32).ToArray(),
+                operationKey = normalized.CausalIssueKey ??
+                    normalized.FailedValidation?.Id,
                 affectedEntities = normalized.AffectedEntities.Take(32).Select(entity => entity.Id).ToArray(),
+                blockedValidations = normalized.BlockedValidations.Take(64).Select(entity => entity.Id).ToArray(),
+                blockedTestCount = normalized.BlockedValidations.Count,
+                affectedProject = normalized.AffectedProject,
+                affectedModIds = normalized.AffectedModIds.Take(32).ToArray(),
+                reportingTool = normalized.ReportingTool ?? "RimLiaison",
+                causalComponent = normalized.CausalComponent,
+                failureSurface = normalized.FailureSurface,
+                orchestrator = normalized.Orchestrator,
+                causalChain = normalized.CausalChain,
+                underlyingErrorCode = normalized.UnderlyingErrorCode,
+                causalIssueKey = normalized.CausalIssueKey,
+                failureSummary = normalized.FailureSummary ??
+                    AgentObservabilityData.BoundText(normalized.Error, 512),
                 evidenceReferences = normalized.PrecedingEvidence
                     .Concat(normalized.References)
                     .Take(16)

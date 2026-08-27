@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace RimLiaison.DevBridge;
 
 public static class DevBridgeModDevelopmentSchemas
@@ -44,7 +46,20 @@ public sealed record DevBridgeBuildDiagnostics(
     string? TransactionId = null,
     string? WorkflowId = null,
     string? ErrorCode = null,
-    bool? OutputTruncated = null);
+    bool? OutputTruncated = null,
+    string? CausalDiagnostic = null,
+    bool? CausalDiagnosticTruncated = null,
+    string? DiagnosticSignature = null,
+    string? RawStdoutPath = null,
+    string? RawStderrPath = null,
+    string? RawNativeStdoutPath = null,
+    string? RawNativeStderrPath = null,
+    string? Orchestrator = null,
+    string? FailureSurface = null,
+    string? LikelyOwner = null,
+    string? OwnershipConfidence = null,
+    string? OwnershipBasis = null,
+    JsonElement? Discrimination = null);
 
 public sealed record DevBridgeBuildOutputEvidence(
     string RepositoryPath,

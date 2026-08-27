@@ -587,12 +587,12 @@ internal static class CliParser
                 "Capability discovery filters are only valid for capabilities.");
         }
 
-        if (command != CliCommand.UiScreenshot &&
+        if (command is not (CliCommand.Capabilities or CliCommand.UiTargets or CliCommand.UiScreenshot) &&
             (uiViewport is not null || uiViewportWidth.HasValue || uiViewportHeight.HasValue ||
              uiLeaseId is not null || uiInputCheck))
         {
             throw new CliParseException(
-                "Viewport and lease options are only valid for ui screenshot.");
+                "Viewport and lease options are only valid for capabilities or UI commands.");
         }
 
         if (command == CliCommand.Capabilities &&
@@ -615,7 +615,7 @@ internal static class CliParser
 
         if (command == CliCommand.UiTargets &&
             (uiTarget is not null || uiCellRect is not null || uiViewport is not null ||
-             uiViewportWidth.HasValue || uiViewportHeight.HasValue || uiLeaseId is not null ||
+             uiViewportWidth.HasValue || uiViewportHeight.HasValue ||
              uiInputCheck))
         {
             throw new CliParseException(
@@ -623,10 +623,10 @@ internal static class CliParser
         }
 
         if (command == CliCommand.UiScreenshot && uiViewport is null &&
-            (uiViewportWidth.HasValue || uiViewportHeight.HasValue || uiLeaseId is not null))
+            (uiViewportWidth.HasValue || uiViewportHeight.HasValue))
         {
             throw new CliParseException(
-                "--viewport-width, --viewport-height, and --lease require --viewport.");
+                "--viewport-width and --viewport-height require --viewport.");
         }
 
         if (command == CliCommand.UiScreenshot && uiViewport is not null)

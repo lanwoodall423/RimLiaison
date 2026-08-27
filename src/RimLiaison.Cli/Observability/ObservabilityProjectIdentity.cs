@@ -19,15 +19,15 @@ public static class ObservabilityProjectIdentityResolver
         string root = Path.GetFullPath(repositoryRoot);
         string? packageId = TryReadAboutValue(root, "packageId");
         string? modName = TryReadAboutValue(root, "name");
+        if (!string.IsNullOrWhiteSpace(packageId))
+        {
+            return new(packageId, modName ?? packageId, "mod-package");
+        }
+
         if (!string.IsNullOrWhiteSpace(explicitProject))
         {
             string project = explicitProject.Trim();
             return new(project, modName ?? project, "stack-manifest");
-        }
-
-        if (!string.IsNullOrWhiteSpace(packageId))
-        {
-            return new(packageId, modName ?? packageId, "mod-package");
         }
 
         string? remote = TryReadOriginIdentity(root);
@@ -52,6 +52,28 @@ public static class ObservabilityProjectIdentityResolver
         }
 
         return new(fallback, modName ?? fallback, "directory");
+    }
+    public static bool IsRimLiaisonRepository(string repositoryRoot)
+    {
+        string root;
+        try
+        {
+            root = Path.GetFullPath(repositoryRoot);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            NotSupportedException)
+        {
+            return false;
+        }
+
+        string? remote = TryReadOriginIdentity(root);
+        if (remote?.EndsWith("/rimliaison", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return true;
+        }
+
+        return File.Exists(Path.Combine(root, "RimLiaison.sln")) &&
+            File.Exists(Path.Combine(root, "src", "RimLiaison.Cli", "RimLiaison.Cli.csproj"));
     }
 
     public static bool TryNormalizeKnownTemporaryIdentity(

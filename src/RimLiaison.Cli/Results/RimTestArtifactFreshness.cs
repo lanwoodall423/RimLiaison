@@ -96,6 +96,43 @@ public sealed record RimTestArtifactFreshness
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ErrorCode { get; init; }
 
+    [JsonPropertyName("underlyingErrorCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UnderlyingErrorCode { get; init; }
+
+    [JsonPropertyName("project")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Project { get; init; }
+
+    [JsonPropertyName("orchestrator")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Orchestrator { get; init; }
+
+    [JsonPropertyName("failureSurface")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FailureSurface { get; init; }
+
+    [JsonPropertyName("likelyOwner")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LikelyOwner { get; init; }
+
+    [JsonPropertyName("ownershipConfidence")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OwnershipConfidence { get; init; }
+
+    [JsonPropertyName("ownershipBasis")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OwnershipBasis { get; init; }
+
+    [JsonPropertyName("causalDiagnostic")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalDiagnostic { get; init; }
+
+    [JsonPropertyName("failureMessage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FailureMessage { get; init; }
+
+
     public static RimTestArtifactFreshness From(
         DevBridgeModDevelopmentResult result,
         string? fallbackWorkflowId = null) => new()
@@ -139,7 +176,15 @@ public sealed record RimTestArtifactFreshness
                     ProcessGeneration = result.Freshness.Generation ?? result.Generation,
                     ExecutionId = result.WorkflowId
                 },
-            ErrorCode = result.Freshness?.ErrorCode ?? result.Status.ErrorCode
+            Project = result.Project,
+            Orchestrator = result.Build?.Orchestrator,
+            FailureSurface = result.Build?.FailureSurface,
+            LikelyOwner = result.Build?.LikelyOwner,
+            OwnershipConfidence = result.Build?.OwnershipConfidence,
+            OwnershipBasis = result.Build?.OwnershipBasis,
+            CausalDiagnostic = result.Build?.CausalDiagnostic,
+            UnderlyingErrorCode = result.Build?.ErrorCode,
+            ErrorCode = result.Freshness?.ErrorCode ?? result.Build?.ErrorCode ?? result.Status.ErrorCode
         };
     public ExecutionIdentity ToExecutionIdentity() => ExecutionIdentity ?? new ExecutionIdentity
     {

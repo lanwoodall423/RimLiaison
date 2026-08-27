@@ -17,11 +17,14 @@ internal sealed class AgentIssueDetector
         IEnumerable<AgentIssue> currentIssues)
     {
         AgentIssue[] allKnown = currentIssues.ToArray();
+        if (AgentObservabilityData.GetBoolean(eventRecord.Data, "lifecycleOnly"))
+        {
+            return [];
+        }
         var known = allKnown
             .Where(issue =>
                 string.Equals(issue.RunId, eventRecord.RunId, StringComparison.Ordinal) &&
-                string.Equals(issue.AgentId, eventRecord.AgentId, StringComparison.Ordinal) &&
-                string.Equals(issue.ModId, eventRecord.ModId, StringComparison.Ordinal))
+                string.Equals(issue.AgentId, eventRecord.AgentId, StringComparison.Ordinal))
             .ToDictionary(
             static issue => issue.Id,
             StringComparer.Ordinal);
@@ -29,6 +32,7 @@ internal sealed class AgentIssueDetector
         string? capabilityFingerprint =
             AgentObservabilityData.GetString(eventRecord.Data, "fingerprint");
 
+        string? causalIssueKey = CausalIssueKey(eventRecord);
         AgentIssue? Find(
             AgentIssueCategory category,
             string? operationKey = null,
@@ -45,11 +49,23 @@ internal sealed class AgentIssueDetector
                 : updates.Values.Concat(known.Values);
             return candidates
                     .Where(issue =>
-                        issue.Category == category &&
+                        (issue.Category == category ||
+                            !string.IsNullOrWhiteSpace(causalIssueKey) &&
+                            string.Equals(
+                                issue.CausalIssueKey,
+                                causalIssueKey,
+                                StringComparison.Ordinal) &&
+                            issue.Category is AgentIssueCategory.Error or
+                                AgentIssueCategory.ToolingFailure) &&
                         (includeRecovered || !issue.Recovered) &&
                         (category == AgentIssueCategory.CapabilityGap ||
                             operationKey is null ||
-                            string.Equals(issue.OperationKey, operationKey, StringComparison.Ordinal)))
+                            string.Equals(issue.OperationKey, operationKey, StringComparison.Ordinal) ||
+                            !string.IsNullOrWhiteSpace(causalIssueKey) &&
+                                string.Equals(
+                                    issue.CausalIssueKey,
+                                    causalIssueKey,
+                                    StringComparison.Ordinal)))
                     .OrderByDescending(static issue => issue.Timestamp)
                     .ThenByDescending(static issue => issue.Occurrences)
                     .FirstOrDefault();
@@ -99,8 +115,9 @@ internal sealed class AgentIssueDetector
                 [eventRecord.Id],
                 occurrenceIncrement: errorIssue is null ? 0 : 1);
 
-            bool repeatedFailure = primary.EventIds.Count > 1 ||
-                eventRecord.Type is AgentEventTypes.RetryCompleted or AgentEventTypes.RetryStarted;
+            bool repeatedFailure =
+                eventRecord.Type is AgentEventTypes.RetryCompleted or
+                    AgentEventTypes.RetryStarted;
             if (repeatedFailure)
             {
                 AgentIssue? retryIssue = Find(AgentIssueCategory.Retry, operationKey);
@@ -325,11 +342,46 @@ internal sealed class AgentIssueDetector
             Occurrences = Math.Max(1, issue.Occurrences + occurrenceIncrement),
             AffectedAgentIds = MergeValues(issue.AffectedAgentIds, [eventRecord.AgentId]),
             AffectedRunIds = MergeValues(issue.AffectedRunIds, [eventRecord.RunId]),
-            AffectedModIds = MergeValues(issue.AffectedModIds, [eventRecord.ModId]),
+            AffectedModIds = MergeValues(issue.AffectedModIds, EventAffectedModIds(eventRecord)),
             ProbableOwner = issue.ProbableOwner ??
-                AgentObservabilityData.GetString(eventRecord.Data, "probableOwner")
+                AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
+            CausalComponent = issue.CausalComponent ??
+                AgentObservabilityData.GetString(eventRecord.Data, "causalComponent") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "componentOwner"),
+            CausalIssueKey = issue.CausalIssueKey ?? CausalIssueKey(eventRecord),
+            ReportingTool = issue.ReportingTool ??
+                AgentObservabilityData.GetString(eventRecord.Data, "reportingTool"),
+            AffectedProject = issue.AffectedProject ?? AffectedProject(eventRecord),
+            AffectedValidations = MergeValues(
+                issue.AffectedValidations,
+                AgentObservabilityData.GetStrings(eventRecord.Data, "blockedTestIds"))
         };
     }
+
+    private static IReadOnlyList<string> EventAffectedModIds(AgentEvent eventRecord)
+    {
+        string[] explicitIds = AgentObservabilityData.GetStrings(
+                eventRecord.Data,
+                "affectedModIds")
+            .ToArray();
+        if (explicitIds.Length > 0)
+        {
+            return explicitIds;
+        }
+
+        return AffectedSubject(eventRecord) is string subject
+            ? [subject]
+            : [];
+    }
+
+    private static string? AffectedProject(AgentEvent eventRecord) =>
+        AgentObservabilityData.GetString(eventRecord.Data, "affectedProject") ??
+        AgentObservabilityData.GetString(eventRecord.Data, "project");
+
+    private static string? AffectedSubject(AgentEvent eventRecord) =>
+        AgentObservabilityData.GetStrings(eventRecord.Data, "affectedModIds")
+            .FirstOrDefault() ??
+        AffectedProject(eventRecord);
 
     private static AgentIssue CreateIssue(
         AgentEvent eventRecord,
@@ -346,10 +398,16 @@ internal sealed class AgentIssueDetector
             AgentId = eventRecord.AgentId,
             LogicalAgentId = eventRecord.LogicalAgentId,
             SessionId = eventRecord.SessionId,
-            ModId = eventRecord.ModId,
-            EntityType = eventRecord.EntityType,
-            CanonicalEntityId = eventRecord.CanonicalEntityId,
-            DisplayName = eventRecord.DisplayName,
+            ModId = AffectedSubject(eventRecord) ?? eventRecord.ModId,
+            EntityType = AffectedSubject(eventRecord) is null
+                ? eventRecord.EntityType
+                : ObservabilityEntityTypes.Mod,
+            CanonicalEntityId = AffectedSubject(eventRecord) is string subject
+                ? "mod:" + subject
+                : eventRecord.CanonicalEntityId,
+            DisplayName = AffectedProject(eventRecord) ??
+                AffectedSubject(eventRecord) ??
+                eventRecord.DisplayName,
             Timestamp = eventRecord.Timestamp,
             Category = category,
             Severity = severity,
@@ -366,6 +424,28 @@ internal sealed class AgentIssueDetector
             TraceId = eventRecord.TraceId,
             SpanIds = MergeSpanIds(null, eventRecord.SpanId),
             OperationKey = operationKey,
+            CausalIssueKey = CausalIssueKey(eventRecord),
+            ReportingTool = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "reportingTool"),
+            ReportingModId = eventRecord.ModId,
+            CausalComponent = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "causalComponent") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "componentOwner") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
+            AffectedProject = AffectedProject(eventRecord),
+            AffectedValidations = AgentObservabilityData.GetStrings(
+                eventRecord.Data,
+                "blockedValidations")
+                .Concat(AgentObservabilityData.GetStrings(
+                    eventRecord.Data,
+                    "blockedTestIds"))
+                .Distinct(StringComparer.Ordinal)
+                .Take(64)
+                .ToArray() is { Length: > 0 } affectedValidations
+                ? affectedValidations
+                : null,
             RetryCount = eventRecord.Type is AgentEventTypes.RetryStarted or AgentEventTypes.RetryCompleted ? 1 : 0,
             Classification = AgentObservabilityData.GetString(eventRecord.Data, "issueKind") ??
                 category switch
@@ -388,7 +468,8 @@ internal sealed class AgentIssueDetector
                     AgentIssueCategory.ToolingFailure or AgentIssueCategory.CapabilityGap,
             CurrentState = "open",
             ResolutionState = "unresolved",
-            ComponentOwner = AgentObservabilityData.GetString(eventRecord.Data, "componentOwner") ??
+            ComponentOwner = AgentObservabilityData.GetString(eventRecord.Data, "causalComponent") ??
+                AgentObservabilityData.GetString(eventRecord.Data, "componentOwner") ??
                 AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
             EvidenceReference = AgentObservabilityData.GetString(
                 eventRecord.Data,
@@ -396,7 +477,9 @@ internal sealed class AgentIssueDetector
                 AgentObservabilityData.GetString(eventRecord.Data, "evidenceLink"),
             AffectedValidation = AgentObservabilityData.GetString(
                 eventRecord.Data,
-                "validationId"),
+                "validationId") ??
+                AgentObservabilityData.GetStrings(eventRecord.Data, "blockedTestIds")
+                    .FirstOrDefault(),
             Recommendation = AgentObservabilityData.GetString(
                 eventRecord.Data,
                 "recommendation") ??
@@ -405,11 +488,19 @@ internal sealed class AgentIssueDetector
                 eventRecord.Data,
                 "requiredCapabilityId") ??
                 AgentObservabilityData.GetString(eventRecord.Data, "capabilityId"),
-            Fingerprint = AgentObservabilityData.GetString(eventRecord.Data, "fingerprint"),
+            Fingerprint = AgentObservabilityData.GetString(eventRecord.Data, "fingerprint") ??
+                CausalIssueKey(eventRecord),
             ProbableOwner = AgentObservabilityData.GetString(eventRecord.Data, "probableOwner"),
             AffectedAgentIds = [eventRecord.AgentId],
             AffectedRunIds = [eventRecord.RunId],
-            AffectedModIds = [eventRecord.ModId]
+            AffectedModIds = AgentObservabilityData.GetStrings(
+                    eventRecord.Data,
+                    "affectedModIds")
+                is { Count: > 0 } affectedModIds
+                ? affectedModIds
+                : AffectedSubject(eventRecord) is string subjectId
+                    ? [subjectId]
+                    : [eventRecord.ModId]
         };
 
     private static string OperationKey(AgentEvent eventRecord)
@@ -431,12 +522,37 @@ internal sealed class AgentIssueDetector
             : eventRecord.Type;
     }
 
+    private static string? CausalIssueKey(AgentEvent eventRecord)
+    {
+        string? explicitKey =
+            AgentObservabilityData.GetString(eventRecord.Data, "causalIssueKey") ??
+            AgentObservabilityData.GetString(eventRecord.Data, "causalFailureId");
+        if (!string.IsNullOrWhiteSpace(explicitKey))
+        {
+            return AgentObservabilityData.BoundText(explicitKey, 256);
+        }
+
+        string? project = AgentObservabilityData.GetString(
+            eventRecord.Data,
+            "affectedProject") ??
+            AgentObservabilityData.GetString(eventRecord.Data, "project");
+        string? errorCode = AgentObservabilityData.GetString(
+            eventRecord.Data,
+            "underlyingErrorCode") ??
+            AgentObservabilityData.GetString(eventRecord.Data, "errorCode");
+        return string.IsNullOrWhiteSpace(project) || string.IsNullOrWhiteSpace(errorCode)
+            ? null
+            : AgentObservabilityData.BoundText(
+                "project:" + project + "|cause:" + errorCode,
+                256);
+    }
+
     private static bool IsFailure(AgentEvent eventRecord)
     {
         if (eventRecord.Type is AgentEventTypes.ToolFailed or AgentEventTypes.ToolException or
             AgentEventTypes.CommandFailed or AgentEventTypes.CommandTimeout or
             AgentEventTypes.BuildFailed or AgentEventTypes.TestFailed or AgentEventTypes.AgentFailed or
-            AgentEventTypes.IntegrationFailed)
+            AgentEventTypes.IntegrationFailed or AgentEventTypes.FailureDetected)
         {
             return true;
         }
@@ -500,6 +616,15 @@ internal sealed class AgentIssueDetector
 
     private static string FailureSummary(AgentEvent eventRecord)
     {
+        string? structured = AgentObservabilityData.GetString(
+            eventRecord.Data,
+            "failureSummary") ??
+            AgentObservabilityData.GetString(eventRecord.Data, "failureMessage");
+        if (!string.IsNullOrWhiteSpace(structured))
+        {
+            return AgentObservabilityData.BoundText(structured, 512);
+        }
+
         string? errorCode = AgentObservabilityData.GetString(eventRecord.Data, "errorCode");
         return string.IsNullOrWhiteSpace(errorCode)
             ? AgentObservabilityData.BoundText(eventRecord.Summary, 512)
@@ -507,7 +632,6 @@ internal sealed class AgentIssueDetector
                 eventRecord.Summary + " (" + errorCode + ")",
                 512);
     }
-
     private static bool IsExplicitIssue(
         AgentEvent eventRecord,
         out AgentIssueCategory category,

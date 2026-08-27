@@ -12,6 +12,7 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
         DevBridgeProcessRequest request,
         CancellationToken cancellationToken)
     {
+        long startedTimestamp = Stopwatch.GetTimestamp();
         string operation = ProfilerActivity.DevBridgeOperation(request.Arguments);
         string operationKey = request.OperationKey ?? "devbridge:" + operation;
         AgentOperationScope? observation = AgentObservabilityRuntime.BeginOperation(
@@ -34,18 +35,26 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                     () => ExecuteCoreAsync(request, cancellationToken),
                     (activity, value) =>
                     {
+                        bool structuredFailure =
+                            DevBridgeProcessResponseParser.TryParse(
+                                value.Stdout,
+                                out DevBridgeProcessResponse? parsed) &&
+                            parsed?.RepresentsFailure(value.ExitCode) == true;
                         ProfilerActivity.SetOutcome(
                             activity,
                             value.Cancelled
                                 ? "cancelled"
                                 : value.TimedOut
                                     ? "timeout"
-                                    : value.ExitCode is 0 && value.StartError is null
+                                    : !structuredFailure &&
+                                        value.ExitCode is 0 &&
+                                        value.StartError is null
                                         ? "success"
                                         : "failure",
-                            value.StartError is null
-                                ? null
-                                : "DEVBRIDGE_PROCESS_START_FAILED");
+                            parsed?.ErrorCode ??
+                                (value.StartError is null
+                                    ? null
+                                    : "DEVBRIDGE_PROCESS_START_FAILED"));
                         ProfilerActivity.SetCounts(
                             activity,
                             outputChars: (value.Stdout?.Length ?? 0) +
@@ -54,6 +63,7 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                     phase: "child-process",
                     scope: operation)
                 .ConfigureAwait(false);
+
             AgentDiagnosticEvidenceReference? stdoutEvidence =
                 AgentObservabilityRuntime.PersistEvidence(
                     "devbridge.process.stdout",
@@ -64,21 +74,61 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
                     "devbridge.process.stderr",
                     result.Stderr,
                     result.StderrTruncated);
+            DevBridgeProcessResponse? response =
+                DevBridgeProcessResponseParser.TryParse(result.Stdout, out DevBridgeProcessResponse? parsed)
+                    ? parsed
+                    : null;
             var details = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["command"] = AgentObservabilityData.SanitizeCommand(
                     request.FileName + " " + string.Join(' ', request.Arguments),
                     4_096),
                 ["workingDirectory"] = request.WorkingDirectory,
+                ["resolvedExecutablePath"] = ResolveExecutablePath(request.FileName),
+                ["resolvedToolRoot"] = ResolveToolRoot(request.WorkingDirectory),
                 ["exitCode"] = result.ExitCode,
                 ["stdoutExcerpt"] = AgentObservabilityData.BoundText(result.Stdout, 2048),
                 ["stderrExcerpt"] = AgentObservabilityData.BoundText(result.Stderr, 2048),
                 ["stdoutTruncated"] = result.StdoutTruncated,
                 ["stderrTruncated"] = result.StderrTruncated,
                 ["timedOut"] = result.TimedOut,
-                ["cancelled"] = result.Cancelled
+                ["cancelled"] = result.Cancelled,
+                ["durationMs"] = Math.Max(
+                    0,
+                    (long)Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds),
+                ["operationKey"] = operationKey,
+                ["toolName"] = "DevBridge"
             };
-            details["operationKey"] = operationKey;
+            if (!string.IsNullOrWhiteSpace(result.StartError))
+            {
+                details["startError"] = AgentObservabilityData.BoundText(
+                    result.StartError,
+                    2_048);
+            }
+            if (response is not null)
+            {
+                details["errorCode"] = response.ErrorCode;
+                details["error"] = response.Error;
+                details["nextAction"] = response.NextAction;
+                details["state"] = response.State;
+                details["responseSchema"] = response.SchemaVersion;
+                details["protocolVersion"] = response.ProtocolVersion;
+                details["buildIdentity"] = response.BuildIdentity;
+                details["structuredResponse"] = new
+                {
+                    success = response.Success,
+                    healthy = response.Healthy,
+                    exitCode = response.ExitCode,
+                    errorCode = response.ErrorCode,
+                    error = response.Error,
+                    nextAction = response.NextAction,
+                    state = response.State,
+                    schemaVersion = response.SchemaVersion,
+                    protocolVersion = response.ProtocolVersion,
+                    buildIdentity = response.BuildIdentity,
+                    findings = response.Findings
+                };
+            }
             if (stdoutEvidence is not null)
             {
                 details["stdoutEvidenceId"] = stdoutEvidence.Id;
@@ -87,35 +137,57 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
             {
                 details["stderrEvidenceId"] = stderrEvidence.Id;
             }
+
+            AgentEvent? lifecycleEvent;
             if (result.Cancelled)
             {
-                observation?.Fail(
+                lifecycleEvent = observation?.Fail(
                     "DevBridge command was cancelled.",
                     "RIMTEST_CANCELLED",
                     details);
             }
             else if (result.TimedOut)
             {
-                observation?.Fail(
+                lifecycleEvent = observation?.Fail(
                     "DevBridge command timed out.",
                     "DEVBRIDGE_COMMAND_TIMEOUT",
                     details,
                     timeout: true);
             }
-            else if (result.ExitCode is 0 && result.StartError is null)
+            else if (response?.RepresentsFailure(result.ExitCode) == true ||
+                result.ExitCode is > 0 ||
+                result.StartError is not null)
             {
-                observation?.Complete("DevBridge command completed.", details);
+                lifecycleEvent = observation?.Fail(
+                    "DevBridge command failed.",
+                    response?.ErrorCode ??
+                        (result.StartError is null
+                            ? "DEVBRIDGE_COMMAND_FAILED"
+                            : "DEVBRIDGE_PROCESS_START_FAILED"),
+                    details);
             }
             else
             {
-                observation?.Fail(
-                    "DevBridge command failed.",
-                    result.StartError is null
-                        ? "DEVBRIDGE_COMMAND_FAILED"
-                        : "DEVBRIDGE_PROCESS_START_FAILED",
-                    details);
+                lifecycleEvent = observation?.Complete("DevBridge command completed.", details);
             }
-            return result;
+
+            return result with
+            {
+                Response = response,
+                Evidence = new DevBridgeProcessEvidence(
+                    ResolveExecutablePath(request.FileName),
+                    ResolveToolRoot(request.WorkingDirectory),
+                    request.WorkingDirectory,
+                    operationKey,
+                    stdoutEvidence?.Id,
+                    stderrEvidence?.Id,
+                    lifecycleEvent?.Id,
+                    Math.Max(
+                        0,
+                        (long)Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds),
+                    result.StdoutTruncated,
+                    result.StderrTruncated)
+            };
         }
         catch (OperationCanceledException)
         {
@@ -129,12 +201,74 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
             observation?.Fail(
                 "DevBridge command raised an exception.",
                 "DEVBRIDGE_COMMAND_EXCEPTION",
-                new { error = AgentObservabilityData.BoundText(exception.Message, 1024) });
+                new
+                {
+                    error = AgentObservabilityData.BoundText(exception.Message, 1024),
+                    operationKey
+                });
             throw;
         }
         finally
         {
             observation?.Dispose();
+        }
+    }
+
+    private static string? ResolveExecutablePath(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (Path.IsPathRooted(fileName) ||
+                fileName.Contains(Path.DirectorySeparatorChar) ||
+                fileName.Contains(Path.AltDirectorySeparatorChar))
+            {
+                return Path.GetFullPath(fileName);
+            }
+
+            string? path = Environment.GetEnvironmentVariable("PATH");
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                foreach (string directory in path.Split(Path.PathSeparator))
+                {
+                    if (string.IsNullOrWhiteSpace(directory))
+                    {
+                        continue;
+                    }
+
+                    foreach (string extension in new[] { "", ".exe", ".cmd", ".bat", ".com" })
+                    {
+                        string candidate = Path.Combine(directory, fileName + extension);
+                        if (File.Exists(candidate))
+                        {
+                            return Path.GetFullPath(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            NotSupportedException)
+        {
+        }
+
+        return fileName;
+    }
+
+    private static string? ResolveToolRoot(string workingDirectory)
+    {
+        try
+        {
+            return Path.GetFullPath(workingDirectory);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            NotSupportedException)
+        {
+            return workingDirectory;
         }
     }
 

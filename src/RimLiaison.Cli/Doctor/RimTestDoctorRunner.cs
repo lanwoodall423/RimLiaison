@@ -6,6 +6,8 @@ using RimLiaison.DevBridge;
 using RimLiaison.RimContext;
 using RimLiaison.RimError;
 using RimLiaison.Recovery;
+using RimLiaison.Observability;
+using RimLiaison.Stack;
 
 namespace RimLiaison.Doctor;
 
@@ -38,21 +40,70 @@ internal sealed class RimTestDoctorRunner
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(transport);
+        Dictionary<string, object?>? manifestRecovery = null;
+        string manifestDirectory = Path.Combine(request.StackManifest.RepositoryRoot, ".rimdev");
+        if (!request.StackManifest.Found &&
+            (request.CatalogExplicit && request.DevBridgeProjectExplicit ||
+             File.Exists(manifestDirectory) || Directory.Exists(manifestDirectory)))
+        {
+            CliRequest repairRequest = request with
+            {
+                InitManifestOnly = true,
+                InitForce = false
+            };
+            StackInitResult repair = StackInitializer.Run(repairRequest);
+            bool repairReportedSuccess =
+                repair.ExitCode == CliExitCodes.Success &&
+                repair.Output.TryGetValue("status", out object? repairStatus) &&
+                string.Equals(
+                    repairStatus as string,
+                    "ok",
+                    StringComparison.Ordinal);
+            StackManifestResolution repaired =
+                StackManifestResolver.Discover(request.StackManifest.RepositoryRoot);
+            if (!repairReportedSuccess || repaired.Manifest is null)
+            {
+                return Blocked(
+                    "manifest",
+                    "STACK_MANIFEST_AUTO_REPAIR_UNSAFE",
+                    "rimliaison init --json --manifest-only --force",
+                    details: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["blockingState"] = "required",
+                        ["repairAttempted"] = true,
+                        ["repairSafe"] = false,
+                        ["repairReason"] = !repairReportedSuccess
+                            ? "authoritative manifest initialization reported a conflict; no user configuration was overwritten."
+                            : "the reconstructed manifest could not be validated after initialization.",
+                        ["repairResult"] = repair.Output,
+                        ["repositoryRoot"] = request.StackManifest.RepositoryRoot
+                    });
+            }
 
-        if (!request.StackManifest.Found)
+            manifestRecovery = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["attempted"] = true,
+                ["repaired"] = true,
+                ["source"] = "authoritative stack configuration",
+                ["manifestPath"] = repaired.ManifestPath
+            };
+            request = request with
+            {
+                StackManifest = repaired,
+                CatalogPath = StackManifestResolver.CatalogPath(repaired),
+                DevBridgeProject = request.DevBridgeProject ?? repaired.Manifest.DevBridgeProject,
+                FallbackSuite = request.FallbackSuite ?? repaired.Manifest.FallbackSuite
+            };
+        }
+        if (!request.StackManifest.Found ||
+            request.StackManifest.Manifest is null)
         {
             return Blocked(
                 "manifest",
                 request.StackManifest.ErrorCode ?? "STACK_MANIFEST_MISSING",
-                "rimliaison init --json");
-        }
-
-        if (request.StackManifest.Manifest is null)
-        {
-            return Blocked(
-                "manifest",
-                request.StackManifest.ErrorCode ?? "STACK_MANIFEST_INVALID",
-                ManifestRepairNextAction);
+                request.StackManifest.Manifest is null && request.StackManifest.Found
+                    ? "rimliaison init --json --manifest-only --force"
+                    : "rimliaison init --json");
         }
 
         if (string.IsNullOrWhiteSpace(request.DevBridgeProject))
@@ -170,7 +221,8 @@ internal sealed class RimTestDoctorRunner
                 "devbridge",
                 devBridgeProbe.Code!,
                 devBridgeProbe.NextAction,
-                devBridgeProbe.IdentityMismatch);
+                devBridgeProbe.IdentityMismatch,
+                devBridgeProbe.Details);
         }
 
         ProbeResult projectProbe = await ProbeDevBridgeProjectAsync(
@@ -186,7 +238,7 @@ internal sealed class RimTestDoctorRunner
         }
 
         if (string.Equals(
-                request.StackManifest.Manifest.RimBridge,
+                request.StackManifest.Manifest?.RimBridge,
                 "via-devbridge",
                 StringComparison.Ordinal) &&
             string.Equals(
@@ -200,21 +252,24 @@ internal sealed class RimTestDoctorRunner
                 DevBridgeDoctorNextAction);
         }
 
-        string project = request.StackManifest.Manifest.Project;
-        return new DoctorRunResult(
-            0,
-            new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["schemaVersion"] = RimTestDoctorSchema.Current,
-                ["status"] = "ready",
-                ["project"] = project,
-                ["catalog"] = "ok",
-                ["rimctx"] = "ok",
-                ["devbridge"] = "ok",
-                ["rimerror"] = "ok",
-                ["rimbridge"] = devBridgeProbe.IntegrationStatus ?? "unknown",
-                ["nextAction"] = AffectedNextAction
-            });
+        string project = request.StackManifest.Manifest?.Project ?? "unknown";
+        var readyOutput = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = RimTestDoctorSchema.Current,
+            ["status"] = "ready",
+            ["project"] = project,
+            ["catalog"] = "ok",
+            ["rimctx"] = "ok",
+            ["devbridge"] = "ok",
+            ["rimerror"] = "ok",
+            ["rimbridge"] = devBridgeProbe.IntegrationStatus ?? "unknown",
+            ["nextAction"] = AffectedNextAction
+        };
+        if (manifestRecovery is not null)
+        {
+            readyOutput["manifestRecovery"] = manifestRecovery;
+        }
+        return new DoctorRunResult(0, readyOutput);
     }
 
     private DoctorRunResult? ValidateConfiguration(
@@ -283,7 +338,8 @@ internal sealed class RimTestDoctorRunner
             ["--root", options.RootPath, "doctor", "--json"],
             TimeSpan.FromSeconds(20),
             MaximumProbeStdoutBytes,
-            MaximumProbeStderrBytes);
+            MaximumProbeStderrBytes,
+            OperationKey: "cli:doctor");
         DevBridgeProcessResult process = await ExecuteProbeAsync(
                 transport,
                 request,
@@ -291,54 +347,84 @@ internal sealed class RimTestDoctorRunner
             .ConfigureAwait(false);
         if (process.Cancelled)
         {
-            return Failure("DEVBRIDGE_CANCELLED");
+            return Failure(
+                "DEVBRIDGE_CANCELLED",
+                DevBridgeDoctorNextAction,
+                details: ProcessDetails(process));
         }
 
         if (process.TimedOut)
         {
-            return Failure("DEVBRIDGE_CLIENT_TIMEOUT", DevBridgeDoctorNextAction);
+            return Failure(
+                "DEVBRIDGE_CLIENT_TIMEOUT",
+                DevBridgeDoctorNextAction,
+                details: ProcessDetails(process));
         }
 
         if (!string.IsNullOrWhiteSpace(process.StartError))
         {
-            return Failure("DEVBRIDGE_START_FAILED", DevBridgeDoctorNextAction);
-        }
-
-        if (process.StdoutTruncated || process.StderrTruncated ||
-            string.IsNullOrWhiteSpace(process.Stdout))
-        {
-            return Failure("DEVBRIDGE_RESPONSE_INVALID", DevBridgeDoctorNextAction);
-        }
-
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(process.Stdout);
-            JsonElement root = document.RootElement;
-            if (!TryGetBoolean(root, "healthy", out bool healthy))
-            {
-                return Failure("DEVBRIDGE_RESPONSE_INVALID", DevBridgeDoctorNextAction);
-            }
-            string? integrationStatus = ReadRimBridgeStatus(root);
-            if (healthy && process.ExitCode is not > 0)
-            {
-                return Success(integrationStatus);
-            }
-
-            string code = TryGetString(root, "errorCode", out string? errorCode)
-                ? errorCode!
-                : FirstDoctorFindingCode(root) ?? "DEVBRIDGE_REFUSAL";
-            DevBridgeIdentityMismatch? identityMismatch =
-                DevBridgeIdentityMismatchParser.Parse(root, options.RootPath, code);
             return Failure(
-                code,
+                "DEVBRIDGE_START_FAILED",
                 DevBridgeDoctorNextAction,
-                integrationStatus,
-                identityMismatch);
+                details: ProcessDetails(process));
         }
-        catch (JsonException)
+
+        if (string.IsNullOrWhiteSpace(process.Stdout))
         {
-            return Failure("DEVBRIDGE_RESPONSE_INVALID", DevBridgeDoctorNextAction);
+            return Failure(
+                "DEVBRIDGE_NO_STRUCTURED_RESPONSE",
+                DevBridgeDoctorNextAction,
+                details: ProcessDetails(process));
         }
+
+        Dictionary<string, object?> details = ProcessDetails(process);
+        if (process.StdoutTruncated || process.StderrTruncated)
+        {
+            return Failure(
+                "DEVBRIDGE_OUTPUT_LIMIT_EXCEEDED",
+                DevBridgeDoctorNextAction,
+                details: details);
+        }
+
+        if (!DevBridgeProcessResponseParser.TryParse(
+                process.Stdout,
+                out DevBridgeProcessResponse? response) ||
+            response is null)
+        {
+            return Failure(
+                "DEVBRIDGE_RESPONSE_INVALID",
+                DevBridgeDoctorNextAction,
+                details: details);
+        }
+
+        details = ProcessDetails(process, response);
+
+        bool failure = response.RepresentsFailure(process.ExitCode);
+        if (!failure)
+        {
+            if (response.Healthy is not true)
+            {
+                return Failure(
+                    "DEVBRIDGE_RESPONSE_INVALID",
+                    DevBridgeDoctorNextAction,
+                    details: details);
+            }
+            using JsonDocument healthyDocument = JsonDocument.Parse(process.Stdout);
+            return Success(ReadRimBridgeStatus(healthyDocument.RootElement));
+        }
+
+        using JsonDocument document = JsonDocument.Parse(process.Stdout);
+        string code = response.ErrorCode ??
+            FirstDoctorFindingCode(document.RootElement) ??
+            "DEVBRIDGE_REFUSAL";
+        DevBridgeIdentityMismatch? identityMismatch =
+            DevBridgeIdentityMismatchParser.Parse(document.RootElement, options.RootPath, code);
+        return Failure(
+            code,
+            response.NextAction ?? DevBridgeDoctorNextAction,
+            ReadRimBridgeStatus(document.RootElement),
+            identityMismatch,
+            details);
     }
 
     private async Task<ProbeResult> ProbeDevBridgeProjectAsync(
@@ -591,11 +677,52 @@ internal sealed class RimTestDoctorRunner
         }
     }
 
+    private static Dictionary<string, object?> ProcessDetails(
+        DevBridgeProcessResult process,
+        DevBridgeProcessResponse? response = null)
+    {
+        response ??= process.Response;
+        var details = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["exitCode"] = response?.ExitCode ?? process.ExitCode,
+            ["stdoutExcerpt"] = AgentObservabilityData.BoundText(process.Stdout, 2048),
+            ["stderrExcerpt"] = AgentObservabilityData.BoundText(process.Stderr, 2048),
+            ["stdoutTruncated"] = process.StdoutTruncated,
+            ["stderrTruncated"] = process.StderrTruncated,
+            ["timedOut"] = process.TimedOut,
+            ["cancelled"] = process.Cancelled
+        };
+        if (!string.IsNullOrWhiteSpace(process.StartError))
+        {
+            details["startError"] = AgentObservabilityData.BoundText(
+                process.StartError,
+                2048);
+        }
+        if (process.Evidence is not null)
+        {
+            details["processEvidence"] = process.Evidence;
+            details["stdoutEvidenceId"] = process.Evidence.StdoutEvidenceId;
+            details["stderrEvidenceId"] = process.Evidence.StderrEvidenceId;
+        }
+        if (response is not null)
+        {
+            details["error"] = response.Error;
+            details["nextAction"] = response.NextAction;
+            details["state"] = response.State;
+            details["responseSchema"] = response.SchemaVersion;
+            details["protocolVersion"] = response.ProtocolVersion;
+            details["buildIdentity"] = response.BuildIdentity;
+            details["findings"] = response.Findings;
+        }
+        return details;
+    }
+
     private static DoctorRunResult Blocked(
         string component,
         string code,
         string? nextAction = null,
-        DevBridgeIdentityMismatch? identityMismatch = null)
+        DevBridgeIdentityMismatch? identityMismatch = null,
+        IReadOnlyDictionary<string, object?>? details = null)
     {
         var output = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -604,6 +731,13 @@ internal sealed class RimTestDoctorRunner
             ["component"] = component,
             ["code"] = code
         };
+        if (details is not null)
+        {
+            foreach ((string key, object? value) in details)
+            {
+                output[key] = value;
+            }
+        }
         if (!string.IsNullOrWhiteSpace(nextAction))
         {
             output["nextAction"] = nextAction;
@@ -624,8 +758,9 @@ internal sealed class RimTestDoctorRunner
         string code,
         string? nextAction = null,
         string? integrationStatus = null,
-        DevBridgeIdentityMismatch? identityMismatch = null) =>
-        new(false, code, nextAction, integrationStatus, identityMismatch);
+        DevBridgeIdentityMismatch? identityMismatch = null,
+        IReadOnlyDictionary<string, object?>? details = null) =>
+        new(false, code, nextAction, integrationStatus, identityMismatch, details);
 
     private static string FirstErrorCode(
         IReadOnlyList<CatalogIssue> errors,
@@ -799,7 +934,8 @@ internal sealed class RimTestDoctorRunner
         string? Code,
         string? NextAction,
         string? IntegrationStatus = null,
-        DevBridgeIdentityMismatch? IdentityMismatch = null);
+        DevBridgeIdentityMismatch? IdentityMismatch = null,
+        IReadOnlyDictionary<string, object?>? Details = null);
 }
 
 internal sealed record DoctorRunResult(

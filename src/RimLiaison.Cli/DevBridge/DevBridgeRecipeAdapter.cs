@@ -125,6 +125,19 @@ public sealed class DevBridgeRecipeAdapter :
         }
 
         JsonElement root = envelope.Root;
+        if (!string.Equals(envelope.SchemaVersion, DevBridgeRecipeSchemas.Plan, StringComparison.Ordinal) &&
+            IsRefusal(envelope, process, envelope.Response?.ErrorCode))
+        {
+            return new DevBridgeRecipePlanResult(
+                recipeId,
+                RefusalStatus(
+                    envelope,
+                    process,
+                    envelope.Response?.ErrorCode,
+                    envelope.Response?.Error),
+                null);
+        }
+
         if (!TryGetString(root, "recipe", out string? reportedId) ||
             !string.Equals(reportedId, recipeId, StringComparison.Ordinal))
         {
@@ -208,6 +221,34 @@ public sealed class DevBridgeRecipeAdapter :
         }
 
         JsonElement root = envelope.Root;
+        if (!string.Equals(envelope.SchemaVersion, DevBridgeRecipeSchemas.Run, StringComparison.Ordinal) &&
+            IsRefusal(envelope, process, envelope.Response?.ErrorCode))
+        {
+            return FailedRun(
+                recipeId,
+                RefusalStatus(
+                    envelope,
+                    process,
+                    envelope.Response?.ErrorCode,
+                    envelope.Response?.Error),
+                null,
+                workflowId);
+        }
+
+        if (envelope.Response?.ErrorCode is string responseErrorCode &&
+            !responseErrorCode.StartsWith("RECIPE_", StringComparison.Ordinal))
+        {
+            return FailedRun(
+                recipeId,
+                RefusalStatus(
+                    envelope,
+                    process,
+                    responseErrorCode,
+                    envelope.Response.Error),
+                null,
+                workflowId);
+        }
+
         if (!TryGetString(root, "recipe", out string? reportedId) ||
             !string.Equals(reportedId, recipeId, StringComparison.Ordinal))
         {
@@ -281,7 +322,9 @@ public sealed class DevBridgeRecipeAdapter :
             error,
             process.ExitCode,
             BoundStderr(process.Stderr),
-            DevBridgeRecipeSchemas.Run);
+            DevBridgeRecipeSchemas.Run,
+            Response: envelope.Response,
+            ProcessEvidence: process.Evidence);
 
         return new DevBridgeRecipeRunResult(
             recipeId,
@@ -593,6 +636,7 @@ public sealed class DevBridgeRecipeAdapter :
         string recipeId,
         out DevBridgeAdapterStatus? failure)
     {
+        _ = recipeId;
         failure = null;
         string stderr = BoundStderr(process.Stderr);
         if (process.Cancelled)
@@ -603,7 +647,8 @@ public sealed class DevBridgeRecipeAdapter :
                 "The DevBridge client process was cancelled.",
                 process.ExitCode,
                 stderr,
-                expectedSchema);
+                expectedSchema,
+                ProcessEvidence: process.Evidence);
             return null;
         }
 
@@ -615,7 +660,8 @@ public sealed class DevBridgeRecipeAdapter :
                 "The bounded DevBridge client process timed out.",
                 process.ExitCode,
                 stderr,
-                expectedSchema);
+                expectedSchema,
+                ProcessEvidence: process.Evidence);
             return null;
         }
 
@@ -662,9 +708,11 @@ public sealed class DevBridgeRecipeAdapter :
         {
             failure = InfrastructureStatus(
                 process,
-                "DEVBRIDGE_MALFORMED_JSON",
-                "DevBridge returned malformed structured JSON.");
-            failure = failure with { Outcome = DevBridgeOutcomeKind.MalformedResponse };
+                "DEVBRIDGE_RESPONSE_INVALID",
+                "DevBridge returned malformed structured JSON.") with
+            {
+                Outcome = DevBridgeOutcomeKind.MalformedResponse
+            };
             return null;
         }
 
@@ -677,11 +725,22 @@ public sealed class DevBridgeRecipeAdapter :
                 "DevBridge JSON response root must be an object.");
             return null;
         }
+        DevBridgeProcessResponseParser.TryParse(
+            process.Stdout,
+            out DevBridgeProcessResponse? response);
+        string? schemaVersion = response?.SchemaVersion;
 
-        if (!TryGetString(
-                document.RootElement,
-                "schemaVersion",
-                out string? schemaVersion))
+        if (response?.RepresentsFailure(process.ExitCode) == true &&
+            !string.Equals(schemaVersion, expectedSchema, StringComparison.Ordinal))
+        {
+            return new ParsedEnvelope(
+                document,
+                schemaVersion,
+                response.ExitCode,
+                response);
+        }
+
+        if (string.IsNullOrWhiteSpace(schemaVersion))
         {
             document.Dispose();
             failure = MalformedStatus(
@@ -700,24 +759,17 @@ public sealed class DevBridgeRecipeAdapter :
                 $"Expected {expectedSchema}; received {schemaVersion}.",
                 process.ExitCode,
                 stderr,
-                schemaVersion);
+                schemaVersion,
+                Response: response,
+                ProcessEvidence: process.Evidence);
             return null;
         }
 
-        if (!TryGetNullableInt(
-                document.RootElement,
-                "exitCode",
-                out int? payloadExitCode))
-        {
-            document.Dispose();
-            failure = MalformedStatus(
-                null,
-                process,
-                "DevBridge JSON response exitCode was not an integer.");
-            return null;
-        }
-
-        return new ParsedEnvelope(document, schemaVersion!, payloadExitCode);
+        return new ParsedEnvelope(
+            document,
+            schemaVersion,
+            response?.ExitCode,
+            response);
     }
 
     private static bool TryValidateRecipeSchema(
@@ -937,7 +989,9 @@ public sealed class DevBridgeRecipeAdapter :
             null,
             process.ExitCode,
             BoundStderr(process.Stderr),
-            envelope.SchemaVersion);
+            envelope.SchemaVersion,
+            Response: envelope.Response,
+            ProcessEvidence: process.Evidence);
     }
 
     private static DevBridgeAdapterStatus RefusalStatus(
@@ -952,7 +1006,10 @@ public sealed class DevBridgeRecipeAdapter :
             error,
             process.ExitCode,
             BoundStderr(process.Stderr),
-            envelope.SchemaVersion);
+            envelope.SchemaVersion,
+            RecoveryAction: envelope.Response?.NextAction,
+            Response: envelope.Response,
+            ProcessEvidence: process.Evidence);
     }
 
     private static DevBridgeAdapterStatus MalformedStatus(
@@ -966,7 +1023,9 @@ public sealed class DevBridgeRecipeAdapter :
             error,
             process.ExitCode,
             BoundStderr(process.Stderr),
-            envelope?.SchemaVersion);
+            envelope?.SchemaVersion,
+            Response: envelope?.Response ?? process.Response,
+            ProcessEvidence: process.Evidence);
     }
 
     private static DevBridgeAdapterStatus InfrastructureStatus(
@@ -979,7 +1038,9 @@ public sealed class DevBridgeRecipeAdapter :
             code,
             error,
             process.ExitCode,
-            BoundStderr(process.Stderr));
+            BoundStderr(process.Stderr),
+            Response: process.Response,
+            ProcessEvidence: process.Evidence);
     }
 
     private static bool TryGetString(
@@ -1147,12 +1208,14 @@ public sealed class DevBridgeRecipeAdapter :
 
     private sealed class ParsedEnvelope(
         JsonDocument document,
-        string schemaVersion,
-        int? payloadExitCode) : IDisposable
+        string? schemaVersion,
+        int? payloadExitCode,
+        DevBridgeProcessResponse? response) : IDisposable
     {
         public JsonElement Root => document.RootElement;
-        public string SchemaVersion { get; } = schemaVersion;
+        public string? SchemaVersion { get; } = schemaVersion;
         public int? PayloadExitCode { get; } = payloadExitCode;
+        public DevBridgeProcessResponse? Response { get; } = response;
 
         public void Dispose()
         {

@@ -139,9 +139,7 @@ public static class CliApplication
             string toolchainState = request.Command == CliCommand.Qualification
                 ? "experimental"
                 : "promoted";
-            string modId = observabilityEntity.EntityType == ObservabilityEntityTypes.Mod
-                ? observabilityEntity.CanonicalEntityId
-                : "RimLiaison";
+            string modId = LegacyModId(observabilityEntity);
             observabilityAgent = observabilityRun.CreateAgent(
                 modId,
                 observabilityEntity.DisplayName,
@@ -153,6 +151,7 @@ public static class CliApplication
                     ? request.Id
                     : null);
             observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
+            observabilityActivation = observabilityAgent.Activate();
             DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
             observabilityAgent.SetStage(
                 commandStage,
@@ -165,7 +164,9 @@ public static class CliApplication
                 {
                     operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
                     command = request.Command.ToString().ToLowerInvariant(),
-                    target = request.Id
+                    target = request.Id,
+                    toolName = "RimLiaison",
+                    componentOwner = "RimLiaison"
                 });
             workflowId = NeedsWorkflowCorrelation(request)
                 ? WorkflowCorrelation.Create()
@@ -267,6 +268,7 @@ public static class CliApplication
                             stdout,
                             processTransport,
                             eventStore,
+                            observabilityEntity,
                             cancellationToken),
                         AnnotateExit,
                         phase: "command",
@@ -303,6 +305,7 @@ public static class CliApplication
                             stdout,
                             eventStore,
                             gitChangeProvider,
+                            observabilityEntity,
                             cancellationToken),
                         AnnotateExit,
                         phase: "command",
@@ -567,47 +570,79 @@ public static class CliApplication
                     AgentWorkflowTelemetrySummary telemetry =
                         AgentWorkflowTelemetrySummary.FromEvents(
                             eventStore?.GetEvents(runId: profiler.RunId, limit: 4096) ?? []);
-                    observabilityAgent.Record(
-                        observabilityAgent.Snapshot.CurrentStage,
-                        AgentEventTypes.CommandCompleted,
-                        "RimLiaison command completed.",
-                        new
-                        {
-                            operationKey = "cli",
-                            command = commandName,
-                            workflowId,
-                            exitCode,
-                            durationMs = ElapsedMilliseconds(started),
-                            outcome = exitCode == CliExitCodes.Success
-                                ? "success"
-                                : exitCode == CliExitCodes.Cancelled
-                                    ? "cancelled"
-                                    : "failure",
-                            telemetry
-                        });
+                    string operationKey = "cli:" + (commandName ?? "unknown");
                     if (exitCode == CliExitCodes.Success)
                     {
+                        observabilityAgent.Record(
+                            observabilityAgent.Snapshot.CurrentStage,
+                            AgentEventTypes.CommandCompleted,
+                            "RimLiaison command completed.",
+                            new
+                            {
+                                operationKey,
+                                command = commandName,
+                                workflowId,
+                                exitCode,
+                                durationMs = ElapsedMilliseconds(started),
+                                outcome = "success",
+                                telemetry
+                            });
                         observabilityAgent.Complete("RimLiaison command completed.");
                     }
                     else
                     {
+                        AgentEvent[] priorFailures = eventStore?
+                            .GetEvents(runId: profiler.RunId, limit: 4096)
+                            .Where(IsFailureLifecycleEvent)
+                            .ToArray() ?? [];
+                        AgentEvent? cause = priorFailures.LastOrDefault();
                         string failureCode = exitCode == CliExitCodes.Cancelled
                             ? "RIMTEST_CANCELLED"
                             : "RIMLIAISON_COMMAND_FAILED";
+                        string? underlyingErrorCode = priorFailures
+                            .Reverse()
+                            .Select(eventRecord =>
+                                AgentObservabilityData.GetString(
+                                    eventRecord.Data,
+                                    "underlyingErrorCode") ??
+                                AgentObservabilityData.GetString(
+                                    eventRecord.Data,
+                                    "errorCode"))
+                            .FirstOrDefault(code =>
+                                !string.IsNullOrWhiteSpace(code) &&
+                                code is not "RIMLIAISON_COMMAND_FAILED" and
+                                    not "DEVBRIDGE_COMMAND_FAILED");
+                        string? componentOwner = cause is null
+                            ? null
+                            : AgentObservabilityData.GetString(
+                                cause.Data,
+                                "componentOwner");
+                        var failureData = new Dictionary<string, object?>(
+                            StringComparer.Ordinal)
+                        {
+                            ["operationKey"] = operationKey,
+                            ["command"] = commandName,
+                            ["workflowId"] = workflowId,
+                            ["exitCode"] = exitCode,
+                            ["errorCode"] = failureCode,
+                            ["outerErrorCode"] = failureCode,
+                            ["underlyingErrorCode"] = underlyingErrorCode,
+                            ["componentOwner"] = componentOwner,
+                            ["causeEventId"] = cause?.Id,
+                            ["relatedEventIds"] = priorFailures
+                                .Select(eventRecord => eventRecord.Id)
+                                .Take(32)
+                                .ToArray(),
+                            ["lifecycleOnly"] = priorFailures.Length > 0,
+                            ["outcome"] = "failure"
+                        };
                         observabilityAgent.Record(
                             observabilityAgent.Snapshot.CurrentStage,
                             AgentEventTypes.CommandFailed,
                             exitCode == CliExitCodes.Cancelled
                                 ? "RimLiaison command was cancelled."
                                 : "RimLiaison command failed.",
-                            new
-                            {
-                                operationKey = "cli",
-                                workflowId,
-                                exitCode,
-                                errorCode = failureCode,
-                                outcome = "failure"
-                            });
+                            failureData);
                         observabilityAgent.Fail(
                             exitCode == CliExitCodes.Cancelled
                                 ? "RimLiaison command was cancelled."
@@ -615,7 +650,8 @@ public static class CliApplication
                             failureCode,
                             completionState: exitCode == CliExitCodes.Cancelled
                                 ? AgentCompletionState.Cancelled
-                                : AgentCompletionState.Failed);
+                                : AgentCompletionState.Failed,
+                            data: failureData);
                     }
                 }
                 catch
@@ -1395,12 +1431,13 @@ public static class CliApplication
         TextWriter stdout,
         IDevBridgeProcessTransport? processTransport,
         IAgentObservabilityStore observabilityStore,
+        ObservabilityEntityIdentity observabilityEntity,
         CancellationToken cancellationToken)
     {
         string rootPath = AffectedGitRoot(request);
         IReadOnlyDictionary<string, string>? relatedRepositoryRoots =
             DiscoverContextRelatedRepositoryRoots(rootPath);
-        (string modId, string modName) = ResolveObservabilityMod(request);
+        (string modId, string modName) = ResolveObservabilityMod(observabilityEntity);
         var provider = new RimLiaisonContextBundleProvider(
             new RimLiaisonContextProviderOptions
             {
@@ -1443,6 +1480,7 @@ public static class CliApplication
         TextWriter stdout,
         IAgentObservabilityStore observabilityStore,
         IGitChangeProvider? suppliedChangeProvider,
+        ObservabilityEntityIdentity observabilityEntity,
         CancellationToken cancellationToken)
     {
         string rootPath = AffectedGitRoot(request);
@@ -1507,7 +1545,7 @@ public static class CliApplication
             repository,
             changes,
             observabilityStore,
-            ResolveObservabilityMod(request).ModId,
+            ResolveObservabilityMod(observabilityEntity).ModId,
             ValidationConfiguration(request),
             dependencyFingerprints: request.DependencyFingerprints);
         ValidationChangeAnalysis analysis = publication.Analysis;
@@ -1658,7 +1696,7 @@ public static class CliApplication
         DevBridgeCapabilityDiscoveryResult result = await adapter.DiscoverAsync(
                 query,
                 workflowId,
-                null,
+                request.UiLeaseId,
                 cancellationToken)
             .ConfigureAwait(false);
         DevBridgeCapabilityRecoveryResult? recovery = null;
@@ -1699,7 +1737,7 @@ public static class CliApplication
                     DevBridgeCapabilityDiscoveryResult retry = await adapter.DiscoverAsync(
                             query,
                             workflowId,
-                            null,
+                            request.UiLeaseId,
                             cancellationToken)
                         .ConfigureAwait(false);
                     result = retry;
@@ -1928,7 +1966,10 @@ public static class CliApplication
 
         if (request.Command == CliCommand.UiTargets)
         {
-            DevBridgeUiTargetsResult result = await adapter.GetTargetsAsync(workflowId, cancellationToken)
+            DevBridgeUiTargetsResult result = await adapter.GetTargetsAsync(
+                    workflowId,
+                    request.UiLeaseId,
+                    cancellationToken)
                 .ConfigureAwait(false);
             DevBridgeLeaseResult? targetLeaseAcquisition = null;
             DevBridgeLeaseResult? targetLeaseRelease = null;
@@ -3359,7 +3400,8 @@ public static class CliApplication
             artifactFreshness,
             freshnessTransaction?.Status,
             freshnessRequest is not null,
-            request.Explain ? validationPlan : null);
+            request.Explain ? validationPlan : null,
+            testIds);
         RecordSuiteCompletion(
             execution,
             result,
@@ -3384,7 +3426,83 @@ public static class CliApplication
             AgentImpactObservabilityRecorder.RecordRuntimeEvidenceCompleted(
                 validationPlan,
                 result);
-            foreach (RimTestSuiteFailure failure in (result.Failures ?? []).Take(16))
+            RimTestOrchestrationFailure? orchestrationFailure = result.Orchestration?.Failure;
+            if (result.BlockedTestCount > 0 && orchestrationFailure is not null)
+            {
+                string project = orchestrationFailure.AffectedProject ??
+                    validationPlan.SourceIdentity.Project ??
+                    "Frontier";
+                global::RimDev.Contracts.EntityReference[] blockedValidations = result.BlockedTests!
+                    .Select(static blocked => new global::RimDev.Contracts.EntityReference
+                    {
+                        Kind = global::RimDev.Contracts.EntityReferenceKinds.Test,
+                        Id = blocked.Test
+                    })
+                    .ToArray();
+                AgentImpactObservabilityRecorder.RecordFailurePacket(
+                    new global::RimDev.Contracts.FailureEvidencePacket
+                    {
+                        Identity = new global::RimDev.Contracts.ExecutionIdentity
+                        {
+                            RepositoryId = validationPlan.SourceIdentity.Repository,
+                            ProjectId = validationPlan.SourceIdentity.Project,
+                            SourceRevision = validationPlan.SourceIdentity.SourceRevision,
+                            BuildIdentity = validationPlan.SourceIdentity.IndexGeneration,
+                            ExecutionId = result.WorkflowId
+                        },
+                        FailedValidation = new global::RimDev.Contracts.EntityReference
+                        {
+                            Kind = global::RimDev.Contracts.EntityReferenceKinds.BuildArtifact,
+                            Id = "build:" + project
+                        },
+                        Classification = orchestrationFailure.ErrorCode,
+                        Error = orchestrationFailure.Summary ??
+                            orchestrationFailure.Error ??
+                            orchestrationFailure.ErrorCode,
+                        FailureSummary = orchestrationFailure.Summary,
+                        ReportingTool = orchestrationFailure.ReportingTool,
+                        CausalComponent = orchestrationFailure.CausalComponent,
+                        AffectedProject = orchestrationFailure.AffectedProject ?? project,
+                        AffectedModIds = orchestrationFailure.AffectedModIds ??
+                            [project],
+                        FailureSurface = orchestrationFailure.FailureSurface,
+                        Orchestrator = orchestrationFailure.Orchestrator,
+                        UnderlyingErrorCode = orchestrationFailure.UnderlyingErrorCode,
+                        CausalIssueKey = "project:" + project + "|cause:" +
+                            (orchestrationFailure.UnderlyingErrorCode ??
+                                orchestrationFailure.ErrorCode),
+                        CausalChain = (orchestrationFailure.CausalChain ?? [])
+                            .Select(link => new global::RimDev.Contracts.FailureCausalReference(
+                                link.Role,
+                                link.Component,
+                                link.Entity))
+                            .ToArray(),
+                        ChangedSourceFiles = validationPlan.ActualChangedFiles,
+                        AffectedEntities = string.IsNullOrWhiteSpace(project)
+                            ? []
+                            : [new global::RimDev.Contracts.EntityReference
+                            {
+                                Kind = global::RimDev.Contracts.EntityReferenceKinds.Mod,
+                                Id = project
+                            }],
+                        BlockedValidations = blockedValidations,
+                        PrecedingEvidence = string.IsNullOrWhiteSpace(
+                                orchestrationFailure.EvidenceId)
+                            ? []
+                            :
+                            [
+                                new global::RimDev.Contracts.EvidenceReference
+                                {
+                                    Kind = "validation",
+                                    Uri = orchestrationFailure.EvidenceId
+                                }
+                            ]
+                    });
+            }
+
+            foreach (RimTestSuiteFailure failure in (result.Failures ?? [])
+                         .Where(static failure => failure.Status is null)
+                         .Take(16))
             {
                 AgentImpactObservabilityRecorder.RecordFailurePacket(
                     new global::RimDev.Contracts.FailureEvidencePacket
@@ -3438,6 +3556,7 @@ public static class CliApplication
         string? workflowId)
     {
         string[] executedTests = execution.Tests
+            .Where(static test => test.Status is "pass" or "fail")
             .Select(static test => test.Test)
             .Where(static test => !string.IsNullOrWhiteSpace(test))
             .Distinct(StringComparer.Ordinal)
@@ -3448,8 +3567,15 @@ public static class CliApplication
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static test => test, StringComparer.Ordinal)
             .ToArray();
+        string[] blockedTests = execution.Tests
+            .Where(static test => test.Status == "blocked")
+            .Select(static test => test.Test)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static test => test, StringComparer.Ordinal)
+            .ToArray();
         string[] skippedTests = selectedTests
             .Except(executedTests, StringComparer.Ordinal)
+            .Except(blockedTests, StringComparer.Ordinal)
             .ToArray();
         RimTestArtifactFreshness? freshness = result.ArtifactFreshness;
         RimTestOrchestrationFailure? failure = result.Orchestration?.Failure;
@@ -3462,6 +3588,12 @@ public static class CliApplication
                 operationKey = "suite:" + execution.SuiteId,
                 suiteId = execution.SuiteId,
                 selectedSuites = new[] { execution.SuiteId },
+                selectedTestCount = selectedTests.Length,
+                executedTestCount = executedTests.Length,
+                blockedTests,
+                blockedTestCount = blockedTests.Length,
+                failedTestCount = result.FailedTestCount,
+                infrastructureFailureCount = result.InfrastructureFailureCount,
                 executedSuites = executedTests.Length > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
                 reusedSuites = execution.Reuse?.GroupsUsed > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
                 skippedSuites = execution.Skipped > 0 ? new[] { execution.SuiteId } : Array.Empty<string>(),
@@ -3502,6 +3634,15 @@ public static class CliApplication
                         leaseId = freshness.LeaseId,
                         evidenceId = freshness.Proof,
                         errorCode = freshness.ErrorCode,
+                        underlyingErrorCode = freshness.UnderlyingErrorCode,
+                        project = freshness.Project,
+                        orchestrator = freshness.Orchestrator,
+                        failureSurface = freshness.FailureSurface,
+                        likelyOwner = freshness.LikelyOwner,
+                        ownershipConfidence = freshness.OwnershipConfidence,
+                        ownershipBasis = freshness.OwnershipBasis,
+                        causalDiagnostic = freshness.CausalDiagnostic,
+                        failureMessage = freshness.FailureMessage,
                         loadedArtifactFreshnessProven = freshness.LoadedArtifactFreshnessProven
                     },
                 overall = result.Orchestration?.Overall,
@@ -3521,7 +3662,16 @@ public static class CliApplication
                 errorCode = failure?.ErrorCode,
                 nextAction = failure?.NextAction,
                 retryable = failure?.RetrySafe,
-                infrastructureFailure = result.Status == "infrastructure"
+                failureSummary = failure?.Summary,
+                reportingTool = failure?.ReportingTool,
+                causalComponent = failure?.CausalComponent,
+                affectedProject = failure?.AffectedProject,
+                affectedModIds = failure?.AffectedModIds,
+                failureSurface = failure?.FailureSurface,
+                orchestrator = failure?.Orchestrator,
+                underlyingErrorCode = failure?.UnderlyingErrorCode,
+                infrastructureFailure = result.Status == "infrastructure" ||
+                    result.Orchestration?.Overall is "SOURCE_BUILD_FAILURE" or "INFRASTRUCTURE_FAILURE"
             });
     }
 
@@ -3972,6 +4122,19 @@ public static class CliApplication
         {
             output["identityMismatch"] = status.IdentityMismatch;
         }
+        if (status.Response is not null)
+        {
+            output["state"] = status.Response.State;
+            output["nextAction"] = status.Response.NextAction;
+            output["protocolVersion"] = status.Response.ProtocolVersion;
+            output["buildIdentity"] = status.Response.BuildIdentity;
+            output["findings"] = status.Response.Findings;
+        }
+
+        if (status.ProcessEvidence is not null)
+        {
+            output["processEvidence"] = status.ProcessEvidence;
+        }
     }
 
     private static string OutcomeName(DevBridgeOutcomeKind outcome)
@@ -3988,6 +4151,14 @@ public static class CliApplication
             _ => "success"
         };
     }
+
+    private static bool IsFailureLifecycleEvent(AgentEvent eventRecord) =>
+        eventRecord.Type is AgentEventTypes.ToolFailed or AgentEventTypes.ToolException or
+            AgentEventTypes.CommandFailed or AgentEventTypes.CommandTimeout or
+            AgentEventTypes.BuildFailed or AgentEventTypes.TestFailed or
+            AgentEventTypes.AgentFailed or AgentEventTypes.IntegrationFailed ||
+        AgentObservabilityData.GetString(eventRecord.Data, "outcome") is
+            "failure" or "timeout" or "cancelled";
 
     private static bool NeedsWorkflowCorrelation(CliRequest request) =>
         request.Command is CliCommand.RecipeRun or
@@ -4007,17 +4178,50 @@ public static class CliApplication
     private static ObservabilityEntityIdentity ResolveObservabilityEntity(
         CliRequest request)
     {
-        _ = request;
-        return ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison");
-    }
-    private static (string ModId, string ModName) ResolveObservabilityMod(
-        CliRequest request)
-    {
-        ObservabilityProjectIdentity identity =
+        // Resolve the subject before any nested executor starts. Nested
+        // RimContext, RimTest, and DevBridge2 events inherit this session.
+        string? explicitRoot = request.Command == CliCommand.RimDev
+            ? request.RimDevRootPath
+            : request.RimContextRootPath;
+        StackManifestResolution target = string.IsNullOrWhiteSpace(explicitRoot)
+            ? request.StackManifest
+            : StackManifestResolver.Discover(explicitRoot);
+        string root = target.RepositoryRoot;
+
+        if (ObservabilityProjectIdentityResolver.IsRimLiaisonRepository(root))
+        {
+            return ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison");
+        }
+
+        bool hasProjectTarget = target.Manifest is not null ||
+            File.Exists(Path.Combine(root, "About", "About.xml"));
+        if (!hasProjectTarget)
+        {
+            return ObservabilityEntityIdentity.ForTool("rimliaison", "RimLiaison");
+        }
+
+        ObservabilityProjectIdentity project =
             ObservabilityProjectIdentityResolver.Resolve(
-                request.StackManifest.RepositoryRoot,
-                request.StackManifest.Manifest?.Project);
-        return (identity.ModId, identity.ModName);
+                root,
+                target.Manifest?.Project);
+        return ObservabilityEntityIdentityResolver.ForMod(project);
+    }
+
+    private static (string ModId, string ModName) ResolveObservabilityMod(
+        ObservabilityEntityIdentity identity) =>
+        (LegacyModId(identity), identity.DisplayName);
+
+    private static string LegacyModId(ObservabilityEntityIdentity identity)
+    {
+        if (identity.EntityType != ObservabilityEntityTypes.Mod)
+        {
+            return "RimLiaison";
+        }
+
+        const string prefix = "mod:";
+        return identity.CanonicalEntityId.StartsWith(prefix, StringComparison.Ordinal)
+            ? identity.CanonicalEntityId[prefix.Length..]
+            : identity.CanonicalEntityId;
     }
 
     private static string? TryReadModDisplayName(string repositoryRoot)

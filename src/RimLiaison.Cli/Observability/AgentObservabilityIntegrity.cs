@@ -47,6 +47,7 @@ public static class AgentObservabilityIntegrityValidator
 
         ValidateAgents(agents, events, now, threshold, findings);
         ValidateEvents(agentsBySession, events, findings);
+        ValidateSuspiciousToolSubjects(agentsBySession, events, findings);
         ValidateIssues(agentsBySession, events, issues, findings);
         ValidateNavigation(store, findings);
         return new AgentObservabilityIntegrityReport(findings);
@@ -206,6 +207,51 @@ public static class AgentObservabilityIntegrityValidator
         }
     }
 
+    private static void ValidateSuspiciousToolSubjects(
+        IReadOnlyDictionary<AgentObservabilityAgentIdentity, AgentSnapshot> agents,
+        IReadOnlyList<AgentEvent> events,
+        ICollection<AgentObservabilityIntegrityFinding> findings)
+    {
+        foreach (AgentEvent eventRecord in events)
+        {
+            AgentObservabilityAgentIdentity key =
+                new(eventRecord.RunId, eventRecord.AgentId);
+            if (!agents.TryGetValue(key, out AgentSnapshot? owner) ||
+                owner.EntityType != ObservabilityEntityTypes.Tool ||
+                !string.Equals(
+                    owner.CanonicalEntityId,
+                    "tool:rimliaison",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string[] projectTargets =
+                new[]
+                {
+                    AgentObservabilityData.GetString(eventRecord.Data, "project"),
+                    AgentObservabilityData.GetString(eventRecord.Data, "repository")
+                }
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => value!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (projectTargets.Any(static value =>
+                    !string.Equals(value, "rimliaison", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(value, "tool:rimliaison", StringComparison.OrdinalIgnoreCase)))
+            {
+                Add(
+                    findings,
+                    "subject.tool-inversion.suspected",
+                    "RimLiaison tool activity contains a project target but has no project subject.",
+                    owner,
+                    eventRecord,
+                    canonicalEntityId: owner.CanonicalEntityId);
+            }
+        }
+    }
+
+
     private static void ValidateIssues(
         IReadOnlyDictionary<AgentObservabilityAgentIdentity, AgentSnapshot> agents,
         IReadOnlyList<AgentEvent> events,
@@ -238,14 +284,22 @@ public static class AgentObservabilityIntegrityValidator
                         issue.DisplayName,
                         owner.WorkloadKind,
                         owner.QualificationProfile);
-                if (!string.Equals(
+                bool subjectAttributed =
+                    !string.IsNullOrWhiteSpace(issue.AffectedProject) ||
+                    !string.IsNullOrWhiteSpace(issue.ReportingModId) &&
+                        !string.Equals(
+                            issue.ReportingModId,
+                            issue.ModId,
+                            StringComparison.Ordinal);
+                if (!subjectAttributed &&
+                    (!string.Equals(
                         expected.CanonicalEntityId,
                         issue.CanonicalEntityId,
                         StringComparison.OrdinalIgnoreCase) ||
                     !string.Equals(
                         owner.CanonicalEntityId,
                         issue.CanonicalEntityId,
-                        StringComparison.OrdinalIgnoreCase))
+                        StringComparison.OrdinalIgnoreCase)))
                 {
                     Add(
                         findings,

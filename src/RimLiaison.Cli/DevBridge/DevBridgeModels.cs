@@ -120,6 +120,38 @@ public interface IDevBridgeDiagnosticSourceAdapter
         CancellationToken cancellationToken = default);
 }
 
+public sealed record DevBridgeProcessResponse(
+    bool? Success = null,
+    bool? Healthy = null,
+    int? ExitCode = null,
+    string? ErrorCode = null,
+    string? Error = null,
+    string? NextAction = null,
+    string? State = null,
+    string? SchemaVersion = null,
+    string? ProtocolVersion = null,
+    string? BuildIdentity = null,
+    JsonElement? Findings = null)
+{
+    public bool RepresentsFailure(int? processExitCode) =>
+        ErrorCode is not null ||
+        Success == false ||
+        Healthy == false ||
+        ExitCode is > 0 ||
+        processExitCode is > 0;
+}
+
+public sealed record DevBridgeProcessEvidence(
+    string? ResolvedExecutablePath,
+    string? ToolRoot,
+    string? WorkingDirectory,
+    string? OperationKey,
+    string? StdoutEvidenceId,
+    string? StderrEvidenceId,
+    string? ProcessEventId,
+    long DurationMilliseconds,
+    bool StdoutTruncated = false,
+    bool StderrTruncated = false);
 public sealed record DevBridgeAdapterStatus(
     DevBridgeOutcomeKind Outcome,
     string? ErrorCode = null,
@@ -130,7 +162,9 @@ public sealed record DevBridgeAdapterStatus(
     PrerequisiteRecoveryState RecoveryState = PrerequisiteRecoveryState.Ready,
     int RecoveryAttempts = 0,
     string? RecoveryAction = null,
-    DevBridgeIdentityMismatch? IdentityMismatch = null)
+    DevBridgeIdentityMismatch? IdentityMismatch = null,
+    DevBridgeProcessResponse? Response = null,
+    DevBridgeProcessEvidence? ProcessEvidence = null)
 {
     public bool IsSuccess => Outcome == DevBridgeOutcomeKind.Success;
 }
@@ -153,7 +187,9 @@ public sealed record DevBridgeProcessResult(
     bool Cancelled = false,
     bool StdoutTruncated = false,
     bool StderrTruncated = false,
-    string? StartError = null);
+    string? StartError = null,
+    DevBridgeProcessResponse? Response = null,
+    DevBridgeProcessEvidence? Evidence = null);
 
 public interface IDevBridgeProcessTransport
 {

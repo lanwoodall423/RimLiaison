@@ -39,8 +39,8 @@ logical-agent identity aggregates sessions and runs for lifecycle purposes;
 legacy records without a supplied logical identity remain separate rather than
 being guessed together. It reports unresolved owners, disconnected aliases,
 missing activity evidence, duplicate Working snapshots, broken issue/event
-references, and unresolvable top-level navigation instead of repairing them
-silently.
+references, unresolvable top-level navigation, and suspicious tool-subject
+inversions instead of repairing them silently.
 
 Diagnostic exports use the `rimliaison-agent-diagnostic-bundle/v2` contract.
 `selectedIssueIds` and `selectedIssues` preserve the exact checkbox selection;
@@ -141,6 +141,34 @@ The CLI carries an upstream worker identity from
 `RIMLIAISON_WORKER_ID`) into each new session. Separate concurrent workers
 retain different session identities beneath the same tooling workspace.
 
+## CLI subject attribution
+
+The CLI resolves one subject identity before creating the observability session.
+The executor remains `RimLiaison` in command/tool metadata and component ownership;
+it is not used as the subject when a project target is present.
+
+Available target inputs are command-scoped:
+
+- ordinary commands use the canonical stack manifest discovered from the current
+  directory, or the explicit `--rimcontext-root`/`--root` path where that command
+  supports one;
+- a valid stack manifest supplies the explicit project identity and repository root;
+- a mod root supplies `About/About.xml` package ID and display name;
+- repository origin is the stable fallback when package metadata is absent;
+- `devBridgeProject` is runtime/tool configuration, not a subject inference by itself.
+
+Resolution first validates the supplied or current project root through stack discovery.
+Within that root, `About.xml` package ID is authoritative; the manifest project is the
+explicit project fallback, followed by repository identity. A root must have a valid
+project manifest or mod metadata before it can become a `mod` subject. The RimLiaison
+repository is recognized by its repository identity or source layout and remains
+`tool:rimliaison`. Unscoped administration and diagnostics therefore remain tool-scoped.
+The resulting `entityType` and `canonicalEntityId` are created once at the CLI boundary;
+legacy `ModId` values remain compatibility data and never override them. Startup can
+reassociate a legacy RimLiaison-tool record only when its structured project/repository
+evidence matches an already-known canonical mod; otherwise historical activity is
+preserved unchanged.
+
 ## Desktop surface
 
 `RimLiaison.Desktop` is the graphical consumer of the store. It is a native
@@ -158,11 +186,7 @@ but those values are never navigation/workspace identities.
   toolchain state (`promoted` or `experimental`), current stage/operation,
   blocking state, elapsed time, latest event, and completion outcome, while
   retaining the chronological activity stream below.
-- `Issues` shows unresolved and recovered structured issues, supports multiple
-  selection, opens supporting activity, and prepares/copies/exports assessment
-  bundles. Categories are rendered as mod defects, required-validation blockers,
-  tooling/infrastructure incidents, recovered incidents, or optional validation
-  gaps.
+- `Issues` shows unresolved and recovered structured issues, supports bounded checkbox selection, opens supporting activity, and exposes `Copy to ChatGPT` plus full-bundle actions. Standard human triage is: select/check the current issue(s), click `Copy to ChatGPT`, paste the clipboard contents into ChatGPT. No export or LLM/browser step is required. Categories are rendered as mod defects, required-validation blockers, tooling/infrastructure incidents, recovered incidents, or optional validation gaps.
 - `Recommendations` is a separate non-blocking surface for tooling and validation
   improvements. It shows owner, originating identity, recommendation text,
   evidence, status, and whether production was affected; recommendations never
@@ -191,9 +215,21 @@ The store subscription is coalesced through a bounded WinForms refresh timer,
 so new authoritative runtime events update the window without forcing the
 user's scroll position. The timer also polls the shared store as a bounded
 fallback if a host does not deliver file-watcher notifications. Issue
-navigation uses stable event IDs; no view switch, filter, or bundle preparation
+navigation uses stable event IDs; no view switch, filter, ChatGPT handoff, or bundle preparation
 invokes an LLM. OpenTelemetry remains optional instrumentation for correlation
 and export only.
+
+The ChatGPT handoff is compact, bounded to 8,000 characters, redacted, and causal:
+it labels primary/root failure, propagation, and top-level workflow separately, then
+includes the selected issue identity, date/state/blocking fields, operation/stage,
+owner/reason, process paths, exit/timeout/cancel state, bounded stdout/stderr/
+diagnostic output, repository and tool versions, evidence references, retries,
+recovery, shared-impact counts, and explicit complete/incomplete evidence status.
+Multiple checked issues are included in one handoff, with a maximum of eight.
+Missing evidence is reported rather than inferred; legacy/session-scoped identities
+cannot produce a trustworthy durable-agent impact count. Clipboard failure leaves
+selection state unchanged. Full diagnostic JSON remains the fallback when the
+compact handoff is insufficient.
 
 Events, issues, and agent snapshots use bounded append-only JSONL files with
 compaction. Output excerpts, summaries, commands, and arbitrary event data are

@@ -59,6 +59,39 @@ public sealed class RimTestSuiteResult
     [JsonPropertyName("failed")]
     public int Failed { get; init; }
 
+    [JsonPropertyName("selectedTests")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? SelectedTests { get; init; }
+
+    [JsonPropertyName("executedTests")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ExecutedTests { get; init; }
+
+    [JsonPropertyName("blockedTests")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RimTestSuiteBlockedTest>? BlockedTests { get; init; }
+
+    [JsonPropertyName("selectedTestCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SelectedTestCount { get; init; }
+
+    [JsonPropertyName("executedTestCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ExecutedTestCount { get; init; }
+
+    [JsonPropertyName("blockedTestCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? BlockedTestCount { get; init; }
+
+    [JsonPropertyName("failedTestCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FailedTestCount { get; init; }
+
+    [JsonPropertyName("infrastructureFailureCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? InfrastructureFailureCount { get; init; }
+
+
     [JsonPropertyName("blocked")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Blocked { get; init; }
@@ -108,6 +141,28 @@ public sealed class RimTestSuiteResult
     public string? NextAction { get; init; }
 }
 
+public sealed class RimTestSuiteBlockedTest
+{
+    [JsonPropertyName("test")]
+    public required string Test { get; init; }
+
+    [JsonPropertyName("errorCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ErrorCode { get; init; }
+
+    [JsonPropertyName("blockedBy")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BlockedBy { get; init; }
+
+    [JsonPropertyName("prerequisite")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Prerequisite { get; init; }
+
+    [JsonPropertyName("causalFailureId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalFailureId { get; init; }
+}
+
 public sealed class RimTestSuiteFailure
 {
     [JsonPropertyName("test")]
@@ -133,7 +188,6 @@ public sealed class RimTestSuiteFailure
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ErrorCode { get; init; }
 }
-
 public static class RimTestSuiteResultFactory
 {
     public static RimTestSuiteResult FromSelectionFailure(
@@ -193,17 +247,49 @@ public static class RimTestSuiteResultFactory
         RimTestArtifactFreshness? artifactFreshness = null,
         DevBridgeAdapterStatus? freshnessStatus = null,
         bool freshnessRequested = false,
-        global::RimContext.Core.Impact.ValidationPlan? validationPlan = null)
+        global::RimContext.Core.Impact.ValidationPlan? validationPlan = null,
+        IReadOnlyList<string>? selectedTestIds = null)
     {
         ArgumentNullException.ThrowIfNull(execution);
         RimTestResult[] children = execution.Tests.ToArray();
         bool emptyExecution = children.Length == 0;
-        int passed = children.Count(static child => child.Status == "pass");
-        int blocked = children.Count(static child => child.Status == "blocked");
+        int passed = children.Count(static child =>
+            child.Status == RimTestValidationStates.Pass);
+        int blocked = children.Count(static child =>
+            child.Status == RimTestValidationStates.Blocked);
         int unavailable = children.Count(static child =>
-            child.Status is "not_available" or "not_executed");
+            child.Status is RimTestValidationStates.NotAvailable or "not_executed");
         int failed = children.Count(static child =>
-            child.Status is "fail" or "infrastructure" or "invalid");
+            child.Status == RimTestValidationStates.Fail);
+        int infrastructureFailures = children.Count(static child =>
+            child.Status is RimTestValidationStates.Infrastructure or "invalid");
+        string[] selected = (selectedTestIds ?? children
+                .Select(static child => child.Test)
+                .ToArray())
+            .Where(static test => !string.IsNullOrWhiteSpace(test))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        string[] executed = children
+            .Where(static child =>
+                child.Status is RimTestValidationStates.Pass or RimTestValidationStates.Fail)
+            .Select(static child => child.Test)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        RimTestSuiteBlockedTest[] blockedTests = children
+            .Where(static child => child.Status == RimTestValidationStates.Blocked)
+            .OrderBy(static child => child.Test, StringComparer.Ordinal)
+            .Select(static child => new RimTestSuiteBlockedTest
+            {
+                Test = child.Test,
+                ErrorCode = child.ErrorCode,
+                BlockedBy = child.BlockedBy,
+                Prerequisite = child.Prerequisite,
+                CausalFailureId = child.CausalFailureId
+            })
+            .ToArray();
+        bool prerequisiteBlocked = children.Any(static child =>
+            child.ValidationOutcome == "PREREQUISITE_BLOCKED");
+        bool includeAccounting = blocked > 0 || infrastructureFailures > 0;
         int cancelledChildren = children.Count(static child => child.Status == "cancelled");
         int cancelled = cancelledChildren > 0
             ? cancelledChildren
@@ -216,25 +302,30 @@ public static class RimTestSuiteResultFactory
             ? "cancelled"
             : emptyExecution
                 ? "conservative"
-                : children.Any(static child => child.Status is "infrastructure" or "invalid")
+                : children.Any(static child =>
+                    child.Status is RimTestValidationStates.Infrastructure or "invalid")
                     ? "infrastructure"
                     : failed > 0
                         ? "fail"
-                        : blocked > 0
-                            ? "blocked"
-                            : failFastIncomplete
-                                ? "conservative"
-                                : execution.Reuse?.Status == "invalidated"
-                                    ? "infrastructure"
-                                    : "pass";
+                        : prerequisiteBlocked
+                            ? "infrastructure"
+                            : blocked > 0
+                                ? "blocked"
+                                : failFastIncomplete
+                                    ? "conservative"
+                                    : execution.Reuse?.Status == "invalidated"
+                                        ? "infrastructure"
+                                        : "pass";
 
         RimTestSuiteFailure[] failures = children
-            .Where(static child => child.Status is "fail" or "infrastructure" or "invalid" or "blocked")
+            .Where(static child =>
+                child.Status is RimTestValidationStates.Fail or
+                    RimTestValidationStates.Infrastructure or "invalid")
             .OrderBy(static child => child.Test, StringComparer.Ordinal)
             .Select(static child => new RimTestSuiteFailure
             {
                 Test = child.Test,
-                Status = child.Status == "fail" ? null : child.Status,
+                Status = child.Status == RimTestValidationStates.Fail ? null : child.Status,
                 DiagnosticId = child.Diagnostic?.Id,
                 FailureFingerprint = child.FailureFingerprint,
                 EvidenceId = child.EvidenceId,
@@ -276,6 +367,14 @@ public static class RimTestSuiteResultFactory
                 .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value)),
             Passed = passed,
             Failed = failed,
+            SelectedTests = includeAccounting ? selected : null,
+            ExecutedTests = includeAccounting ? executed : null,
+            BlockedTests = blockedTests.Length == 0 ? null : blockedTests,
+            SelectedTestCount = includeAccounting ? selected.Length : null,
+            ExecutedTestCount = includeAccounting ? executed.Length : null,
+            BlockedTestCount = includeAccounting ? blockedTests.Length : null,
+            FailedTestCount = includeAccounting ? failed : null,
+            InfrastructureFailureCount = includeAccounting ? infrastructureFailures : null,
             Blocked = blocked > 0 ? blocked : null,
             Unavailable = unavailable > 0 ? unavailable : null,
             Validation = validation,

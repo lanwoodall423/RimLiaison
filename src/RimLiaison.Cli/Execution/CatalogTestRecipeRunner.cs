@@ -193,10 +193,25 @@ public sealed class CatalogTestRecipeRunner : ICatalogTestRecipeRunner
                 ["operationKey"] = "test:" + test.Id,
                 ["testId"] = test.Id,
                 ["recipe"] = test.Recipe,
+                ["toolName"] = "DevBridge",
                 ["generation"] = result.Generation,
                 ["exitCode"] = result.Status.ProcessExitCode,
                 ["errorCode"] = result.Status.ErrorCode,
-                ["operationCount"] = result.Operations.Count
+                ["operationCount"] = result.Operations.Count,
+                ["underlyingErrorCode"] = result.Status.Response?.ErrorCode,
+                ["underlyingError"] = result.Status.Response?.Error,
+                ["nextAction"] = result.Status.Response?.NextAction,
+                ["state"] = result.Status.Response?.State,
+                ["responseSchema"] = result.Status.Response?.SchemaVersion,
+                ["protocolVersion"] = result.Status.Response?.ProtocolVersion,
+                ["processEvidence"] = result.Status.ProcessEvidence,
+                ["stdoutEvidenceId"] = result.Status.ProcessEvidence?.StdoutEvidenceId,
+                ["stderrEvidenceId"] = result.Status.ProcessEvidence?.StderrEvidenceId,
+                ["stdoutTruncated"] = result.Status.ProcessEvidence?.StdoutTruncated,
+                ["stderrTruncated"] = result.Status.ProcessEvidence?.StderrTruncated,
+                ["componentOwner"] = result.Status.Response is not null
+                    ? "DevBridge2"
+                    : null
             };
             if (result.Status.Outcome == DevBridgeOutcomeKind.Success)
             {

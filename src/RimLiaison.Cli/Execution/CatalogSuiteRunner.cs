@@ -181,10 +181,35 @@ public sealed class CatalogSuiteRunner
                 if (plan.Status.Outcome != DevBridgeOutcomeKind.Success ||
                     plan.Plan is null)
                 {
-                    results.Add(RimTestResultFactory.Infrastructure(
-                        testId,
-                        plan.Status.ErrorCode ?? "DEVBRIDGE_PLAN_FAILED"));
+                    string errorCode = plan.Status.ErrorCode ?? "DEVBRIDGE_PLAN_FAILED";
+                    results.Add(IsSharedPrerequisiteFailure(errorCode)
+                        ? RimTestResultFactory.PrerequisiteBlocked(
+                            testId,
+                            errorCode,
+                            workflowId,
+                            "DevBridge2 recipe/build prerequisite")
+                        : RimTestResultFactory.Infrastructure(
+                            testId,
+                            errorCode));
                 }
+            }
+
+            RimTestResult? sharedPrerequisite = results.FirstOrDefault(
+                static result => result.Status == RimTestValidationStates.Blocked &&
+                    IsSharedPrerequisiteFailure(result.ErrorCode));
+            if (sharedPrerequisite is not null)
+            {
+                string errorCode = sharedPrerequisite.ErrorCode ?? "DEVBRIDGE_PLAN_FAILED";
+                string causalFailureId = $"shared-prerequisite:{errorCode}";
+                results = executionTestIds
+                    .Select(testId => RimTestResultFactory.PrerequisiteBlocked(
+                        testId,
+                        errorCode,
+                        workflowId,
+                        sharedPrerequisite.Prerequisite ?? "DevBridge2 recipe/build prerequisite",
+                        causalFailureId,
+                        sharedPrerequisite.ComponentOwner))
+                    .ToList();
             }
 
             if (results.Count > 0)
@@ -737,6 +762,25 @@ public sealed class CatalogSuiteRunner
             DevBridgeOutcomeKind.MalformedResponse
             ? PrerequisiteRecoveryState.Unavailable
             : PrerequisiteRecoveryState.RecoveryFailed;
+    }
+
+    private static bool IsSharedPrerequisiteFailure(string? errorCode)
+    {
+        if (string.IsNullOrWhiteSpace(errorCode))
+        {
+            return false;
+        }
+
+        string code = errorCode.Trim();
+        return code.StartsWith("DEVBRIDGE_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("DEVELOPMENT_BUILD_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("DEPLOYMENT_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("READINESS_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("LEASE_", StringComparison.OrdinalIgnoreCase) ||
+            code.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase) ||
+            code.Contains("PREREQUISITE", StringComparison.OrdinalIgnoreCase);
     }
 
     private static RimTestPrerequisiteRecovery RecoveryEvent(

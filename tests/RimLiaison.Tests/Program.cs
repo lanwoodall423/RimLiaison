@@ -69,6 +69,8 @@ internal static class Program
         ("environment fallback leaves list usable", EnvironmentFallbackLeavesListUsable),
         ("environment fallback leaves run usable", EnvironmentFallbackLeavesRunUsable),
         ("environment fallback leaves doctor usable", EnvironmentFallbackLeavesDoctorUsable),
+        ("doctor preserves structured DevBridge failure", DoctorPreservesStructuredDevBridgeFailure),
+        ("DevBridge process evidence is retained", DevBridgeProcessEvidenceIsRetained),
         ("explicit fallback is rejected on unrelated command", ExplicitFallbackIsRejectedOnUnrelatedCommand),
         ("show exposes metadata", ShowExposesMetadata),
         ("missing run uses not-found contract", MissingRunUsesNotFoundContract),
@@ -151,6 +153,7 @@ internal static class Program
         ("suite duplicate tests execute once", SuiteDuplicateTestsExecuteOnce),
         ("suite plan refusal blocks execution", SuitePlanRefusalBlocksExecution),
         ("suite child infrastructure failure is summarized", SuiteChildInfrastructureFailureIsSummarized),
+        ("shared build prerequisite blocks every selected test", SharedBuildPrerequisiteBlocksEverySelectedTest),
         ("unannotated recipes use the safe path", UnannotatedRecipesUseSafePath),
         ("unsafe recipes never share state", UnsafeRecipesNeverShareState),
         ("mutation recipes never share state", MutationRecipesNeverShareState),
@@ -180,6 +183,7 @@ internal static class Program
         ("capabilities reject malformed response", CapabilitiesRejectMalformedResponse),
         ("capabilities reject incompatible response", CapabilitiesRejectIncompatibleResponse),
         ("capability discovery does not mutate lifecycle", CapabilityDiscoveryDoesNotMutateLifecycle),
+        ("capability discovery forwards its lease", CapabilityDiscoveryForwardsLease),
         ("validation capability present", ValidationCapabilityPresent),
         ("validation capability absent blocks execution", ValidationCapabilityAbsentBlocksExecution),
         ("validation capability provider mismatch blocks", ValidationCapabilityProviderMismatchBlocks),
@@ -255,8 +259,9 @@ internal static class Program
         ("artifact mutation without build provenance is rejected", ArtifactMutationWithoutBuildProvenanceIsRejected),
         ("artifact mutation with unexpected bytes is rejected", ArtifactMutationWithUnexpectedBytesIsRejected),
         ("multiple build-owned artifact mutations are classified per output", MultipleBuildOwnedArtifactMutationsAreClassifiedPerOutput),
-        ("affected build failure blocks pass", AffectedBuildFailureBlocksPass),
+        ("affected build prerequisite blocks all selected tests", AffectedBuildPrerequisiteBlocksAllSelectedTests),
         ("affected deployment failure blocks pass", AffectedDeploymentFailureBlocksPass),
+        ("affected structured DevBridge failure preserves causal chain", AffectedStructuredDevBridgeFailurePreservesCausalChain),
         ("affected readiness failure blocks pass", AffectedReadinessFailureBlocksPass),
         ("affected run recovers readiness once", AffectedRunRecoversReadinessOnce),
         ("identity generation mismatch recovers", IdentityGenerationMismatchRecovers),
@@ -313,7 +318,13 @@ internal static class Program
         ("observability OTel disabled still stores product state", ObservabilityTests.OTelDisabledStillStoresProductState),
         ("observability telemetry failure cannot break execution", ObservabilityTests.TelemetryFailureCannotBreakExecution),
         ("observability runtime operations need no model calls", ObservabilityTests.RuntimeOperationsDoNotNeedModelCalls),
+        ("observability one failed invocation is not a retry", ObservabilityTests.SingleFailedInvocationDoesNotCreateRetryIncident),
         ("observability CLI wires the authoritative store", ObservabilityTests.CliWiresTheAuthoritativeStore),
+        ("observability CLI resolves Frontier as the subject", ObservabilityTests.CliProjectTargetUsesCanonicalIdentity),
+        ("observability CLI separates project targets", ObservabilityTests.CliProjectTargetsRemainDistinct),
+        ("observability nested tooling preserves the primary subject", ObservabilityTests.NestedToolingPreservesThePrimarySubject),
+        ("observability structured legacy target migration is idempotent", ObservabilityHydrationTests.LegacyToolTargetWithStructuredProjectEvidenceIsReassociated),
+        ("observability package aliases share canonical identity", ObservabilityTests.PackageAliasesShareOneCanonicalModIdentity),
         ("observability recent hydration is bounded and deferred", ObservabilityHydrationTests.RecentHydrationIsBoundedAndDeferred),
         ("observability malformed state is degraded but usable", ObservabilityHydrationTests.MalformedAndTruncatedRecordsAreDegradedButUsable),
         ("observability legacy identity migration is durable and idempotent", ObservabilityHydrationTests.LegacyIdentityMigrationIsDurableAndIdempotent),
@@ -337,6 +348,8 @@ internal static class Program
         ("observability desktop retains concurrent runs", ObservabilityIsolationTests.UnscopedUiRetainsConcurrentRuns),
         ("prompt 2 integrity validator accepts coherent state", ObservabilityIsolationTests.IntegrityValidatorAcceptsCoherentStore),
         ("prompt 2 integrity validator reports unresolved activity", ObservabilityIsolationTests.IntegrityValidatorReportsUnresolvedActivity),
+        ("prompt 2 integrity validator detects subject inversion", ObservabilityIsolationTests.IntegrityValidatorDetectsToolSubjectInversion),
+        ("prompt 2 concurrent project subjects retain tool ownership", ObservabilityIsolationTests.ConcurrentProjectSubjectsRetainToolOwnership),
         ("prompt 2 multi-mod attribution remains canonical", ObservabilityIsolationTests.MultiModLogicalAgentRetainsAttribution),
         ("prompt 2 concurrent canonical registration remains unique", ObservabilityIsolationTests.ConcurrentCanonicalRegistrationDoesNotDuplicate),
         ("prompt 2 lifecycle reconnect remains one canonical agent", ObservabilityIsolationTests.LifecycleReconnectKeepsOneCanonicalAgent),
@@ -417,6 +430,7 @@ internal static class Program
         ("prompt 4 malformed agent route is diagnostic", DesktopObservabilityTests.MalformedAgentRouteShowsDiagnosticState),
         ("prompt 4 agent selection reloads by canonical identity", DesktopObservabilityTests.AgentSelectionSurvivesStoreReloadByCanonicalIdentity),
         ("prompt 4 desktop Frontier click renders agent detail", DesktopObservabilityTests.DesktopFrontierClickShowsAgentDetailPanel),
+        ("prompt 5 desktop content host mounts every primary view", DesktopObservabilityTests.DesktopContentHostMountsEveryPrimaryView),
         ("prompt 2 tooling detail with data uses canonical identity", DesktopObservabilityTests.ToolDetailWithDataUsesCanonicalToolIdentity),
         ("prompt 2 tooling detail without data has empty state", DesktopObservabilityTests.ToolDetailWithoutDataShowsExplicitEmptyState),
         ("prompt 2 duplicate names across namespaces stay separate", DesktopObservabilityTests.DuplicateDisplayNamesAcrossEntityTypesStaySeparate),
@@ -426,8 +440,17 @@ internal static class Program
         ("observability persisted Working state reconciles on restart", DesktopObservabilityTests.PersistedWorkingStateIsReconciledOnRestart),
         ("prompt 2 Issues projection is indexed, cached, and lazy", DesktopObservabilityTests.IssuesProjectionIsIndexedCachedAndLazy),
         ("prompt 2 triage classifies owners conservatively", DesktopObservabilityTests.IssueTriageClassifiesOwnersConservatively),
+        ("prompt 1 generic wrappers do not claim shared impact", DesktopObservabilityTests.GenericWrapperCodesDoNotCreateSharedToolingCounts),
         ("prompt 2 shared tooling hints avoid unrelated failures", DesktopObservabilityTests.SharedToolingHintsAvoidUnrelatedFailures),
         ("prompt 2 ChatGPT packet is bounded and explicit", DesktopObservabilityTests.ChatPacketContainsBoundedTriageAndMissingEvidence),
+        ("prompt 2 ChatGPT action supports checked issues", DesktopObservabilityTests.ChatGPTActionSupportsCheckedIssuesAndPreservesCausalEvidence),
+        ("failure handling attributes project compiler errors", FailureHandlingTests.ProjectCompilerFailureIsOwnedByProject),
+        ("failure handling attributes injected build errors", FailureHandlingTests.DevBridgeInjectedFailureIsOwnedByDevBridge),
+        ("failure handling keeps missing build cause unproven", FailureHandlingTests.MissingBuildCauseRemainsUnproven),
+        ("failure handling preserves causal handoff and raw evidence", FailureHandlingTests.CausalDiagnosticSurvivesBoundedHandoffAndRawEvidenceRetrieval),
+        ("failure handling rejects truncated causal evidence", FailureHandlingTests.TruncatedCauseCannotBeComplete),
+        ("failure handling repairs missing manifest before doctor", FailureHandlingTests.MissingManifestIsSafelyRepairedAndDoctorRetries),
+        ("failure handling refuses unsafe manifest repair", FailureHandlingTests.UnsafeManifestRepairDoesNotMutateState),
         ("desktop preserves existing CLI UI", DesktopObservabilityTests.ExistingCliUiRemainsAvailable),
         ("efficiency profiler aggregates compact schema", ProfilerTests.AggregatesCompactSchema),
         ("efficiency profiler groups repeated operations", ProfilerTests.GroupsRepeatedOperations),
@@ -3547,7 +3570,7 @@ internal static class Program
             .GetResult();
 
         AssertEqual(DevBridgeOutcomeKind.MalformedResponse, result.Status.Outcome);
-        AssertEqual("DEVBRIDGE_MALFORMED_JSON", result.Status.ErrorCode);
+        AssertEqual("DEVBRIDGE_RESPONSE_INVALID", result.Status.ErrorCode);
     }
 
     private static void IncompatibleSchemaIsClassified()
@@ -4472,7 +4495,8 @@ internal static class Program
 
         AssertEqual("infrastructure", result.Status);
         AssertEqual(1, result.Passed);
-        AssertEqual(1, result.Failed);
+        AssertEqual(0, result.Failed);
+        AssertEqual(1, result.InfrastructureFailureCount);
         AssertEqual("infrastructure", result.Failures![0].Status);
         AssertEqual("DEVBRIDGE_CLIENT_TIMEOUT", result.Failures[0].ErrorCode);
         AssertSequence(["assembler-fixture", "settings-fixture"], adapter.RunCalls);
@@ -4504,12 +4528,53 @@ internal static class Program
             .GetAwaiter()
             .GetResult();
         RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(execution, 100);
-
         AssertEqual("infrastructure", result.Status);
-        AssertEqual(1, result.Failed);
+        AssertEqual(0, result.Failed);
+        AssertEqual(1, result.InfrastructureFailureCount);
         AssertEqual(1, result.Skipped);
         AssertEqual(0, adapter.RunCalls.Count);
         AssertEqual("TEST_RECIPE_NOT_FOUND", result.Failures![0].ErrorCode);
+    }
+
+    private static void SharedBuildPrerequisiteBlocksEverySelectedTest()
+    {
+        var adapter = new FakeRecipeAdapter();
+        adapter.Plans["assembler-fixture"] = new DevBridgeRecipePlanResult(
+            "assembler-fixture",
+            new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                "DEVELOPMENT_BUILD_FAILED"),
+            null);
+        var runner = new CatalogSuiteRunner(
+            adapter,
+            new CatalogTestExecutionService(adapter));
+
+        CatalogSuiteExecutionResult execution = runner.RunAsync(
+                CreateCatalog(),
+                "smoke",
+                ["assembler-smoke", "settings-smoke"])
+            .GetAwaiter()
+            .GetResult();
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
+            execution,
+            100,
+            selectedTestIds: ["assembler-smoke", "settings-smoke"]);
+
+        AssertEqual(2, result.SelectedTestCount);
+        AssertEqual(0, result.ExecutedTestCount);
+        AssertEqual(2, result.BlockedTestCount);
+        AssertEqual(0, result.FailedTestCount);
+        AssertEqual(0, result.Failed);
+        AssertEqual("infrastructure", result.Status);
+        Assert(result.Failures is null,
+            "A shared prerequisite must not create per-test failure records.");
+        AssertSequence(["assembler-smoke", "settings-smoke"], result.SelectedTests!);
+        AssertSequence(["assembler-smoke", "settings-smoke"],
+            result.BlockedTests!.Select(static blocked => blocked.Test).ToArray());
+        Assert(result.BlockedTests!.All(static blocked =>
+                blocked.CausalFailureId == "shared-prerequisite:DEVELOPMENT_BUILD_FAILED"),
+            "All blocked tests must link to one prerequisite failure.");
+        AssertEqual(0, adapter.RunCalls.Count);
     }
 
     private static void UnannotatedRecipesUseSafePath()
@@ -5889,7 +5954,9 @@ internal static class Program
         AssertEqual("blocked", result.Status);
         AssertEqual(1, result.Blocked);
         AssertEqual(1, result.Passed);
-        AssertEqual("blocked", result.Failures![0].Status);
+        AssertEqual(1, result.BlockedTestCount);
+        Assert(result.Failures is null,
+            "Capability blocking is not a failed test.");
     }
 
     private static void ValidationCapabilityObservabilityDeduplicates()
@@ -6254,6 +6321,25 @@ internal static class Program
         Assert(!request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase),
             "Capability discovery must not begin a lifecycle session.");
     }
+    private static void CapabilityDiscoveryForwardsLease()
+    {
+        const string leaseId = "lease-11111111111111111111111111111111";
+        (CliResult result, FakeTransport transport) = RunCapabilitiesFixture(
+            """
+            {
+              "success": true,
+              "rimBridgeRoute": { "success": true, "result": { "tools": [] } }
+            }
+            """,
+            "--lease",
+            leaseId);
+
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        DevBridgeProcessRequest request = transport.Requests.Single();
+        AssertSequence(
+            ["--root", request.Arguments[1], "bridge", "tools", "--lease", leaseId, "--json"],
+            request.Arguments);
+    }
 
     private static void CapabilityRetryRecoversTransientReadiness()
     {
@@ -6491,8 +6577,10 @@ internal static class Program
 
     private static void UiTargetEnumeration()
     {
-        (CliResult result, FakeTransport transport) = RunUiFixture("targets");
-
+        const string leaseId = "lease-11111111111111111111111111111111";
+        (CliResult result, FakeTransport transport) = RunUiFixture(
+            "targets",
+            options: ["--lease", leaseId]);
         using JsonDocument document = JsonDocument.Parse(result.Stdout);
         JsonElement root = document.RootElement;
         AssertEqual(CliExitCodes.Success, result.ExitCode);
@@ -6511,6 +6599,10 @@ internal static class Program
         Assert(transport.Requests[1].Arguments.Any(argument =>
                 argument.Contains("get_screen_targets", StringComparison.OrdinalIgnoreCase)),
             "Target enumeration must call the registered screen-target capability.");
+        Assert(transport.Requests.All(request =>
+                request.Arguments.Contains("--lease", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains(leaseId, StringComparer.Ordinal)),
+            "UI target discovery must preserve the caller lease for capability discovery and invocation.");
     }
 
     private static void UiTargetObjectSchemaIsSupported()
@@ -6968,6 +7060,112 @@ internal static class Program
         Assert(string.IsNullOrEmpty(result.Stderr),
             "Healthy doctor output should not write diagnostics.");
     }
+    private static void DoctorPreservesStructuredDevBridgeFailure()
+    {
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            structuredFailure: true);
+
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("devbridge", root.GetProperty("component").GetString());
+        AssertEqual("OUTPUT_TOO_LARGE", root.GetProperty("code").GetString());
+        AssertEqual("ERROR", root.GetProperty("state").GetString());
+        AssertEqual(2, root.GetProperty("exitCode").GetInt32());
+        Assert(
+            root.GetProperty("error").GetString()!.Contains(
+                "maximum payload",
+                StringComparison.OrdinalIgnoreCase),
+            "doctor must preserve the lower-level error message");
+        Assert(!result.Stdout.Contains("DEVBRIDGE_RESPONSE_INVALID", StringComparison.Ordinal),
+            "a valid structured failure must not be classified as invalid");
+        Assert(result.Stderr.Contains("devbridge OUTPUT_TOO_LARGE", StringComparison.Ordinal),
+            "doctor diagnostics must identify the originating component and code");
+    }
+
+    private static void DevBridgeProcessEvidenceIsRetained()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string script = Path.Combine(directory, "DevBridge.cmd");
+            File.WriteAllText(
+                script,
+                "@echo off\r\n" +
+                "echo {\"success\":false,\"exitCode\":2,\"state\":\"ERROR\",\"errorCode\":\"OUTPUT_TOO_LARGE\",\"error\":\"The coordinator result exceeded the maximum payload length.\"}\r\n" +
+                "echo stderr evidence 1>&2\r\n" +
+                "exit /b 2\r\n");
+            using var store = new AgentObservabilityStore();
+            using var run = new AgentObservabilityRun(
+                "run-process-evidence",
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession agent = run.CreateAgent(
+                "mod.process-evidence",
+                "Process Evidence");
+            agent.Start();
+            using IDisposable activation = agent.Activate();
+            DevBridgeProcessResult process =
+                new SystemDevBridgeProcessTransport().ExecuteAsync(
+                        new DevBridgeProcessRequest(
+                            Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+                            directory,
+                            ["/d", "/c", script, "--root", directory, "doctor", "--json"],
+                            TimeSpan.FromSeconds(5),
+                            16 * 1024,
+                            16 * 1024,
+                            OperationKey: "devbridge:doctor"),
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+
+            AssertEqual("OUTPUT_TOO_LARGE", process.Response?.ErrorCode);
+            Assert(process.Evidence?.StdoutEvidenceId is not null,
+                "stdout evidence id must be retained");
+            Assert(process.Evidence?.StderrEvidenceId is not null,
+                "stderr evidence id must be retained");
+            AgentIssue issue = store.GetIssues(agentId: agent.AgentId).Single();
+            AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([issue.Id]);
+            AgentDiagnosticCommandEvidence command = bundle.CommandEvidence.Single(
+                value => value.Stdout?.Contains("OUTPUT_TOO_LARGE", StringComparison.Ordinal) == true);
+            Assert(command.Stdout?.Contains("OUTPUT_TOO_LARGE", StringComparison.Ordinal) == true,
+                "diagnostic bundle must retain structured stdout");
+            Assert(command.Stderr?.Contains("stderr evidence", StringComparison.Ordinal) == true,
+                "diagnostic bundle must retain stderr");
+            AssertEqual(2, command.ExitCode);
+            string bundleJson = JsonSerializer.Serialize(
+                bundle,
+                AgentObservabilityJson.Options);
+            Assert(bundleJson.Contains("DevBridge", StringComparison.Ordinal) &&
+                bundleJson.Contains("OUTPUT_TOO_LARGE", StringComparison.Ordinal) &&
+                bundleJson.Contains("\"exitCode\":2", StringComparison.Ordinal),
+                "serialized diagnostic bundle must expose the originating component, code, and exit code");
+            Assert(bundleJson.Contains(directory.Replace("\\", "\\\\", StringComparison.Ordinal), StringComparison.Ordinal),
+                "serialized diagnostic bundle must expose the DevBridge root");
+            Assert(bundleJson.Contains("resolvedExecutablePath", StringComparison.Ordinal) &&
+                bundleJson.Contains("workingDirectory", StringComparison.Ordinal) &&
+                bundleJson.Contains("\"timedOut\":false", StringComparison.Ordinal) &&
+                bundleJson.Contains("\"cancelled\":false", StringComparison.Ordinal),
+                "serialized diagnostic bundle must expose process metadata and terminal state");
+            Assert(!bundle.Completeness.MissingEvidence.Contains("command.output"),
+                "persisted process output must satisfy command.output completeness");
+            AgentEvent processEvent = bundle.SupportingEvents.Single(
+                eventRecord => eventRecord.Type == AgentEventTypes.ToolFailed);
+            Assert(AgentObservabilityData.GetString(
+                    processEvent.Data,
+                    "resolvedExecutablePath") is not null,
+                "process evidence must retain the resolved executable path");
+            AssertEqual(directory, AgentObservabilityData.GetString(
+                processEvent.Data,
+                "resolvedToolRoot"));
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
 
     private static void DoctorPreservesIdentityMismatchDetails()
     {
@@ -7770,6 +7968,59 @@ internal static class Program
         AssertArtifactTransactionFailure(result, "DEVELOPMENT_BUILD_FAILED");
     }
 
+    private static void AffectedBuildPrerequisiteBlocksAllSelectedTests()
+    {
+        CatalogDocument scenarioCatalog = new()
+        {
+            SchemaVersion = CatalogSchema.Current,
+            Tests =
+            [
+                new CatalogTest
+                {
+                    Id = "assembler-smoke",
+                    Recipe = "assembler-fixture",
+                    ArtifactFreshnessAnchor = true,
+                    Covers = [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                },
+                new CatalogTest
+                {
+                    Id = "assembler-companion",
+                    Recipe = "assembler-fixture",
+                    ArtifactFreshnessAnchor = true,
+                    Covers = [new CatalogCoverage { Kind = "def", Name = "CCM_Assembler" }]
+                }
+            ],
+            Suites = []
+        };
+        AffectedScenarioResult result = RunAffectedSourceScenario(
+            (_, workflowId) => FailedDevelopmentResult(
+                workflowId,
+                "RIMWORLD_EXECUTABLE_MISSING") with
+            {
+                Project = "Frontier"
+            },
+            scenarioCatalog: scenarioCatalog);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual(2, root.GetProperty("selectedTestCount").GetInt32());
+        AssertEqual(0, root.GetProperty("executedTestCount").GetInt32());
+        AssertEqual(2, root.GetProperty("blockedTestCount").GetInt32());
+        AssertEqual(0, root.GetProperty("failedTestCount").GetInt32());
+        Assert(!root.TryGetProperty("failures", out _),
+            "A shared source prerequisite must not create test failures.");
+        AssertEqual(
+            "Frontier build blocked: required RimWorld build environment unavailable",
+            root.GetProperty("orchestration").GetProperty("failure")
+                .GetProperty("summary").GetString());
+        AssertEqual("FAIL",
+            root.GetProperty("orchestration").GetProperty("sourceBuild").GetString());
+        AssertEqual("BLOCKED",
+            root.GetProperty("orchestration").GetProperty("runtimeValidation").GetString());
+        AssertEqual(0, result.RecipeCalls.Count);
+    }
+
     private static void AffectedDeploymentFailureBlocksPass()
     {
         AffectedScenarioResult result = RunAffectedSourceScenario(
@@ -8218,8 +8469,9 @@ internal static class Program
         JsonElement freshness = root.GetProperty("artifactFreshness");
         AssertEqual(CliExitCodes.InternalError, result.ExitCode);
         AssertEqual("infrastructure", root.GetProperty("status").GetString());
+        AssertEqual(1, root.GetProperty("blockedTestCount").GetInt32());
         AssertEqual("RIMTEST_ARTIFACT_GENERATION_MISMATCH",
-            root.GetProperty("failures")[0].GetProperty("errorCode").GetString());
+            root.GetProperty("blockedTests")[0].GetProperty("errorCode").GetString());
         AssertEqual("RIMTEST_ARTIFACT_GENERATION_MISMATCH", freshness.GetProperty("errorCode").GetString());
         Assert(!freshness.GetProperty("loadedArtifactFreshnessProven").GetBoolean(),
             "A mismatched generation must invalidate the freshness proof.");
@@ -8671,6 +8923,8 @@ internal static class Program
                 command = "dotnet build Source/Fixture.csproj --configuration Debug",
                 exitCode = 1,
                 output = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found.",
+                causalDiagnostic = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found.",
+                diagnosticSignature = "CS0246",
                 sourceProject = "Source/Fixture.csproj",
                 stagingPath = "staging/Fixture",
                 timedOut = false,
@@ -9319,10 +9573,15 @@ internal static class Program
         AssertEqual(CliExitCodes.InternalError, result.ExitCode);
         AssertEqual("infrastructure", root.GetProperty("status").GetString());
         AssertEqual(0, root.GetProperty("passed").GetInt32());
-        AssertEqual(1, root.GetProperty("failed").GetInt32());
+        AssertEqual(0, root.GetProperty("failed").GetInt32());
         AssertEqual(
-            errorCode,
-            root.GetProperty("failures")[0].GetProperty("errorCode").GetString());
+            root.GetProperty("selectedTestCount").GetInt32(),
+            root.GetProperty("blockedTestCount").GetInt32());
+        AssertEqual(
+            root.GetProperty("selectedTestCount").GetInt32(),
+            root.GetProperty("blockedTests").GetArrayLength());
+        Assert(!root.TryGetProperty("failures", out _),
+            "Blocked prerequisites must not be serialized as test failures.");
         Assert(!root.GetProperty("artifactFreshness")
             .GetProperty("loadedArtifactFreshnessProven")
             .GetBoolean(), "A failed transaction cannot prove freshness.");
@@ -9336,11 +9595,12 @@ internal static class Program
         AssertEqual(
             sourceBuildFailed ? "FAIL" : "NOT_RUN",
             orchestration.GetProperty("sourceBuild").GetString());
-        string expectedDeployment = root.GetProperty("artifactFreshness")
-            .GetProperty("evaluationStatus").GetString() == "FAILED"
-            ? "FAILED"
-            : "NOT_EVALUATED";
-        AssertEqual(expectedDeployment, orchestration.GetProperty("deployment").GetString());
+        AssertEqual(
+            sourceBuildFailed ? "BLOCKED" :
+                root.GetProperty("artifactFreshness").GetProperty("evaluationStatus").GetString() == "FAILED"
+                    ? "FAILED"
+                    : "NOT_EVALUATED",
+            orchestration.GetProperty("deployment").GetString());
         AssertEqual("BLOCKED", orchestration.GetProperty("runtimeValidation").GetString());
         AssertEqual(
             errorCode.StartsWith("RIMTEST_", StringComparison.Ordinal)
@@ -9471,6 +9731,130 @@ internal static class Program
         AssertEqual("fail", root.GetProperty("status").GetString());
         AssertEqual("d-81f72", root.GetProperty("diagnostic").GetProperty("id").GetString());
         AssertEqual("rimerror show d-81f72", root.GetProperty("nextAction").GetString());
+    }
+
+    private static void AffectedStructuredDevBridgeFailurePreservesCausalChain()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            using var observabilityStore = new AgentObservabilityStore();
+            AgentDiagnosticEvidenceReference stdoutEvidence =
+                observabilityStore.PersistEvidence(
+                    "command.stdout",
+                    "{\"success\":false,\"errorCode\":\"OUTPUT_TOO_LARGE\"}")!;
+            AgentDiagnosticEvidenceReference stderrEvidence =
+                observabilityStore.PersistEvidence(
+                    "command.stderr",
+                    "DevBridge coordinator rejected the maximum payload.")!;
+            var response = new DevBridgeProcessResponse(
+                Success: false,
+                Healthy: false,
+                ExitCode: 2,
+                ErrorCode: "OUTPUT_TOO_LARGE",
+                Error: "The coordinator result exceeded the maximum payload length.",
+                NextAction: "DevBridge.cmd doctor --json",
+                State: "ERROR",
+                SchemaVersion: "devbridge/v1");
+            var adapter = new FakeRecipeAdapter();
+            adapter.Runs["assembler-fixture"] = new DevBridgeRecipeRunResult(
+                "assembler-fixture",
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.InfrastructureFailure,
+                    "OUTPUT_TOO_LARGE",
+                    Response: response,
+                    ProcessEvidence: new DevBridgeProcessEvidence(
+                        "C:\\DevBridge\\DevBridge.cmd",
+                        "C:\\DevBridge",
+                        directory,
+                        "devbridge:run",
+                        stdoutEvidence.Id,
+                        stderrEvidence.Id,
+                        null,
+                        17)),
+                false,
+                "run-assembler-fixture",
+                null,
+                null,
+                null,
+                "evidence-assembler-fixture",
+                null,
+                "DevBridge.cmd doctor --json",
+                null,
+                null,
+                [],
+                null);
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
+                new RimContextImpact(
+                    "direct",
+                    "def",
+                    "def-assembler",
+                    "CCM_Assembler",
+                    null,
+                    null,
+                    null,
+                    null)));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = CliApplication.RunAsync(
+                    [
+                        "affected",
+                        "Defs/Assembler.xml",
+                        "--run",
+                        "--json",
+                        "--catalog",
+                        catalogPath
+                    ],
+                    stdout,
+                    stderr,
+                    adapter,
+                    impactAdapter: impactAdapter,
+                    observabilityStore: observabilityStore)
+                .GetAwaiter()
+                .GetResult();
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.InternalError, exitCode);
+            AssertEqual("infrastructure", root.GetProperty("status").GetString());
+            AssertEqual("OUTPUT_TOO_LARGE", root.GetProperty("failures")[0]
+                .GetProperty("errorCode").GetString());
+            AssertEqual("DevBridge2", root.GetProperty("orchestration")
+                .GetProperty("failure").GetProperty("owner").GetString());
+            AssertEqual("OUTPUT_TOO_LARGE", root.GetProperty("orchestration")
+                .GetProperty("failure").GetProperty("errorCode").GetString());
+
+            AgentEvent[] events = observabilityStore.GetEvents().ToArray();
+            AgentEvent causalEvent = events.Last(
+                value => value.Type == AgentEventTypes.TestFailed);
+            AgentIssue issue = observabilityStore.GetIssues()
+                .First(value => value.EventIds.Contains(causalEvent.Id));
+            AgentDiagnosticBundle bundle = observabilityStore.CreateDiagnosticBundle([issue.Id]);
+            Assert(bundle.SupportingEvents.Any(value =>
+                    value.Type == AgentEventTypes.TestFailed &&
+                    AgentObservabilityData.GetString(value.Data, "errorCode") ==
+                        "OUTPUT_TOO_LARGE"),
+                "affected failure must retain the causal test event");
+            Assert(bundle.CommandEvidence.Any(value =>
+                    value.Stdout?.Contains("OUTPUT_TOO_LARGE", StringComparison.Ordinal) == true &&
+                    value.Stderr?.Contains("maximum payload", StringComparison.Ordinal) == true),
+                "affected failure must retain DevBridge process evidence");
+            AgentEvent lifecycleFailure = events.Single(
+                value => value.Type == AgentEventTypes.CommandFailed &&
+                    AgentObservabilityData.GetString(value.Data, "operationKey") ==
+                        "cli:affected");
+            string causeEventId = AgentObservabilityData.GetString(
+                lifecycleFailure.Data,
+                "causeEventId")!;
+            Assert(bundle.SupportingEvents.Any(value => value.Id == causeEventId),
+                "top-level affected failure must link to its causal event");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static void DevBridgeFailureProvidesNextAction()
@@ -9901,7 +10285,8 @@ internal static class Program
         bool contextAvailable,
         bool useExplicitOverrides = false,
         bool usePascalRimBridgeFields = false,
-        bool identityMismatch = false)
+        bool identityMismatch = false,
+        bool structuredFailure = false)
     {
         string directory = CreateTempDirectory();
         try
@@ -9930,9 +10315,11 @@ internal static class Program
                 ? "{\"ConfiguredMode\":\"required\",\"LifecycleState\":\"READY\"}"
                 : "{\"configuredMode\":\"optional\",\"lifecycleState\":\"READY\"}";
             string identityRoot = JsonSerializer.Serialize(directory);
-            string devBridgeResult = identityMismatch
-                ? $"{{\"success\":false,\"healthy\":false,\"errorCode\":\"READINESS_IDENTITY_MISMATCH\",\"field\":\"runtimeGeneration\",\"expected\":\"8\",\"actual\":\"7\",\"classification\":\"runtimeGeneration\",\"recoverable\":true,\"authoritativeRoot\":{identityRoot},\"actualRoot\":{identityRoot},\"rimBridge\":{rimBridge}}}"
-                : $"{{\"success\":true,\"healthy\":true,\"rimBridge\":{rimBridge}}}";
+            string devBridgeResult = structuredFailure
+                ? "{\"success\":false,\"exitCode\":2,\"state\":\"ERROR\",\"errorCode\":\"OUTPUT_TOO_LARGE\",\"error\":\"The coordinator result exceeded the maximum payload length.\"}"
+                : identityMismatch
+                    ? $"{{\"success\":false,\"healthy\":false,\"errorCode\":\"READINESS_IDENTITY_MISMATCH\",\"field\":\"runtimeGeneration\",\"expected\":\"8\",\"actual\":\"7\",\"classification\":\"runtimeGeneration\",\"recoverable\":true,\"authoritativeRoot\":{identityRoot},\"actualRoot\":{identityRoot},\"rimBridge\":{rimBridge}}}"
+                    : $"{{\"success\":true,\"healthy\":true,\"rimBridge\":{rimBridge}}}";
             File.WriteAllText(rimContextPath, "fixture");
             File.WriteAllText(devBridgePath, "fixture");
             File.WriteAllText(rimErrorPath, "fixture");
@@ -10525,6 +10912,7 @@ internal static class Program
             {
                 Factory = resultFactory
             };
+
             var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
                 new RimContextImpact(
                     "direct",

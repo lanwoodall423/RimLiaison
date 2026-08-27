@@ -27,6 +27,7 @@ public sealed class ObservabilityMainForm : Form
     private string? hydrationStatus;
     private readonly AgentObservabilityUi observabilityUi;
     private readonly ContentIntelligenceObservabilityAdministration? contentAdministration;
+    private readonly Action<string> clipboardWriter;
     private readonly IDisposable uiSubscription;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly FlowLayoutPanel navigationPanel;
@@ -98,8 +99,10 @@ public sealed class ObservabilityMainForm : Form
 
     public ObservabilityMainForm(
         IAgentObservabilityStore? store = null,
-        ContentIntelligenceObservabilityAdministration? contentAdministration = null)
+        ContentIntelligenceObservabilityAdministration? contentAdministration = null,
+        Action<string>? clipboardWriter = null)
     {
+        this.clipboardWriter = clipboardWriter ?? Clipboard.SetText;
         bool useDefaultStore = store is null;
         AgentObservabilityStore? defaultStore = useDefaultStore
             ? AgentObservabilityStore.CreateDefault(loadPersistedRecords: false)
@@ -204,7 +207,7 @@ public sealed class ObservabilityMainForm : Form
             ("Summary", 450),
             ("Issue", 220));
         issueList.CheckBoxes = true;
-        issueList.MultiSelect = false;
+        issueList.MultiSelect = true;
         issueList.ItemChecked += OnIssueChecked;
         issueList.SelectedIndexChanged += OnIssueSelected;
         issueDetails = CreateDetailsBox();
@@ -218,7 +221,7 @@ public sealed class ObservabilityMainForm : Form
         issueDetailsButton = CreateButton("Details", OnViewIssueDetails);
         loadMoreIssuesButton = CreateButton("Load older issues", OnLoadMoreIssues);
         prepareAssessmentButton = CreateButton("Preview full assessment", OnPrepareAssessment);
-        copyChatButton = CreateButton("Copy for ChatGPT", OnCopyForChatGPT);
+        copyChatButton = CreateButton("Copy to ChatGPT", OnCopyForChatGPT);
         copyBundleButton = CreateButton("Copy full diagnostic", OnCopyBundle);
         exportBundleButton = CreateButton("Export full diagnostic", OnExportBundle);
         copyChatButton.Enabled = false;
@@ -303,6 +306,7 @@ public sealed class ObservabilityMainForm : Form
         contentPanel.Controls.Add(issuesPanel);
         contentPanel.Controls.Add(allPanel);
         contentPanel.Controls.Add(agentPanel);
+        Controls.Add(contentPanel);
         Controls.Add(streamStatus);
         Controls.Add(viewTitle);
         Controls.Add(navigationPanel);
@@ -1444,7 +1448,7 @@ public sealed class ObservabilityMainForm : Form
                 renderedIssueDetailSignature = signature;
             }
 
-            SetEnabled(copyChatButton, false);
+            SetEnabled(copyChatButton, snapshot.SelectedIssueIds.Count > 0);
             SetEnabled(copyBundleButton, true);
             SetEnabled(exportBundleButton, true);
             return;
@@ -1463,7 +1467,7 @@ public sealed class ObservabilityMainForm : Form
                 renderedIssueDetailSignature = signature;
             }
 
-            SetEnabled(copyChatButton, detail.Triage is not null);
+            SetEnabled(copyChatButton, detail.Triage is not null || snapshot.SelectedIssueIds.Count > 0);
             bool hasCheckedIssues = snapshot.SelectedIssueIds.Count > 0;
             SetEnabled(copyBundleButton, hasCheckedIssues);
             SetEnabled(exportBundleButton, hasCheckedIssues);
@@ -2220,17 +2224,24 @@ public sealed class ObservabilityMainForm : Form
 
     private void OnCopyForChatGPT(object? sender, EventArgs e)
     {
-        AgentIssue? issue = SelectedIssue();
-        if (issue is null)
+        string[] issueIds = ChatIssueIds();
+        if (issueIds.Length == 0)
         {
             return;
         }
 
         try
         {
-            string packet = observabilityUi.CreateChatPacket(issue.Id);
-            Clipboard.SetText(packet);
-            streamStatus.Text = "Compact ChatGPT diagnostic packet copied.";
+            AgentObservabilityChatPacket packet = observabilityUi.CreateChatPacket(issueIds);
+            clipboardWriter(packet.Text);
+            string status = packet.Completeness.IsComplete
+                ? "Copied to ChatGPT. Evidence: Complete."
+                : "Copied to ChatGPT. Evidence: Incomplete.";
+            if (!packet.Completeness.IsComplete && packet.Completeness.MissingEvidence.Count > 0)
+            {
+                status += " Missing: " + string.Join(", ", packet.Completeness.MissingEvidence.Take(3));
+            }
+            streamStatus.Text = status;
         }
         catch (ExternalException)
         {
@@ -2336,6 +2347,17 @@ public sealed class ObservabilityMainForm : Form
             ? "unspecified evidence gap"
             : string.Join(", ", bundle.Completeness.MissingEvidence);
         return "Diagnostic bundle: incomplete (missing " + missing + ").";
+    }
+    private string[] ChatIssueIds()
+    {
+        IReadOnlyList<string> selectedIds = observabilityUi.Snapshot.SelectedIssueIds;
+        if (selectedIds.Count > 0)
+        {
+            return selectedIds.ToArray();
+        }
+
+        AgentIssue? selected = SelectedIssue();
+        return selected is null ? [] : [selected.Id];
     }
 
     private AgentIssue? SelectedIssue()
@@ -2662,6 +2684,22 @@ public sealed class ObservabilityMainForm : Form
         builder.AppendLine("-----------------");
         builder.AppendLine($"Issue:      {detail.Issue.Id}");
         builder.AppendLine($"Mod:        {detail.Issue.ModId}");
+        if (!string.IsNullOrWhiteSpace(detail.Issue.AffectedProject))
+        {
+            builder.AppendLine($"Affected project: {detail.Issue.AffectedProject}");
+        }
+        if (!string.IsNullOrWhiteSpace(detail.Issue.ReportingTool) ||
+            !string.IsNullOrWhiteSpace(detail.Issue.CausalComponent))
+        {
+            builder.AppendLine(
+                $"Attribution: {detail.Issue.ReportingTool ?? "unknown"} -> " +
+                $"{detail.Issue.CausalComponent ?? "unknown"}");
+        }
+        if (detail.Issue.AffectedValidations is { Count: > 0 } validations)
+        {
+            builder.AppendLine(
+                $"Blocked validations ({validations.Count}): {string.Join(", ", validations)}");
+        }
         builder.AppendLine($"Agent:      {detail.Issue.AgentId}");
         builder.AppendLine($"Logical agent: {detail.Issue.LogicalAgentId ?? "legacy/session-scoped"}");
         builder.AppendLine($"Run:        {detail.Issue.RunId}");

@@ -486,7 +486,7 @@ public sealed class AgentObservabilityStore :
                             ObservabilityEntityTypes.Mod => EntityReferenceKinds.Mod,
                             _ => "unknown"
                         },
-                        Id = request.ModId
+                        Id = agent.CanonicalEntityId
                     }
                 ],
                 payload: boundedData,
@@ -614,7 +614,9 @@ public sealed class AgentObservabilityStore :
             return issues.Values
                 .Where(issue => Matches(issue.RunId, runId) &&
                     Matches(issue.AgentId, agentId) &&
-                    Matches(issue.ModId, modId) &&
+                    (Matches(issue.ModId, modId) ||
+                        issue.ReportingModId is not null &&
+                        Matches(issue.ReportingModId, modId)) &&
                     (includeRecovered || !issue.Recovered))
                 .OrderByDescending(static issue => issue.Timestamp)
                 .ThenBy(static issue => issue.Id, StringComparer.Ordinal)
@@ -747,6 +749,16 @@ public sealed class AgentObservabilityStore :
             HashSet<(string RunId, string AgentId, string ModId)> identities = selectedIssues
                 .Select(issue => (issue.RunId, issue.AgentId, issue.ModId))
                 .ToHashSet();
+            foreach (AgentIssue issue in selectedIssues)
+            {
+                foreach (string eventId in issue.EventIds)
+                {
+                    if (eventsById.TryGetValue(eventId, out AgentEvent? eventRecord))
+                    {
+                        identities.Add((eventRecord.RunId, eventRecord.AgentId, eventRecord.ModId));
+                    }
+                }
+            }
             string[] selectedEventReferences = selectedIssues
                 .SelectMany(issue => issue.EventIds.Concat(
                     issue.ResolutionEventId is string resolution
@@ -1304,10 +1316,16 @@ public sealed class AgentObservabilityStore :
             ["errorOutput", "stderr", "stderrExcerpt"]);
         EvidenceValue diagnostic = ReadEvidenceValue(
             build,
-            failure,
             data,
+            failure,
             ["diagnosticEvidenceId", "outputEvidenceId"],
-            ["diagnosticOutput", "output", "error"]);
+            ["causalDiagnostic", "diagnosticOutput", "output", "error"]);
+        EvidenceValue causalDiagnostic = ReadEvidenceValue(
+            build,
+            data,
+            failure,
+            ["causalDiagnosticEvidenceId"],
+            ["causalDiagnostic"]);
         bool? freshnessProven = FirstBoolean(data, build, failure, "loadedArtifactFreshnessProven");
         string? deploymentDecision = FirstString(
             data,
@@ -1315,6 +1333,21 @@ public sealed class AgentObservabilityStore :
         string? command = FirstString(data, "command", "commandText") ??
             FirstString(build, "command") ??
             FirstString(failure, "command");
+        string? orchestrator = FirstString(data, "orchestrator") ??
+            FirstString(build, "orchestrator") ??
+            FirstString(failure, "orchestrator");
+        string? failureSurface = FirstString(data, "failureSurface") ??
+            FirstString(build, "failureSurface") ??
+            FirstString(failure, "failureSurface");
+        string? causalOwner = FirstString(data, "likelyOwner", "causalOwner") ??
+            FirstString(build, "likelyOwner", "causalOwner") ??
+            FirstString(failure, "likelyOwner", "causalOwner");
+        string? ownershipConfidence = FirstString(data, "ownershipConfidence") ??
+            FirstString(build, "ownershipConfidence") ??
+            FirstString(failure, "ownershipConfidence");
+        string? ownershipBasis = FirstString(data, "ownershipBasis") ??
+            FirstString(build, "ownershipBasis") ??
+            FirstString(failure, "ownershipBasis");
         return new AgentDiagnosticBuildEvidence(
             eventRecord.Id,
             FirstString(data, "project") ?? FirstString(build, "project"),
@@ -1355,7 +1388,20 @@ public sealed class AgentObservabilityStore :
                 deploymentDecision,
             FirstString(data, "errorCode") ?? FirstString(failure, "errorCode"),
             FirstString(data, "failureMessage", "message") ??
-                FirstString(failure, "message", "error"));
+                FirstString(failure, "message", "error"),
+            causalDiagnostic.Text,
+            causalDiagnostic.Truncated ||
+                AgentObservabilityData.GetBoolean(data, "causalDiagnosticTruncated"),
+            FirstString(data, "diagnosticSignature") ??
+                FirstString(build, "diagnosticSignature"),
+            orchestrator,
+            failureSurface,
+            causalOwner,
+            ownershipConfidence,
+            ownershipBasis,
+            AgentObservabilityData.GetString(data, "rawStdoutEvidenceId"),
+            AgentObservabilityData.GetString(data, "rawStderrEvidenceId"),
+            GetObject(data, "buildDiscrimination"));
     }
 
     private static AgentDiagnosticToolOperationEvidence? ToToolOperationEvidence(
@@ -1602,14 +1648,29 @@ public sealed class AgentObservabilityStore :
 
         bool buildFailure = supportingEvents.Any(eventRecord =>
                 eventRecord.Type == AgentEventTypes.BuildFailed ||
-                eventRecord.Type == AgentEventTypes.BuildDiagnostics) ||
+                (eventRecord.Type == AgentEventTypes.BuildDiagnostics &&
+                    int.TryParse(
+                        AgentObservabilityData.GetString(eventRecord.Data, "exitCode"),
+                        out int exitCode) &&
+                    exitCode != 0)) ||
             buildEvidence.Any(value => value.ExitCode is not null and not 0);
         bool hasCommand = commandEvidence.Any(value => !string.IsNullOrWhiteSpace(value.Command)) ||
             buildEvidence.Any(value => !string.IsNullOrWhiteSpace(value.Command));
         bool hasMeaningfulBuildDiagnostics = buildEvidence.Any(value =>
             !string.IsNullOrWhiteSpace(value.Output) ||
             !string.IsNullOrWhiteSpace(value.ErrorOutput) ||
-            !string.IsNullOrWhiteSpace(value.DiagnosticOutput));
+            !string.IsNullOrWhiteSpace(value.DiagnosticOutput) ||
+            !string.IsNullOrWhiteSpace(value.CausalDiagnostic));
+        bool hasCausalBuildDiagnostic = buildEvidence.Any(value =>
+            !string.IsNullOrWhiteSpace(value.CausalDiagnostic) ||
+            !string.IsNullOrWhiteSpace(value.DiagnosticSignature));
+        bool causalBuildDiagnosticIsTruncated = buildEvidence.Any(value =>
+            value.CausalDiagnosticTruncated ||
+            (value.DiagnosticOutputTruncated &&
+                string.IsNullOrWhiteSpace(value.CausalDiagnostic)));
+        bool hasDurableRawBuildOutput = buildEvidence.Any(value =>
+            !string.IsNullOrWhiteSpace(value.RawStdoutEvidenceId) ||
+            !string.IsNullOrWhiteSpace(value.RawStderrEvidenceId));
         if (buildFailure)
         {
             if (!hasCommand)
@@ -1623,6 +1684,19 @@ public sealed class AgentObservabilityStore :
             if (!hasMeaningfulBuildDiagnostics)
             {
                 missing.Add("build.diagnostics");
+            }
+            if (!hasCausalBuildDiagnostic)
+            {
+                missing.Add("build.causalDiagnostic");
+            }
+            if (causalBuildDiagnosticIsTruncated)
+            {
+                missing.Add("build.causalDiagnostic");
+            }
+            if (buildEvidence.Any(value => value.OutputTruncated || value.ErrorOutputTruncated) &&
+                !hasDurableRawBuildOutput)
+            {
+                missing.Add("build.rawOutput");
             }
         }
 
@@ -2173,6 +2247,7 @@ public sealed class AgentObservabilityStore :
         LoadAgents(persistedAgents);
         LoadEvents(persistedEvents);
         LoadIssues(persistedIssues);
+        ReassociatePersistedToolingTargetsLocked();
         ReconcileLifecycleStateLocked();
         nextSequence = events.Count == 0
             ? 0
@@ -3221,14 +3296,24 @@ public sealed class AgentObservabilityStore :
         agents.TryGetValue(
             new AgentObservabilityAgentIdentity(issue.RunId, issue.AgentId),
             out AgentSnapshot? owner);
+        bool subjectAttributed =
+            !string.IsNullOrWhiteSpace(issue.AffectedProject) ||
+            !string.IsNullOrWhiteSpace(issue.ReportingModId) &&
+                !string.Equals(issue.ReportingModId, issue.ModId, StringComparison.Ordinal);
         ObservabilityEntityIdentity identity =
-            ObservabilityEntityIdentityResolver.ForPersisted(
-                owner?.EntityType ?? issue.EntityType,
-                owner?.CanonicalEntityId ?? issue.CanonicalEntityId,
-                issue.ModId,
-                issue.DisplayName,
-                owner?.WorkloadKind,
-                owner?.QualificationProfile);
+            subjectAttributed
+                ? ObservabilityEntityIdentityResolver.ForPersisted(
+                    issue.EntityType,
+                    issue.CanonicalEntityId,
+                    issue.ModId,
+                    issue.DisplayName)
+                : ObservabilityEntityIdentityResolver.ForPersisted(
+                    owner?.EntityType ?? issue.EntityType,
+                    owner?.CanonicalEntityId ?? issue.CanonicalEntityId,
+                    issue.ModId,
+                    issue.DisplayName,
+                    owner?.WorkloadKind,
+                    owner?.QualificationProfile);
         return issue with
         {
             SchemaVersion = AgentObservabilitySchemas.Issue,
@@ -3243,6 +3328,12 @@ public sealed class AgentObservabilityStore :
                 .Take(options.MaximumIssueEventReferences)
                 .ToArray(),
             RelatedFiles = NormalizeValues(issue.RelatedFiles),
+            ReportingTool = AgentObservabilityData.BoundIdentifier(issue.ReportingTool, 128),
+            ReportingModId = AgentObservabilityData.BoundIdentifier(issue.ReportingModId, 256),
+            CausalComponent = AgentObservabilityData.BoundIdentifier(issue.CausalComponent, 128),
+            AffectedProject = AgentObservabilityData.BoundIdentifier(issue.AffectedProject, 256),
+            AffectedValidations = NormalizeValues(issue.AffectedValidations, 256),
+            CausalIssueKey = AgentObservabilityData.BoundIdentifier(issue.CausalIssueKey, 256),
             RelatedToolCalls = NormalizeValues(issue.RelatedToolCalls),
             RelatedCommands = NormalizeCommands(issue.RelatedCommands),
             TraceId = AgentObservabilityData.BoundIdentifier(issue.TraceId, 128),
@@ -3251,6 +3342,143 @@ public sealed class AgentObservabilityStore :
             RetryCount = Math.Max(0, issue.RetryCount),
             Occurrences = Math.Max(1, issue.Occurrences)
         };
+    }
+    private void ReassociatePersistedToolingTargetsLocked()
+    {
+        // Historical tool records are migrated only when structured target
+        // evidence agrees with an existing canonical mod entity.
+        Dictionary<string, AgentSnapshot> knownMods = agents.Values
+            .Where(static agent =>
+                agent.EntityType == ObservabilityEntityTypes.Mod &&
+                agent.CanonicalEntityId.StartsWith(
+                    "mod:",
+                    StringComparison.Ordinal))
+            .GroupBy(static agent => agent.CanonicalEntityId, StringComparer.Ordinal)
+            .ToDictionary(
+                static group => group.Key,
+                static group => group.First(),
+                StringComparer.Ordinal);
+        if (knownMods.Count == 0)
+        {
+            return;
+        }
+
+        foreach ((AgentObservabilityAgentIdentity key, AgentSnapshot agent) in agents.ToArray())
+        {
+            if (agent.EntityType != ObservabilityEntityTypes.Tool ||
+                agent.CanonicalEntityId != "tool:rimliaison" ||
+                !TryGetPersistedProjectTarget(key, out string target))
+            {
+                continue;
+            }
+
+            ObservabilityEntityIdentity candidate =
+                ObservabilityEntityIdentity.ForMod(target);
+            if (!knownMods.TryGetValue(candidate.CanonicalEntityId, out AgentSnapshot? knownMod))
+            {
+                continue;
+            }
+
+            ObservabilityEntityIdentity identity = new(
+                knownMod.EntityType,
+                knownMod.CanonicalEntityId,
+                knownMod.DisplayName);
+            agents[key] = agent with
+            {
+                ModId = knownMod.ModId,
+                ModName = knownMod.ModName,
+                EntityType = identity.EntityType,
+                CanonicalEntityId = identity.CanonicalEntityId,
+                DisplayName = identity.DisplayName
+            };
+            for (int index = 0; index < events.Count; index++)
+            {
+                AgentEvent eventRecord = events[index];
+                if (eventRecord.RunId == key.RunId && eventRecord.AgentId == key.AgentId)
+                {
+                    events[index] = eventRecord with
+                    {
+                        ModId = knownMod.ModId,
+                        EntityType = identity.EntityType,
+                        CanonicalEntityId = identity.CanonicalEntityId,
+                        DisplayName = identity.DisplayName
+                    };
+                }
+            }
+
+            foreach ((string issueId, AgentIssue issue) in issues.ToArray())
+            {
+                if (issue.RunId == key.RunId && issue.AgentId == key.AgentId)
+                {
+                    issues[issueId] = issue with
+                    {
+                        ModId = knownMod.ModId,
+                        EntityType = identity.EntityType,
+                        CanonicalEntityId = identity.CanonicalEntityId,
+                        DisplayName = identity.DisplayName
+                    };
+                }
+            }
+
+            identityMigrationPending = true;
+        }
+    }
+
+    private bool TryGetPersistedProjectTarget(
+        AgentObservabilityAgentIdentity key,
+        out string target)
+    {
+        target = string.Empty;
+        string? projectTarget = null;
+        string? repositoryTarget = null;
+        foreach (AgentEvent eventRecord in events)
+        {
+            if (eventRecord.RunId != key.RunId || eventRecord.AgentId != key.AgentId)
+            {
+                continue;
+            }
+
+            string? project = AgentObservabilityData.GetString(eventRecord.Data, "project");
+            string? repository = AgentObservabilityData.GetString(
+                eventRecord.Data,
+                "repository");
+            if (!string.IsNullOrWhiteSpace(project))
+            {
+                project = project.Trim();
+                if (projectTarget is not null &&
+                    !string.Equals(projectTarget, project, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                projectTarget = project;
+            }
+
+            if (!string.IsNullOrWhiteSpace(repository))
+            {
+                repository = repository.Trim();
+                if (repositoryTarget is not null &&
+                    !string.Equals(
+                        repositoryTarget,
+                        repository,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                repositoryTarget = repository;
+            }
+        }
+
+        if (projectTarget is not null &&
+            repositoryTarget is not null &&
+            !string.Equals(projectTarget, repositoryTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        target = projectTarget ?? repositoryTarget ?? string.Empty;
+        return target.Length > 0;
     }
 
     private static string NormalizeEntityModId(
@@ -3302,7 +3530,6 @@ public sealed class AgentObservabilityStore :
             .ToArray();
         return normalized.Length == 0 ? null : normalized;
     }
-
     private static IReadOnlyList<string>? NormalizeCommands(IReadOnlyList<string>? values)
     {
         string[] normalized = (values ?? [])

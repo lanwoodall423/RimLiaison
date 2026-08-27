@@ -310,6 +310,8 @@ internal static class ObservabilityTests
                 exitCode = 1,
                 stderr = "Source/Fixture.cs(12,7): error CS0246: The type or namespace name 'MissingType' could not be found.",
                 diagnosticOutput = "error CS0246: The type or namespace name 'MissingType' could not be found.",
+                causalDiagnostic = "error CS0246: The type or namespace name 'MissingType' could not be found.",
+                diagnosticSignature = "CS0246",
                 transactionId = "tx-build-1",
                 workflowId = "wf-build-1",
                 builtSha256 = new string('b', 64),
@@ -441,7 +443,8 @@ internal static class ObservabilityTests
                         operationKey = "build:evidence",
                         command = "dotnet build Evidence.csproj",
                         exitCode = 1,
-                        diagnosticEvidenceId = evidence!.Id
+                        diagnosticEvidenceId = evidence!.Id,
+                        causalDiagnosticEvidenceId = evidence.Id
                     });
                 issueId = store.GetIssues(agentId: agent.AgentId).Single().Id;
                 AgentDiagnosticBundle bundle = store.CreateDiagnosticBundle([issueId]);
@@ -745,6 +748,241 @@ internal static class ObservabilityTests
         {
             throw new InvalidOperationException(
                 $"Expected {expected}, got {actual}.");
+        }
+    }
+
+    public static void SingleFailedInvocationDoesNotCreateRetryIncident()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "run-single-failure",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.single-failure",
+            "Single Failure");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ToolFailed,
+            "DevBridge command failed.",
+            new
+            {
+                operationKey = "test:single",
+                toolName = "DevBridge",
+                errorCode = "OUTPUT_TOO_LARGE",
+                exitCode = 2
+            });
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.TestFailed,
+            "Test failed.",
+            new
+            {
+                operationKey = "test:single",
+                toolName = "DevBridge",
+                errorCode = "OUTPUT_TOO_LARGE",
+                exitCode = 2
+            });
+
+        Assert(store.GetIssues(agentId: agent.AgentId)
+            .All(issue => issue.Category != AgentIssueCategory.Retry),
+            "one invocation with a tool failure and its test summary must not look like a retry");
+    }
+
+    public static void CliProjectTargetUsesCanonicalIdentity()
+    {
+        string originalDirectory = Environment.CurrentDirectory;
+        string root = CreateObservabilityProject("Frontier", "com.frontier");
+        string storage = CreateTemporaryDirectory("rimliaison-observability-frontier-store-");
+        try
+        {
+            AgentSnapshot agent = RunListForProject(root, storage);
+            AssertEqual(ObservabilityEntityTypes.Mod, agent.EntityType);
+            AssertEqual("mod:com.frontier", agent.CanonicalEntityId);
+            AssertEqual("com.frontier", agent.ModId);
+            AssertEqual("Frontier", agent.DisplayName);
+
+            using AgentObservabilityStore persistedStore = new(storage);
+            AgentEvent command = persistedStore.GetEvents(agentId: agent.AgentId)
+                .First(value => value.Type == AgentEventTypes.CommandStarted);
+            AssertEqual("RimLiaison", AgentObservabilityData.GetString(command.Data, "toolName"));
+            AssertEqual("RimLiaison", AgentObservabilityData.GetString(command.Data, "componentOwner"));
+            using var ui = new AgentObservabilityUi(persistedStore);
+            AgentObservabilityUiNavigationItem tab = ui.Snapshot.Navigation.Items
+                .Single(item => item.CanonicalEntityId == "mod:com.frontier");
+            AgentObservabilityAgentView detail =
+                ui.ShowAgent(tab.CanonicalEntityId!, tab.RunId).Agent!;
+            AssertEqual("mod:com.frontier", detail.Agent.CanonicalEntityId);
+            Assert(detail.RecentActivity.Any(
+                row => row.Event?.CanonicalEntityId == "mod:com.frontier"),
+                "Frontier detail must receive its persisted events");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            DeleteTemporaryDirectory(root);
+            DeleteTemporaryDirectory(storage);
+        }
+    }
+
+    public static void CliProjectTargetsRemainDistinct()
+    {
+        string originalDirectory = Environment.CurrentDirectory;
+        string frontier = CreateObservabilityProject("Frontier", "com.frontier");
+        string wildlife = CreateObservabilityProject("Wildlife", "com.wildlife");
+        string frontierStorage = CreateTemporaryDirectory("rimliaison-observability-frontier-store-");
+        string wildlifeStorage = CreateTemporaryDirectory("rimliaison-observability-wildlife-store-");
+        try
+        {
+            AgentSnapshot frontierAgent = RunListForProject(frontier, frontierStorage);
+            AgentSnapshot wildlifeAgent = RunListForProject(wildlife, wildlifeStorage);
+
+            AssertEqual("mod:com.frontier", frontierAgent.CanonicalEntityId);
+            AssertEqual("mod:com.wildlife", wildlifeAgent.CanonicalEntityId);
+            Assert(frontierAgent.CanonicalEntityId != wildlifeAgent.CanonicalEntityId,
+                "different mod package identities must remain distinct");
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            DeleteTemporaryDirectory(frontier);
+            DeleteTemporaryDirectory(wildlife);
+            DeleteTemporaryDirectory(frontierStorage);
+            DeleteTemporaryDirectory(wildlifeStorage);
+        }
+    }
+
+    public static void NestedToolingPreservesThePrimarySubject()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "nested-frontier-run",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "com.frontier",
+            "Frontier",
+            entityIdentity: ObservabilityEntityIdentity.ForMod("com.frontier", "Frontier"));
+        using IDisposable activation = agent.Activate();
+        agent.Start();
+        foreach ((string toolName, string owner) in new[]
+        {
+            ("RimContext", "RimContext"),
+            ("RimTest", "RimTest"),
+            ("DevBridge2", "DevBridge2"),
+            ("RimError", "RimError")
+        })
+        {
+            agent.Record(
+                DevelopmentStage.Testing,
+                AgentEventTypes.ToolFailed,
+                toolName + " failed.",
+                new
+                {
+                    operationKey = "tool:" + toolName,
+                    toolName,
+                    componentOwner = owner,
+                    errorCode = "TEST_FAILURE"
+                });
+        }
+        agent.Complete();
+
+        Assert(store.GetEvents(agentId: agent.AgentId).All(
+            value => value.EntityType == ObservabilityEntityTypes.Mod &&
+                value.CanonicalEntityId == "mod:com.frontier"),
+            "nested tooling must not replace the primary subject");
+        Assert(store.GetIssues(agentId: agent.AgentId).All(
+            value => value.CanonicalEntityId == "mod:com.frontier" &&
+                value.ComponentOwner is "RimContext" or "RimTest" or "DevBridge2" or "RimError"),
+            "tool failures must retain component ownership separately");
+    }
+
+    public static void PackageAliasesShareOneCanonicalModIdentity()
+    {
+        string frontierPath = CreateObservabilityProject("Frontier-Alias", "com.frontier");
+        string secondPath = CreateObservabilityProject("Frontier-Checkout", "COM.FRONTIER");
+        try
+        {
+            ObservabilityEntityIdentity first = ObservabilityEntityIdentityResolver.ForMod(
+                ObservabilityProjectIdentityResolver.Resolve(frontierPath));
+            ObservabilityEntityIdentity second = ObservabilityEntityIdentityResolver.ForMod(
+                ObservabilityProjectIdentityResolver.Resolve(secondPath));
+            AssertEqual("mod:com.frontier", first.CanonicalEntityId);
+            AssertEqual(first.CanonicalEntityId, second.CanonicalEntityId);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(frontierPath);
+            DeleteTemporaryDirectory(secondPath);
+        }
+    }
+
+    private static AgentSnapshot RunListForProject(string root, string? storage = null)
+    {
+        string originalDirectory = Environment.CurrentDirectory;
+        string catalog = Path.Combine(
+            originalDirectory,
+            "TestCatalog",
+            "rimtest.catalog.json");
+        try
+        {
+            Directory.SetCurrentDirectory(root);
+            using var store = storage is null
+                ? new AgentObservabilityStore()
+                : new AgentObservabilityStore(storage);
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            int exitCode = CliApplication.RunAsync(
+                    ["list", "--catalog", catalog],
+                    output,
+                    error,
+                    observabilityStore: store,
+                    observabilityTelemetry: new NoopAgentObservabilityTelemetry())
+                .GetAwaiter()
+                .GetResult();
+            AssertEqual(CliExitCodes.Success, exitCode);
+            return store.GetAgents().Single();
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+        }
+    }
+
+    private static string CreateObservabilityProject(string name, string packageId)
+    {
+        string root = CreateTemporaryDirectory("rimliaison-observability-project-");
+        Directory.CreateDirectory(Path.Combine(root, ".rimdev"));
+        Directory.CreateDirectory(Path.Combine(root, "About"));
+        File.WriteAllText(
+            Path.Combine(root, ".rimdev", "stack.json"),
+            $$"""
+            {
+              "schemaVersion": "rimdev-stack/v1",
+              "project": "{{name}}",
+              "catalog": "TestCatalog/rimtest.catalog.json",
+              "rimBridge": "disabled"
+            }
+            """);
+        File.WriteAllText(
+            Path.Combine(root, "About", "About.xml"),
+            $"<ModMetaData><packageId>{packageId}</packageId><name>{name}</name></ModMetaData>");
+        return root;
+    }
+
+    private static string CreateTemporaryDirectory(string prefix)
+    {
+        string path = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
+    private static void DeleteTemporaryDirectory(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            Directory.Delete(path, recursive: true);
         }
     }
 

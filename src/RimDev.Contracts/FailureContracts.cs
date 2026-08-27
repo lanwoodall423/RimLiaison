@@ -9,6 +9,11 @@ public static class FailureContractSchemas
     public const string RemediationPrecedent = "rimdev-remediation-precedent/v1";
 }
 
+public sealed record FailureCausalReference(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("component")] string Component,
+    [property: JsonPropertyName("entity")] string Entity);
+
 public sealed record FailureEvidencePacket
 {
     [JsonPropertyName("schemaVersion")]
@@ -28,6 +33,44 @@ public sealed record FailureEvidencePacket
     [JsonPropertyName("error")]
     public required string Error { get; init; }
 
+    [JsonPropertyName("reportingTool")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportingTool { get; init; }
+
+    [JsonPropertyName("causalComponent")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalComponent { get; init; }
+
+    [JsonPropertyName("affectedProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AffectedProject { get; init; }
+
+    [JsonPropertyName("affectedModIds")]
+    public IReadOnlyList<string> AffectedModIds { get; init; } = [];
+
+    [JsonPropertyName("failureSurface")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FailureSurface { get; init; }
+
+    [JsonPropertyName("orchestrator")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Orchestrator { get; init; }
+
+    [JsonPropertyName("underlyingErrorCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UnderlyingErrorCode { get; init; }
+
+    [JsonPropertyName("causalIssueKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalIssueKey { get; init; }
+
+    [JsonPropertyName("failureSummary")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FailureSummary { get; init; }
+
+    [JsonPropertyName("causalChain")]
+    public IReadOnlyList<FailureCausalReference> CausalChain { get; init; } = [];
+
     [JsonPropertyName("stackOrLog")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public EvidenceReference? StackOrLog { get; init; }
@@ -37,6 +80,10 @@ public sealed record FailureEvidencePacket
 
     [JsonPropertyName("affectedEntities")]
     public IReadOnlyList<EntityReference> AffectedEntities { get; init; } = [];
+
+    [JsonPropertyName("blockedValidations")]
+    public IReadOnlyList<EntityReference> BlockedValidations { get; init; } = [];
+
 
     [JsonPropertyName("dependencies")]
     public IReadOnlyList<EntityReference> Dependencies { get; init; } = [];
@@ -56,6 +103,27 @@ public sealed record FailureEvidencePacket
 
     public FailureEvidencePacket Normalize() => this with
     {
+        AffectedModIds = AffectedModIds
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => Bound(value, 256)!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(32)
+            .ToArray(),
+        ReportingTool = Bound(ReportingTool, 128),
+        CausalComponent = Bound(CausalComponent, 128),
+        AffectedProject = Bound(AffectedProject, 256),
+        FailureSurface = Bound(FailureSurface, 128),
+        Orchestrator = Bound(Orchestrator, 128),
+        UnderlyingErrorCode = Bound(UnderlyingErrorCode, 128),
+        CausalIssueKey = Bound(CausalIssueKey, 256),
+        CausalChain = CausalChain
+            .Take(16)
+            .Select(value => new FailureCausalReference(
+                Bound(value.Role, 64) ?? "unknown",
+                Bound(value.Component, 128) ?? "unknown",
+                Bound(value.Entity, 256) ?? "unknown"))
+            .ToArray(),
+        FailureSummary = Bound(FailureSummary, 1024),
         SchemaVersion = FailureContractSchemas.Packet,
         Identity = Identity?.Normalize(),
         FailedValidation = FailedValidation?.Normalize(),
@@ -70,6 +138,7 @@ public sealed record FailureEvidencePacket
         AffectedEntities = NormalizeEntities(AffectedEntities),
         Dependencies = NormalizeEntities(Dependencies),
         Frameworks = NormalizeEntities(Frameworks),
+        BlockedValidations = NormalizeEntities(BlockedValidations),
         PrecedingEvidence = NormalizeEvidence(PrecedingEvidence),
         References = NormalizeEvidence(References),
         StackOrLog = StackOrLog?.Normalize(),
