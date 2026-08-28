@@ -1,13 +1,13 @@
 {
   "schemaVersion": "rimliaison-toolchain-manifest/v1",
-  "version": "2025.02.qualification.1",
+  "version": "2026.08.28.0b8c044",
   "state": "promoted",
   "profile": "burn-in-25",
   "components": {
-    "rimliaison": "repository-qualified-head",
-    "rimcontext": "repository-qualified-head",
-    "rimerror": "repository-qualified-head",
-    "devbridge2": "stack-managed-compatible",
+    "rimliaison": "0b8c0448db7f5d0b4228f723b9f16d8e5130ce32",
+    "rimcontext": "0b8c0448db7f5d0b4228f723b9f16d8e5130ce32",
+    "rimerror": "0b8c0448db7f5d0b4228f723b9f16d8e5130ce32",
+    "devbridge2": "d296e31b6355ee5771414d5a5bd7d7616466646f",
     "rimbridgeserver": "stack-managed-compatible"
   },
   "promotionCriteria": [
@@ -19,5 +19,5 @@
     "parallel coverage passes when supported"
   ],
   "qualificationArtifact": ".rimdev/qualification/latest.json",
-  "updatedAt": "2025-02-01T00:00:00Z"
+  "updatedAt": "2026-08-28T01:43:09.9742282Z"
 }
