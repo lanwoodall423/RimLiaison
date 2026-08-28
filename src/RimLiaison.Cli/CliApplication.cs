@@ -3695,10 +3695,7 @@ public static class CliApplication
         string? workflowId)
     {
         if (!SourceChangeClassifier.IsBuildRelevant(changedPaths) ||
-            string.Equals(
-                request.StackManifest.Manifest?.Project,
-                "RimLiaison",
-                StringComparison.OrdinalIgnoreCase))
+            IsRimLiaisonRepository(request))
         {
             return null;
         }
@@ -3717,6 +3714,35 @@ public static class CliApplication
             workflowId,
             TestRecipe: SelectDevelopmentRecipe(catalog, selectedTestIds));
     }
+
+    private static bool IsRimLiaisonRepository(CliRequest request)
+    {
+        if (!string.Equals(
+                request.StackManifest.Manifest?.Project,
+                "RimLiaison",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            string affectedRoot = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(AffectedGitRoot(request)));
+            string manifestRoot = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(request.StackManifest.RepositoryRoot));
+            return string.Equals(
+                affectedRoot,
+                manifestRoot,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is ArgumentException or
+            IOException or NotSupportedException)
+        {
+            return true;
+        }
+    }
+
 
     private static IDevBridgeModDevelopmentAdapter CreateDevelopmentAdapter(
         CliRequest request,
