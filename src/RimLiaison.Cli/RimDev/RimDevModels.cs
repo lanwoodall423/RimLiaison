@@ -39,7 +39,10 @@ public sealed record RimDevWorkspaceConfiguration(
     string? RimWorldExecutable = null,
     string? DevBridgeRuntimeRoot = null,
     string? DevBridgeSourceRoot = null,
-    string? DevBridgePinnedWorktreeRoot = null);
+    string? DevBridgePinnedWorktreeRoot = null,
+    string? PackageRoot = null,
+    string? ActiveModsRoot = null,
+    IReadOnlyDictionary<string, string>? PackageMappings = null);
 
 public sealed record RimDevWorkspaceRepository(
     string Path,

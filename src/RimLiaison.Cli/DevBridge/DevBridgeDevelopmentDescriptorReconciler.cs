@@ -19,7 +19,9 @@ public sealed record DevBridgeDevelopmentDescriptor(
     string Configuration,
     string ExpectedAssembly,
     string DeploymentTarget,
-    string TestRecipe);
+    string TestRecipe,
+    JsonElement? RuntimePackage = null,
+    string? DeploymentRole = null);
 
 public sealed record DevBridgeDescriptorReconciliationResult(
     PrerequisiteRecoveryState State,
@@ -197,7 +199,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             configuration,
             expectedAssembly,
             deploymentTarget,
-            testRecipe);
+            testRecipe,
+            currentFields?.RuntimePackage,
+            currentFields?.DeploymentRole);
         if (!ValidateDescriptor(
                 descriptor,
                 project,
@@ -392,6 +396,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
 
     private static DescriptorFields ReadFields(JsonElement root)
     {
+        JsonElement? runtimePackage = root.TryGetProperty("runtimePackage", out JsonElement value)
+            ? value.Clone()
+            : null;
         return new DescriptorFields(
             GetString(root, "schemaVersion"),
             GetString(root, "project"),
@@ -399,7 +406,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             GetString(root, "configuration"),
             GetString(root, "expectedAssembly"),
             GetString(root, "deploymentTarget"),
-            GetString(root, "testRecipe"));
+            GetString(root, "testRecipe"),
+            runtimePackage,
+            GetString(root, "deploymentRole"));
     }
 
     private static bool TryCreateDescriptor(
@@ -419,7 +428,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             !IsSafeRelativePath(fields.SourceProject, requireExtension: ".csproj") ||
             !IsSafeAssembly(fields.ExpectedAssembly) ||
             !IsSafeRelativePath(fields.DeploymentTarget, requireExtension: null) ||
-            !IsSafeToken(fields.TestRecipe))
+            !IsSafeToken(fields.TestRecipe) ||
+            (!string.IsNullOrWhiteSpace(fields.DeploymentRole) &&
+                fields.DeploymentRole is not ("mod" or "tooling-only")))
         {
             error = "The existing descriptor is malformed, stale, or contains an unsafe path.";
             return false;
@@ -432,7 +443,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             fields.Configuration!,
             fields.ExpectedAssembly!,
             fields.DeploymentTarget!,
-            fields.TestRecipe!);
+            fields.TestRecipe!,
+            fields.RuntimePackage,
+            fields.DeploymentRole);
         return true;
     }
 
@@ -451,7 +464,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             !IsSafeRelativePath(descriptor.SourceProject, ".csproj") ||
             !IsSafeAssembly(descriptor.ExpectedAssembly) ||
             !IsSafeRelativePath(descriptor.DeploymentTarget, null) ||
-            !IsSafeToken(descriptor.TestRecipe))
+            !IsSafeToken(descriptor.TestRecipe) ||
+            (!string.IsNullOrWhiteSpace(descriptor.DeploymentRole) &&
+                descriptor.DeploymentRole is not ("mod" or "tooling-only")))
         {
             error = "The reconstructed descriptor contains invalid contract fields.";
             return false;
@@ -845,21 +860,32 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             return null;
         }
     }
-
     private static string SerializeDescriptor(
-        DevBridgeDevelopmentDescriptor descriptor) =>
-        JsonSerializer.Serialize(
-            new
-            {
-                schemaVersion = descriptor.SchemaVersion,
-                project = descriptor.Project,
-                sourceProject = descriptor.SourceProject,
-                configuration = descriptor.Configuration,
-                expectedAssembly = descriptor.ExpectedAssembly,
-                deploymentTarget = descriptor.DeploymentTarget,
-                testRecipe = descriptor.TestRecipe
-            },
+        DevBridgeDevelopmentDescriptor descriptor)
+    {
+        var fields = new Dictionary<string, object?>
+        {
+            ["schemaVersion"] = descriptor.SchemaVersion,
+            ["project"] = descriptor.Project,
+            ["sourceProject"] = descriptor.SourceProject,
+            ["configuration"] = descriptor.Configuration,
+            ["expectedAssembly"] = descriptor.ExpectedAssembly,
+            ["deploymentTarget"] = descriptor.DeploymentTarget,
+            ["testRecipe"] = descriptor.TestRecipe
+        };
+        if (descriptor.RuntimePackage is JsonElement runtimePackage)
+        {
+            fields["runtimePackage"] = runtimePackage;
+        }
+        if (!string.IsNullOrWhiteSpace(descriptor.DeploymentRole))
+        {
+            fields["deploymentRole"] = descriptor.DeploymentRole;
+        }
+
+        return JsonSerializer.Serialize(
+            fields,
             new JsonSerializerOptions { WriteIndented = true });
+    }
 
     private static string? GetString(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out JsonElement value) &&
@@ -935,7 +961,9 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         string? Configuration,
         string? ExpectedAssembly,
         string? DeploymentTarget,
-        string? TestRecipe);
+        string? TestRecipe,
+        JsonElement? RuntimePackage,
+        string? DeploymentRole);
 
     private sealed record DescriptorCandidate(
         string SourceProject,

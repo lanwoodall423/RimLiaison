@@ -287,6 +287,25 @@ internal static class RimDevWorkspaceDiscoverer
                     return false;
                 }
             }
+            string? packageRoot = string.IsNullOrWhiteSpace(parsed.PackageRoot)
+                ? deploymentRoot
+                : ResolveOptionalPath(root, parsed.PackageRoot);
+            if (!string.IsNullOrWhiteSpace(parsed.PackageRoot) && packageRoot is null)
+            {
+                errorCode = "RIMDEV_PACKAGE_ROOT_INVALID";
+                error = "The configured package root is invalid.";
+                return false;
+            }
+
+            string? activeModsRoot = string.IsNullOrWhiteSpace(parsed.ActiveModsRoot)
+                ? null
+                : ResolveOptionalPath(root, parsed.ActiveModsRoot);
+            if (!string.IsNullOrWhiteSpace(parsed.ActiveModsRoot) && activeModsRoot is null)
+            {
+                errorCode = "RIMDEV_ACTIVE_MODS_ROOT_INVALID";
+                error = "The configured active Mods root is invalid.";
+                return false;
+            }
 
             configuration = new RimDevWorkspaceConfiguration(
                 parsed.SchemaVersion,
@@ -296,7 +315,10 @@ internal static class RimDevWorkspaceDiscoverer
                 parsed.RimWorldExecutable,
                 parsed.DevBridgeRuntimeRoot,
                 parsed.DevBridgeSourceRoot,
-                parsed.DevBridgePinnedWorktreeRoot);
+                parsed.DevBridgePinnedWorktreeRoot,
+                packageRoot,
+                activeModsRoot,
+                parsed.PackageMappings);
             return true;
         }
         catch (JsonException)
@@ -393,6 +415,18 @@ internal static class RimDevWorkspaceDiscoverer
         [JsonPropertyName("repositories")]
         public List<RimDevWorkspaceRepositoryDocument>? Repositories { get; init; }
 
+        [JsonPropertyName("devBridgePinnedWorktreeRoot")]
+        public string? DevBridgePinnedWorktreeRoot { get; init; }
+
+        [JsonPropertyName("packageRoot")]
+        public string? PackageRoot { get; init; }
+
+        [JsonPropertyName("activeModsRoot")]
+        public string? ActiveModsRoot { get; init; }
+
+        [JsonPropertyName("packageMappings")]
+        public Dictionary<string, string>? PackageMappings { get; init; }
+
         [JsonPropertyName("deploymentRoot")]
         public string? DeploymentRoot { get; init; }
         [JsonPropertyName("rimWorldRoot")]
@@ -407,8 +441,6 @@ internal static class RimDevWorkspaceDiscoverer
         [JsonPropertyName("devBridgeSourceRoot")]
         public string? DevBridgeSourceRoot { get; init; }
 
-        [JsonPropertyName("devBridgePinnedWorktreeRoot")]
-        public string? DevBridgePinnedWorktreeRoot { get; init; }
     }
 
     private sealed class RimDevWorkspaceRepositoryDocument

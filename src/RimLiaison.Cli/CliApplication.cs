@@ -600,6 +600,7 @@ public static class CliApplication
                             ? "RIMTEST_CANCELLED"
                             : "RIMLIAISON_COMMAND_FAILED";
                         string? underlyingErrorCode = priorFailures
+                            .AsEnumerable()
                             .Reverse()
                             .Select(eventRecord =>
                                 AgentObservabilityData.GetString(
@@ -3682,7 +3683,11 @@ public static class CliApplication
         IReadOnlyList<string> changedPaths,
         string? workflowId)
     {
-        if (!SourceChangeClassifier.IsBuildRelevant(changedPaths))
+        if (!SourceChangeClassifier.IsBuildRelevant(changedPaths) ||
+            string.Equals(
+                request.StackManifest.Manifest?.Project,
+                "RimLiaison",
+                StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }

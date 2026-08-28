@@ -20,7 +20,10 @@ public sealed record DevBridgeArtifactFreshness(
     string? TransactionId,
     string? WorkflowId,
     string? LeaseId,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? BuiltPackageSha256 = null,
+    string? DeployedPackageSha256 = null,
+    string? DeploymentManifestPath = null);
 
 /// <summary>
 /// Structured diagnostics returned by the DevBridge2 mod-development

@@ -32,6 +32,18 @@ public sealed record RimTestArtifactFreshness
     [JsonPropertyName("deployedArtifactSha256")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DeployedArtifactSha256 { get; init; }
+    [JsonPropertyName("builtPackageSha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuiltPackageSha256 { get; init; }
+
+    [JsonPropertyName("deployedPackageSha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeployedPackageSha256 { get; init; }
+
+    [JsonPropertyName("deploymentManifestPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeploymentManifestPath { get; init; }
+
 
     [JsonPropertyName("deploymentDecision")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -131,8 +143,6 @@ public sealed record RimTestArtifactFreshness
     [JsonPropertyName("failureMessage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FailureMessage { get; init; }
-
-
     public static RimTestArtifactFreshness From(
         DevBridgeModDevelopmentResult result,
         string? fallbackWorkflowId = null) => new()
@@ -140,6 +150,9 @@ public sealed record RimTestArtifactFreshness
             SourceFingerprint = result.Freshness?.SourceFingerprint,
             BuiltArtifactSha256 = result.Freshness?.BuiltArtifactSha256,
             DeployedArtifactSha256 = result.Freshness?.DeployedArtifactSha256,
+            BuiltPackageSha256 = result.Freshness?.BuiltPackageSha256,
+            DeployedPackageSha256 = result.Freshness?.DeployedPackageSha256,
+            DeploymentManifestPath = result.Freshness?.DeploymentManifestPath,
             DeploymentDecision = result.Freshness?.DeploymentDecision,
             EvaluationStatus = result.Freshness is null
                 ? "NOT_EVALUATED"
@@ -168,11 +181,12 @@ public sealed record RimTestArtifactFreshness
                 : new ExecutionIdentity
                 {
                     SourceFingerprint = result.Freshness.SourceFingerprint,
-                    BuildIdentity = result.Freshness.BuiltArtifactSha256,
-                    ArtifactHash = result.Freshness.DeployedArtifactSha256 ??
+                    BuildIdentity = result.Freshness.BuiltPackageSha256 ??
                         result.Freshness.BuiltArtifactSha256,
-                    DeploymentIdentity = result.TransactionId ??
-                        result.Freshness.TransactionId,
+                    ArtifactHash = result.Freshness.DeployedPackageSha256 ??
+                        result.Freshness.DeployedArtifactSha256 ??
+                        result.Freshness.BuiltPackageSha256 ??
+                        result.Freshness.BuiltArtifactSha256,
                     ProcessGeneration = result.Freshness.Generation ?? result.Generation,
                     ExecutionId = result.WorkflowId
                 },

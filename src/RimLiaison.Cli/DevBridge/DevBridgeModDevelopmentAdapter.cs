@@ -630,6 +630,9 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         TryGetNullableString(value, "workflowId", out string? workflowId);
         TryGetNullableString(value, "leaseId", out string? leaseId);
         TryGetNullableString(value, "errorCode", out string? errorCode);
+        TryGetNullableString(value, "builtPackageSha256", out string? builtPackageHash);
+        TryGetNullableString(value, "deployedPackageSha256", out string? deployedPackageHash);
+        TryGetNullableString(value, "deploymentManifestPath", out string? manifestPath);
         return new DevBridgeArtifactFreshness(
             sourceFingerprint,
             builtHash,
@@ -643,7 +646,10 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             transactionId,
             workflowId,
             leaseId,
-            errorCode);
+            errorCode,
+            builtPackageHash,
+            deployedPackageHash,
+            manifestPath);
     }
 
     private static IReadOnlyList<DevBridgeBuildOutputEvidence> ResolveBuildOutputs(
