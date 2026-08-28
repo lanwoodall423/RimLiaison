@@ -90,8 +90,6 @@ internal static class ProjectOwnedDescriptorMaterializer
             {
                 ["schemaVersion"] = DevBridgeModDevelopmentSchemas.Current,
                 ["project"] = project,
-                ["sourceRoot"] = sourceRoot,
-                ["runtimeRoot"] = resolvedRuntimeRoot,
                 ["sourceProject"] = manifest.SourceProject,
                 ["configuration"] = manifest.Configuration,
                 ["expectedAssembly"] = manifest.ExpectedAssembly,

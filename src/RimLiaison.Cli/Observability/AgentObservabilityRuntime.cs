@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 
 using RimLiaison.Validation;
+using RimLiaison.Toolchain;
 
 namespace RimLiaison.Observability;
 
@@ -119,7 +120,9 @@ public sealed class AgentObservabilityRun : IDisposable
         string toolchainState = "promoted",
         string? qualificationProfile = null,
         ObservabilityEntityIdentity? entityIdentity = null,
-        string? toolchainFingerprint = null)
+        string? toolchainFingerprint = null,
+        bool toolchainBindingProven = false,
+        ProductionToolchainBinding? productionBinding = null)
     {
         if (Volatile.Read(ref disposed) != 0)
         {
@@ -181,7 +184,9 @@ public sealed class AgentObservabilityRun : IDisposable
                 toolchainState,
                 qualificationProfile,
                 runActivity,
-                toolchainFingerprint);
+                toolchainFingerprint,
+                toolchainBindingProven,
+                productionBinding);
             sessions.Add(session);
             return session;
         }
@@ -275,8 +280,8 @@ public sealed class AgentObservabilitySession : IDisposable
     private readonly Activity? agentActivity;
     private readonly long startedTimestamp;
     private AgentSnapshot snapshot;
-    private int disposed;
     private int started;
+    private int disposed;
     internal AgentObservabilitySession(
         AgentObservabilityRun run,
         IAgentObservabilityStore store,
@@ -291,7 +296,9 @@ public sealed class AgentObservabilitySession : IDisposable
         string toolchainState,
         string? qualificationProfile,
         Activity? runActivity,
-        string? toolchainFingerprint)
+        string? toolchainFingerprint,
+        bool toolchainBindingProven,
+        ProductionToolchainBinding? productionBinding)
     {
         this.run = run;
         this.store = store;
@@ -321,6 +328,19 @@ public sealed class AgentObservabilitySession : IDisposable
             WorkloadKind = workloadKind,
             ToolchainState = toolchainState,
             ToolchainFingerprint = toolchainFingerprint,
+            ToolchainBindingProven = toolchainBindingProven,
+            ToolchainMode = productionBinding is null
+                ? (toolchainState == "experimental" ? "experimental" : "unknown")
+                : "production",
+            RimLiaisonExecutablePath = productionBinding?.RimLiaisonExecutablePath,
+            RimLiaisonExecutableSha256 = productionBinding?.RimLiaisonExecutableHash,
+            RimLiaisonAssemblyPath = productionBinding?.RimLiaisonAssemblyPath,
+            RimLiaisonAssemblySha256 = productionBinding?.RimLiaisonAssemblyHash,
+            DevBridgeRuntimeRoot = productionBinding?.DevBridgeRuntimeRoot,
+            DevBridgePackageSha256 = productionBinding?.DevBridgePackageHash,
+            TransactionConsumerPath = productionBinding?.TransactionConsumerPath,
+            TransactionConsumerSha256 = productionBinding?.TransactionConsumerHash,
+            ToolchainCompatibilityContract = productionBinding?.CompatibilityContract,
             QualificationProfile = qualificationProfile,
             Status = AgentStatus.Created,
             CurrentStage = DevelopmentStage.Analysis,

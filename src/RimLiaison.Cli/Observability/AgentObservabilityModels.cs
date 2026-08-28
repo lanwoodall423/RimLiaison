@@ -415,6 +415,37 @@ public sealed record AgentSnapshot
     [JsonPropertyName("toolchainFingerprint")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ToolchainFingerprint { get; init; }
+    [JsonPropertyName("toolchainBindingProven")]
+    public bool ToolchainBindingProven { get; init; }
+    [JsonPropertyName("toolchainMode")]
+    public string ToolchainMode { get; init; } = "unknown";
+    [JsonPropertyName("rimLiaisonExecutablePath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RimLiaisonExecutablePath { get; init; }
+    [JsonPropertyName("rimLiaisonExecutableSha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RimLiaisonExecutableSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonAssemblyPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RimLiaisonAssemblyPath { get; init; }
+    [JsonPropertyName("rimLiaisonAssemblySha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RimLiaisonAssemblySha256 { get; init; }
+    [JsonPropertyName("devBridgeRuntimeRoot")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DevBridgeRuntimeRoot { get; init; }
+    [JsonPropertyName("devBridgePackageSha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DevBridgePackageSha256 { get; init; }
+    [JsonPropertyName("transactionConsumerPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TransactionConsumerPath { get; init; }
+    [JsonPropertyName("transactionConsumerSha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TransactionConsumerSha256 { get; init; }
+    [JsonPropertyName("toolchainCompatibilityContract")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ToolchainCompatibilityContract { get; init; }
 
     [JsonPropertyName("qualificationProfile")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

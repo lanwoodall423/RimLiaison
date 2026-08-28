@@ -44,6 +44,7 @@ internal static class Program
         ("contradictory production metadata fails closed", ProjectMetadataOwnershipTests.ContradictoryProductionMetadataFailsClosed),
         ("materializer uses owning manifest", ProjectMetadataOwnershipTests.MaterializerUsesOwningManifestNotToolingCatalog),
         ("missing project runtime root fails closed", ProjectMetadataOwnershipTests.MissingRuntimeRootFailsClosed),
+        ("production binding requires exact installed identity", ProjectMetadataOwnershipTests.ProductionBindingRequiresExactInstalledIdentity),
         ("source-relative project runtime root fails closed", ProjectMetadataOwnershipTests.SourceRuntimeRootFailsClosed),
         ("context uses canonical stack discovery", ContextUsesCanonicalStackDiscovery),
         ("git context separates descriptor recovery state", GitContextSeparatesDescriptorRecoveryState),

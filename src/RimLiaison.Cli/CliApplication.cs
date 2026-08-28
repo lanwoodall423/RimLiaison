@@ -24,6 +24,7 @@ using RimLiaison.Benchmarking;
 using RimLiaison.RimDev;
 using RimLiaison.Qualification;
 using RimLiaison.Validation;
+using RimLiaison.Toolchain;
 
 namespace RimLiaison;
 
@@ -113,6 +114,8 @@ public static class CliApplication
         AgentObservabilitySession? observabilityAgent = null;
         IAgentObservabilityStore? eventStore = null;
         IDisposable? observabilityActivation = null;
+        string? priorProductionConsumerRoot = null;
+        bool productionConsumerOverrideApplied = false;
         try
         {
             CliRequest request = CliParser.Parse(args);
@@ -133,21 +136,83 @@ public static class CliApplication
                 observabilityTelemetry);
             ObservabilityEntityIdentity observabilityEntity =
                 ResolveObservabilityEntity(request);
+            bool experimentalToolchain = request.ExperimentalToolchain ||
+                request.Command == CliCommand.Qualification;
             string workloadKind = request.Command == CliCommand.Qualification
                 ? "qualification"
                 : "production";
-            string toolchainState = request.Command == CliCommand.Qualification
-                ? "experimental"
-                : "promoted";
-            string? toolchainFingerprint = null;
-            if (request.Command != CliCommand.Qualification)
+            ProductionToolchainBinding? productionBinding = null;
+            if (!experimentalToolchain &&
+                string.Equals(
+                    request.StackManifest.Manifest?.Workload,
+                    "production",
+                    StringComparison.OrdinalIgnoreCase) &&
+                RequiresProductionToolchainBinding(request))
             {
-                PromotedToolchainIdentity.TryLoadFingerprint(
-                    request.StackManifest.RepositoryRoot,
-                    out toolchainFingerprint);
+                ProductionToolchainBindingResolution resolution =
+                    ProductionToolchainBindingResolver.Resolve(
+                        request.StackManifest.RepositoryRoot,
+                        requestedDevBridgePath: request.DevBridgePath,
+                        requestedDevBridgeRoot: request.DevBridgeRootPath);
+                if (!resolution.Succeeded)
+                {
+                    ProductionToolchainBindingFailure failure = resolution.Failure!;
+                    observabilityAgent = observabilityRun.CreateAgent(
+                        LegacyModId(observabilityEntity),
+                        observabilityEntity.DisplayName,
+                        logicalAgentId: ResolveLogicalAgentId(),
+                        entityIdentity: observabilityEntity,
+                        workloadKind: workloadKind,
+                        toolchainState: "unbound",
+                        toolchainFingerprint: failure.ExpectedFingerprint);
+                    observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
+                    observabilityActivation = observabilityAgent.Activate();
+                    observabilityAgent.Record(
+                        DevelopmentStage.Analysis,
+                        "toolchain.binding.failed",
+                        failure.Error,
+                        failure.ToEvidence());
+                    WriteJson(
+                        stdout,
+                        new
+                        {
+                            schemaVersion = "rimliaison-toolchain-binding/v1",
+                            status = "blocked",
+                            code = failure.ErrorCode,
+                            error = failure.Error,
+                            nextAction = failure.NextAction,
+                            rejectedCandidates = failure.RejectedCandidates,
+                            expectedFingerprint = failure.ExpectedFingerprint,
+                            currentExecutablePath = failure.CurrentExecutablePath,
+                            devBridgeRuntimeRoot = failure.DevBridgeRuntimeRoot
+                        });
+                    exitCode = CliExitCodes.ConservativeSelection;
+                    return exitCode;
+                }
+
+                productionBinding = resolution.Binding!;
+                request = request with
+                {
+                    DevBridgePath = productionBinding.DevBridgeCommandPath,
+                    DevBridgeRootPath = productionBinding.DevBridgeRuntimeRoot
+                };
+                priorProductionConsumerRoot =
+                    Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT");
+                Environment.SetEnvironmentVariable(
+                    "DEVBRIDGE_SOURCE_ROOT",
+                    Path.GetDirectoryName(
+                        Path.GetDirectoryName(productionBinding.TransactionConsumerPath)));
+                productionConsumerOverrideApplied = true;
             }
+
+            string toolchainState = experimentalToolchain
+                ? "experimental"
+                : productionBinding is null
+                    ? "unbound"
+                    : "promoted";
+            string? toolchainFingerprint = productionBinding?.Fingerprint;
             string modId = LegacyModId(observabilityEntity);
-            observabilityAgent = observabilityRun.CreateAgent(
+            observabilityAgent ??= observabilityRun.CreateAgent(
                 modId,
                 observabilityEntity.DisplayName,
                 logicalAgentId: ResolveLogicalAgentId(),
@@ -157,7 +222,9 @@ public static class CliApplication
                 qualificationProfile: request.Command == CliCommand.Qualification
                     ? request.Id
                     : null,
-                toolchainFingerprint: toolchainFingerprint);
+                toolchainFingerprint: toolchainFingerprint,
+                toolchainBindingProven: productionBinding is not null,
+                productionBinding: productionBinding);
             observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
             observabilityActivation = observabilityAgent.Activate();
             DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
@@ -174,6 +241,8 @@ public static class CliApplication
                     workloadKind,
                     toolchainState,
                     toolchainFingerprint,
+                    toolchainMode = experimentalToolchain ? "experimental" : "production",
+                    productionToolchainBinding = productionBinding?.ToEvidence(),
                     command = request.Command.ToString().ToLowerInvariant(),
                     target = request.Id,
                     toolName = "RimLiaison",
@@ -669,6 +738,12 @@ public static class CliApplication
                 catch
                 {
                 }
+            }
+            if (productionConsumerOverrideApplied)
+            {
+                Environment.SetEnvironmentVariable(
+                    "DEVBRIDGE_SOURCE_ROOT",
+                    priorProductionConsumerRoot);
             }
             observabilityActivation?.Dispose();
             observabilityRun?.Dispose();
@@ -4247,6 +4322,14 @@ public static class CliApplication
             AgentEventTypes.AgentFailed or AgentEventTypes.IntegrationFailed ||
         AgentObservabilityData.GetString(eventRecord.Data, "outcome") is
             "failure" or "timeout" or "cancelled";
+
+    private static bool RequiresProductionToolchainBinding(CliRequest request) =>
+        request.Command is CliCommand.RecipeRun or
+            CliCommand.RunTest or
+            CliCommand.SuiteRun or
+            CliCommand.GoldenPath or
+            CliCommand.Doctor ||
+        request.Command == CliCommand.Affected && request.RunSelected;
 
     private static bool NeedsWorkflowCorrelation(CliRequest request) =>
         request.Command is CliCommand.RecipeRun or

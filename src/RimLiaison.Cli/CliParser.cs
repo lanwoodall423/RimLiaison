@@ -80,6 +80,7 @@ internal sealed record CliRequest(
     int QualificationRuns,
     string? QualificationOutputPath,
     bool HelpRequested,
+    bool ExperimentalToolchain,
     string? ContentKind,
     string? ContentRole,
     string? ContentReuseSource,
@@ -152,6 +153,7 @@ internal static class CliParser
         string? contentRole = null;
         string? contentReuseSource = null;
         int contentMaxBytes = 65_536;
+        bool experimentalToolchain = false;
         var positionals = new List<string>();
 
         for (int index = 0; index < args.Count; index++)
@@ -319,6 +321,9 @@ internal static class CliParser
                     // accept the explicit agent-facing spelling as a no-op.
                     rimDevJson = true;
                     break;
+                case "--experimental":
+                    experimentalToolchain = true;
+                    break;
                 case "--help":
                 case "-h":
                     helpRequested = true;
@@ -390,6 +395,7 @@ internal static class CliParser
                 qualificationRuns,
                 qualificationOutputPath,
                 true,
+                experimentalToolchain,
                 contentKind,
                 contentRole,
                 contentReuseSource,
@@ -707,6 +713,17 @@ internal static class CliParser
                 : ResolveDefaultCatalogPath();
         }
 
+        if (experimentalToolchain &&
+            string.Equals(
+                stackManifest.Manifest?.Workload,
+                "production",
+                StringComparison.OrdinalIgnoreCase) &&
+            command != CliCommand.Qualification)
+        {
+            throw new CliParseException(
+                "--experimental is not valid for a production workload.");
+        }
+
         if (devBridgeProject is null)
         {
             devBridgeProject = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_PROJECT") ??
@@ -769,6 +786,7 @@ internal static class CliParser
             qualificationRuns,
             qualificationOutputPath,
             false,
+            experimentalToolchain,
             contentKind,
             contentRole,
             contentReuseSource,
@@ -841,6 +859,7 @@ internal static class CliParser
                 "--check-input (with ui screenshot; uses semantic live input state when registered)",
                 "--explain",
                 "--base <git-ref> (with affected or publish check)",
+                "--experimental (qualification/tooling mode; never production)",
                 "--dependency-fingerprint <name=value> (with affected validation)",
                 "--json (default output)",
                 "--run (with affected)",

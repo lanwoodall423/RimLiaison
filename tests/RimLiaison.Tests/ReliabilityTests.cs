@@ -570,6 +570,7 @@ internal static class ReliabilityTests
             WorkloadKind = workloadKind,
             ToolchainState = toolchainState,
             ToolchainFingerprint = toolchainFingerprint,
+            ToolchainBindingProven = toolchainState == "promoted" && toolchainFingerprint is not null,
             Status = AgentStatus.Completed,
             CurrentStage = DevelopmentStage.Complete,
             StartTime = start,

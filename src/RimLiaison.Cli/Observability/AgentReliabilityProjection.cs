@@ -196,6 +196,29 @@ public static class PromotedToolchainIdentity
 
     public static bool TryLoadFingerprint(string? repositoryRoot, out string? fingerprint)
     {
+        string? productionManifest = Environment.GetEnvironmentVariable(
+            "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
+        productionManifest ??= Path.Combine(
+            "C:\\RimDev",
+            ".rimdev",
+            "production-toolchain.json");
+        try
+        {
+            if (File.Exists(productionManifest))
+            {
+                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(productionManifest));
+                if (document.RootElement.TryGetProperty("fingerprint", out JsonElement value) &&
+                    !string.IsNullOrWhiteSpace(value.GetString()))
+                {
+                    fingerprint = value.GetString();
+                    return true;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
+
         foreach (string root in CandidateRoots(repositoryRoot))
         {
             string path = Path.Combine(root, "qualification", "toolchain-known-good.json");
@@ -376,9 +399,11 @@ public static class AgentReliabilityProjection
             ? "not-applicable"
             : Normalize(agent.ToolchainState) == "experimental"
                 ? "experimental"
-                : string.IsNullOrWhiteSpace(toolchainFingerprint)
+                : !agent.ToolchainBindingProven
                     ? "unknown"
-                    : "promoted";
+                    : string.IsNullOrWhiteSpace(toolchainFingerprint)
+                        ? "unknown"
+                        : "promoted";
         string terminalOutcome = TerminalOutcome(agent, terminal);
         List<string> missing = [];
         if (input.HistoryDegraded || !input.HistoryComplete)
@@ -393,7 +418,13 @@ public static class AgentReliabilityProjection
         {
             missing.Add("workflow.terminalOutcome");
         }
-        if (Normalize(agent.WorkloadKind) == "production" && string.IsNullOrWhiteSpace(toolchainFingerprint))
+        if (Normalize(agent.WorkloadKind) == "production" &&
+            !agent.ToolchainBindingProven)
+        {
+            missing.Add("toolchain.binding");
+        }
+        if (Normalize(agent.WorkloadKind) == "production" &&
+            string.IsNullOrWhiteSpace(toolchainFingerprint))
         {
             missing.Add("toolchain.fingerprint");
         }
