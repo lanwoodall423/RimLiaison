@@ -97,16 +97,20 @@ public sealed class AgentObservabilityStore :
     IAgentObservabilityStore,
     IAgentObservabilityLiveStore,
     IAgentObservabilityHydrationStore,
+    IAgentObservabilityHistoryStatus,
+    IAgentReliabilityCampaignStore,
     IDisposable
 {
     private const string EventsFileName = "events.jsonl";
     private const string IssuesFileName = "issues.jsonl";
     private const string AgentsFileName = "agents.jsonl";
+    private const string ReliabilityCampaignsFileName = "reliability-campaigns.jsonl";
     private const string SequenceFileName = "metadata.sequence";
     private const string EvidenceDirectoryName = "evidence";
     private const string EventRecordKind = "event";
     private const string IssueRecordKind = "issue";
     private const string AgentRecordKind = "agent";
+    private const string ReliabilityCampaignRecordKind = "reliability-campaign";
     private const int EvidenceMaintenanceSlack = 128;
 
     private readonly object gate = new();
@@ -119,12 +123,15 @@ public sealed class AgentObservabilityStore :
     private readonly string? eventsPath;
     private readonly string? issuesPath;
     private readonly string? agentsPath;
+    private readonly string? reliabilityCampaignsPath;
     private readonly string? sequencePath;
     private readonly string? evidenceDirectory;
     private readonly FileSystemWatcher? storageWatcher;
     private readonly List<AgentEvent> events = [];
     private readonly Dictionary<string, AgentIssue> issues = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AgentDiagnosticEvidence> evidence =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentReliabilityCampaignConfiguration> reliabilityCampaigns =
         new(StringComparer.Ordinal);
     private readonly Dictionary<AgentObservabilityAgentIdentity, AgentSnapshot> agents = [];
     private readonly List<Action<AgentObservabilityNotification>> subscribers = [];
@@ -134,6 +141,8 @@ public sealed class AgentObservabilityStore :
     private long diagnosticBundleCreationCount;
     private int refreshRequested;
     private int refreshQueued;
+    private bool historyComplete = true;
+    private bool historyDegraded;
     private int disposed;
     private bool identityMigrationPending;
 
@@ -154,6 +163,7 @@ public sealed class AgentObservabilityStore :
             eventsPath = Path.Combine(this.storageDirectory, EventsFileName);
             issuesPath = Path.Combine(this.storageDirectory, IssuesFileName);
             agentsPath = Path.Combine(this.storageDirectory, AgentsFileName);
+            reliabilityCampaignsPath = Path.Combine(this.storageDirectory, ReliabilityCampaignsFileName);
             sequencePath = Path.Combine(this.storageDirectory, SequenceFileName);
             evidenceDirectory = Path.Combine(this.storageDirectory, EvidenceDirectoryName);
             Directory.CreateDirectory(evidenceDirectory);
@@ -189,6 +199,57 @@ public sealed class AgentObservabilityStore :
                 options: options,
                 loadPersistedRecords: loadPersistedRecords);
         }
+    }
+    public bool HistoryComplete
+    {
+        get
+        {
+            lock (gate)
+            {
+                return historyComplete;
+            }
+        }
+    }
+
+    public bool HistoryDegraded
+    {
+        get
+        {
+            lock (gate)
+            {
+                return historyDegraded;
+            }
+        }
+    }
+
+    public AgentReliabilityCampaignConfiguration? GetReliabilityCampaign(string campaignId)
+    {
+        if (string.IsNullOrWhiteSpace(campaignId))
+        {
+            return null;
+        }
+
+        lock (gate)
+        {
+            return reliabilityCampaigns.TryGetValue(campaignId, out AgentReliabilityCampaignConfiguration? configuration)
+                ? configuration
+                : null;
+        }
+    }
+
+    public void SaveReliabilityCampaign(AgentReliabilityCampaignConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        if (string.IsNullOrWhiteSpace(configuration.CampaignId))
+        {
+            throw new ArgumentException("A campaign id is required.", nameof(configuration));
+        }
+
+        lock (gate)
+        {
+            reliabilityCampaigns[configuration.CampaignId] = configuration;
+        }
+        PersistRecord(reliabilityCampaignsPath, ReliabilityCampaignRecordKind, configuration);
     }
 
     public string? StorageDirectory => storageDirectory;
@@ -2042,6 +2103,14 @@ public sealed class AgentObservabilityStore :
                 persistedEvents.Degraded ||
                 persistedIssues.Degraded ||
                 persistedAgents.Degraded;
+            lock (gate)
+            {
+                historyDegraded |= degraded;
+                if (recentOnly)
+                {
+                    historyComplete = false;
+                }
+            }
             string? message = degraded
                 ? "Some historical observability records were skipped or unavailable."
                 : null;
@@ -2174,6 +2243,10 @@ public sealed class AgentObservabilityStore :
                 TrimEvidence();
                 MigratePersistedIdentityStateLocked();
             }
+            else
+            {
+                historyDegraded = true;
+            }
         }
     }
 
@@ -2236,7 +2309,11 @@ public sealed class AgentObservabilityStore :
         IReadOnlyList<JsonElement>? persistedAgents = ReadRecords(
             agentsPath,
             AgentRecordKind);
-        if (persistedEvents is null || persistedIssues is null || persistedAgents is null)
+        IReadOnlyList<JsonElement>? persistedCampaigns = ReadRecords(
+            reliabilityCampaignsPath,
+            ReliabilityCampaignRecordKind);
+        if (persistedEvents is null || persistedIssues is null || persistedAgents is null ||
+            persistedCampaigns is null)
         {
             return false;
         }
@@ -2244,9 +2321,11 @@ public sealed class AgentObservabilityStore :
         events.Clear();
         issues.Clear();
         agents.Clear();
+        reliabilityCampaigns.Clear();
         LoadAgents(persistedAgents);
         LoadEvents(persistedEvents);
         LoadIssues(persistedIssues);
+        LoadReliabilityCampaigns(persistedCampaigns);
         ReassociatePersistedToolingTargetsLocked();
         ReconcileLifecycleStateLocked();
         nextSequence = events.Count == 0
@@ -2571,6 +2650,29 @@ public sealed class AgentObservabilityStore :
     }
 
 
+    private void LoadReliabilityCampaigns(IReadOnlyList<JsonElement> records)
+    {
+        foreach (JsonElement value in records)
+        {
+            try
+            {
+                AgentReliabilityCampaignConfiguration? configuration =
+                    value.Deserialize<AgentReliabilityCampaignConfiguration>(AgentObservabilityJson.Options);
+                if (configuration is null || string.IsNullOrWhiteSpace(configuration.CampaignId))
+                {
+                    historyDegraded = true;
+                    continue;
+                }
+
+                reliabilityCampaigns[configuration.CampaignId] = configuration;
+            }
+            catch (JsonException)
+            {
+                historyDegraded = true;
+            }
+        }
+    }
+
     private IReadOnlyList<JsonElement>? ReadRecords(string? path, string expectedKind)
     {
         if (path is null || !File.Exists(path))
@@ -2893,6 +2995,7 @@ public sealed class AgentObservabilityStore :
         CompactPersistedFile(eventsPath, EventRecordKind);
         CompactPersistedFile(issuesPath, IssueRecordKind);
         CompactPersistedFile(agentsPath, AgentRecordKind);
+        CompactPersistedFile(reliabilityCampaignsPath, ReliabilityCampaignRecordKind);
     }
 
     private void CompactPersistedFile(string? path, string kind)
@@ -2965,6 +3068,15 @@ public sealed class AgentObservabilityStore :
                             .OrderBy(static agent => agent.StartTime)
                             .ThenBy(static agent => agent.AgentId, StringComparer.Ordinal));
                     break;
+                case ReliabilityCampaignRecordKind:
+                    Rewrite(
+                        path,
+                        kind,
+                        ReadPersistedCampaignsForCompaction(path)
+                            .Values
+                            .OrderBy(static campaign => campaign.CreatedAtUtc)
+                            .Take(64));
+                    break;
             }
         }
         catch (Exception exception) when (exception is IOException or
@@ -3002,6 +3114,35 @@ public sealed class AgentObservabilityStore :
             .TakeLast(remaining)
             .ToArray();
         return required.Concat(recent);
+    }
+
+    private Dictionary<string, AgentReliabilityCampaignConfiguration>
+        ReadPersistedCampaignsForCompaction(string path)
+    {
+        var result = new Dictionary<string, AgentReliabilityCampaignConfiguration>(
+            StringComparer.Ordinal);
+        foreach (JsonElement value in ReadRecordsUnlocked(path, ReliabilityCampaignRecordKind))
+        {
+            try
+            {
+                AgentReliabilityCampaignConfiguration? campaign =
+                    value.Deserialize<AgentReliabilityCampaignConfiguration>(AgentObservabilityJson.Options);
+                if (campaign is not null && !string.IsNullOrWhiteSpace(campaign.CampaignId))
+                {
+                    result[campaign.CampaignId] = campaign;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        foreach ((string id, AgentReliabilityCampaignConfiguration campaign) in reliabilityCampaigns)
+        {
+            result[id] = campaign;
+        }
+
+        return result;
     }
 
     private void Rewrite<T>(
@@ -3197,6 +3338,7 @@ public sealed class AgentObservabilityStore :
     {
         if (events.Count > options.MaximumEvents)
         {
+            historyComplete = false;
             events.RemoveRange(0, events.Count - options.MaximumEvents);
         }
     }
@@ -3208,6 +3350,7 @@ public sealed class AgentObservabilityStore :
             return;
         }
 
+        historyComplete = false;
         foreach (string id in issues.Values
                      .OrderByDescending(static issue => issue.Recovered)
                      .ThenBy(static issue => issue.Timestamp)
@@ -3227,8 +3370,9 @@ public sealed class AgentObservabilityStore :
             return;
         }
 
+        historyComplete = false;
         foreach (AgentObservabilityAgentIdentity identity in agents.Values
-                     .OrderBy(static agent => agent.Status is AgentStatus.Completed or AgentStatus.Failed
+                     .OrderByDescending(static agent => agent.Status is AgentStatus.Completed or AgentStatus.Failed
                          ? 0
                          : 1)
                      .ThenBy(static agent => agent.StartTime)

@@ -139,6 +139,13 @@ public static class CliApplication
             string toolchainState = request.Command == CliCommand.Qualification
                 ? "experimental"
                 : "promoted";
+            string? toolchainFingerprint = null;
+            if (request.Command != CliCommand.Qualification)
+            {
+                PromotedToolchainIdentity.TryLoadFingerprint(
+                    request.StackManifest.RepositoryRoot,
+                    out toolchainFingerprint);
+            }
             string modId = LegacyModId(observabilityEntity);
             observabilityAgent = observabilityRun.CreateAgent(
                 modId,
@@ -149,7 +156,8 @@ public static class CliApplication
                 toolchainState: toolchainState,
                 qualificationProfile: request.Command == CliCommand.Qualification
                     ? request.Id
-                    : null);
+                    : null,
+                toolchainFingerprint: toolchainFingerprint);
             observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
             observabilityActivation = observabilityAgent.Activate();
             DevelopmentStage commandStage = ObservabilityStageFor(request.Command);
@@ -163,6 +171,9 @@ public static class CliApplication
                 new
                 {
                     operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                    workloadKind,
+                    toolchainState,
+                    toolchainFingerprint,
                     command = request.Command.ToString().ToLowerInvariant(),
                     target = request.Id,
                     toolName = "RimLiaison",

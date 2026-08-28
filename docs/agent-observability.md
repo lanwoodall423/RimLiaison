@@ -307,6 +307,52 @@ marked `insufficient-data`; synthetic golden-workflow benchmarks remain under
 uses run identity and the store's bounded retention; it does not start a
 telemetry service or create a second database.
 
+## Production reliability burn-in
+
+`AgentReliabilityProjection` derives a bounded campaign projection from the
+canonical agent snapshots, events, issues, validation evidence, runtime
+freshness fields, and efficiency profiles. It emits
+`rimliaison-reliability-workflow/v1` workflow records and
+`rimliaison-reliability-campaign/v1` campaign projections. Campaign identity
+and configuration are persisted beside the canonical JSONL store in
+`reliability-campaigns.jsonl`; the projection is recomputed rather than stored
+as a second telemetry database.
+
+Production workflows are eligible only when they are bound to the exact
+promoted manifest fingerprint. The fingerprint uses
+`rimliaison-toolchain-fingerprint/v1`, the promoted manifest version/state,
+sorted component identities, promotion criteria, and qualification artifact
+identity. Qualification workloads, experimental toolchains, unknown
+fingerprints, and mismatches are excluded or marked incomplete; they never
+silently contribute to the promoted campaign.
+
+Infrastructure incidents are deduplicated within `(runId, agentId)` by
+`CausalIssueKey ?? Fingerprint ?? issue:<id>`. A duplicate causal group is
+recovered only when every record in that group is recovered. Structured
+tooling/capability/integration failures are infrastructure incidents.
+`MOD_DEFECT` and source/test failures remain source outcomes and do not fail
+the infrastructure campaign. An unrecovered infrastructure incident or a
+passing runtime check against stale/mismatched artifact identity is a campaign
+failure.
+
+Timing is evidence-only. RimLiaison wall time comes from the explicit command
+duration or the matching `rimliaison-efficiency-profile/v1` outcome. Phase
+timings remain separate cumulative observations and may overlap nested work;
+they are never summed into total task time. Missing profiles produce null
+timings, not fabricated zeros. Runtime generation, deployment, live
+validation, controlled restart, and validation-proof reuse are reported only
+when their structured evidence is present.
+
+Campaign state is `PASS` only after the minimum completed promoted workflow
+target and all required coverage are proven. It is `FAIL` for stale-runtime
+or unrecovered-tooling failures, `COLLECTING` while valid evidence is below
+the target or coverage is not yet complete, and `INCOMPLETE` when persisted
+history is partial/degraded or required identity/evidence is unknown.
+Concurrency is `established` only for overlapping complete workflow
+intervals with distinct logical agents and a shared observed runtime
+generation; otherwise it is `unknown` or `not-covered`, never inferred from
+workflow count alone.
+
 ## OpenTelemetry
 
 `OpenTelemetryAgentTelemetry` creates this hierarchy when enabled:

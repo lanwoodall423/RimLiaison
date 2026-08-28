@@ -118,7 +118,8 @@ public sealed class AgentObservabilityRun : IDisposable
         string workloadKind = "production",
         string toolchainState = "promoted",
         string? qualificationProfile = null,
-        ObservabilityEntityIdentity? entityIdentity = null)
+        ObservabilityEntityIdentity? entityIdentity = null,
+        string? toolchainFingerprint = null)
     {
         if (Volatile.Read(ref disposed) != 0)
         {
@@ -179,7 +180,8 @@ public sealed class AgentObservabilityRun : IDisposable
                 workloadKind,
                 toolchainState,
                 qualificationProfile,
-                runActivity);
+                runActivity,
+                toolchainFingerprint);
             sessions.Add(session);
             return session;
         }
@@ -288,7 +290,8 @@ public sealed class AgentObservabilitySession : IDisposable
         string workloadKind,
         string toolchainState,
         string? qualificationProfile,
-        Activity? runActivity)
+        Activity? runActivity,
+        string? toolchainFingerprint)
     {
         this.run = run;
         this.store = store;
@@ -317,6 +320,7 @@ public sealed class AgentObservabilitySession : IDisposable
             DisplayName = DisplayName,
             WorkloadKind = workloadKind,
             ToolchainState = toolchainState,
+            ToolchainFingerprint = toolchainFingerprint,
             QualificationProfile = qualificationProfile,
             Status = AgentStatus.Created,
             CurrentStage = DevelopmentStage.Analysis,

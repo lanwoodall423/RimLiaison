@@ -412,6 +412,10 @@ public sealed record AgentSnapshot
     [JsonPropertyName("toolchainState")]
     public string ToolchainState { get; init; } = "promoted";
 
+    [JsonPropertyName("toolchainFingerprint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ToolchainFingerprint { get; init; }
+
     [JsonPropertyName("qualificationProfile")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? QualificationProfile { get; init; }

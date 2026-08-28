@@ -52,6 +52,8 @@ internal static class Program
         ("observed performance stays separate from benchmarks", ObservedPerformanceStaysSeparateFromBenchmarks),
         ("observed performance reports insufficient data", ObservedPerformanceReportsInsufficientData),
         ("real workflow telemetry aggregates bounded events", ObservabilityTests.RealWorkflowTelemetryAggregatesBoundedEvents),
+        ("reliability projection evaluates production campaigns", ReliabilityTests.ProductionCampaignProjection),
+
         ("qualification harness covers deterministic contract", QualificationTests.HarnessCoversDeterministicContract),
         ("production recommendation remains non-blocking", QualificationTests.ProductionFirstRecommendationDoesNotFailModWorkflow),
         ("required capability can fail Golden Path", QualificationTests.RequiredCapabilityCanFailGoldenPath),
