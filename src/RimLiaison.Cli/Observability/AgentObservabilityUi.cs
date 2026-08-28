@@ -18,7 +18,8 @@ public enum AgentObservabilityUiView
     Recommendations,
     Agent,
     Issue,
-    Content
+    Content,
+    Reliability
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -482,10 +483,13 @@ public sealed record AgentObservabilityUiSnapshot
     [JsonPropertyName("issue")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public AgentObservabilityIssueDetail? Issue { get; init; }
-
     [JsonPropertyName("content")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ContentIntelligenceObservabilityView? Content { get; init; }
+
+    [JsonPropertyName("reliability")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AgentReliabilityObservabilityView? Reliability { get; init; }
 
     [JsonPropertyName("emptyState")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -516,6 +520,8 @@ public sealed class AgentObservabilityUiOptions
     public int MaximumIndexedIssues { get; init; } = 5_000;
     public int MaximumIndexedAgents { get; init; } = 2_000;
     public int MaximumNavigationAgents { get; init; } = 100;
+    public string? ReliabilityToolchainFingerprint { get; init; }
+    public string? ReliabilityToolchainVersion { get; init; }
 
     internal void Validate()
     {
@@ -612,6 +618,8 @@ public sealed class AgentObservabilityUi : IDisposable
     private long revision;
     private long issueProjectionRevision;
     private long issueSelectionRevision;
+    private AgentReliabilityObservabilityView? cachedReliabilityView;
+    private long cachedReliabilityProjectionRevision = -1;
     private long issueSignatureComputations;
     private long cachedIssueProjectionRevision = -1;
     private long cachedIssueSelectionRevision = -1;
@@ -774,6 +782,77 @@ public sealed class AgentObservabilityUi : IDisposable
         }
 
         return Navigate(new AgentObservabilityUiRoute(AgentObservabilityUiView.Content));
+    }
+    public AgentObservabilityUiSnapshot ShowReliability()
+    {
+        lock (gate)
+        {
+            selectedEventId = null;
+            assessment = null;
+            issueMode = AgentObservabilityIssueMode.Details;
+        }
+
+        return Navigate(new AgentObservabilityUiRoute(AgentObservabilityUiView.Reliability));
+    }
+
+    public AgentObservabilityUiSnapshot StartReliabilityCampaign(DateTimeOffset? nowUtc = null)
+    {
+        if (store is not IAgentReliabilityCampaignStore campaignStore)
+        {
+            throw new InvalidOperationException("The observability store cannot persist reliability campaigns.");
+        }
+        string fingerprint = CurrentReliabilityFingerprint();
+        AgentReliabilityCampaignOperations.Start(
+            campaignStore,
+            fingerprint,
+            nowUtc ?? DateTimeOffset.UtcNow);
+        lock (gate)
+        {
+            revision++;
+            cachedReliabilityView = null;
+        }
+        return ShowReliability();
+    }
+
+    public AgentObservabilityUiSnapshot ArchiveReliabilityCampaign(DateTimeOffset? nowUtc = null)
+    {
+        if (store is not IAgentReliabilityCampaignStore campaignStore)
+        {
+            throw new InvalidOperationException("The observability store cannot persist reliability campaigns.");
+        }
+        AgentReliabilityObservabilityView view = ReliabilityView();
+        if (view.Campaign is not null)
+        {
+            AgentReliabilityCampaignOperations.Archive(
+                campaignStore,
+                view.Campaign.Configuration.CampaignId,
+                nowUtc ?? DateTimeOffset.UtcNow);
+        }
+        lock (gate)
+        {
+            revision++;
+            cachedReliabilityView = null;
+        }
+        return ShowReliability();
+    }
+
+    public AgentObservabilityUiSnapshot OpenReliabilityWorkflow(string workflowId)
+    {
+        AgentReliabilityWorkflowView? workflow = ReliabilityView().Workflows
+            .FirstOrDefault(value => string.Equals(value.Workflow.WorkflowId, workflowId, StringComparison.Ordinal));
+        return workflow is null
+            ? ShowReliability()
+            : ShowAgent(workflow.NavigationAgentId ?? workflow.Workflow.AgentId, workflow.NavigationRunId ?? workflow.Workflow.RunId);
+    }
+
+    public AgentObservabilityUiSnapshot OpenReliabilityIncident(string signature)
+    {
+        AgentIssue? issue = issues.Values
+            .Where(value => !string.IsNullOrWhiteSpace(value.Fingerprint) &&
+                string.Equals(value.Fingerprint, signature, StringComparison.Ordinal))
+            .OrderByDescending(value => value.Timestamp)
+            .FirstOrDefault();
+        return issue is null ? ShowReliability() : ShowIssue(issue.Id);
     }
 
     public AgentObservabilityUiSnapshot SelectContentBlueprint(string? blueprintId)
@@ -1376,6 +1455,12 @@ public sealed class AgentObservabilityUi : IDisposable
                     Content = BuildContentViewLocked()
                 };
                 break;
+            case AgentObservabilityUiView.Reliability:
+                snapshot = snapshot with
+                {
+                    Reliability = BuildReliabilityViewLocked()
+                };
+                break;
         }
 
         return snapshot with
@@ -1400,6 +1485,7 @@ public sealed class AgentObservabilityUi : IDisposable
                 snapshot.Recommendations?.EmptyState ??
                 snapshot.Agent?.EmptyState ??
                 snapshot.Content?.EmptyState ??
+                snapshot.Reliability?.EmptyState ??
                 (snapshot.Issue is null && route.View == AgentObservabilityUiView.Issue
                     ? "Issue not found."
                     : null) ??
@@ -1407,6 +1493,52 @@ public sealed class AgentObservabilityUi : IDisposable
                     ? "Mod or agent not found."
                     : null)
         };
+    }
+
+    private AgentReliabilityObservabilityView BuildReliabilityViewLocked()
+    {
+        if (cachedReliabilityView is not null &&
+            cachedReliabilityProjectionRevision == revision)
+        {
+            return cachedReliabilityView;
+        }
+
+        string fingerprint = CurrentReliabilityFingerprint();
+        cachedReliabilityView = store is IAgentReliabilityCampaignStore
+            ? AgentReliabilityObservabilityProjection.Build(
+                store,
+                fingerprint,
+                options.ReliabilityToolchainVersion,
+                new AgentReliabilityProjectionOptions(
+                    HistoryComplete: store is not IAgentObservabilityHistoryStatus history || history.HistoryComplete,
+                    HistoryDegraded: store is IAgentObservabilityHistoryStatus degraded && degraded.HistoryDegraded))
+            : AgentReliabilityObservabilityProjection.Build(
+                null,
+                [],
+                fingerprint,
+                options.ReliabilityToolchainVersion);
+        cachedReliabilityProjectionRevision = revision;
+        return cachedReliabilityView;
+    }
+
+    private AgentReliabilityObservabilityView ReliabilityView()
+    {
+        lock (gate)
+        {
+            return BuildReliabilityViewLocked();
+        }
+    }
+
+    private string CurrentReliabilityFingerprint()
+    {
+        if (!string.IsNullOrWhiteSpace(options.ReliabilityToolchainFingerprint))
+        {
+            return options.ReliabilityToolchainFingerprint!;
+        }
+        return PromotedToolchainIdentity.TryLoadFingerprint(null, out string? fingerprint) &&
+            !string.IsNullOrWhiteSpace(fingerprint)
+            ? fingerprint
+            : "unknown";
     }
 
     private ContentIntelligenceObservabilityView BuildContentViewLocked()
@@ -1460,7 +1592,13 @@ public sealed class AgentObservabilityUi : IDisposable
                 "content",
                 "Content Intelligence",
                 "Content Intelligence",
-                route.View == AgentObservabilityUiView.Content)
+                route.View == AgentObservabilityUiView.Content),
+            new(
+                "reliability",
+                "reliability",
+                "Reliability / Burn-in",
+                "Reliability / Burn-in",
+                route.View == AgentObservabilityUiView.Reliability)
         };
         AgentSnapshot? selectedAgent = route.View == AgentObservabilityUiView.Agent &&
             route.AgentId is not null
@@ -2643,6 +2781,7 @@ public sealed class AgentObservabilityUi : IDisposable
             AgentObservabilityUiView.Issues => new(AgentObservabilityUiView.Issues),
             AgentObservabilityUiView.Recommendations => new(AgentObservabilityUiView.Recommendations),
             AgentObservabilityUiView.Content => new(AgentObservabilityUiView.Content),
+            AgentObservabilityUiView.Reliability => new(AgentObservabilityUiView.Reliability),
             AgentObservabilityUiView.Agent => new(
                 AgentObservabilityUiView.Agent,
                 requested.AgentId,

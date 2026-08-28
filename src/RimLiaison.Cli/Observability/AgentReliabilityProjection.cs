@@ -24,6 +24,7 @@ public static class AgentReliabilityStates
     public const string Unknown = "unknown";
     public const string NotCovered = "not-covered";
     public const string Established = "established";
+    public const string Missing = "MISSING";
 }
 
 public sealed record AgentReliabilityCoverageRequirements(
@@ -344,6 +345,13 @@ public static class AgentReliabilityProjection
             workflows.Add(BuildWorkflow(agent, workflowEvents, workflowIssues, profile, input));
         }
 
+        if (configuration.StartedAtUtc is not null)
+        {
+            long campaignStart = configuration.StartedAtUtc.Value.ToUnixTimeMilliseconds();
+            workflows = workflows
+                .Where(workflow => workflow.StartTimestamp >= campaignStart)
+                .ToList();
+        }
         return BuildCampaign(workflows, configuration, input.HistoryComplete, input.HistoryDegraded);
     }
 
@@ -1114,5 +1122,6 @@ public interface IAgentObservabilityHistoryStatus
 public interface IAgentReliabilityCampaignStore
 {
     AgentReliabilityCampaignConfiguration? GetReliabilityCampaign(string campaignId);
+    IReadOnlyList<AgentReliabilityCampaignConfiguration> GetReliabilityCampaigns();
     void SaveReliabilityCampaign(AgentReliabilityCampaignConfiguration configuration);
 }

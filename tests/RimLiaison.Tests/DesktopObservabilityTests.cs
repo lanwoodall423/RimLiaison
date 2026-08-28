@@ -2534,6 +2534,7 @@ internal static class DesktopObservabilityTests
         Panel contentIntelligencePanel =
             GetPrivateField<Panel>(form, "contentIntelligencePanel");
         Panel agentPanel = GetPrivateField<Panel>(form, "agentPanel");
+        Panel reliabilityPanel = GetPrivateField<Panel>(form, "reliabilityPanel");
         ListView allActivity = GetPrivateField<ListView>(form, "allActivity");
         ListView issueList = GetPrivateField<ListView>(form, "issueList");
         ListView contentList = GetPrivateField<ListView>(form, "contentList");
@@ -2552,6 +2553,8 @@ internal static class DesktopObservabilityTests
             "Content Intelligence panel must descend from the mounted content host");
         Assert(Descendants(contentPanel).Contains(agentPanel),
             "agent panel must descend from the mounted content host");
+        Assert(Descendants(contentPanel).Contains(reliabilityPanel),
+            "Reliability / Burn-in panel must descend from the mounted content host");
 
         form.Show();
         Application.DoEvents();
@@ -2590,6 +2593,9 @@ internal static class DesktopObservabilityTests
         Assert(agentActivity.Items.Count > 0, "RimLiaison must render activity rows");
         Assert(HasDisplayRectangle(agentActivity),
             "RimLiaison detail must have a display rectangle");
+
+        SelectNavigation(form, "reliability", "Reliability / Burn-in");
+        Assert(reliabilityPanel.Visible, "Reliability / Burn-in must expose the reliability panel");
     }
 
     private static IEnumerable<Control> Descendants(Control root)

@@ -38,6 +38,14 @@ public sealed class ObservabilityMainForm : Form
     private readonly Panel issuesPanel;
     private readonly Panel contentIntelligencePanel;
     private readonly Panel agentPanel;
+    private readonly Panel reliabilityPanel;
+    private readonly Label reliabilitySummary;
+    private readonly Label reliabilityCoverage;
+    private readonly Label reliabilityTiming;
+    private readonly ListView reliabilityWorkflows;
+    private readonly Button startReliabilityButton;
+    private readonly ListView reliabilityIncidents;
+    private readonly Button archiveReliabilityButton;
     private readonly ListView productionList;
     private readonly ListView allActivity;
     private readonly ListView agentActivity;
@@ -113,13 +121,6 @@ public sealed class ObservabilityMainForm : Form
             ? null
             : "Loading recent observability state...";
         ownsStore = useDefaultStore;
-        this.contentAdministration = contentAdministration ??
-            (useDefaultStore
-                ? new ContentIntelligenceObservabilityAdministration(
-                    new ContentIntelligenceAdministration(
-                        new ContentIntelligenceStore(ContentIntelligenceStorage.ResolveDefaultPath())),
-                    this.store)
-                : null);
         observabilityUi = new AgentObservabilityUi(
             this.store,
             new AgentObservabilityUiOptions
@@ -127,7 +128,12 @@ public sealed class ObservabilityMainForm : Form
                 MaximumActivityRows = 1_000,
                 MaximumIssueRows = 100,
                 MaximumRecentActivityRows = 100,
-                MaximumSupportingEvents = 2_000
+                MaximumSupportingEvents = 2_000,
+                ReliabilityToolchainFingerprint = PromotedToolchainIdentity.TryLoadFingerprint(
+                    null,
+                    out string? promotedFingerprint)
+                    ? promotedFingerprint
+                    : null
             });
         uiSubscription = observabilityUi.Subscribe(OnObservabilityUpdate);
         refreshTimer = new System.Windows.Forms.Timer { Interval = 250 };
@@ -266,6 +272,50 @@ public sealed class ObservabilityMainForm : Form
         contentActions.Controls.Add(contentExcludeButton);
         contentActions.Controls.Add(contentIneligibleButton);
         contentIntelligencePanel = BuildContentPanel();
+        reliabilitySummary = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 96,
+            Padding = new Padding(4, 4, 4, 4),
+            AutoEllipsis = true,
+            Font = new Font(Font, FontStyle.Bold)
+        };
+        reliabilityCoverage = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 180,
+            Padding = new Padding(4, 4, 4, 4),
+            AutoEllipsis = true
+        };
+        reliabilityTiming = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 120,
+            Padding = new Padding(4, 4, 4, 4),
+            AutoEllipsis = true
+        };
+        reliabilityWorkflows = CreateListView(
+            ("Project / mod", 180),
+            ("Agent", 150),
+            ("Outcome", 110),
+            ("Infrastructure", 110),
+            ("Toolchain", 190),
+            ("Wall ms", 90),
+            ("Build ms", 90),
+            ("Deploy ms", 90),
+            ("Runtime ms", 100),
+            ("Evidence", 110),
+            ("Incidents", 160));
+        reliabilityIncidents = CreateListView(
+            ("Signature", 440),
+            ("Count", 90),
+            ("Recovered", 110),
+            ("Projects / mods", 260));
+        reliabilityIncidents.SelectedIndexChanged += OnReliabilityIncidentSelected;
+        reliabilityWorkflows.SelectedIndexChanged += OnReliabilityWorkflowSelected;
+        startReliabilityButton = CreateButton("Start campaign", OnStartReliabilityCampaign);
+        archiveReliabilityButton = CreateButton("End / archive campaign", OnArchiveReliabilityCampaign);
+        reliabilityPanel = BuildReliabilityPanel();
 
         agentHeader = new Label
         {
@@ -304,6 +354,7 @@ public sealed class ObservabilityMainForm : Form
 
         contentPanel.Controls.Add(contentIntelligencePanel);
         contentPanel.Controls.Add(issuesPanel);
+        contentPanel.Controls.Add(reliabilityPanel);
         contentPanel.Controls.Add(allPanel);
         contentPanel.Controls.Add(agentPanel);
         Controls.Add(contentPanel);
@@ -370,6 +421,34 @@ public sealed class ObservabilityMainForm : Form
         panel.Controls.Add(split);
         panel.Controls.Add(contentActions);
         panel.Controls.Add(contentSummary);
+        return panel;
+    }
+
+    private Panel BuildReliabilityPanel()
+    {
+        var panel = new Panel { Dock = DockStyle.Fill };
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 38,
+            Padding = new Padding(4, 2, 4, 2),
+            WrapContents = false
+        };
+        actions.Controls.Add(startReliabilityButton);
+        actions.Controls.Add(archiveReliabilityButton);
+        var split = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Vertical,
+            SplitterDistance = 760
+        };
+        split.Panel1.Controls.Add(reliabilityWorkflows);
+        split.Panel2.Controls.Add(reliabilityIncidents);
+        panel.Controls.Add(split);
+        panel.Controls.Add(actions);
+        panel.Controls.Add(reliabilityTiming);
+        panel.Controls.Add(reliabilityCoverage);
+        panel.Controls.Add(reliabilitySummary);
         return panel;
     }
 
@@ -639,6 +718,7 @@ public sealed class ObservabilityMainForm : Form
                 AgentObservabilityUiView.Issue or
                 AgentObservabilityUiView.Recommendations);
         SetVisible(contentIntelligencePanel, snapshot.View == AgentObservabilityUiView.Content);
+        SetVisible(reliabilityPanel, snapshot.View == AgentObservabilityUiView.Reliability);
         SetVisible(agentPanel, snapshot.View == AgentObservabilityUiView.Agent);
         SetText(
             viewTitle,
@@ -646,8 +726,8 @@ public sealed class ObservabilityMainForm : Form
             {
                 AgentObservabilityUiView.All => "Production overview",
                 AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Issues",
-                AgentObservabilityUiView.Recommendations => "Recommendations",
                 AgentObservabilityUiView.Content => "Content Intelligence",
+                AgentObservabilityUiView.Reliability => "Reliability / Burn-in",
                 AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Agent",
                 _ => "RimLiaison"
             });
@@ -670,6 +750,11 @@ public sealed class ObservabilityMainForm : Form
         if (snapshot.Content is not null)
         {
             RefreshContent(snapshot.Content);
+        }
+
+        if (snapshot.Reliability is not null)
+        {
+            RefreshReliability(snapshot.Reliability);
         }
 
         if (snapshot.Agent is not null)
@@ -897,6 +982,9 @@ public sealed class ObservabilityMainForm : Form
             case "content":
                 observabilityUi.ShowContent();
                 break;
+            case "reliability":
+                observabilityUi.ShowReliability();
+                break;
             case "agent" when item.CanonicalEntityId is not null:
                 observabilityUi.ShowAgent(item.CanonicalEntityId, item.RunId);
                 break;
@@ -984,6 +1072,94 @@ public sealed class ObservabilityMainForm : Form
     }
 
 
+
+    private void RefreshReliability(AgentReliabilityObservabilityView view)
+    {
+        SetText(
+            reliabilitySummary,
+            $"State: {view.CampaignState} · Campaign: {view.Campaign?.Configuration.CampaignId ?? "none"} · " +
+            $"Promoted toolchain: {view.CurrentPromotedToolchainFingerprint}" +
+            (view.CurrentPromotedToolchainVersion is null ? string.Empty : $" · {view.CurrentPromotedToolchainVersion}") +
+            Environment.NewLine +
+            $"Production workflows: {view.QualifyingWorkflowCount} / {view.QualifyingWorkflowTarget} · " +
+            $"Incidents: {view.TotalIncidentCount} · Recovery: {view.RecoveryRateDisplay}" +
+            (view.EmptyState is null ? string.Empty : Environment.NewLine + view.EmptyState));
+        SetText(
+            reliabilityCoverage,
+            "Coverage" + Environment.NewLine + string.Join(
+                Environment.NewLine,
+                view.Coverage.Select(row =>
+                    $"{(row.Required ? "REQUIRED" : "RECOMMENDED")}  {row.Label}: {row.State}" +
+                    (row.Detail is null ? string.Empty : $" ({row.Detail})"))));
+        SetText(
+            reliabilityTiming,
+            $"Timing: wall={FormatReliabilityMilliseconds(view.Timing.RimLiaisonWallTimeMilliseconds)}, " +
+            $"tooling={FormatReliabilityMilliseconds(view.Timing.ObservedToolingTimeMilliseconds)}, " +
+            $"build={FormatReliabilityMilliseconds(view.Timing.ObservedBuildTimeMilliseconds)}, " +
+            $"deploy={FormatReliabilityMilliseconds(view.Timing.ObservedDeploymentTimeMilliseconds)}, " +
+            $"runtime={FormatReliabilityMilliseconds(view.Timing.ObservedLifecycleRuntimeWaitMilliseconds)}, " +
+            $"recovery={FormatReliabilityMilliseconds(view.Timing.ObservedRecoveryTimeMilliseconds)}, " +
+            $"validation={FormatReliabilityMilliseconds(view.Timing.ObservedValidationTimeMilliseconds)}" +
+            (view.Timing.Complete ? string.Empty : " · timing evidence incomplete") +
+            Environment.NewLine + view.Timing.Definition);
+        reliabilityWorkflows.BeginUpdate();
+        reliabilityIncidents.BeginUpdate();
+        try
+        {
+            reliabilityWorkflows.Items.Clear();
+            reliabilityIncidents.Items.Clear();
+            foreach (AgentReliabilityWorkflowView row in view.Workflows)
+            {
+                var item = new ListViewItem(
+                [
+                    row.Workflow.ModId + " / " + row.Workflow.DisplayName,
+                    row.Workflow.AgentId,
+                    row.Workflow.TerminalOutcome,
+                    row.InfrastructureState,
+                    row.ToolchainDisplay,
+                    FormatReliabilityMilliseconds(row.Workflow.RimLiaisonWallTimeMilliseconds),
+                    FormatReliabilityMilliseconds(row.Workflow.ObservedBuildTimeMilliseconds),
+                    FormatReliabilityMilliseconds(row.Workflow.ObservedDeploymentTimeMilliseconds),
+                    FormatReliabilityMilliseconds(row.Workflow.ObservedLifecycleRuntimeWaitMilliseconds),
+                    row.EvidenceDisplay,
+                    string.Join(", ", row.IncidentSignatures.DefaultIfEmpty("—"))
+                ])
+                {
+                    Tag = row.Workflow.WorkflowId
+                };
+                reliabilityWorkflows.Items.Add(item);
+            }
+            foreach (var incident in view.Workflows
+                         .SelectMany(row => row.IncidentSignatures.Select(signature => (signature, row))))
+            {
+                ListViewItem item = reliabilityIncidents.Items.Cast<ListViewItem>()
+                    .FirstOrDefault(existing => string.Equals(existing.Tag as string, incident.signature, StringComparison.Ordinal))
+                    ?? new ListViewItem([incident.signature, "0", "—", ""]);
+                if (item.ListView is null)
+                {
+                    item.Tag = incident.signature;
+                    reliabilityIncidents.Items.Add(item);
+                }
+                int count = int.TryParse(item.SubItems[1].Text, out int current) ? current + 1 : 1;
+                SetSubItem(item, 1, count.ToString(CultureInfo.InvariantCulture));
+                SetSubItem(item, 3, string.Join(", ", view.Workflows
+                    .Where(row => row.IncidentSignatures.Contains(incident.signature, StringComparer.Ordinal))
+                    .Select(row => row.Workflow.ModId + " / " + row.Workflow.DisplayName)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(value => value, StringComparer.Ordinal)));
+            }
+        }
+        finally
+        {
+            reliabilityWorkflows.EndUpdate();
+            reliabilityIncidents.EndUpdate();
+        }
+        startReliabilityButton.Enabled = view.CanStartCampaign;
+        archiveReliabilityButton.Enabled = view.Campaign is not null && view.Campaign.Configuration.EndAtUtc is null;
+    }
+
+    private static string FormatReliabilityMilliseconds(long? milliseconds) =>
+        milliseconds is null ? "unavailable" : milliseconds.Value.ToString("N0", CultureInfo.InvariantCulture) + " ms";
 
     private void RefreshAll(AgentObservabilityAllView view)
     {
@@ -2173,6 +2349,63 @@ public sealed class ObservabilityMainForm : Form
             blueprint.BlueprintId,
             "DESKTOP_ADMIN_SOURCE_INELIGIBLE");
         RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnReliabilityWorkflowSelected(object? sender, EventArgs e)
+    {
+        if (reliabilityWorkflows.SelectedItems.Count == 0 ||
+            reliabilityWorkflows.SelectedItems[0].Tag is not string workflowId)
+        {
+            return;
+        }
+
+        observabilityUi.OpenReliabilityWorkflow(workflowId);
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnReliabilityIncidentSelected(object? sender, EventArgs e)
+    {
+        if (reliabilityIncidents.SelectedItems.Count == 0 ||
+            reliabilityIncidents.SelectedItems[0].Tag is not string signature)
+        {
+            return;
+        }
+
+        observabilityUi.OpenReliabilityIncident(signature);
+        RefreshFromSnapshot(observabilityUi.Snapshot);
+    }
+
+    private void OnStartReliabilityCampaign(object? sender, EventArgs e)
+    {
+        try
+        {
+            observabilityUi.StartReliabilityCampaign(DateTimeOffset.UtcNow);
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            streamStatus.Text = "Unable to start reliability campaign: " + exception.Message;
+        }
+    }
+
+    private void OnArchiveReliabilityCampaign(object? sender, EventArgs e)
+    {
+        AgentReliabilityObservabilityView view = observabilityUi.Snapshot.Reliability ??
+            throw new InvalidOperationException("Reliability view is unavailable.");
+        if (view.Campaign is null)
+        {
+            return;
+        }
+
+        try
+        {
+            observabilityUi.ArchiveReliabilityCampaign(DateTimeOffset.UtcNow);
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            streamStatus.Text = "Unable to archive reliability campaign: " + exception.Message;
+        }
     }
 
     private void OnPastSessionSelected(object? sender, EventArgs e)

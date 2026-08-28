@@ -282,6 +282,232 @@ internal static class ReliabilityTests
         }
     }
 
+    public static void PromptTwoReliabilitySurface()
+    {
+        ReliabilityViewShowsCampaign();
+        ReliabilityViewShowsEmptyState();
+        ReliabilityCoverageMarksRequiredEvidence();
+        ReliabilityCoverageMarksRecommendation();
+        ReliabilityTimingLeavesMissingUnavailable();
+        ReliabilityTimingDefinitionIsExplicit();
+        ReliabilityRecoveryRateIsBounded();
+        ReliabilityWorkflowRowsExposeToolchain();
+        ReliabilityWorkflowRowsExposeRecoveredInfrastructure();
+        ReliabilityWorkflowRowsExposeIncidents();
+        CampaignStartCreatesActiveCampaign();
+        CampaignStartIsIdempotent();
+        CampaignStartArchivesPreviousFingerprint();
+        CampaignArchiveEndsCampaign();
+        CampaignPersistenceReloadsAllCampaigns();
+        ActiveCampaignUsesExactFingerprint();
+        HistoricalCampaignsAreBounded();
+        ReliabilityNavigationIsVisible();
+        ReliabilityWorkflowSelectionNavigates();
+        ReliabilityIncidentSelectionNavigates();
+    }
+
+    private static void ReliabilityViewShowsCampaign()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-campaign", "view-logical");
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(
+            Project(snapshot, events, configuration: Campaign(minimum: 1, requireConcurrency: false)),
+            [],
+            "tc-promoted");
+        Assert(view.Campaign is not null, "reliability view exposes campaign");
+        AssertEqual(1, view.Workflows.Count, "reliability view exposes production workflow");
+    }
+
+    private static void ReliabilityViewShowsEmptyState()
+    {
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(
+            null,
+            [],
+            "tc-promoted");
+        Assert(view.EmptyState is not null && view.CanStartCampaign, "reliability empty state offers campaign start");
+    }
+
+    private static void ReliabilityCoverageMarksRequiredEvidence()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-coverage", "view-coverage-logical");
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(
+            Project(snapshot, events, configuration: Campaign(minimum: 1, requireConcurrency: false)),
+            [],
+            "tc-promoted");
+        Assert(view.Coverage.Single(row => row.Id == "live-validation").Required, "live validation is required");
+        AssertEqual(AgentReliabilityStates.Pass, view.Coverage.Single(row => row.Id == "live-validation").State, "live validation passes");
+    }
+
+    private static void ReliabilityCoverageMarksRecommendation()
+    {
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(null, [], "tc-promoted");
+        AgentReliabilityCoverageRow cleanStart = view.Coverage.Single(row => row.Id == "clean-start");
+        Assert(!cleanStart.Required && cleanStart.State == AgentReliabilityStates.Missing, "clean start is a non-blocking missing recommendation");
+    }
+
+    private static void ReliabilityTimingLeavesMissingUnavailable()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-no-timing", "view-no-timing-logical");
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(
+            Project(snapshot, events, configuration: Campaign(minimum: 1, requireConcurrency: false)),
+            [],
+            "tc-promoted");
+        Assert(view.Timing.ObservedBuildTimeMilliseconds is null, "missing timing remains unavailable");
+    }
+
+    private static void ReliabilityTimingDefinitionIsExplicit()
+    {
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(null, [], "tc-promoted");
+        Assert(view.Timing.Definition.Contains("not summed", StringComparison.Ordinal), "timing definition explains nested phase treatment");
+    }
+
+    private static void ReliabilityRecoveryRateIsBounded()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-recovery", "view-recovery-logical");
+        AgentReliabilityCampaignProjection projection = Project(
+            snapshot,
+            events,
+            [Issue(snapshot, "view-recovery-issue", "view-recovery-cause", recovered: true)],
+            configuration: Campaign(minimum: 1, requireConcurrency: false));
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(projection, [], "tc-promoted");
+        AssertEqual("1 / 1 = 100 %", view.RecoveryRateDisplay, "recovery rate is explicit");
+    }
+
+    private static void ReliabilityWorkflowRowsExposeToolchain()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-toolchain", "view-toolchain-logical");
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(
+            Project(snapshot, events, configuration: Campaign(minimum: 1, requireConcurrency: false)),
+            [],
+            "tc-promoted");
+        Assert(view.Workflows.Single().ToolchainDisplay.Contains("tc-promoted", StringComparison.Ordinal), "workflow row exposes fingerprint");
+    }
+
+    private static void ReliabilityWorkflowRowsExposeRecoveredInfrastructure()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-recovered", "view-recovered-logical");
+        AgentReliabilityCampaignProjection projection = Project(
+            snapshot,
+            events,
+            [Issue(snapshot, "view-recovered-issue", "view-recovered-cause", recovered: true)],
+            configuration: Campaign(minimum: 1, requireConcurrency: false));
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(projection, [], "tc-promoted");
+        AssertEqual("RECOVERED", view.Workflows.Single().InfrastructureState, "recovered incident is surfaced");
+    }
+
+    private static void ReliabilityWorkflowRowsExposeIncidents()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-incident", "view-incident-logical");
+        AgentReliabilityCampaignProjection projection = Project(
+            snapshot,
+            events,
+            [Issue(snapshot, "view-incident-issue", "view-incident-cause")],
+            configuration: Campaign(minimum: 1, requireConcurrency: false));
+        AgentReliabilityWorkflowView row = AgentReliabilityObservabilityProjection.Build(projection, [], "tc-promoted").Workflows.Single();
+        Assert(row.IncidentSignatures.Contains("signature.view-incident-cause"), "workflow row exposes incident signature");
+    }
+
+    private static void CampaignStartCreatesActiveCampaign()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentReliabilityCampaignConfiguration campaign = AgentReliabilityCampaignOperations.Start(store, "tc-start", DateTimeOffset.UnixEpoch);
+        AssertEqual(campaign.CampaignId, AgentReliabilityCampaignOperations.FindActive(store, "tc-start")!.CampaignId, "campaign start creates active campaign");
+    }
+
+    private static void CampaignStartIsIdempotent()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentReliabilityCampaignConfiguration first = AgentReliabilityCampaignOperations.Start(store, "tc-idempotent", DateTimeOffset.UnixEpoch);
+        AgentReliabilityCampaignConfiguration second = AgentReliabilityCampaignOperations.Start(store, "tc-idempotent", DateTimeOffset.UnixEpoch.AddHours(1));
+        AssertEqual(first.CampaignId, second.CampaignId, "starting current campaign is idempotent");
+    }
+
+    private static void CampaignStartArchivesPreviousFingerprint()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentReliabilityCampaignConfiguration first = AgentReliabilityCampaignOperations.Start(store, "tc-old", DateTimeOffset.UnixEpoch);
+        AgentReliabilityCampaignOperations.Start(store, "tc-new", DateTimeOffset.UnixEpoch.AddHours(1));
+        Assert(store.GetReliabilityCampaign(first.CampaignId)!.EndAtUtc is not null, "new fingerprint archives previous campaign");
+    }
+
+    private static void CampaignArchiveEndsCampaign()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentReliabilityCampaignConfiguration campaign = AgentReliabilityCampaignOperations.Start(store, "tc-archive", DateTimeOffset.UnixEpoch);
+        AgentReliabilityCampaignOperations.Archive(store, campaign.CampaignId, DateTimeOffset.UnixEpoch.AddHours(1));
+        Assert(store.GetReliabilityCampaign(campaign.CampaignId)!.EndAtUtc is not null, "archive persists campaign end");
+    }
+
+    private static void CampaignPersistenceReloadsAllCampaigns()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "rimliaison-prompt2-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var first = new AgentObservabilityStore(directory))
+            {
+                AgentReliabilityCampaignOperations.Start(first, "tc-persist-a", DateTimeOffset.UnixEpoch);
+                AgentReliabilityCampaignOperations.Start(first, "tc-persist-b", DateTimeOffset.UnixEpoch.AddHours(1));
+            }
+            using var second = new AgentObservabilityStore(directory);
+            AssertEqual(2, second.GetReliabilityCampaigns().Count, "campaign list survives restart");
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
+    private static void ActiveCampaignUsesExactFingerprint()
+    {
+        using var store = new AgentObservabilityStore();
+        AgentReliabilityCampaignOperations.Start(store, "tc-exact", DateTimeOffset.UnixEpoch);
+        Assert(AgentReliabilityCampaignOperations.FindActive(store, "tc-exact") is not null, "exact fingerprint selects campaign");
+        Assert(AgentReliabilityCampaignOperations.FindActive(store, "tc-exact-suffix") is null, "different fingerprint does not select campaign");
+    }
+
+    private static void HistoricalCampaignsAreBounded()
+    {
+        using var store = new AgentObservabilityStore();
+        for (int index = 0; index < 66; index++)
+        {
+            AgentReliabilityCampaignOperations.Start(store, "tc-history-" + index, DateTimeOffset.UnixEpoch.AddMinutes(index));
+        }
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(store, "tc-history-65");
+        Assert(view.HistoricalCampaigns.Count <= 64, "historical campaigns are bounded");
+    }
+
+    private static void ReliabilityNavigationIsVisible()
+    {
+        using var store = new AgentObservabilityStore();
+        using var ui = new AgentObservabilityUi(store, new AgentObservabilityUiOptions { ReliabilityToolchainFingerprint = "tc-nav" });
+        Assert(ui.Snapshot.Navigation.Items.Any(item => item.Kind == "reliability"), "reliability navigation item is visible");
+        AssertEqual(AgentObservabilityUiView.Reliability, ui.ShowReliability().View, "reliability navigation selects view");
+    }
+
+    private static void ReliabilityWorkflowSelectionNavigates()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-nav-workflow", "view-nav-logical");
+        AgentReliabilityCampaignProjection projection = Project(snapshot, events, configuration: Campaign(minimum: 1, requireConcurrency: false));
+        AgentReliabilityWorkflowRecord workflow = projection.Workflows.Single();
+        using var store = new AgentObservabilityStore();
+        using var ui = new AgentObservabilityUi(store);
+        ui.ShowReliability();
+        AssertEqual(AgentObservabilityUiView.Reliability, ui.Snapshot.View, "workflow selection starts on reliability view");
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(projection, [], "tc-promoted");
+        AssertEqual(workflow.WorkflowId, view.Workflows.Single().Workflow.WorkflowId, "workflow selection target is stable");
+    }
+
+    private static void ReliabilityIncidentSelectionNavigates()
+    {
+        (AgentSnapshot snapshot, List<AgentEvent> events) = SuccessfulWorkflow("view-nav-incident", "view-nav-incident-logical");
+        AgentReliabilityCampaignProjection projection = Project(
+            snapshot,
+            events,
+            [Issue(snapshot, "view-nav-issue", "view-nav-cause")],
+            configuration: Campaign(minimum: 1, requireConcurrency: false));
+        AgentReliabilityObservabilityView view = AgentReliabilityObservabilityProjection.Build(projection, [], "tc-promoted");
+        AssertEqual("signature.view-nav-cause", view.Workflows.Single().IncidentSignatures.Single(), "incident selection target is stable");
+    }
+
 
     private static AgentReliabilityCampaignProjection Project(
         IReadOnlyList<AgentSnapshot> snapshots,

@@ -53,6 +53,7 @@ internal static class Program
         ("observed performance reports insufficient data", ObservedPerformanceReportsInsufficientData),
         ("real workflow telemetry aggregates bounded events", ObservabilityTests.RealWorkflowTelemetryAggregatesBoundedEvents),
         ("reliability projection evaluates production campaigns", ReliabilityTests.ProductionCampaignProjection),
+        ("reliability UI projection and campaign controls", ReliabilityTests.PromptTwoReliabilitySurface),
 
         ("qualification harness covers deterministic contract", QualificationTests.HarnessCoversDeterministicContract),
         ("production recommendation remains non-blocking", QualificationTests.ProductionFirstRecommendationDoesNotFailModWorkflow),

@@ -236,6 +236,17 @@ public sealed class AgentObservabilityStore :
                 : null;
         }
     }
+    public IReadOnlyList<AgentReliabilityCampaignConfiguration> GetReliabilityCampaigns()
+    {
+        lock (gate)
+        {
+            return reliabilityCampaigns.Values
+                .OrderByDescending(value => value.StartedAtUtc ?? value.CreatedAtUtc)
+                .ThenBy(value => value.CampaignId, StringComparer.Ordinal)
+                .ToArray();
+        }
+    }
+
 
     public void SaveReliabilityCampaign(AgentReliabilityCampaignConfiguration configuration)
     {
