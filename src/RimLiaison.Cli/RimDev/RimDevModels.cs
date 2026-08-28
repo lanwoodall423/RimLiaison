@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Text.Json;
 
 namespace RimLiaison.RimDev;
 
@@ -70,6 +71,16 @@ public sealed record StackManifestState(
     string? Catalog,
     string? FallbackSuite,
     string? RimBridge,
+    string? Workload,
+    string? ProjectType,
+    string? PackageId,
+    string? SourceProject,
+    string? Configuration,
+    string? ExpectedAssembly,
+    string? DeploymentTarget,
+    string? TestRecipe,
+    JsonElement? RuntimePackage,
+    IReadOnlyList<string>? Dependencies,
     string? ErrorCode,
     string? Error);
 

@@ -1448,53 +1448,35 @@ public sealed class RimDevWorkflow
         return true;
     }
 
-    private static RimDevDeploymentSpec? ResolveDeployment(RimDevRepository repository, string workspaceRoot, RimDevBuildEvidence evidence, out string? error)
+    private static RimDevDeploymentSpec? ResolveDeployment(
+        RimDevRepository repository,
+        string workspaceRoot,
+        RimDevBuildEvidence evidence,
+        out string? error)
     {
         error = null;
-        string? deploymentRoot = ResolveConfiguredPath(workspaceRoot, repository.DeploymentRoot);
-        string? target = repository.DeploymentTarget;
-        string expectedAssembly = Path.GetFileName(evidence.OutputPath);
-        if (deploymentRoot is null || string.IsNullOrWhiteSpace(target))
+        if (!repository.Manifest.IsValid ||
+            repository.Manifest.Workload != "production" ||
+            string.IsNullOrWhiteSpace(repository.Manifest.SourceProject) ||
+            string.IsNullOrWhiteSpace(repository.Manifest.ExpectedAssembly) ||
+            string.IsNullOrWhiteSpace(repository.Manifest.DeploymentTarget))
         {
-            try
-            {
-                deploymentRoot ??= DevBridgeAdapterOptions.Discover().RootPath;
-                if (string.IsNullOrWhiteSpace(repository.Manifest.DevBridgeProject))
-                {
-                    error = "The stack manifest does not declare a DevBridge project alias.";
-                    return null;
-                }
-
-                string descriptor = Path.Combine(deploymentRoot, "DevelopmentProjects", repository.Manifest.DevBridgeProject + ".json");
-                if (!File.Exists(descriptor))
-                {
-                    error = "The configured DevBridge development descriptor was not found.";
-                    return null;
-                }
-
-                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(descriptor));
-                JsonElement root = document.RootElement;
-                if (!string.Equals(GetString(root, "schemaVersion"), "devbridge-mod-development/v1", StringComparison.Ordinal) ||
-                    !string.Equals(GetString(root, "project"), repository.Manifest.DevBridgeProject, StringComparison.OrdinalIgnoreCase))
-                {
-                    error = "The DevBridge deployment descriptor does not match the stack manifest.";
-                    return null;
-                }
-
-                target ??= GetString(root, "deploymentTarget");
-                expectedAssembly = GetString(root, "expectedAssembly") ?? expectedAssembly;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
-            {
-                error = Bound(exception.Message) ?? "The deployment descriptor could not be read.";
-                return null;
-            }
+            error = "PROJECT_METADATA_MISSING: the production repository has no complete project-owned metadata.";
+            return null;
         }
 
-        if (string.IsNullOrWhiteSpace(deploymentRoot) || string.IsNullOrWhiteSpace(target) ||
-            !string.Equals(expectedAssembly, Path.GetFileName(evidence.OutputPath), StringComparison.OrdinalIgnoreCase))
+        string? deploymentRoot = ResolveConfiguredPath(workspaceRoot, repository.DeploymentRoot);
+        string target = repository.Manifest.DeploymentTarget;
+        string expectedAssembly = repository.Manifest.ExpectedAssembly;
+        if (deploymentRoot is null)
         {
-            error = "The deployment root, target, or expected assembly is not safely configured.";
+            error = "WORKSPACE_DEPLOYMENT_ROOT_MISSING: the machine workspace has no deployment root.";
+            return null;
+        }
+
+        if (!string.Equals(expectedAssembly, Path.GetFileName(evidence.OutputPath), StringComparison.OrdinalIgnoreCase))
+        {
+            error = "PROJECT_METADATA_IDENTITY_CONTRADICTION: expectedAssembly does not match the validated output.";
             return null;
         }
 
@@ -1503,7 +1485,7 @@ public sealed class RimDevWorkflow
         if (targetPath is null || parent is null || !Directory.Exists(parent) || IsReparsePoint(parent) ||
             (File.Exists(targetPath) && IsReparsePoint(targetPath)))
         {
-            error = "The deployment target is outside the configured root or its parent is unsafe.";
+            error = "WORKSPACE_DEPLOYMENT_TARGET_INVALID: the machine deployment target is outside the configured root or its parent is unsafe.";
             return null;
         }
 

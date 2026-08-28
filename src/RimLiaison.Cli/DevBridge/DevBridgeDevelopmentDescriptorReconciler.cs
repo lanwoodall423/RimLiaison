@@ -82,6 +82,19 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         }
 
         bool descriptorExists = File.Exists(fullDescriptorPath);
+        if (descriptorExists &&
+            Directory.Exists(Path.Combine(fullRepositoryRoot, ".git")) &&
+            IsWithin(fullDescriptorPath, Path.Combine(fullRepositoryRoot, "DevelopmentProjects")) &&
+            !IsExplicitNonProductionDescriptor(fullDescriptorPath))
+        {
+            return Failure(
+                fullDescriptorPath,
+                PrerequisiteRecoveryState.RecoveryRequired,
+                "EXTERNAL_PRODUCTION_DESCRIPTOR_IN_TOOLING",
+                "Descriptors stored in a tooling repository must be explicitly classified as non-production fixtures.",
+                action: "move-project-metadata-to-owning-repository");
+        }
+
         bool repositoryExists = Directory.Exists(fullRepositoryRoot);
         bool coordinatorExists = Directory.Exists(options.RootPath);
         if (!descriptorExists && !repositoryExists && !coordinatorExists)
@@ -885,6 +898,25 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         return JsonSerializer.Serialize(
             fields,
             new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private static bool IsExplicitNonProductionDescriptor(string descriptorPath)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(descriptorPath),
+                new JsonDocumentOptions { MaxDepth = 16 });
+            JsonElement root = document.RootElement;
+            string? entityType = GetString(root, "entityType");
+            return entityType is "fixture" or "test" or "internal" or "example" &&
+                root.TryGetProperty("productionEligible", out JsonElement eligible) &&
+                eligible.ValueKind == JsonValueKind.False;
+        }
+        catch (Exception) when (File.Exists(descriptorPath))
+        {
+            return false;
+        }
     }
 
     private static string? GetString(JsonElement parent, string name) =>

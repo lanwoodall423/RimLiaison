@@ -29,6 +29,46 @@ public sealed class RimDevStackManifest
 
     [JsonPropertyName("rimBridge")]
     public string RimBridge { get; init; } = string.Empty;
+
+    [JsonPropertyName("workload")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Workload { get; init; }
+
+    [JsonPropertyName("projectType")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ProjectType { get; init; }
+
+    [JsonPropertyName("packageId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PackageId { get; init; }
+
+    [JsonPropertyName("sourceProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceProject { get; init; }
+
+    [JsonPropertyName("configuration")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Configuration { get; init; }
+
+    [JsonPropertyName("expectedAssembly")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ExpectedAssembly { get; init; }
+
+    [JsonPropertyName("deploymentTarget")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeploymentTarget { get; init; }
+
+    [JsonPropertyName("testRecipe")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TestRecipe { get; init; }
+
+    [JsonPropertyName("runtimePackage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? RuntimePackage { get; init; }
+
+    [JsonPropertyName("dependencies")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Dependencies { get; init; }
 }
 
 internal sealed record StackManifestResolution(
@@ -184,7 +224,8 @@ internal static class StackManifestResolver
                     manifestPath);
             }
 
-            string? validationCode = Validate(manifest, repositoryRoot);
+            string? validationCode = Validate(manifest, repositoryRoot) ??
+                ProjectMetadataValidator.Validate(manifest, repositoryRoot);
             return validationCode is null
                 ? new(true, repositoryRoot, manifestPath, manifest, null, null)
                 : Failure(

@@ -182,7 +182,17 @@ internal static class StackInitializer
             DevBridgeProject = devBridgeProject,
             Catalog = catalog,
             FallbackSuite = fallbackSuite,
-            RimBridge = existing?.RimBridge ?? "via-devbridge"
+            RimBridge = existing?.RimBridge ?? "via-devbridge",
+            Workload = existing?.Workload,
+            ProjectType = existing?.ProjectType,
+            PackageId = existing?.PackageId,
+            SourceProject = existing?.SourceProject,
+            Configuration = existing?.Configuration,
+            ExpectedAssembly = existing?.ExpectedAssembly,
+            DeploymentTarget = existing?.DeploymentTarget,
+            TestRecipe = existing?.TestRecipe,
+            RuntimePackage = existing?.RuntimePackage,
+            Dependencies = existing?.Dependencies
         };
     }
 
@@ -238,7 +248,17 @@ internal static class StackInitializer
         string.Equals(left.DevBridgeProject, right.DevBridgeProject, StringComparison.Ordinal) &&
         string.Equals(left.Catalog, right.Catalog, StringComparison.Ordinal) &&
         string.Equals(left.FallbackSuite, right.FallbackSuite, StringComparison.Ordinal) &&
-        string.Equals(left.RimBridge, right.RimBridge, StringComparison.Ordinal);
+        string.Equals(left.RimBridge, right.RimBridge, StringComparison.Ordinal) &&
+        string.Equals(left.Workload, right.Workload, StringComparison.Ordinal) &&
+        string.Equals(left.ProjectType, right.ProjectType, StringComparison.Ordinal) &&
+        string.Equals(left.PackageId, right.PackageId, StringComparison.Ordinal) &&
+        string.Equals(left.SourceProject, right.SourceProject, StringComparison.Ordinal) &&
+        string.Equals(left.Configuration, right.Configuration, StringComparison.Ordinal) &&
+        string.Equals(left.ExpectedAssembly, right.ExpectedAssembly, StringComparison.Ordinal) &&
+        string.Equals(left.DeploymentTarget, right.DeploymentTarget, StringComparison.Ordinal) &&
+        string.Equals(left.TestRecipe, right.TestRecipe, StringComparison.Ordinal) &&
+        string.Equals(left.RuntimePackage?.GetRawText(), right.RuntimePackage?.GetRawText(), StringComparison.Ordinal) &&
+        (left.Dependencies ?? []).SequenceEqual(right.Dependencies ?? [], StringComparer.Ordinal);
 
     private static string RelativeCatalogPath(string path, string root)
     {

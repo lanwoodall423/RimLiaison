@@ -9,7 +9,8 @@ internal sealed record RimDevWorkspaceDiscovery(
     string RootPath,
     IReadOnlyList<RimDevRepository> Repositories,
     string? ErrorCode = null,
-    string? Error = null);
+    string? Error = null,
+    RimDevWorkspaceConfiguration? Configuration = null);
 
 internal static class RimDevWorkspaceDiscoverer
 {
@@ -83,8 +84,8 @@ internal static class RimDevWorkspaceDiscoverer
                     InvalidManifest("RIMDEV_REPOSITORY_PATH_INVALID", "The configured repository path is unsafe."),
                     entry.Dependencies,
                     entry.DeploymentRoot,
-                    entry.DeploymentTarget,
-                    entry.BuildProject,
+                    entry.DeploymentTarget ?? null,
+                    entry.BuildProject ?? null,
                     entry.Configuration ?? "Release"));
                 continue;
             }
@@ -93,23 +94,30 @@ internal static class RimDevWorkspaceDiscoverer
             StackManifestResolution resolution = StackManifestResolver.Discover(repositoryPath);
             StackManifestState manifest = ToManifestState(resolution);
             string name = manifest.Project ?? Path.GetFileName(repositoryPath);
+            bool ownerMetadata = manifest.IsValid &&
+                string.Equals(manifest.Workload, "production", StringComparison.Ordinal);
+            IReadOnlyList<string> dependencies = ownerMetadata
+                ? manifest.Dependencies ?? []
+                : entry.Dependencies;
             repositories.Add(new RimDevRepository(
                 name,
                 repositoryPath,
                 File.Exists(manifestPath) ? manifestPath : resolution.ManifestPath,
                 manifest,
-                entry.Dependencies,
+                dependencies,
                 entry.DeploymentRoot ?? configuration?.DeploymentRoot,
-                entry.DeploymentTarget,
-                entry.BuildProject,
-                entry.Configuration ?? "Release"));
+                ownerMetadata ? manifest.DeploymentTarget : entry.DeploymentTarget ?? manifest.DeploymentTarget,
+                ownerMetadata ? manifest.SourceProject : entry.BuildProject ?? manifest.SourceProject,
+                ownerMetadata
+                    ? manifest.Configuration ?? "Release"
+                    : entry.Configuration ?? manifest.Configuration ?? "Release"));
         }
 
         RimDevRepository[] ordered = repositories
             .OrderBy(repository => repository.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(repository => repository.Path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return new(true, root, ordered);
+        return new(true, root, ordered, Configuration: configuration);
     }
 
     private static string ResolveWorkspaceRoot(string start, string? explicitRoot)
@@ -397,12 +405,23 @@ internal static class RimDevWorkspaceDiscoverer
             resolution.Manifest.Catalog,
             resolution.Manifest.FallbackSuite,
             resolution.Manifest.RimBridge,
+            resolution.Manifest.Workload,
+            resolution.Manifest.ProjectType,
+            resolution.Manifest.PackageId,
+            resolution.Manifest.SourceProject,
+            resolution.Manifest.Configuration,
+            resolution.Manifest.ExpectedAssembly,
+            resolution.Manifest.DeploymentTarget,
+            resolution.Manifest.TestRecipe,
+            resolution.Manifest.RuntimePackage,
+            resolution.Manifest.Dependencies,
             null,
             null);
     }
 
     private static StackManifestState InvalidManifest(string errorCode, string error) =>
-        new(false, null, null, null, null, null, errorCode, error);
+        new(false, null, null, null, null, null, null, null, null, null, null, null, null,
+            null, null, null, errorCode, error);
 
     private static RimDevWorkspaceDiscovery Failure(string root, string code, string error) =>
         new(false, root, [], code, error);

@@ -16,5 +16,6 @@
     <EmbeddedResource Include="..\..\templates\AGENTS.md"
                       LogicalName="RimLiaison.CanonicalAgents.md" />
     <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
+    <InternalsVisibleTo Include="RimLiaison.Tests" />
   </ItemGroup>
 </Project>

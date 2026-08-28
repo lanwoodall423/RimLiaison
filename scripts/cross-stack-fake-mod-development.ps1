@@ -284,6 +284,9 @@ try {
         project = $Project
         workflowId = $workflow
         sourceFingerprint = $SourceFingerprint
+        sourceRoot = $developmentRoots[0]
+        runtimeRoot = $deploymentRoot
+        stagingRoot = $stagingRoot
         success = $true
         stage = 'complete'
         exitCode = 0

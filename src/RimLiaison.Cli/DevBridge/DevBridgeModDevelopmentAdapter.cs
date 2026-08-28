@@ -70,13 +70,37 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                 workflowId);
         }
 
-        string descriptorPath = ResolveDescriptorPath(project);
+        string descriptorPath = options.DescriptorPath ?? string.Empty;
+        ProjectOwnedDescriptorMaterialization? ownedMaterialization = null;
         DevBridgeDevelopmentDescriptor? developmentDescriptor = null;
-        PrerequisiteRecoveryState descriptorRecoveryState =
-            PrerequisiteRecoveryState.Ready;
+        PrerequisiteRecoveryState descriptorRecoveryState = PrerequisiteRecoveryState.Ready;
         int descriptorRecoveryAttempts = 0;
         string? descriptorRecoveryAction = null;
-        if (options.EnableDescriptorRecovery)
+        if (options.DescriptorPath is null)
+        {
+            ownedMaterialization = ProjectOwnedDescriptorMaterializer.Materialize(
+                project,
+                fullRepositoryRoot,
+                options.DeploymentRoot,
+                out string? metadataErrorCode,
+                out string? metadataError);
+            if (ownedMaterialization is null)
+            {
+                return Failed(
+                    project,
+                    new DevBridgeAdapterStatus(
+                        DevBridgeOutcomeKind.InfrastructureFailure,
+                        metadataErrorCode ?? "PROJECT_METADATA_MISSING",
+                        metadataError,
+                        RecoveryAction: "repair-project-metadata"),
+                    workflowId);
+            }
+
+            descriptorPath = ownedMaterialization.DescriptorPath;
+            developmentDescriptor = ownedMaterialization.Descriptor;
+            descriptorRecoveryAction = "project-owned-metadata";
+        }
+        else if (options.EnableDescriptorRecovery)
         {
             DevBridgeDescriptorReconciliationResult reconciliation =
                 DevBridgeDevelopmentDescriptorReconciler.Reconcile(
@@ -99,20 +123,17 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
                     workflowId);
             }
 
-            // A recovered descriptor is now the input to the authoritative
-            // DevBridge2 transaction.  ResolveDeploymentRoot reads the
-            // reconciled file, preserving the existing deployment ownership.
             descriptorPath = reconciliation.DescriptorPath;
             developmentDescriptor = reconciliation.Descriptor;
             descriptorRecoveryState = reconciliation.State;
             descriptorRecoveryAttempts = reconciliation.Attempts;
             descriptorRecoveryAction = reconciliation.Action;
         }
-
-        string deploymentRoot = ResolveDeploymentRoot(
-            descriptorPath,
-            fullRepositoryRoot);
-        string scriptPath = Path.Combine(options.RootPath, "scripts", "mod-test.ps1");
+        string deploymentRoot = ownedMaterialization is not null
+            ? options.DeploymentRoot!
+            : ResolveDeploymentRoot(descriptorPath, fullRepositoryRoot);
+        string scriptRootPath = options.ScriptRootPath ?? options.RootPath;
+        string scriptPath = Path.Combine(scriptRootPath, "scripts", "mod-test.ps1");
         var arguments = new List<string>
         {
             "-NoProfile",
@@ -179,16 +200,11 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         DevBridgeProcessResult process;
         try
         {
-            process = await transport.ExecuteAsync(
-                    new DevBridgeProcessRequest(
-                        options.PowerShellPath,
-                        options.RootPath,
-                        arguments,
-                        options.Timeout,
-                        options.MaxStdoutBytes,
-                        options.MaxStderrBytes,
-                        DevBridgeProcessEnvironment.ForWorkflow(workflowId),
-                        OperationKey: "build:" + project),
+            process = await ExecuteOwnerAsync(
+                    project,
+                    arguments,
+                    workflowId,
+                    ownedMaterialization,
                     cancellationToken)
                 .ConfigureAwait(false);
             AgentDiagnosticEvidenceReference? stdoutEvidence =
@@ -557,14 +573,35 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         }
     }
 
-    private string ResolveDescriptorPath(string project)
+    private async Task<DevBridgeProcessResult> ExecuteOwnerAsync(
+        string project,
+        IReadOnlyList<string> arguments,
+        string? workflowId,
+        ProjectOwnedDescriptorMaterialization? ownedMaterialization,
+        CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(options.DescriptorPath))
+        try
         {
-            return options.DescriptorPath!;
+            return await transport.ExecuteAsync(
+                    new DevBridgeProcessRequest(
+                        options.PowerShellPath,
+                        options.RootPath,
+                        arguments,
+                        options.Timeout,
+                        options.MaxStdoutBytes,
+                        options.MaxStderrBytes,
+                        DevBridgeProcessEnvironment.ForWorkflow(workflowId),
+                        OperationKey: "build:" + project),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
-
-        return Path.Combine(options.RootPath, "DevelopmentProjects", project + ".json");
+        finally
+        {
+            if (ownedMaterialization is not null)
+            {
+                ProjectOwnedDescriptorMaterializer.Delete(ownedMaterialization);
+            }
+        }
     }
 
     private string ResolveDeploymentRoot(

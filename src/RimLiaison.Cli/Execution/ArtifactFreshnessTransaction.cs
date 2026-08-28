@@ -698,9 +698,7 @@ public sealed class ArtifactFreshnessTransaction
             freshness with
             {
                 ErrorCode = null,
-                SourceInputsStable = classification.BuildOwnedOutputChanges.Count == 0
-                    ? null
-                    : true,
+                SourceInputsStable = true,
                 BuildOwnedOutputChanges = classification.BuildOwnedOutputChanges.Count == 0
                     ? null
                     : classification.BuildOwnedOutputChanges

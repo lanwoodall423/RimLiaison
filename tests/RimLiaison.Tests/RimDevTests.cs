@@ -269,8 +269,8 @@ public static class RimDevTests
         AssertEqual(0, buildExitCode);
         Directory.CreateDirectory(Path.Combine(workspace.DeploymentRoot, "Repo.dll"));
         (int deployExitCode, JsonElement result) = Run(workspace, RimDevOperation.Deploy);
-        AssertEqual(1, deployExitCode);
-        AssertEqual("RIMDEV_DEPLOYMENT_FAILED", result.GetProperty("repositories")[0].GetProperty("errorCode").GetString());
+        AssertEqual(3, deployExitCode);
+        AssertEqual("RIMDEV_DEPLOYMENT_CONFIGURATION_MISSING", result.GetProperty("repositories")[0].GetProperty("errorCode").GetString());
         (int pushExitCode, JsonElement push) = Run(workspace, RimDevOperation.Push);
         AssertEqual(3, pushExitCode);
         AssertEqual("blocked", push.GetProperty("repositories")[0].GetProperty("status").GetString());

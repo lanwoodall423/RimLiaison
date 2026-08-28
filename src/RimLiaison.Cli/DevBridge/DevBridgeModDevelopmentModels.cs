@@ -111,6 +111,7 @@ public interface IDevBridgeModDevelopmentAdapter
 public sealed record DevBridgeModDevelopmentAdapterOptions
 {
     public required string RootPath { get; init; }
+    public string? ScriptRootPath { get; init; }
     public string? DescriptorPath { get; init; }
     public string? DeploymentRoot { get; init; }
     public IReadOnlyList<string>? ChangedPaths { get; init; }
@@ -136,6 +137,10 @@ public sealed record DevBridgeModDevelopmentAdapterOptions
         return new DevBridgeModDevelopmentAdapterOptions
         {
             RootPath = Path.GetFullPath(rootPath),
+            ScriptRootPath = Path.GetFullPath(
+                Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT") ??
+                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
+                rootPath),
             DescriptorPath = string.IsNullOrWhiteSpace(descriptorPath)
                 ? null
                 : Path.GetFullPath(descriptorPath),

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "rimdev-stack/v1",
+  "project": "frontier",
+  "devBridgeProject": "frontier",
+  "catalog": "catalog.json",
+  "fallbackSuite": "cross-stack",
+  "rimBridge": "via-devbridge",
+  "workload": "fixture",
+  "projectType": "rimworld-content-mod",
+  "packageId": "com.example.crossstackfixture",
+  "sourceProject": "FixtureMod/CrossStack.Fixture.csproj",
+  "configuration": "Release",
+  "expectedAssembly": "CrossStack.Fixture.dll",
+  "deploymentTarget": "deployed/CrossStack.Fixture.dll",
+  "testRecipe": "cross-stack-fixture",
+  "runtimePackage": {
+    "sourceRoot": ".",
+    "include": [
+      "About/**",
+      "1.*/**"
+    ],
+    "exclude": [
+      ".rimdev/**",
+      "Source/**",
+      "bin/**",
+      "obj/**"
+    ]
+  }
+}

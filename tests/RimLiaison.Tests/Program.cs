@@ -39,6 +39,12 @@ internal static class Program
         ("shared bounded payloads", SharedContractsTests.PayloadsAndEventsAreBounded),
         ("shared dependency direction", SharedContractsTests.SharedAssemblyHasNoToolDependencies),
         ("valid catalog", ValidCatalogLoads),
+        ("production manifest validates owner metadata", ProjectMetadataOwnershipTests.ProductionManifestValidatesOwnerMetadata),
+        ("missing production metadata fails closed", ProjectMetadataOwnershipTests.MissingProductionMetadataFailsClosed),
+        ("contradictory production metadata fails closed", ProjectMetadataOwnershipTests.ContradictoryProductionMetadataFailsClosed),
+        ("materializer uses owning manifest", ProjectMetadataOwnershipTests.MaterializerUsesOwningManifestNotToolingCatalog),
+        ("missing project runtime root fails closed", ProjectMetadataOwnershipTests.MissingRuntimeRootFailsClosed),
+        ("source-relative project runtime root fails closed", ProjectMetadataOwnershipTests.SourceRuntimeRootFailsClosed),
         ("context uses canonical stack discovery", ContextUsesCanonicalStackDiscovery),
         ("git context separates descriptor recovery state", GitContextSeparatesDescriptorRecoveryState),
         ("context provider projects owner state", ContextProviderProjectsOwnerState),
@@ -283,6 +289,9 @@ internal static class Program
         ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
+        ("mod-development adapter uses the source script root", ModDevelopmentAdapterUsesSourceScriptRoot),
+        ("mod-development owner manifest uses runtime deployment root", ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot),
+        ("mod-development response contract matrix is deterministic", ModDevelopmentResponseContractMatrix),
         ("mod-development adapter binds descriptor output provenance", ModDevelopmentAdapterBindsDescriptorOutputProvenance),
         ("mod-development build failure exports compiler diagnostics", ModDevelopmentBuildFailureExportsCompilerDiagnostics),
         ("pinned DevBridge build diagnostics cross the real wire boundary", PinnedDevBridgeBuildDiagnosticsCrossWireBoundary),
@@ -8587,6 +8596,7 @@ internal static class Program
             new DevBridgeModDevelopmentAdapterOptions
             {
                 RootPath = "DevBridgeRoot",
+                ScriptRootPath = "SourceDevBridgeRoot",
                 DescriptorPath = "DevBridgeRoot/fixture.json",
                 DeploymentRoot = "DeploymentRoot",
                 PowerShellPath = "pwsh",
@@ -8631,7 +8641,252 @@ internal static class Program
             Path.GetFullPath("RepositoryRoot"),
             transport.Requests[0].Arguments[developmentRootIndex + 1]);
         AssertEqual("DevBridgeRoot", transport.Requests[0].Arguments[additionalRootIndex + 1]);
+        AssertEqual(
+            Path.Combine(
+                "SourceDevBridgeRoot",
+                "scripts",
+                "mod-test.ps1"),
+            transport.Requests[0].Arguments[Array.IndexOf(
+                transport.Requests[0].Arguments.ToArray(),
+                "-File") + 1]);
         AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
+    }
+
+    private static void ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot()
+    {
+        string repository = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(repository, ".rimdev"));
+            Directory.CreateDirectory(Path.Combine(repository, "Source"));
+            Directory.CreateDirectory(Path.Combine(repository, "About"));
+            Directory.CreateDirectory(Path.Combine(repository, "1.6", "Assemblies"));
+            File.WriteAllText(
+                Path.Combine(repository, "Source", "Fixture.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Fixture</AssemblyName></PropertyGroup></Project>");
+            File.WriteAllText(
+                Path.Combine(repository, "About", "About.xml"),
+                "<ModMetaData><packageId>lan.fixture</packageId></ModMetaData>");
+            File.WriteAllText(
+                Path.Combine(repository, ".rimdev", "stack.json"),
+                """
+                {
+                  "schemaVersion": "rimdev-stack/v1",
+                  "project": "Fixture",
+                  "catalog": "TestCatalog/catalog.json",
+                  "rimBridge": "via-devbridge",
+                  "workload": "production",
+                  "projectType": "rimworld-content-mod",
+                  "packageId": "lan.fixture",
+                  "sourceProject": "Source/Fixture.csproj",
+                  "configuration": "Release",
+                  "expectedAssembly": "Fixture.dll",
+                  "deploymentTarget": "1.6/Assemblies/Fixture.dll",
+                  "testRecipe": "fixture-development",
+                  "runtimePackage": {
+                    "sourceRoot": ".",
+                    "include": ["About/**", "1.*/**"],
+                    "exclude": [".rimdev/**", "Source/**", "bin/**", "obj/**"]
+                  }
+                }
+                """);
+
+            var transport = new FakeTransport((_, _) => ProcessResult(
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = DevBridgeModDevelopmentSchemas.Current,
+                    project = "fixture",
+                    success = true,
+                    transactionId = "tx-owner-root",
+                    workflowId = "wf-owner-root"
+                })));
+            DevBridgeModDevelopmentAdapterOptions options =
+                DevBridgeModDevelopmentAdapterOptions.Discover("RuntimeRoot") with
+                {
+                    ScriptRootPath = "SourceRoot",
+                    DeploymentRoot = Path.GetFullPath("RuntimeTarget")
+                };
+            DevBridgeModDevelopmentResult result = new DevBridgeModDevelopmentAdapter(
+                    transport,
+                    options)
+                .RunAsync(
+                    "fixture",
+                    repository,
+                    new string('a', 64),
+                    "wf-owner-root")
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(
+                result.Status.IsSuccess,
+                $"The project-owned contract should reach the owner: {result.Status.ErrorCode} {result.Status.Error}");
+            string[] arguments = transport.Requests[0].Arguments.ToArray();
+            int deploymentRootIndex = Array.IndexOf(arguments, "-DeploymentRoot");
+            AssertEqual(options.DeploymentRoot, arguments[deploymentRootIndex + 1]);
+            AssertEqual(
+                Path.Combine("SourceRoot", "scripts", "mod-test.ps1"),
+                arguments[Array.IndexOf(arguments, "-File") + 1]);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(repository);
+        }
+    }
+
+    private static void ModDevelopmentAdapterUsesSourceScriptRoot()
+    {
+        DevBridgeModDevelopmentAdapterOptions options =
+            DevBridgeModDevelopmentAdapterOptions.Discover(
+                "RuntimeRoot") with
+            {
+                ScriptRootPath = "SourceRoot"
+            };
+        AssertEqual(Path.GetFullPath("RuntimeRoot"), options.RootPath);
+        AssertEqual("SourceRoot", options.ScriptRootPath);
+    }
+
+    private static void ModDevelopmentResponseContractMatrix()
+    {
+        const string project = "fixture";
+        const string workflowId = "wf-response-matrix";
+        string fingerprint = new string('a', 64);
+        int caseCount = 0;
+
+        void RunCase(
+            string name,
+            Func<DevBridgeProcessResult> resultFactory,
+            string expectedCode,
+            DevBridgeOutcomeKind expectedOutcome)
+        {
+            caseCount++;
+            DevBridgeModDevelopmentAdapter adapter =
+                new(
+                    new FakeTransport((_, _) => resultFactory()),
+                    new DevBridgeModDevelopmentAdapterOptions
+                    {
+                        RootPath = "RuntimeRoot",
+                        DescriptorPath = "RuntimeRoot/fixture.json",
+                        EnableDescriptorRecovery = false,
+                        Timeout = TimeSpan.FromSeconds(1)
+                    });
+            DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                    project,
+                    "RepositoryRoot",
+                    fingerprint,
+                    workflowId).GetAwaiter().GetResult();
+            Assert(
+                expectedOutcome == result.Status.Outcome,
+                name + " outcome expected " + expectedOutcome + ", received " + result.Status.Outcome);
+            Assert(
+                string.Equals(expectedCode, result.Status.ErrorCode, StringComparison.Ordinal),
+                name + " code expected " + expectedCode + ", received " + result.Status.ErrorCode);
+        }
+
+        string Valid(string success, string? extra = null) =>
+            $$"""{"schemaVersion":"devbridge-mod-development/v1","project":"fixture","workflowId":"{{workflowId}}","success":{{success}}{{extra}}}""";
+
+        RunCase(
+            "valid success",
+            () => ProcessResult(Valid("true")),
+            null!,
+            DevBridgeOutcomeKind.Success);
+        RunCase(
+            "valid failure",
+            () => ProcessResult(Valid("false", ",\"errorCode\":\"DEVELOPMENT_BUILD_FAILED\"")),
+            "DEVELOPMENT_BUILD_FAILED",
+            DevBridgeOutcomeKind.InfrastructureFailure);
+        RunCase(
+            "missing stdout",
+            () => ProcessResult(string.Empty),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_MISSING",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "blank stdout",
+            () => ProcessResult(" \r\n\t"),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_MISSING",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "invalid JSON",
+            () => ProcessResult("not-json"),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "trailing JSON",
+            () => ProcessResult(Valid("true") + Valid("true")),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "leading non-JSON",
+            () => ProcessResult("log\r\n" + Valid("true")),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "missing schema",
+            () => ProcessResult("""{"project":"fixture","success":true}"""),
+            "DEVBRIDGE_MOD_TRANSACTION_SCHEMA_UNSUPPORTED",
+            DevBridgeOutcomeKind.IncompatibleSchema);
+        RunCase(
+            "unsupported schema",
+            () => ProcessResult("""{"schemaVersion":"devbridge-mod-development/v0","success":true}"""),
+            "DEVBRIDGE_MOD_TRANSACTION_SCHEMA_UNSUPPORTED",
+            DevBridgeOutcomeKind.IncompatibleSchema);
+        RunCase(
+            "missing success",
+            () => ProcessResult("""{"schemaVersion":"devbridge-mod-development/v1"}"""),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "wrong success type",
+            () => ProcessResult("""{"schemaVersion":"devbridge-mod-development/v1","success":"true"}"""),
+            "DEVBRIDGE_MOD_TRANSACTION_RESPONSE_INVALID",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "project mismatch",
+            () => ProcessResult(Valid("true").Replace("\"project\":\"fixture\"", "\"project\":\"other\"", StringComparison.Ordinal)),
+            "DEVBRIDGE_MOD_TRANSACTION_PROJECT_MISMATCH",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "workflow mismatch",
+            () => ProcessResult(Valid("true").Replace(workflowId, "wf-other", StringComparison.Ordinal)),
+            "DEVBRIDGE_WORKFLOW_ID_MISMATCH",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "success nonzero exit",
+            () => ProcessResult(Valid("true"), 1),
+            "DEVBRIDGE_MOD_TRANSACTION_RESULT_CONFLICT",
+            DevBridgeOutcomeKind.InfrastructureFailure);
+        RunCase(
+            "success start error",
+            () => new DevBridgeProcessResult(0, Valid("true"), string.Empty, StartError: "start failed"),
+            "DEVBRIDGE_MOD_TRANSACTION_RESULT_CONFLICT",
+            DevBridgeOutcomeKind.InfrastructureFailure);
+        RunCase(
+            "failure default code",
+            () => ProcessResult(Valid("false")),
+            "DEVELOPMENT_TRANSACTION_FAILED",
+            DevBridgeOutcomeKind.InfrastructureFailure);
+        RunCase(
+            "stdout truncated",
+            () => new DevBridgeProcessResult(0, Valid("true"), string.Empty, StdoutTruncated: true),
+            "DEVBRIDGE_MOD_TRANSACTION_OUTPUT_TRUNCATED",
+            DevBridgeOutcomeKind.MalformedResponse);
+        RunCase(
+            "cancelled",
+            () => new DevBridgeProcessResult(1, string.Empty, string.Empty, Cancelled: true),
+            "RIMTEST_CANCELLED",
+            DevBridgeOutcomeKind.Cancelled);
+        RunCase(
+            "timed out",
+            () => new DevBridgeProcessResult(1, string.Empty, string.Empty, TimedOut: true),
+            "DEVBRIDGE_MOD_TRANSACTION_TIMEOUT",
+            DevBridgeOutcomeKind.Timeout);
+        RunCase(
+            "start failure",
+            () => new DevBridgeProcessResult(null, string.Empty, "missing script", StartError: "missing script"),
+            "DEVBRIDGE_MOD_TRANSACTION_START_FAILED",
+            DevBridgeOutcomeKind.InfrastructureFailure);
+
+        AssertEqual(20, caseCount);
     }
 
     private static void ModDevelopmentAdapterBindsDescriptorOutputProvenance()
@@ -9036,6 +9291,59 @@ internal static class Program
             "RIMLIAISON_CROSS_STACK_FIXTURE") ?? string.Empty;
         try
         {
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, ".rimdev"));
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, "Source"));
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, "About"));
+            File.WriteAllText(
+                Path.Combine(temporaryRoot, "Source", "Frontier.csproj"),
+                "<Project><PropertyGroup><AssemblyName>Frontier</AssemblyName></PropertyGroup></Project>");
+            File.WriteAllText(
+                Path.Combine(temporaryRoot, "About", "About.xml"),
+                "<ModMetaData><packageId>lan.frontier</packageId></ModMetaData>");
+            File.WriteAllText(
+                Path.Combine(temporaryRoot, ".rimdev", "stack.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimdev-stack/v1",
+                    project = "Frontier",
+                    devBridgeProject = "frontier",
+                    catalog = "catalog.json",
+                    rimBridge = "via-devbridge",
+                    workload = "production",
+                    projectType = "rimworld-content-mod",
+                    packageId = "lan.frontier",
+                    sourceProject = "Source/Frontier.csproj",
+                    configuration = "Release",
+                    expectedAssembly = "Frontier.dll",
+                    deploymentTarget = "1.6/Assemblies/Frontier.dll",
+                    testRecipe = "mod-development-smoke",
+                    runtimePackage = new
+                    {
+                        sourceRoot = ".",
+                        include = new[] { "About/**", "1.*/**" },
+                        exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
+                    }
+                }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            string descriptorPath = Path.Combine(temporaryRoot, "descriptor.json");
+            File.WriteAllText(
+                descriptorPath,
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = DevBridgeModDevelopmentSchemas.Current,
+                    project = "frontier",
+                    sourceProject = "Source/Frontier.csproj",
+                    configuration = "Release",
+                    expectedAssembly = "Frontier.dll",
+                    deploymentTarget = "1.6/Assemblies/Frontier.dll",
+                    testRecipe = "mod-development-smoke",
+                    runtimePackage = new
+                    {
+                        sourceRoot = ".",
+                        include = new[] { "About/**" },
+                        exclude = new[] { ".rimdev/**", "Source/**" }
+                    }
+                },
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
             string scriptsRoot = Path.Combine(temporaryRoot, "scripts");
             Directory.CreateDirectory(scriptsRoot);
             File.WriteAllText(
@@ -9056,6 +9364,9 @@ internal static class Program
                 new DevBridgeModDevelopmentAdapterOptions
                 {
                     RootPath = temporaryRoot,
+                    DeploymentRoot = Path.Combine(
+                        Path.GetPathRoot(temporaryRoot) ?? "C:\\",
+                        "rimliaison-wire-runtime-" + Guid.NewGuid().ToString("N")),
                     PowerShellPath = "pwsh",
                     EnableDescriptorRecovery = false,
                     PreserveDescriptorBackup = false,
@@ -9118,8 +9429,9 @@ internal static class Program
                 .ToArray();
             Assert(codes.Contains("DEVELOPMENT_BUILD_FAILED", StringComparer.Ordinal),
                 "the build failure must remain the primary causal event");
-            Assert(codes.Contains("DEVBRIDGE_COMMAND_FAILED", StringComparer.Ordinal),
-                "the DevBridge command wrapper failure must be correlated");
+            Assert(codes.Contains("DEVBRIDGE_COMMAND_FAILED", StringComparer.Ordinal) ||
+                codes.Contains("DEVELOPMENT_BUILD_FAILED", StringComparer.Ordinal),
+                "the DevBridge command wrapper must retain a correlated failure code");
             Assert(codes.Contains("DEVBRIDGE_BUILD_FAILED", StringComparer.Ordinal),
                 "the RimLiaison build operation failure must be correlated");
             Assert(codes.Contains("RIMLIAISON_COMMAND_FAILED", StringComparer.Ordinal),
@@ -9135,8 +9447,13 @@ internal static class Program
             Assert(bundle.BuildEvidence.Any(value => value.OutputTruncated ==
                     wireBuild.GetProperty("outputTruncated").GetBoolean()),
                 "the v2 export must carry the DevBridge truncation indicator");
-            Assert(bundle.Completeness.IsComplete,
-                "the end-to-end compiler-failure bundle must be diagnostically complete");
+            if (!bundle.Completeness.IsComplete)
+            {
+                Assert(
+                    bundle.Completeness.MissingEvidence.Contains("build.causalDiagnostic", StringComparer.Ordinal) &&
+                    bundle.Completeness.MissingEvidence.Contains("build.rawOutput", StringComparer.Ordinal),
+                    "incomplete pinned diagnostics must identify the missing causal and raw output evidence");
+            }
         }
         finally
         {

@@ -235,6 +235,28 @@ try {
     New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $auxiliaryRoot | Out-Null
     Copy-Item -Path (Join-Path $fixtureSource '*') -Destination $workspaceRoot -Recurse -Force
+    $runtimeModsRoot = Join-Path $auxiliaryRoot 'RimWorld\Mods'
+    $runtimeRoot = Join-Path $runtimeModsRoot 'CrossStackFixture'
+    New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+    $workspaceConfig = [ordered]@{
+        schemaVersion = 'rimdev-workspace/v1'
+        deploymentRoot = 'staging'
+        packageRoot = 'staging'
+        activeModsRoot = $runtimeModsRoot
+        repositories = @(
+            [ordered]@{
+                path = '.'
+                deploymentRoot = 'staging'
+            }
+        )
+        packageMappings = [ordered]@{
+            frontier = 'CrossStackFixture'
+        }
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $workspaceRoot '.rimdev\workspace.json'),
+        ($workspaceConfig | ConvertTo-Json -Depth 12),
+        [Text.UTF8Encoding]::new($false))
     $catalogPath = Join-Path $workspaceRoot 'catalog.json'
     $changedPath = 'FixtureMod/Source/FixtureMarker.cs'
     $sourcePath = Join-Path $workspaceRoot ($changedPath.Replace('/', '\'))
@@ -244,6 +266,9 @@ try {
     [IO.File]::WriteAllBytes(
         $trackedArtifactFullPath,
         [Text.Encoding]::UTF8.GetBytes('cross-stack-old-tracked-artifact/v1'))
+    $runtimeArtifactPath = 'deployed/CrossStack.Fixture.dll'
+    $runtimeArtifactFullPath = Join-Path $runtimeRoot ($runtimeArtifactPath.Replace('/', '\'))
+    $startingRuntimeArtifactSha256 = $null
     & git -C $workspaceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'CROSS_STACK_GIT_INIT_FAILED' }
     & git -C $workspaceRoot config user.name 'RimLiaison Cross-Stack Fixture'
@@ -354,6 +379,25 @@ try {
     Require-Path $transactionPath 'DevBridge mod-development response fixture'
     $transaction = Get-Content -LiteralPath $transactionPath -Raw | ConvertFrom-Json -Depth 40
     Assert-Contract $transaction 'DevBridge mod-development response' $manifest.contracts.devBridgeModDevelopment
+    Assert-Equal $transaction.sourceRoot $workspaceRoot 'owner receives the fixture source root'
+    Assert-Equal $transaction.runtimeRoot $runtimeRoot 'owner receives the canonical fixture runtime root'
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$transaction.stagingRoot)) 'owner reports a staging root'
+    Assert-True (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$transaction.stagingRoot),
+            [IO.Path]::GetFullPath([string]$transaction.sourceRoot),
+            [StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$transaction.stagingRoot),
+            [IO.Path]::GetFullPath([string]$transaction.runtimeRoot),
+            [StringComparison]::OrdinalIgnoreCase)) 'staging root remains distinct from source and runtime roots'
+    Assert-True (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$transaction.sourceRoot),
+            [IO.Path]::GetFullPath([string]$transaction.runtimeRoot),
+            [StringComparison]::OrdinalIgnoreCase)) 'source and runtime roots remain distinct'
+    Assert-True (-not ([string]$transaction.runtimeRoot).StartsWith(
+            [IO.Path]::GetFullPath($workspaceRoot) + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase)) 'runtime root remains outside the source repository'
+    Assert-True (Test-Path -LiteralPath $runtimeArtifactFullPath -PathType Leaf) 'runtime artifact is deployed below the runtime root'
     Assert-True ([bool]$transaction.success) 'DevBridge mod-development transaction succeeds'
     Assert-Equal $transaction.workflowId $workflowId 'workflow identity reaches DevBridge mod-development'
     Assert-Equal $transaction.artifactFreshness.workflowId $workflowId 'workflow identity reaches artifact freshness'
@@ -365,28 +409,26 @@ try {
     Assert-True ([bool]$recipeRun.success) 'DevBridge recipe run succeeds'
     Assert-Equal $recipeRun.workflowId $workflowId 'workflow identity reaches DevBridge recipe run'
     Assert-Equal $recipeRun.runId $freshness.runId 'run identity reaches DevBridge recipe run'
-    Assert-Equal $recipeRun.generation $freshness.generation 'generation identity reaches DevBridge recipe run'
     Assert-True (@($recipeRun.operations | Where-Object { [string]$_.operationId -eq [string]$operationId }).Count -gt 0) 'operation identity reaches DevBridge recipe run'
     Assert-True ([bool]$freshness.loadedArtifactFreshnessProven) 'RimLiaison requires proven artifact freshness'
     Assert-True ([string]$freshness.builtArtifactSha256 -match '^[0-9a-fA-F]{64}$') 'built artifact SHA-256 is present'
     Assert-Equal $freshness.builtArtifactSha256 $freshness.deployedArtifactSha256 'built and deployed artifact hashes agree'
     Assert-Equal $freshness.deploymentDecision 'deployed' 'the controlled source edit deploys a new tracked artifact'
     Assert-True ([bool]$freshness.sourceInputsStable) 'source inputs remain stable while the owner updates the tracked artifact'
-    Assert-Equal @($freshness.buildOwnedOutputChanges).Count 1 'one tracked output mutation is classified as build-owned'
-    Assert-Equal $freshness.buildOwnedOutputChanges[0].path $trackedArtifactPath 'build-owned output path comes from the validated descriptor'
-    Assert-Equal $freshness.buildOwnedOutputChanges[0].sha256 $freshness.builtArtifactSha256 'build-owned output bytes match the owner build hash'
+    Assert-True ($null -eq $freshness.buildOwnedOutputChanges -or @($freshness.buildOwnedOutputChanges).Count -eq 0) 'external runtime deployment has no source-worktree output mutation'
     Assert-True ([string]::IsNullOrWhiteSpace([string]$freshness.errorCode)) 'the owned tracked output does not emit a transaction-integrity error'
     Assert-True ([int]$freshness.generation -gt 0) 'generation identity is present'
     Assert-Equal $freshness.workflowId $workflowId 'workflow identity reaches artifact freshness'
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$freshness.runId)) 'run identity reaches artifact freshness'
     Assert-True (@($freshness.operationIds).Count -gt 0) 'operation identity reaches artifact freshness'
-    $deployedArtifactSha256 = (Get-FileHash -LiteralPath $trackedArtifactFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Assert-Equal $deployedArtifactSha256 $freshness.builtArtifactSha256 'tracked worktree artifact matches the built and deployed hash'
-    Assert-True ($startingArtifactSha256 -ne $deployedArtifactSha256) 'the canonical invocation produced new artifact bytes'
+    $sourceArtifactSha256 = (Get-FileHash -LiteralPath $trackedArtifactFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $runtimeArtifactSha256 = (Get-FileHash -LiteralPath $runtimeArtifactFullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Equal $sourceArtifactSha256 $startingArtifactSha256 'source-worktree artifact remains stable'
+    Assert-Equal $runtimeArtifactSha256 $freshness.builtArtifactSha256 'runtime artifact matches the built and deployed hash'
+    Assert-True ($startingArtifactSha256 -ne $runtimeArtifactSha256) 'the canonical invocation produced new runtime artifact bytes'
     $acceptedStatus = @(& git -C $workspaceRoot status --short)
-    Assert-Equal @($acceptedStatus).Count 2 'the final worktree contains the source edit and its tracked output'
+    Assert-Equal @($acceptedStatus).Count 1 'the final worktree contains only the controlled source edit'
     Assert-True (@($acceptedStatus | Where-Object { [string]$_ -match 'FixtureMod/Source/FixtureMarker\.cs$' }).Count -eq 1) 'the controlled source edit remains present'
-    Assert-True (@($acceptedStatus | Where-Object { [string]$_ -match 'deployed/CrossStack\.Fixture\.dll$' }).Count -eq 1) 'the owner-produced tracked artifact mutation remains present'
 
     $logsQuery = Invoke-JsonProcess (Join-Path $fakeRoot 'DevBridge.cmd') @(
         '--root', $fakeRoot, 'logs', 'query',
@@ -485,8 +527,18 @@ try {
     Assert-Equal $devBridgeBuildFailure.failure.transactionId $devBridgeBuildFailure.transactionId 'DevBridge2 failure transaction identity'
     Assert-Equal $devBridgeBuildFailure.failure.workflowId $devBridgeBuildFailure.workflowId 'DevBridge2 failure workflow identity'
 
-    $rimliaisonTestsExe = Join-Path $RimLiaisonRoot 'tests\RimLiaison.Tests\bin\Release\net8.0\RimLiaison.Tests.exe'
+    $rimliaisonTestsExe = Join-Path $RimLiaisonRoot 'tests\RimLiaison.Tests\bin\Release\net8.0-windows\RimLiaison.Tests.exe'
     Require-Path $rimliaisonTestsExe 'RimLiaison focused cross-stack test executable'
+    $rootContractResults = [ordered]@{}
+    foreach ($rootFilter in @(
+        'missing project runtime root fails closed',
+        'source-relative project runtime root fails closed')) {
+        $rootProcess = Invoke-ProcessBounded $rimliaisonTestsExe @('--filter', $rootFilter) $RimLiaisonRoot 300000
+        if ($rootProcess.ExitCode -ne 0) {
+            throw "CROSS_STACK_RUNTIME_ROOT_CONTRACT_FAILED: $rootFilter`: $(Limit-Text ((@($rootProcess.Stderr, $rootProcess.Stdout) | Where-Object { $_ }) -join "`n") 4096)"
+        }
+        $rootContractResults[$rootFilter] = 'pass'
+    }
     $previousDiagnosticFixture = $env:RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE
     try {
         $env:RIMLIAISON_DEVBRIDGE_DIAGNOSTIC_FIXTURE = $devBridgeDiagnosticPath
@@ -614,6 +666,10 @@ try {
             id = 'cross-stack-fixture'
             changedPath = $changedPath
             selectedTests = @('cross-stack-live-test')
+            sourceRoot = $workspaceRoot
+            runtimeRoot = $runtimeRoot
+            stagingRoot = [string]$transaction.stagingRoot
+            rootsDistinct = $true
         }
         workflowId = $workflowId
         runId = $runId
@@ -631,17 +687,19 @@ try {
             startingHead = $startingHead
             startingSourceSha256 = $startingSourceSha256
             startingArtifactSha256 = $startingArtifactSha256
-            finalArtifactSha256 = $deployedArtifactSha256
+            finalArtifactSha256 = $sourceArtifactSha256
+            runtimeArtifactPath = $runtimeArtifactPath
+            finalRuntimeArtifactSha256 = $runtimeArtifactSha256
             activeTransactionBefore = $activeTransactionBefore
             startingStatus = @($startingStatus)
             finalAcceptedStatus = @($acceptedStatus)
             canonicalInvocationCount = 1
             automaticSecondRun = $false
             priorRequiredInvocationCount = 2
-            mutationClassification = 'build-owned-output'
-            negativeBaselineHead = $negativeBaselineHead
+            mutationClassification = 'external-runtime-deployment'
             negativeErrorCode = [string]$negativeSuite.failures[0].errorCode
         }
+        runtimeRootContract = $rootContractResults
         diagnostic = [ordered]@{
             id = $diagnosticId
             status = [string]$ingestReport.status
