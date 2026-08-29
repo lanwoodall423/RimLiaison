@@ -609,7 +609,7 @@ public static class ToolchainPromotionService
         {
             (int exitCode, string output) liaisonDoctor = await RunJsonCommandAsync(
                 executable,
-                ["doctor", "--devbridge-root", devBridgeRoot],
+                ["doctor", "--devbridge-root", devBridgeRoot, "--json"],
                 cancellationToken).ConfigureAwait(false);
             checks["rimLiaisonDoctor"] = IsReady(liaisonDoctor.exitCode, liaisonDoctor.output)
                 ? "ready"
@@ -623,7 +623,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) status = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "status"],
+                ["/d", "/c", devBridgeCommand, "status", "--json"],
                 cancellationToken).ConfigureAwait(false);
             checks["devBridgeStatus"] = IsReady(status.exitCode, status.output) ? "ready" : "failed";
             if (!TryParse(status.output, out JsonDocument? statusDocument))
@@ -650,7 +650,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) doctor = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "doctor"],
+                ["/d", "/c", devBridgeCommand, "doctor", "--json"],
                 cancellationToken).ConfigureAwait(false);
             checks["devBridgeDoctor"] = IsHealthy(doctor.exitCode, doctor.output) ? "healthy" : "failed";
             if (!TryParse(doctor.output, out JsonDocument? doctorDocument))
@@ -670,7 +670,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) probe = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "coordinator", "probe"],
+                ["/d", "/c", devBridgeCommand, "coordinator", "probe", "--json"],
                 cancellationToken).ConfigureAwait(false);
             checks["coordinatorProbe"] = IsResponsive(probe.exitCode, probe.output)
                 ? "responsive"
@@ -694,7 +694,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) capabilities = await RunJsonCommandAsync(
                 executable,
-                ["capabilities", "--devbridge-root", devBridgeRoot],
+                ["capabilities", "--devbridge-root", devBridgeRoot, "--json"],
                 cancellationToken,
                 devBridgeRoot).ConfigureAwait(false);
             checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
