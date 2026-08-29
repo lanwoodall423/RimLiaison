@@ -610,7 +610,8 @@ public static class ToolchainPromotionService
             (int exitCode, string output) liaisonDoctor = await RunJsonCommandAsync(
                 executable,
                 ["doctor"],
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                devBridgeRoot).ConfigureAwait(false);
             checks["rimLiaisonDoctor"] = IsReady(liaisonDoctor.exitCode, liaisonDoctor.output)
                 ? "ready"
                 : "failed";
@@ -695,7 +696,8 @@ public static class ToolchainPromotionService
             (int exitCode, string output) capabilities = await RunJsonCommandAsync(
                 executable,
                 ["capabilities"],
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                devBridgeRoot).ConfigureAwait(false);
             checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
                 ? "ready"
                 : "failed";
@@ -720,7 +722,8 @@ public static class ToolchainPromotionService
     private static async Task<(int exitCode, string output)> RunJsonCommandAsync(
         string executable,
         IReadOnlyList<string> arguments,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? devBridgeRoot = null)
     {
         using var process = new Process
         {
@@ -734,6 +737,10 @@ public static class ToolchainPromotionService
                 CreateNoWindow = true
             }
         };
+        if (!string.IsNullOrWhiteSpace(devBridgeRoot))
+        {
+            process.StartInfo.Environment["RIMTEST_DEVBRIDGE_ROOT"] = devBridgeRoot;
+        }
         foreach (string argument in arguments)
         {
             process.StartInfo.ArgumentList.Add(argument);
