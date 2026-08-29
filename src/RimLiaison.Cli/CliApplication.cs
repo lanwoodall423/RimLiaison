@@ -294,8 +294,41 @@ public static class CliApplication
                         request.StackManifest.RepositoryRoot,
                         request.PromotionPackagePath,
                         request.QualificationOutputPath,
-                        cancellationToken)
+                        cancellationToken,
+                        workflowId)
                     .ConfigureAwait(false);
+                if (promotion.Status == "promoted" &&
+                    !string.IsNullOrWhiteSpace(promotion.PromotedFingerprint) &&
+                    eventStore is IAgentReliabilityCampaignStore campaignStore)
+                {
+                    AgentReliabilityCampaignConfiguration campaign =
+                        AgentReliabilityCampaignOperations.Start(
+                            campaignStore,
+                            promotion.PromotedFingerprint,
+                            DateTimeOffset.UtcNow);
+                    AgentReliabilityObservabilityView reliability =
+                        AgentReliabilityObservabilityProjection.Build(
+                            eventStore,
+                            promotion.PromotedFingerprint);
+                    promotion = promotion with
+                    {
+                        ReliabilityCampaignId = campaign.CampaignId,
+                        ReliabilityCampaignState = reliability.CampaignState
+                    };
+                    observabilityAgent.Record(
+                        commandStage,
+                        "toolchain.promotion.completed",
+                        "Production toolchain promotion completed.",
+                        new
+                        {
+                            transactionId = promotion.PromotionTransactionId,
+                            workflowId,
+                            promotedFingerprint = promotion.PromotedFingerprint,
+                            previousFingerprint = promotion.PreviousFingerprint,
+                            reliabilityCampaignId = campaign.CampaignId,
+                            reliabilityCampaignState = reliability.CampaignState
+                        });
+                }
                 WriteJson(stdout, promotion);
                 exitCode = promotion.Status == "promoted"
                     ? CliExitCodes.Success

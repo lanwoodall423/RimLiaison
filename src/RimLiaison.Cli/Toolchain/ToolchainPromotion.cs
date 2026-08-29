@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimLiaison.Git;
+using RimLiaison.DevBridge;
+
 
 namespace RimLiaison.Toolchain;
 
@@ -64,6 +66,14 @@ public sealed record ToolchainPromotionResult(
     string? InstalledRoot,
     string? NextAction)
 {
+    [JsonPropertyName("promotionTransactionId")]
+    public string? PromotionTransactionId { get; init; }
+
+    [JsonPropertyName("reliabilityCampaignId")]
+    public string? ReliabilityCampaignId { get; init; }
+
+    [JsonPropertyName("reliabilityCampaignState")]
+    public string? ReliabilityCampaignState { get; init; }
     public static ToolchainPromotionResult Blocked(
         string code,
         string error,
@@ -112,7 +122,9 @@ public static class ToolchainPromotionService
         string sourceRoot,
         string? packagePath,
         string? qualificationArtifactPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? workflowId = null,
+        IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null)
     {
         if (string.IsNullOrWhiteSpace(packagePath))
         {
@@ -132,6 +144,7 @@ public static class ToolchainPromotionService
         try
         {
             promotionLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            string promotionTransactionId = "promotion-" + Guid.NewGuid().ToString("N");
             ToolchainPromotionPackage? package = ReadPackage(packagePath, out string? packageError);
             if (package is null)
             {
@@ -304,6 +317,25 @@ public static class ToolchainPromotionService
                 previous.TransactionConsumerPath!,
                 previous.TransactionConsumerSha256!,
                 previous.CompatibilityContract!);
+            ProductionHealthResult health = await RunProductionHealthAsync(
+                installedExecutable,
+                previous.DevBridgeRuntimeRoot!,
+                workflowId ?? "rimliaison-promotion-" + sourceCommit[..Math.Min(12, sourceCommit.Length)],
+                cancellationToken,
+                promotionLeaseOrchestrator).ConfigureAwait(false);
+            if (!health.Passed)
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_PRODUCTION_HEALTH_FAILED",
+                    health.Error ?? "The promoted production health checks did not pass.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Repair the production control plane, then retry the supported promotion command.",
+                    health.Summary);
+            }
+
             var updated = new ProductionToolchainManifest
             {
                 SchemaVersion = previous.SchemaVersion,
@@ -329,7 +361,7 @@ public static class ToolchainPromotionService
                 currentExecutablePath: installedExecutable);
             if (!installed.Succeeded)
             {
-                AtomicReplace(manifestPath, JsonSerializer.Serialize(previous, WriteOptions));
+                TryRestoreProductionManifest(manifestPath, previous);
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
                     installed.Failure?.Error ?? "The installed production identity could not be verified.",
@@ -337,24 +369,6 @@ public static class ToolchainPromotionService
                     artifactPath,
                     qualificationHash,
                     previous.PromotedFingerprint);
-            }
-
-            ProductionHealthResult health = await RunProductionHealthAsync(
-                installedExecutable,
-                previous.DevBridgeRuntimeRoot!,
-                cancellationToken).ConfigureAwait(false);
-            if (!health.Passed)
-            {
-                AtomicReplace(manifestPath, JsonSerializer.Serialize(previous, WriteOptions));
-                return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_PRODUCTION_HEALTH_FAILED",
-                    health.Error ?? "The promoted production health checks did not pass.",
-                    package.SourceCommit,
-                    artifactPath,
-                    qualificationHash,
-                    previous.PromotedFingerprint,
-                    "Repair the production control plane, then retry the supported promotion command.",
-                    health.Summary);
             }
 
             string doctor = health.Summary;
@@ -389,7 +403,10 @@ public static class ToolchainPromotionService
                 doctor,
                 "start-new-reliability-campaign-collecting",
                 stagedRoot,
-                null);
+                null)
+            {
+                PromotionTransactionId = promotionTransactionId
+            };
         }
         catch (IOException exception) when (exception.HResult == unchecked((int)0x800700B7))
         {
@@ -593,7 +610,9 @@ public static class ToolchainPromotionService
     private static async Task<ProductionHealthResult> RunProductionHealthAsync(
         string executable,
         string devBridgeRoot,
-        CancellationToken cancellationToken)
+        string workflowId,
+        CancellationToken cancellationToken,
+        IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null)
     {
         var checks = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -630,6 +649,7 @@ public static class ToolchainPromotionService
             {
                 return HealthFailure(checks, "DevBridge status did not return structured JSON.");
             }
+            int? expectedGeneration = null;
             using (statusDocument)
             {
                 JsonElement statusRoot = statusDocument!.RootElement;
@@ -641,7 +661,17 @@ public static class ToolchainPromotionService
                     && active.TryGetInt32(out int activeValue)
                     ? activeValue
                     : -1;
+                expectedGeneration = statusRoot.TryGetProperty("generation", out JsonElement generationElement) &&
+                    generationElement.TryGetInt32(out int generationValue) &&
+                    generationValue > 0
+                    ? generationValue
+                    : null;
+                checks["generation"] = expectedGeneration?.ToString() ?? "unknown";
                 checks["activeLeases"] = activeTests == 0 ? "zero" : "nonzero-or-unknown";
+                if (expectedGeneration is null)
+                {
+                    return HealthFailure(checks, "DevBridge status did not prove a current generation.");
+                }
                 if (activeTests != 0)
                 {
                     return HealthFailure(checks, "DevBridge reports an active test or lease owner.");
@@ -691,63 +721,72 @@ public static class ToolchainPromotionService
                 }
                 checks["coordinatorCount"] = "one";
             }
+            DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
+                rootPath: devBridgeRoot);
+            var transport = new SystemDevBridgeProcessTransport();
+            IPromotionLeaseOrchestrator liveOrchestrator = promotionLeaseOrchestrator ??
+                new PromotionLeaseOrchestrator(
+                    new DevBridgeLeaseAdapter(transport, bridgeOptions),
+                    new DevBridgeCapabilityAdapter(transport, bridgeOptions));
+            PromotionLiveVerificationResult live = await liveOrchestrator
+                .VerifyCapabilitiesAsync(workflowId, expectedGeneration, cancellationToken)
+                .ConfigureAwait(false);
+            checks["capabilities"] = live.Passed ? "ready" : "failed";
+            checks["capabilityLeaseId"] = live.LeaseId ?? "none";
+            checks["capabilityLeaseGeneration"] = live.Generation?.ToString() ?? "unknown";
+            checks["capabilityLeaseReleased"] = live.LeaseReleased ? "true" : "false";
+            checks["capabilityLeaseAttempts"] = live.Attempts.ToString();
+            if (!live.Passed)
+            {
+                return HealthFailure(
+                    checks,
+                    live.ErrorCode is null
+                        ? live.Error ?? "The promoted executable did not return READY capabilities."
+                        : live.ErrorCode + ": " + (live.Error ?? "The promoted executable did not return READY capabilities."));
+            }
 
-            string agent = "rimliaison-promotion-" + Environment.ProcessId;
-            (int exitCode, string output) leaseBegin = await RunJsonCommandAsync(
+            (int exitCode, string output) finalStatus = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "test", "begin", "--json"],
-                cancellationToken,
-                devBridgeRoot,
-                agent).ConfigureAwait(false);
-            if (!TryLeaseId(leaseBegin.exitCode, leaseBegin.output, out string? leaseId))
+                ["/d", "/c", devBridgeCommand, "status", "--json"],
+                cancellationToken).ConfigureAwait(false);
+            if (!TryParse(finalStatus.output, out JsonDocument? finalStatusDocument))
             {
-                return HealthFailure(checks, "DevBridge could not grant the temporary capability lease.");
+                return HealthFailure(checks, "DevBridge final status did not return structured JSON.");
+            }
+            using (finalStatusDocument)
+            {
+                JsonElement root = finalStatusDocument!.RootElement;
+                int activeTests = root.TryGetProperty("activeTests", out JsonElement active) &&
+                    active.TryGetInt32(out int activeValue)
+                    ? activeValue
+                    : -1;
+                checks["activeLeases"] = activeTests == 0 ? "zero" : "nonzero-or-unknown";
+                if (!IsReady(finalStatus.exitCode, root.GetRawText()) || activeTests != 0)
+                {
+                    return HealthFailure(checks, "DevBridge final status did not prove READY zero-lease state.");
+                }
             }
 
-            string? leaseReleaseError = null;
-            try
+            (int exitCode, string output) finalDoctor = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "doctor", "--json"],
+                cancellationToken).ConfigureAwait(false);
+            if (!TryParse(finalDoctor.output, out JsonDocument? finalDoctorDocument))
             {
-                (int exitCode, string output) capabilities = await RunJsonCommandAsync(
-                    executable,
-                    ["capabilities", "--devbridge-root", devBridgeRoot, "--lease", leaseId!, "--json"],
-                    cancellationToken,
-                    devBridgeRoot,
-                    agent).ConfigureAwait(false);
-                checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
-                    ? "ready"
+                return HealthFailure(checks, "DevBridge final doctor did not return structured JSON.");
+            }
+            using (finalDoctorDocument)
+            {
+                JsonElement root = finalDoctorDocument!.RootElement;
+                checks["devBridgeDoctor"] = IsHealthy(finalDoctor.exitCode, root.GetRawText())
+                    ? "healthy"
                     : "failed";
-                if (!IsReady(capabilities.exitCode, capabilities.output))
+                if (!IsHealthy(finalDoctor.exitCode, root.GetRawText()) ||
+                    !TryFindingLeaseCount(root, out int leaseCount) ||
+                    leaseCount != 0)
                 {
-                    return HealthFailure(checks, "The promoted executable did not return READY capabilities.");
+                    return HealthFailure(checks, "DevBridge final doctor did not prove healthy zero-lease state.");
                 }
-            }
-            finally
-            {
-                try
-                {
-                    (int exitCode, string output) leaseEnd = await RunJsonCommandAsync(
-                        "cmd.exe",
-                        ["/d", "/c", devBridgeCommand, "test", "end", leaseId!, "--json"],
-                        CancellationToken.None,
-                        devBridgeRoot,
-                        agent).ConfigureAwait(false);
-                    if (leaseEnd.exitCode != 0)
-                    {
-                        leaseReleaseError = "DevBridge did not release the temporary capability lease.";
-                    }
-                    else
-                    {
-                        checks["activeLeases"] = "zero";
-                    }
-                }
-                catch (Exception exception) when (exception is IOException or OperationCanceledException)
-                {
-                    leaseReleaseError = "DevBridge did not release the temporary capability lease.";
-                }
-            }
-            if (leaseReleaseError is not null)
-            {
-                return HealthFailure(checks, leaseReleaseError);
             }
 
             return new ProductionHealthResult(true, JsonSerializer.Serialize(checks, WriteOptions), null);

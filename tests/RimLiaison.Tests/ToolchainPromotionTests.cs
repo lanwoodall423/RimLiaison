@@ -1,8 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using RimLiaison.DevBridge;
 using RimLiaison.Toolchain;
-
 namespace RimLiaison.Tests;
 
 internal static class ToolchainPromotionTests
@@ -18,6 +18,22 @@ internal static class ToolchainPromotionTests
         Assert(result.Status == "blocked" && result.ErrorCode == "PROMOTION_PACKAGE_MISSING",
             "promotion without a package did not fail closed");
     }
+    public static void StaticPromotionPathDoesNotAcquireLease()
+    {
+        var orchestrator = new CountingPromotionLeaseOrchestrator();
+        ToolchainPromotionResult result = ToolchainPromotionService.PromoteAsync(
+                AppContext.BaseDirectory,
+                null,
+                null,
+                promotionLeaseOrchestrator: orchestrator)
+            .GetAwaiter()
+            .GetResult();
+        Assert(result.Status == "blocked" &&
+               result.ErrorCode == "PROMOTION_PACKAGE_MISSING" &&
+               orchestrator.Calls == 0,
+            "static promotion preflight unexpectedly acquired a live lease");
+    }
+
 
     public static void MalformedPromotionPackageFailsClosed()
     {
@@ -146,6 +162,20 @@ internal static class ToolchainPromotionTests
         if (Directory.Exists(root))
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class CountingPromotionLeaseOrchestrator : IPromotionLeaseOrchestrator
+    {
+        public int Calls { get; private set; }
+
+        public Task<PromotionLiveVerificationResult> VerifyCapabilitiesAsync(
+            string workflowId,
+            int? expectedGeneration,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("static promotion path acquired a live lease");
         }
     }
 
