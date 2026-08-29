@@ -410,9 +410,9 @@ public static class ToolchainPromotionService
                 TryDelete(stagedRoot);
             }
             TryDelete(lockPath);
-    }
-
         }
+
+    }
     private static void TryRestoreProductionManifest(
         string manifestPath,
         ProductionToolchainManifest? previous)

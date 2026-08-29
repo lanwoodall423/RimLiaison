@@ -161,12 +161,12 @@ internal static class CanonicalProjectIdentityTests
         string slug,
         string package,
         string? runtimeFolder = null) => new()
-    {
-        Project = project,
-        DevBridgeProject = slug,
-        PackageId = package,
-        RuntimeFolder = runtimeFolder ?? project
-    };
+        {
+            Project = project,
+            DevBridgeProject = slug,
+            PackageId = package,
+            RuntimeFolder = runtimeFolder ?? project
+        };
 
     private static void Assert(bool condition, string message)
     {
