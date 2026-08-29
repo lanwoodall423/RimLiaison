@@ -94,6 +94,7 @@ internal static class Program
         ("old DevBridge request parsers remain compatible", OldDevBridgeRequestParsersRemainCompatible),
         ("mismatched workflow ids fail closed", MismatchedWorkflowIdsFailClosed),
         ("catalog run CLI delegates execution", CatalogRunCliDelegatesExecution),
+        ("catalog run acquires and propagates a lease", CatalogRunAcquiresAndPropagatesLease),
         ("run result categories are compact", RunResultCategoriesAreCompact),
         ("compact final output includes workflow id", CompactFinalOutputIncludesWorkflowId),
         ("agent output contracts are golden and bounded", AgentOutputContractsAreGoldenAndBounded),
@@ -2541,6 +2542,75 @@ internal static class Program
                 StringComparison.Ordinal), "Catalog run should not copy recipe payload data.");
             AssertEqual("run", transport.Requests.Single().Arguments[4]);
             AssertEqual("assembler-fixture", transport.Requests.Single().Arguments[5]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static void CatalogRunAcquiresAndPropagatesLease()
+    {
+        var transport = new FakeTransport((request, _) =>
+        {
+            if (request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
+            {
+                return ProcessResult(
+                    "{\"schemaVersion\":\"devbridge-test-lease/v1\",\"success\":true,\"exitCode\":0,\"generation\":8,\"leaseId\":\"lease-direct\"}");
+            }
+
+            if (request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase))
+            {
+                return ProcessResult(
+                    "{\"schemaVersion\":\"devbridge-test-lease/v1\",\"success\":true,\"exitCode\":0,\"generation\":8,\"leaseId\":\"lease-direct\"}");
+            }
+
+            if (request.Arguments.Contains("run", StringComparer.OrdinalIgnoreCase) &&
+                !request.Arguments.Contains("--lease", StringComparer.OrdinalIgnoreCase))
+            {
+                return ProcessResult(
+                    "{\"schemaVersion\":\"devbridge-test-recipe-run/v1\",\"recipe\":\"assembler-fixture\",\"success\":false,\"errorCode\":\"RIMBRIDGE_LEASE_REQUIRED\",\"error\":\"lease required\",\"generation\":null,\"runId\":null,\"leaseId\":null,\"evidence\":null,\"evidenceId\":null,\"failureFingerprint\":null,\"finalNextAction\":null,\"restartRequired\":false,\"launchesConsumed\":0,\"workflowId\":null,\"operations\":[]}",
+                    exitCode: 4);
+            }
+
+            return ProcessResult(
+                "{\"schemaVersion\":\"devbridge-test-recipe-run/v1\",\"recipe\":\"assembler-fixture\",\"success\":true,\"errorCode\":null,\"error\":null,\"generation\":8,\"leaseId\":\"lease-direct\",\"runId\":\"run-direct\",\"evidence\":null,\"evidenceId\":null,\"failureFingerprint\":null,\"finalNextAction\":\"status\",\"restartRequired\":false,\"launchesConsumed\":0,\"workflowId\":null,\"operations\":[]}");
+        });
+        string directory = CreateTempDirectory();
+        try
+        {
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            using AgentObservabilityStore observabilityStore = new();
+
+            int exitCode = CliApplication.RunAsync(
+                    ["run", "assembler-smoke", "--json", "--catalog", catalogPath],
+                    stdout,
+                    stderr,
+                    processTransport: transport,
+                    observabilityStore: observabilityStore)
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(
+                exitCode == CliExitCodes.Success,
+                $"Expected successful lease recovery; got {exitCode}: {stdout}");
+            Assert(stdout.ToString().Contains(
+                "\"status\":\"pass\"",
+                StringComparison.Ordinal), "Lease-recovered catalog run did not pass.");
+            AssertEqual(2, transport.Requests.Count(request =>
+                request.Arguments.Contains("run", StringComparer.OrdinalIgnoreCase)));
+            AssertEqual(1, transport.Requests.Count(request =>
+                request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase)));
+            AssertEqual(1, transport.Requests.Count(request =>
+                request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase)));
+            Assert(transport.Requests.Any(request =>
+                    request.Arguments.Contains("run", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("--lease", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("lease-direct", StringComparer.Ordinal)),
+                "The retried catalog run must carry the acquired lease.");
         }
         finally
         {

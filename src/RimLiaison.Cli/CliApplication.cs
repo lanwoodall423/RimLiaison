@@ -1296,28 +1296,23 @@ public static class CliApplication
                             workflowId: workflowId);
                     }
 
-                    IDevBridgeRecipeAdapter adapter = CreateAdapter(
-                        request,
-                        recipeAdapter,
-                        processTransport);
-                    var executor = CreateTestExecutor(
-                        request,
-                        adapter,
-                        diagnosisAdapter,
-                        diagnosticSourceAdapter,
-                        processTransport,
-                        capabilityAdapter);
-                    CatalogTestExecutionResult execution = await executor.RunAsync(
+                    return await RunSuiteAsync(
                             loaded.Catalog,
                             test.Id,
+                            [test.Id],
+                            request,
+                            stdout,
+                            recipeAdapter,
+                            diagnosisAdapter,
+                            diagnosticSourceAdapter,
+                            processTransport,
                             started,
                             cancellationToken,
-                            workflowId)
+                            workflowId: workflowId,
+                            freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
+                            providedCapabilityAdapter: capabilityAdapter,
+                            singleTestOutput: true)
                         .ConfigureAwait(false);
-                    WriteJson(stdout, execution.Result);
-                    return execution.Result.Status == "blocked"
-                        ? CliExitCodes.ConservativeSelection
-                        : RimTestExitCodeFor(execution.Run.RecipeResult.Status.Outcome);
                 }
             default:
                 throw new InvalidOperationException("Unknown catalog command.");
@@ -3278,7 +3273,8 @@ public static class CliApplication
         IDevBridgeCapabilityAdapter? providedCapabilityAdapter = null,
         ContentIntelligenceCapture? contentCapture = null,
         ValidationPlan? validationPlan = null,
-        ImpactGraph? impactGraph = null)
+        ImpactGraph? impactGraph = null,
+        bool singleTestOutput = false)
     {
         string[] validationRecipeIds = testIds
             .Select(testId => catalog.Tests.FirstOrDefault(test => test.Id == testId)?.Recipe)
@@ -3629,6 +3625,16 @@ public static class CliApplication
             impactGraph,
             result,
             AffectedGitRoot(request));
+        if (singleTestOutput)
+        {
+            RimTestResult single = execution.Tests.FirstOrDefault() ??
+                RimTestResultFactory.Invalid(
+                    testIds.FirstOrDefault() ?? suiteId,
+                    "RIMTEST_SINGLE_RESULT_MISSING",
+                    workflowId: workflowId);
+            WriteJson(stdout, single);
+            return SingleTestExitCodeFor(single.Status, single.ErrorCode);
+        }
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
     }
@@ -4157,6 +4163,21 @@ public static class CliApplication
         "invalid" => CliExitCodes.InvalidInput,
         _ => CliExitCodes.InternalError
     };
+
+    private static int SingleTestExitCodeFor(string status, string? errorCode) =>
+        string.Equals(errorCode, "DEVBRIDGE_TIMEOUT", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(errorCode, "DEVBRIDGE_CLIENT_TIMEOUT", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(errorCode, "RIMTEST_TIMEOUT", StringComparison.OrdinalIgnoreCase)
+            ? CliExitCodes.Timeout
+            : status switch
+            {
+                "pass" => CliExitCodes.Success,
+                "fail" => CliExitCodes.TestFailure,
+                "cancelled" => CliExitCodes.Cancelled,
+                "blocked" or "conservative" => CliExitCodes.ConservativeSelection,
+                "invalid" => CliExitCodes.InvalidInput,
+                _ => CliExitCodes.InternalError
+            };
 
     private static void WriteRunResult(
         string testId,
