@@ -116,6 +116,13 @@ internal static class RuntimeRootEnrollmentTests
     {
         using TestEnvironment environment = TestEnvironment.Create();
         string second = environment.CreateSecondProject("OtherMod", "lan.other");
+        string secondManifestPath = Path.Combine(second, ".rimdev", "stack.json");
+        File.WriteAllText(
+            secondManifestPath,
+            File.ReadAllText(secondManifestPath).Replace(
+                "\"devBridgeProject\":\"demo\"",
+                "\"devBridgeProject\":\"other\"",
+                StringComparison.Ordinal));
         environment.WriteWorkspace(new
         {
             schemaVersion = RimDevSchemas.Workspace,
