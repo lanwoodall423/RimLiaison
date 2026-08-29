@@ -94,6 +94,111 @@ internal static class ProjectMetadataOwnershipTests
         }
     }
 
+    public static void DrfProjectOwnedMetadataPasses()
+    {
+        AssertProjectOwnerContract("DeferredRealityFramework", "deferred-reality");
+    }
+
+    public static void FrontierProjectOwnedMetadataPasses()
+    {
+        AssertProjectOwnerContract("Frontier", "frontier");
+    }
+
+    public static void InsightCanvasProjectOwnedMetadataPasses()
+    {
+        AssertProjectOwnerContract("InsightCanvas", "insight-canvas");
+    }
+
+    public static void WrongMetadataOwnerFailsClosed()
+    {
+        string root = CreateRepository();
+        try
+        {
+            WriteProductionManifest(root);
+            ProjectOwnedDescriptorMaterialization? materialization =
+                ProjectOwnedDescriptorMaterializer.Materialize(
+                    "not-frontier",
+                    root,
+                    Path.Combine(Path.GetTempPath(), "FrontierRuntime"),
+                    out string? errorCode,
+                    out string? error);
+            Assert(materialization is null, "a forged project owner must fail closed");
+            Assert(errorCode == "PROJECT_METADATA_OWNER_MISMATCH",
+                $"expected PROJECT_METADATA_OWNER_MISMATCH, got {errorCode}: {error}");
+        }
+        finally
+        {
+            Delete(root);
+        }
+    }
+
+    private static void AssertProjectOwnerContract(string project, string devBridgeProject)
+    {
+        string root = CreateRepository();
+        try
+        {
+            string manifest = JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimdev-stack/v1",
+                project,
+                devBridgeProject,
+                catalog = "catalog.json",
+                rimBridge = "disabled",
+                workload = "production",
+                projectType = "rimworld-content-mod",
+                packageId = "lan.frontier",
+                sourceProject = "Source/Frontier.csproj",
+                configuration = "Release",
+                expectedAssembly = "Frontier.dll",
+                deploymentTarget = "1.6/Assemblies/Frontier.dll",
+                testRecipe = "mod-development-smoke",
+                runtimePackage = new
+                {
+                    sourceRoot = ".",
+                    include = new[] { "About/**", "1.*/**" },
+                    exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
+                }
+            });
+            WriteManifest(root, manifest);
+            string runtimeRoot = Path.Combine(Path.GetTempPath(), project + "-Runtime");
+            ProjectOwnedDescriptorMaterialization? materialization =
+                ProjectOwnedDescriptorMaterializer.Materialize(
+                    devBridgeProject,
+                    root,
+                    runtimeRoot,
+                    out string? errorCode,
+                    out string? error);
+            try
+            {
+                Assert(materialization is not null, error ?? errorCode ?? "materialization failed");
+                using JsonDocument contract = JsonDocument.Parse(File.ReadAllText(materialization!.DescriptorPath));
+                Assert(contract.RootElement.GetProperty("project").GetString() == devBridgeProject,
+                    "execution project identity must remain the DevBridge routing identity");
+                Assert(contract.RootElement.GetProperty("metadataOwner").GetString() == project,
+                    "metadata owner must remain the repository project identity");
+                Assert(contract.RootElement.GetProperty("metadataSource").GetString() ==
+                    Path.Combine(root, ".rimdev", "stack.json"),
+                    "metadata source must remain the project-owned manifest");
+                Assert(contract.RootElement.GetProperty("contractProducer").GetString() == "RimLiaison",
+                    "contract producer must remain RimLiaison");
+                Assert(contract.RootElement.GetProperty("materializedContractPath").GetString() ==
+                    materialization.DescriptorPath,
+                    "contract location must be explicit and distinct from ownership");
+            }
+            finally
+            {
+                if (materialization is not null)
+                {
+                    ProjectOwnedDescriptorMaterializer.Delete(materialization);
+                }
+            }
+        }
+        finally
+        {
+            Delete(root);
+        }
+    }
+
     public static void MissingRuntimeRootFailsClosed()
     {
         string root = CreateRepository();

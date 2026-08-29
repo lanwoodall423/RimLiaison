@@ -91,6 +91,9 @@ internal static class ProjectOwnedDescriptorMaterializer
             {
                 ["schemaVersion"] = DevBridgeModDevelopmentSchemas.Current,
                 ["project"] = project,
+                ["metadataOwner"] = manifest.Project,
+                ["metadataSource"] = Path.Combine(sourceRoot, ".rimdev", "stack.json"),
+                ["contractProducer"] = "RimLiaison",
                 ["sourceProject"] = manifest.SourceProject,
                 ["configuration"] = manifest.Configuration,
                 ["expectedAssembly"] = manifest.ExpectedAssembly,
@@ -99,6 +102,7 @@ internal static class ProjectOwnedDescriptorMaterializer
                 ["runtimePackage"] = manifest.RuntimePackage!.Value
             };
             string descriptorPath = Path.Combine(temporaryRoot, "devbridge-execution-contract.json");
+            fields["materializedContractPath"] = descriptorPath;
             File.WriteAllText(
                 descriptorPath,
                 JsonSerializer.Serialize(fields, new JsonSerializerOptions { WriteIndented = true }));
