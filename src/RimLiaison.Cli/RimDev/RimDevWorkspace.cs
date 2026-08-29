@@ -62,8 +62,33 @@ internal static class RimDevWorkspaceDiscoverer
             }
         }
 
+        var configuredRepositoryList = (
+            configuration?.Repositories ?? DiscoverRepositoryEntries(root)).ToList();
+        StackManifestResolution currentManifest = StackManifestResolver.Discover(startDirectory);
+        if (string.IsNullOrWhiteSpace(explicitRoot) &&
+            currentManifest.Manifest is not null &&
+            !string.Equals(currentManifest.RepositoryRoot, root, StringComparison.OrdinalIgnoreCase))
+        {
+            string currentPath = Path.GetRelativePath(root, currentManifest.RepositoryRoot);
+            if (!Path.IsPathRooted(currentPath) &&
+                !configuredRepositoryList.Any(entry =>
+                    string.Equals(
+                        Path.GetFullPath(Path.Combine(root, entry.Path)),
+                        currentManifest.RepositoryRoot,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                configuredRepositoryList.Add(new RimDevWorkspaceRepository(
+                    currentPath,
+                    currentManifest.Manifest.Dependencies ?? [],
+                    null,
+                    currentManifest.Manifest.DeploymentTarget,
+                    currentManifest.Manifest.SourceProject,
+                    currentManifest.Manifest.Configuration));
+            }
+        }
+
         IReadOnlyList<RimDevWorkspaceRepository> configuredRepositories =
-            configuration?.Repositories ?? DiscoverRepositoryEntries(root);
+            configuredRepositoryList;
         if (configuredRepositories.Count == 0)
         {
             return Failure(
@@ -414,6 +439,7 @@ internal static class RimDevWorkspaceDiscoverer
             resolution.Manifest.DeploymentTarget,
             resolution.Manifest.TestRecipe,
             resolution.Manifest.RuntimePackage,
+            resolution.Manifest.RuntimeFolder,
             resolution.Manifest.Dependencies,
             null,
             null);
@@ -421,7 +447,7 @@ internal static class RimDevWorkspaceDiscoverer
 
     private static StackManifestState InvalidManifest(string errorCode, string error) =>
         new(false, null, null, null, null, null, null, null, null, null, null, null, null,
-            null, null, null, errorCode, error);
+            null, null, null, null, errorCode, error);
 
     private static RimDevWorkspaceDiscovery Failure(string root, string code, string error) =>
         new(false, root, [], code, error);

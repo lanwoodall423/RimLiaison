@@ -142,6 +142,34 @@ public static class CliApplication
                 ? "qualification"
                 : "production";
             ProductionToolchainBinding? productionBinding = null;
+            ProjectRuntimeBindingResult? projectBinding = null;
+            if (!experimentalToolchain &&
+                RequiresProjectBinding(request))
+            {
+                projectBinding = ResolveProjectBinding(request);
+                if (!projectBinding.Succeeded)
+                {
+                    observabilityAgent = observabilityRun.CreateAgent(
+                        LegacyModId(observabilityEntity),
+                        observabilityEntity.DisplayName,
+                        logicalAgentId: ResolveLogicalAgentId(),
+                        entityIdentity: observabilityEntity,
+                        workloadKind: workloadKind,
+                        toolchainState: "unbound");
+                    observabilityAgent.Start("command:" + request.Command.ToString().ToLowerInvariant());
+                    observabilityActivation = observabilityAgent.Activate();
+                    observabilityAgent.Record(
+                        DevelopmentStage.Analysis,
+                        "project.binding.failed",
+                        projectBinding.Error ?? "Project binding failed.",
+                        projectBinding.ToEvidence());
+                    WriteJson(stdout, projectBinding.ToEvidence());
+                    exitCode = CliExitCodes.ConservativeSelection;
+                    return exitCode;
+                }
+
+            }
+
             if (!experimentalToolchain &&
                 string.Equals(
                     request.StackManifest.Manifest?.Workload,
@@ -248,6 +276,14 @@ public static class CliApplication
                     toolName = "RimLiaison",
                     componentOwner = "RimLiaison"
                 });
+            if (projectBinding is not null)
+            {
+                observabilityAgent.Record(
+                    commandStage,
+                    "project.binding.resolved",
+                    "Project runtime binding resolved.",
+                    projectBinding.ToEvidence());
+            }
             workflowId = NeedsWorkflowCorrelation(request)
                 ? WorkflowCorrelation.Create()
                 : null;
@@ -1451,6 +1487,16 @@ public static class CliApplication
         IDevBridgeProcessTransport? processTransport,
         CancellationToken cancellationToken)
     {
+        ProjectRuntimeBindingResult? projectBinding =
+            RequiresProjectBinding(request)
+                ? ResolveProjectBinding(request)
+                : null;
+        if (projectBinding is not null && !projectBinding.Succeeded)
+        {
+            WriteJson(stdout, projectBinding.ToEvidence());
+            return CliExitCodes.ConservativeSelection;
+        }
+
         DoctorRunResult result = await new RimTestDoctorRunner(stderr)
             .RunAsync(
                 request,
@@ -1467,6 +1513,10 @@ public static class CliApplication
                 ? nextAction
                 : null
         };
+        if (projectBinding is not null)
+        {
+            output["projectBinding"] = projectBinding.ToEvidence();
+        }
         ExecutionPacketGenerationResult packet = ExecutionPacketCoordinator.TryGenerate(
             AffectedGitRoot(request),
             request.RimContextStorePath,
@@ -3851,43 +3901,15 @@ public static class CliApplication
         CliRequest request,
         string repositoryRoot)
     {
-        RimDevWorkspaceDiscovery workspace =
-            RimDevWorkspaceDiscoverer.Discover(null, repositoryRoot);
-        RimDevWorkspaceConfiguration? configuration = workspace.Configuration;
-        string? project = request.DevBridgeProject ??
-            request.StackManifest.Manifest?.DevBridgeProject;
-        if (!workspace.Succeeded ||
-            configuration?.ActiveModsRoot is null ||
-            string.IsNullOrWhiteSpace(project) ||
-            configuration.PackageMappings is null ||
-            !configuration.PackageMappings.TryGetValue(project, out string? packageName) ||
-            string.IsNullOrWhiteSpace(packageName))
+        if (request.StackManifest.Manifest is null)
         {
             return null;
         }
 
-        try
-        {
-            string runtimeRoot = Path.GetFullPath(Path.Combine(
-                configuration.ActiveModsRoot,
-                packageName));
-            string activeModsRoot = Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(configuration.ActiveModsRoot));
-            if (string.Equals(runtimeRoot, activeModsRoot, StringComparison.OrdinalIgnoreCase) ||
-                !runtimeRoot.StartsWith(
-                    activeModsRoot + Path.DirectorySeparatorChar,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                return null;
-            }
-
-            return runtimeRoot;
-        }
-        catch (Exception exception) when (exception is ArgumentException or IOException or
-            NotSupportedException)
-        {
-            return null;
-        }
+        return ProjectRuntimeBindingResolver.Resolve(
+                repositoryRoot,
+                request.StackManifest.Manifest)
+            .RuntimeRoot;
     }
 
     private static string? SelectDevelopmentRecipe(
@@ -4351,6 +4373,38 @@ public static class CliApplication
             CliCommand.GoldenPath or
             CliCommand.Doctor ||
         request.Command == CliCommand.Affected && request.RunSelected;
+    private static bool RequiresProjectBinding(CliRequest request) =>
+        string.Equals(
+            request.StackManifest.Manifest?.Workload,
+            "production",
+            StringComparison.OrdinalIgnoreCase) &&
+        (RequiresProductionToolchainBinding(request) ||
+         request.Command == CliCommand.Preflight);
+
+    private static ProjectRuntimeBindingResult ResolveProjectBinding(CliRequest request)
+    {
+        if (request.StackManifest.Manifest is null)
+        {
+            return new(
+                false,
+                request.DevBridgeProject ?? "unknown",
+                request.StackManifest.RepositoryRoot,
+                null,
+                null,
+                null,
+                "unknown",
+                false,
+                false,
+                null,
+                request.StackManifest.ErrorCode ?? "PROJECT_METADATA_MISSING",
+                "A valid production project manifest is required before runtime binding.",
+                "repair the project-owned .rimdev/stack.json");
+        }
+
+        return ProjectRuntimeBindingResolver.Resolve(
+            request.StackManifest.RepositoryRoot,
+            request.StackManifest.Manifest);
+    }
 
     private static bool NeedsWorkflowCorrelation(CliRequest request) =>
         request.Command is CliCommand.RecipeRun or

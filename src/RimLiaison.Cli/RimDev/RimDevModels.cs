@@ -80,6 +80,7 @@ public sealed record StackManifestState(
     string? DeploymentTarget,
     string? TestRecipe,
     JsonElement? RuntimePackage,
+    string? RuntimeFolder,
     IReadOnlyList<string>? Dependencies,
     string? ErrorCode,
     string? Error);

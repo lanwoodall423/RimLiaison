@@ -66,6 +66,10 @@ public sealed class RimDevStackManifest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonElement? RuntimePackage { get; init; }
 
+    [JsonPropertyName("runtimeFolder")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RuntimeFolder { get; init; }
+
     [JsonPropertyName("dependencies")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Dependencies { get; init; }
@@ -259,7 +263,8 @@ internal static class StackManifestResolver
             !IsRelativeCatalog(manifest.Catalog, repositoryRoot) ||
             !IsToken(manifest.RimBridge) ||
             (manifest.DevBridgeProject is not null && !IsToken(manifest.DevBridgeProject)) ||
-            (manifest.FallbackSuite is not null && !IsToken(manifest.FallbackSuite)))
+            (manifest.FallbackSuite is not null && !IsToken(manifest.FallbackSuite)) ||
+            (manifest.RuntimeFolder is not null && !IsRuntimeFolder(manifest.RuntimeFolder)))
         {
             return "STACK_MANIFEST_FIELD_INVALID";
         }
@@ -281,6 +286,15 @@ internal static class StackManifestResolver
         !string.IsNullOrWhiteSpace(value) &&
         value.Length <= 128 &&
         value.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.');
+
+    private static bool IsRuntimeFolder(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length <= 128 &&
+        !Path.IsPathRooted(value) &&
+        !value.Contains(':') &&
+        value.All(character => !char.IsControl(character) &&
+            character is not '/' and not '\\') &&
+        value is not "." and not "..";
 
     private static bool IsRelativeCatalog(string? value, string repositoryRoot)
     {

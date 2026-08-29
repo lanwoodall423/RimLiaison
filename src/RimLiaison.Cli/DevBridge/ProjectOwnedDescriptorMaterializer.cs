@@ -61,7 +61,8 @@ internal static class ProjectOwnedDescriptorMaterializer
         }
 
         RimDevStackManifest manifest = resolution.Manifest;
-        if (!string.Equals(manifest.Project, project, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(manifest.Project, project, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(manifest.DevBridgeProject, project, StringComparison.OrdinalIgnoreCase))
         {
             errorCode = "PROJECT_METADATA_OWNER_MISMATCH";
             error = "The project manifest identity does not match the resolved project.";
