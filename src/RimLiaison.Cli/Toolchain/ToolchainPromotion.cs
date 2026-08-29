@@ -692,17 +692,62 @@ public static class ToolchainPromotionService
                 checks["coordinatorCount"] = "one";
             }
 
-            (int exitCode, string output) capabilities = await RunJsonCommandAsync(
-                executable,
-                ["capabilities", "--devbridge-root", devBridgeRoot, "--json"],
+            string agent = "rimliaison-promotion-" + Environment.ProcessId;
+            (int exitCode, string output) leaseBegin = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "test", "begin", "--json"],
                 cancellationToken,
-                devBridgeRoot).ConfigureAwait(false);
-            checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
-                ? "ready"
-                : "failed";
-            if (!IsReady(capabilities.exitCode, capabilities.output))
+                devBridgeRoot,
+                agent).ConfigureAwait(false);
+            if (!TryLeaseId(leaseBegin.exitCode, leaseBegin.output, out string? leaseId))
             {
-                return HealthFailure(checks, "The promoted executable did not return READY capabilities.");
+                return HealthFailure(checks, "DevBridge could not grant the temporary capability lease.");
+            }
+
+            string? leaseReleaseError = null;
+            try
+            {
+                (int exitCode, string output) capabilities = await RunJsonCommandAsync(
+                    executable,
+                    ["capabilities", "--devbridge-root", devBridgeRoot, "--lease", leaseId!, "--json"],
+                    cancellationToken,
+                    devBridgeRoot,
+                    agent).ConfigureAwait(false);
+                checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
+                    ? "ready"
+                    : "failed";
+                if (!IsReady(capabilities.exitCode, capabilities.output))
+                {
+                    return HealthFailure(checks, "The promoted executable did not return READY capabilities.");
+                }
+            }
+            finally
+            {
+                try
+                {
+                    (int exitCode, string output) leaseEnd = await RunJsonCommandAsync(
+                        "cmd.exe",
+                        ["/d", "/c", devBridgeCommand, "test", "end", leaseId!, "--json"],
+                        CancellationToken.None,
+                        devBridgeRoot,
+                        agent).ConfigureAwait(false);
+                    if (leaseEnd.exitCode != 0)
+                    {
+                        leaseReleaseError = "DevBridge did not release the temporary capability lease.";
+                    }
+                    else
+                    {
+                        checks["activeLeases"] = "zero";
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or OperationCanceledException)
+                {
+                    leaseReleaseError = "DevBridge did not release the temporary capability lease.";
+                }
+            }
+            if (leaseReleaseError is not null)
+            {
+                return HealthFailure(checks, leaseReleaseError);
             }
 
             return new ProductionHealthResult(true, JsonSerializer.Serialize(checks, WriteOptions), null);
@@ -722,7 +767,8 @@ public static class ToolchainPromotionService
         string executable,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
-        string? devBridgeRoot = null)
+        string? devBridgeRoot = null,
+        string? devBridgeAgent = null)
     {
         using var process = new Process
         {
@@ -740,6 +786,10 @@ public static class ToolchainPromotionService
         {
             process.StartInfo.Environment["RIMTEST_DEVBRIDGE_ROOT"] = devBridgeRoot;
         }
+        if (!string.IsNullOrWhiteSpace(devBridgeAgent))
+        {
+            process.StartInfo.Environment["DEVBRIDGE_AGENT"] = devBridgeAgent;
+        }
         foreach (string argument in arguments)
         {
             process.StartInfo.ArgumentList.Add(argument);
@@ -747,6 +797,7 @@ public static class ToolchainPromotionService
         if (!process.Start())
         {
             return (-1, string.Empty);
+
         }
         Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
         Task<string> errorTask = process.StandardError.ReadToEndAsync();
@@ -767,6 +818,25 @@ public static class ToolchainPromotionService
         }
         await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
         return (process.ExitCode, outputTask.Result);
+    }
+    private static bool TryLeaseId(int exitCode, string output, out string? leaseId)
+    {
+        leaseId = null;
+        if (exitCode != 0 || !TryParse(output, out JsonDocument? document))
+        {
+            return false;
+        }
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            if (!root.TryGetProperty("leaseId", out JsonElement value) ||
+                value.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+            leaseId = value.GetString();
+            return !string.IsNullOrWhiteSpace(leaseId);
+        }
     }
 
     private static bool TryParse(string output, out JsonDocument? document)
