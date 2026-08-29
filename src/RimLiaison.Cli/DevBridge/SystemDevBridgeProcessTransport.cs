@@ -392,7 +392,19 @@ public sealed class SystemDevBridgeProcessTransport : IDevBridgeProcessTransport
             StandardErrorEncoding = Encoding.UTF8
         };
 
-        startInfo.FileName = request.FileName;
+        bool batchScript = request.FileName.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            request.FileName.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        if (batchScript)
+        {
+            startInfo.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/c");
+            startInfo.ArgumentList.Add(request.FileName);
+        }
+        else
+        {
+            startInfo.FileName = request.FileName;
+        }
         foreach (string argument in request.Arguments)
         {
             startInfo.ArgumentList.Add(argument);

@@ -81,6 +81,7 @@ internal static class Program
         ("environment fallback leaves doctor usable", EnvironmentFallbackLeavesDoctorUsable),
         ("doctor preserves structured DevBridge failure", DoctorPreservesStructuredDevBridgeFailure),
         ("DevBridge process evidence is retained", DevBridgeProcessEvidenceIsRetained),
+        ("DevBridge batch launcher executes on Windows", DevBridgeBatchLauncherExecutesOnWindows),
         ("explicit fallback is rejected on unrelated command", ExplicitFallbackIsRejectedOnUnrelatedCommand),
         ("show exposes metadata", ShowExposesMetadata),
         ("missing run uses not-found contract", MissingRunUsesNotFoundContract),
@@ -7168,6 +7169,43 @@ internal static class Program
             "a valid structured failure must not be classified as invalid");
         Assert(result.Stderr.Contains("devbridge OUTPUT_TOO_LARGE", StringComparison.Ordinal),
             "doctor diagnostics must identify the originating component and code");
+    }
+
+    private static void DevBridgeBatchLauncherExecutesOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string directory = CreateTempDirectory();
+        try
+        {
+            string script = Path.Combine(directory, "DevBridge.cmd");
+            File.WriteAllText(script, "@echo off\r\n" +
+                "echo {\"success\":true}\r\n");
+            DevBridgeProcessResult process =
+                new SystemDevBridgeProcessTransport().ExecuteAsync(
+                        new DevBridgeProcessRequest(
+                            script,
+                            directory,
+                            [],
+                            TimeSpan.FromSeconds(5),
+                            16 * 1024,
+                            16 * 1024),
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+
+            AssertEqual(0, process.ExitCode);
+            Assert(process.StartError is null, "batch launcher must not report a start error");
+            Assert(process.Stdout.Contains("\"success\":true", StringComparison.Ordinal),
+                "batch launcher must preserve script stdout");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
     }
 
     private static void DevBridgeProcessEvidenceIsRetained()
