@@ -609,9 +609,8 @@ public static class ToolchainPromotionService
         {
             (int exitCode, string output) liaisonDoctor = await RunJsonCommandAsync(
                 executable,
-                ["doctor"],
-                cancellationToken,
-                devBridgeRoot).ConfigureAwait(false);
+                ["doctor", "--devbridge-root", devBridgeRoot],
+                cancellationToken).ConfigureAwait(false);
             checks["rimLiaisonDoctor"] = IsReady(liaisonDoctor.exitCode, liaisonDoctor.output)
                 ? "ready"
                 : "failed";
@@ -695,7 +694,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) capabilities = await RunJsonCommandAsync(
                 executable,
-                ["capabilities"],
+                ["capabilities", "--devbridge-root", devBridgeRoot],
                 cancellationToken,
                 devBridgeRoot).ConfigureAwait(false);
             checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
