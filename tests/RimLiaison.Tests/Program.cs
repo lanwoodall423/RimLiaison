@@ -7351,9 +7351,15 @@ internal static class Program
         CliResult result = RunDoctorFixture(contextAvailable: false);
 
         AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
-        AssertEqual(
-            "{\"schemaVersion\":\"rimtest-doctor/v1\",\"status\":\"blocked\",\"component\":\"rimctx\",\"code\":\"INDEX_MISSING\",\"nextAction\":\"rimliaison affected --run --json\"}",
-            result.Stdout.Trim());
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual("rimtest-doctor/v1", root.GetProperty("schemaVersion").GetString());
+        AssertEqual("blocked", root.GetProperty("status").GetString());
+        AssertEqual("rimctx", root.GetProperty("component").GetString());
+        AssertEqual("INDEX_MISSING", root.GetProperty("code").GetString());
+        Assert(root.GetProperty("workspaceIntegrity").GetProperty("schemaVersion").GetString() ==
+            "rimliaison-workspace-integrity/v1", "blocked doctor output must retain workspace health evidence");
+        AssertEqual("rimliaison affected --run --json", root.GetProperty("nextAction").GetString());
         Assert(result.Stderr.Contains("rimctx INDEX_MISSING", StringComparison.Ordinal),
             "Blocked doctor diagnostics should identify the component and code.");
     }
