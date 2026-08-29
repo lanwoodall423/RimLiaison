@@ -71,7 +71,8 @@ public sealed record ToolchainPromotionResult(
         string? qualificationArtifactPath = null,
         string? qualificationArtifactSha256 = null,
         string? previousFingerprint = null,
-        string? nextAction = null) => new(
+        string? nextAction = null,
+        string? productionDoctor = null) => new(
         ToolchainPromotionSchemas.Result,
         "blocked",
         code,
@@ -85,7 +86,7 @@ public sealed record ToolchainPromotionResult(
         previousFingerprint,
         [],
         "not-verified",
-        "not-run",
+        productionDoctor ?? "not-run",
         "unchanged",
         null,
         nextAction);
@@ -352,7 +353,8 @@ public static class ToolchainPromotionService
                     artifactPath,
                     qualificationHash,
                     previous.PromotedFingerprint,
-                    "Repair the production control plane, then retry the supported promotion command.");
+                    "Repair the production control plane, then retry the supported promotion command.",
+                    health.Summary);
             }
 
             string doctor = health.Summary;
@@ -742,8 +744,19 @@ public static class ToolchainPromotionService
         }
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-        return (process.ExitCode, await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            throw;
+        }
+        return (process.ExitCode, await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false));
     }
 
     private static bool TryParse(string output, out JsonDocument? document)
