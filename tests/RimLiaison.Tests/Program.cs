@@ -7183,13 +7183,13 @@ internal static class Program
         {
             string script = Path.Combine(directory, "DevBridge.cmd");
             File.WriteAllText(script, "@echo off\r\n" +
-                "echo {\"success\":true}\r\n");
+                "echo {\"success\":true,\"args\":\"%*\"}\r\n");
             DevBridgeProcessResult process =
                 new SystemDevBridgeProcessTransport().ExecuteAsync(
                         new DevBridgeProcessRequest(
                             script,
                             directory,
-                            [],
+                            ["--root", directory, "doctor", "--json"],
                             TimeSpan.FromSeconds(5),
                             16 * 1024,
                             16 * 1024),
@@ -7199,8 +7199,9 @@ internal static class Program
 
             AssertEqual(0, process.ExitCode);
             Assert(process.StartError is null, "batch launcher must not report a start error");
-            Assert(process.Stdout.Contains("\"success\":true", StringComparison.Ordinal),
-                "batch launcher must preserve script stdout");
+            Assert(process.Stdout.Contains("--root", StringComparison.Ordinal) &&
+                process.Stdout.Contains("doctor", StringComparison.Ordinal),
+                "batch launcher must preserve script arguments");
         }
         finally
         {
