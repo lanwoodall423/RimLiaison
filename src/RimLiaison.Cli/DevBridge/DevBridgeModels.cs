@@ -215,10 +215,11 @@ public sealed record DevBridgeAdapterOptions
         string? commandPath = null,
         string? rootPath = null)
     {
-        string selectedPath = ResolveCommandPath(commandPath);
+        string? configuredRoot = rootPath ??
+            Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT");
+        string selectedPath = ResolveCommandPath(commandPath, configuredRoot);
         string fullPath = Path.GetFullPath(selectedPath);
-        string selectedRoot = rootPath ??
-            Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
+        string selectedRoot = configuredRoot ??
             Path.GetDirectoryName(fullPath) ??
             Environment.CurrentDirectory;
         string fullRoot = Path.GetFullPath(selectedRoot);
@@ -228,7 +229,7 @@ public sealed record DevBridgeAdapterOptions
             CommandPath = fullPath,
             RootPath = fullRoot,
             SourceRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT") ??
-                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
+                configuredRoot ??
                 fullRoot,
             RuntimeRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_RUNTIME_ROOT"),
             PinnedWorktreeRootPath = Environment.GetEnvironmentVariable("DEVBRIDGE_PINNED_WORKTREE_ROOT") ??
@@ -236,7 +237,9 @@ public sealed record DevBridgeAdapterOptions
         };
     }
 
-    private static string ResolveCommandPath(string? explicitPath)
+    private static string ResolveCommandPath(
+        string? explicitPath,
+        string? configuredRoot)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
@@ -249,6 +252,11 @@ public sealed record DevBridgeAdapterOptions
         if (!string.IsNullOrWhiteSpace(configured))
         {
             return configured;
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            return Path.Combine(configuredRoot, "DevBridge.cmd");
         }
 
         var candidates = new List<string>();
@@ -273,6 +281,7 @@ public sealed record DevBridgeAdapterOptions
         }
     }
 }
+
 
 public sealed record DevBridgeRecipeShowResult(
     string RecipeId,

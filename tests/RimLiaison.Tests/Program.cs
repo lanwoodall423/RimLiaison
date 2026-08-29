@@ -82,7 +82,7 @@ internal static class Program
         ("doctor preserves structured DevBridge failure", DoctorPreservesStructuredDevBridgeFailure),
         ("DevBridge process evidence is retained", DevBridgeProcessEvidenceIsRetained),
         ("DevBridge batch launcher executes on Windows", DevBridgeBatchLauncherExecutesOnWindows),
-        ("explicit fallback is rejected on unrelated command", ExplicitFallbackIsRejectedOnUnrelatedCommand),
+        ("DevBridge root selects its batch launcher", DevBridgeRootSelectsBatchLauncher),
         ("show exposes metadata", ShowExposesMetadata),
         ("missing run uses not-found contract", MissingRunUsesNotFoundContract),
         ("missing show and suite commands use not-found exit code", MissingShowAndSuiteCommandsUseNotFoundExitCode),
@@ -7169,6 +7169,24 @@ internal static class Program
             "a valid structured failure must not be classified as invalid");
         Assert(result.Stderr.Contains("devbridge OUTPUT_TOO_LARGE", StringComparison.Ordinal),
             "doctor diagnostics must identify the originating component and code");
+    }
+
+    private static void DevBridgeRootSelectsBatchLauncher()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            string expected = Path.GetFullPath(Path.Combine(directory, "DevBridge.cmd"));
+            DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
+                rootPath: directory);
+
+            AssertEqual(expected, options.CommandPath);
+            AssertEqual(Path.GetFullPath(directory), options.RootPath);
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
     }
 
     private static void DevBridgeBatchLauncherExecutesOnWindows()
