@@ -172,6 +172,16 @@ public static class ToolchainPromotionService
                     qualificationHash,
                     nextAction: "Run the complete burn-in profile for the current source commit.");
             }
+            if (!QualifiedHashesMatch(qualification.RootElement, package, out string? artifactHashError))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_QUALIFIED_ARTIFACT_MISMATCH",
+                    artifactHashError ?? "The promotion artifacts are not the artifacts qualified by the burn-in.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Publish the exact qualified Release artifacts and rebuild the promotion package.");
+            }
 
             GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
                 .ReadAsync(sourceRoot, cancellationToken)
@@ -483,6 +493,39 @@ public static class ToolchainPromotionService
             return false;
         }
         return true;
+    }
+
+    private static bool QualifiedHashesMatch(
+        JsonElement root,
+        ToolchainPromotionPackage package,
+        out string? error)
+    {
+        error = null;
+        if (!TryObject(root, "QualifiedArtifactHashes", out JsonElement hashes) &&
+            !TryObject(root, "qualifiedArtifactHashes", out hashes))
+        {
+            error = "The qualification artifact has no qualified artifact hashes.";
+            return false;
+        }
+        if (!TryString(hashes, "rimLiaisonExecutableSha256", out string? executableHash) ||
+            !TryString(hashes, "rimLiaisonAssemblySha256", out string? assemblyHash) ||
+            !string.Equals(executableHash, package.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase))
+        {
+            error = "The promotion package artifact hashes do not match the qualification artifact.";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryObject(JsonElement root, string name, out JsonElement value)
+    {
+        if (root.TryGetProperty(name, out value) && value.ValueKind == JsonValueKind.Object)
+        {
+            return true;
+        }
+        value = default;
+        return false;
     }
 
     private static bool TryString(JsonElement root, string name, out string? value)
