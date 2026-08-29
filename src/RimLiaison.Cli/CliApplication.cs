@@ -3901,15 +3901,61 @@ public static class CliApplication
         CliRequest request,
         string repositoryRoot)
     {
-        if (request.StackManifest.Manifest is null)
+        RimDevStackManifest? manifest = request.StackManifest.Manifest;
+        if (manifest is null)
         {
             return null;
         }
 
-        return ProjectRuntimeBindingResolver.Resolve(
-                repositoryRoot,
-                request.StackManifest.Manifest)
-            .RuntimeRoot;
+        if (string.Equals(manifest.Workload, "production", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectRuntimeBindingResolver.Resolve(repositoryRoot, manifest).RuntimeRoot;
+        }
+
+        return ResolveNonProductionRuntimeRoot(request, repositoryRoot);
+    }
+
+    private static string? ResolveNonProductionRuntimeRoot(
+        CliRequest request,
+        string repositoryRoot)
+    {
+        RimDevWorkspaceDiscovery workspace =
+            RimDevWorkspaceDiscoverer.Discover(null, repositoryRoot);
+        RimDevWorkspaceConfiguration? configuration = workspace.Configuration;
+        string? project = request.DevBridgeProject ??
+            request.StackManifest.Manifest?.DevBridgeProject;
+        if (!workspace.Succeeded ||
+            configuration?.ActiveModsRoot is null ||
+            string.IsNullOrWhiteSpace(project) ||
+            configuration.PackageMappings is null ||
+            !configuration.PackageMappings.TryGetValue(project, out string? packageName) ||
+            string.IsNullOrWhiteSpace(packageName))
+        {
+            return null;
+        }
+
+        try
+        {
+            string runtimeRoot = Path.GetFullPath(Path.Combine(
+                configuration.ActiveModsRoot,
+                packageName));
+            string activeModsRoot = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(configuration.ActiveModsRoot));
+            if (string.Equals(runtimeRoot, activeModsRoot, StringComparison.OrdinalIgnoreCase) ||
+                !runtimeRoot.StartsWith(
+                    activeModsRoot + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return runtimeRoot;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private static string? SelectDevelopmentRecipe(
