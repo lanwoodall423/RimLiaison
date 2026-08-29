@@ -141,6 +141,16 @@ internal static class ProjectRuntimeBindingResolver
                 rimWorldRoot,
                 nextAction: "set activeModsRoot to the canonical RimWorld Mods directory");
         }
+        if (SamePath(sourceRoot, canonicalModsRoot) || IsWithin(sourceRoot, canonicalModsRoot))
+        {
+            return Failure(
+                projectId,
+                sourceRoot,
+                "PROJECT_SOURCE_ROOT_IN_MODS",
+                "The project source repository cannot be located under the canonical RimWorld Mods directory.",
+                rimWorldRoot,
+                nextAction: "move the source checkout under the managed Repos root");
+        }
 
         string? metadataError = ProjectMetadataValidator.Validate(manifest, sourceRoot);
         if (metadataError is not null)
@@ -153,6 +163,18 @@ internal static class ProjectRuntimeBindingResolver
                 rimWorldRoot,
                 nextAction: "repair the project-owned .rimdev/stack.json");
         }
+        string? identityConflict = FindIdentityConflict(workspace, manifest, sourceRoot);
+        if (identityConflict is not null)
+        {
+            return Failure(
+                projectId,
+                sourceRoot,
+                "PROJECT_IDENTITY_CONFLICT",
+                identityConflict,
+                rimWorldRoot,
+                nextAction: "give each production project a unique project and package identity");
+        }
+
 
         ResolutionCandidateResult candidateResult = FindCandidate(
             workspace,
@@ -291,6 +313,19 @@ internal static class ProjectRuntimeBindingResolver
         }
 
         var projects = new List<WorkspaceIntegrityEntry>();
+        StackManifestResolution current = StackManifestResolver.Discover(startDirectory);
+        if (current.Manifest is null &&
+            ClaimsProduction(current.RepositoryRoot) &&
+            !workspace.Repositories.Any(repository => SamePath(repository.Path, current.RepositoryRoot)))
+        {
+            ProjectRuntimeBindingResult failure = Failure(
+                Path.GetFileName(current.RepositoryRoot),
+                current.RepositoryRoot,
+                current.ErrorCode ?? "PROJECT_METADATA_INVALID",
+                current.Error ?? "The production project manifest is invalid.");
+            projects.Add(failure.ToIntegrityEntry());
+        }
+
         foreach (RimDevRepository repository in workspace.Repositories)
         {
             string sourceRoot = repository.Path;
@@ -379,6 +414,49 @@ internal static class ProjectRuntimeBindingResolver
         bool blocked = projects.Any(project =>
             project.Health is not (ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired));
         return new(true, blocked ? "BLOCKED" : "READY", projects);
+    }
+
+    private static string? FindIdentityConflict(
+        RimDevWorkspaceDiscovery workspace,
+        RimDevStackManifest manifest,
+        string sourceRoot)
+    {
+        foreach (RimDevRepository repository in workspace.Repositories)
+        {
+            if (SamePath(repository.Path, sourceRoot) ||
+                !repository.Manifest.IsValid ||
+                !string.Equals(repository.Manifest.Workload, "production", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            RimDevStackManifest? other = StackManifestResolver.Discover(repository.Path).Manifest;
+            if (other is null)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(manifest.PackageId) &&
+                string.Equals(manifest.PackageId, other.PackageId, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"The package identity '{manifest.PackageId}' is already claimed by project '{repository.Name}'.";
+            }
+
+            string[] identities = new[] { manifest.Project, manifest.DevBridgeProject }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => NormalizeIdentity(value!))
+                .ToArray();
+            string[] otherIdentities = new[] { other.Project, other.DevBridgeProject }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => NormalizeIdentity(value!))
+                .ToArray();
+            if (identities.Intersect(otherIdentities, StringComparer.Ordinal).Any())
+            {
+                return $"The project identity is already claimed by project '{repository.Name}'.";
+            }
+        }
+
+        return null;
     }
 
     private static ResolutionCandidateResult FindCandidate(
@@ -963,7 +1041,9 @@ internal static class ProjectRuntimeBindingResolver
             "PROJECT_RUNTIME_ROOT_AMBIGUOUS" => (ProjectBindingHealthStates.Ambiguous, false),
             "PROJECT_RUNTIME_ROOT_INVALID" when error.Contains("source repository", StringComparison.OrdinalIgnoreCase) =>
                 (ProjectBindingHealthStates.SourceEqualsRuntime, false),
+            "PROJECT_SOURCE_ROOT_IN_MODS" => (ProjectBindingHealthStates.SourceUnderMods, false),
             "PROJECT_RUNTIME_ROOT_OUTSIDE_MODS" => (ProjectBindingHealthStates.RuntimeOutsideMods, false),
+            "PROJECT_IDENTITY_CONFLICT" => (ProjectBindingHealthStates.ProjectIdentityConflict, false),
             _ when code.StartsWith("PROJECT_METADATA_", StringComparison.Ordinal) =>
                 (ProjectBindingHealthStates.ProjectIdentityConflict, false),
             _ => (ProjectBindingHealthStates.Unknown, false)

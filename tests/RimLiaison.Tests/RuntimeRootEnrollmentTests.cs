@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 using RimLiaison.DevBridge;
 using System.Text.Json;
 using RimLiaison.RimDev;
@@ -356,6 +358,177 @@ internal static class RuntimeRootEnrollmentTests
         Assert(!missing.Repairable, "a disappeared project must not be auto-repaired");
     }
 
+    public static void CleanWholeModPackageMaterializesContract()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Directory.CreateDirectory(Path.Combine(environment.ProjectRoot, "1.6", "Assemblies"));
+        File.WriteAllText(Path.Combine(environment.ProjectRoot, "1.6", "Assemblies", "DemoMod.dll"), "assembly");
+        File.WriteAllText(Path.Combine(environment.ProjectRoot, "LoadFolders.xml"), "<loadFolders />");
+        string manifestPath = Path.Combine(environment.ProjectRoot, ".rimdev", "stack.json");
+        File.WriteAllText(
+            manifestPath,
+            File.ReadAllText(manifestPath).Replace(
+                "\"1.*/**\"",
+                "\"1.*/**\", \"LoadFolders.xml\"",
+                StringComparison.Ordinal));
+
+        ProjectRuntimeBindingResult binding = environment.Resolve();
+        ProjectOwnedDescriptorMaterialization? materialization = ProjectOwnedDescriptorMaterializer.Materialize(
+            "demo",
+            environment.ProjectRoot,
+            binding.RuntimeRoot,
+            out string? errorCode,
+            out string? error);
+        try
+        {
+            Assert(binding.Succeeded, binding.Error ?? binding.ErrorCode ?? "binding failed");
+            Assert(materialization is not null, error ?? errorCode ?? "contract materialization failed");
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(materialization!.DescriptorPath));
+            JsonElement package = document.RootElement.GetProperty("runtimePackage");
+            string packageJson = package.GetRawText();
+            Assert(packageJson.Contains("LoadFolders.xml", StringComparison.Ordinal), "whole-mod package contract must retain non-DLL content");
+            Assert(packageJson.Contains("1.*/**", StringComparison.Ordinal), "whole-mod package contract must retain versioned content");
+            Assert(!Path.GetFullPath(materialization.TemporaryRoot).StartsWith(
+                Path.GetFullPath(environment.ProjectRoot) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase), "execution contract must remain outside the source root");
+            Assert(!Path.GetFullPath(binding.RuntimeRoot!).StartsWith(
+                Path.GetFullPath(environment.ProjectRoot) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase), "runtime root must remain outside the source root");
+        }
+        finally
+        {
+            if (materialization is not null)
+            {
+                ProjectOwnedDescriptorMaterializer.Delete(materialization);
+            }
+        }
+    }
+
+    public static void WorkspaceEnrollmentSurvivesProcessRestart()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Assert(environment.Resolve().Succeeded, "initial enrollment failed");
+        using Process process = StartProbe(environment, "workspace enrollment process probe");
+        Assert(process.WaitForExit(120_000), "restart probe exceeded its bound");
+        string output = process.StandardOutput.ReadToEnd();
+        Assert(process.ExitCode == 0, "a new RimLiaison process could not read the persisted enrollment: " + output);
+    }
+
+    public static void ConcurrentProcessEnrollmentIsIdempotent()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        using Process first = StartProbe(environment, "workspace enrollment process probe");
+        using Process second = StartProbe(environment, "workspace enrollment process probe");
+        Assert(first.WaitForExit(120_000), "first concurrent enrollment exceeded its bound");
+        Assert(second.WaitForExit(120_000), "second concurrent enrollment exceeded its bound");
+        string firstOutput = first.StandardOutput.ReadToEnd();
+        string secondOutput = second.StandardOutput.ReadToEnd();
+        Assert(first.ExitCode == 0 && second.ExitCode == 0,
+            "concurrent processes did not receive a consistent result: " + firstOutput + secondOutput);
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(environment.WorkspacePath));
+        string[] paths = document.RootElement.GetProperty("repositories")
+            .EnumerateArray()
+            .Select(entry => entry.GetProperty("path").GetString()!)
+            .ToArray();
+        Assert(paths.Count(path => path.Equals("DemoMod", StringComparison.OrdinalIgnoreCase)) == 1,
+            "concurrent process enrollment duplicated the registration");
+    }
+
+    public static void DuplicateProjectIdentityFailsBeforeEnrollment()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        string second = environment.CreateSecondProject("OtherMod", "lan.other");
+        string secondManifest = Path.Combine(second, ".rimdev", "stack.json");
+        File.WriteAllText(
+            secondManifest,
+            File.ReadAllText(secondManifest)
+                .Replace("\"devBridgeProject\":\"demo\"", "\"devBridgeProject\":\"other\"", StringComparison.Ordinal)
+                .Replace("\"lan.other\"", "\"lan.demo\"", StringComparison.Ordinal));
+        File.WriteAllText(Path.Combine(second, "About", "About.xml"), "<ModMetaData><packageId>lan.demo</packageId></ModMetaData>");
+        environment.WriteWorkspace(new
+        {
+            schemaVersion = RimDevSchemas.Workspace,
+            rimWorldRoot = environment.RimWorldRoot,
+            activeModsRoot = environment.ModsRoot,
+            repositories = new[] { new { path = "DemoMod" }, new { path = "OtherMod" } },
+            packageMappings = new { }
+        });
+
+        ProjectRuntimeBindingResult result = environment.Resolve();
+        Assert(!result.Succeeded, "duplicate package identity must fail closed");
+        Assert(result.ErrorCode == "PROJECT_IDENTITY_CONFLICT", "duplicate package identity returned the wrong error");
+        Assert(result.Health == ProjectBindingHealthStates.ProjectIdentityConflict, "duplicate identity returned the wrong health");
+    }
+
+    public static void MalformedAboutXmlFailsBeforeEnrollment()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        RimDevStackManifest manifest = StackManifestResolver.Discover(environment.ProjectRoot).Manifest!;
+        File.WriteAllText(Path.Combine(environment.ProjectRoot, "About", "About.xml"), "<ModMetaData>");
+        environment.WriteWorkspace(new
+        {
+            schemaVersion = RimDevSchemas.Workspace,
+            rimWorldRoot = environment.RimWorldRoot,
+            activeModsRoot = environment.ModsRoot,
+            repositories = new[] { new { path = "DemoMod" } },
+            packageMappings = new { }
+        });
+
+
+        ProjectRuntimeBindingResult result = ProjectRuntimeBindingResolver.Resolve(
+            environment.ProjectRoot,
+            manifest);
+        Assert(!result.Succeeded, "malformed About.xml must fail closed");
+        Assert(result.ErrorCode == "PROJECT_METADATA_IDENTITY_CONTRADICTION", "malformed About.xml returned the wrong error");
+        Assert(result.Health == ProjectBindingHealthStates.ProjectIdentityConflict, "malformed About.xml returned the wrong health");
+    }
+
+    public static void SourceUnderModsFailsBeforeEnrollment()
+    {
+        using TestEnvironment environment = TestEnvironment.Create(sourceUnderMods: true);
+        ProjectRuntimeBindingResult result = environment.Resolve();
+
+        Assert(!result.Succeeded, "a source checkout under Mods must fail closed");
+        Assert(result.ErrorCode == "PROJECT_SOURCE_ROOT_IN_MODS", "source under Mods returned the wrong error");
+        Assert(result.Health == ProjectBindingHealthStates.SourceUnderMods, "source under Mods returned the wrong health");
+    }
+
+    public static void WorkspaceEnrollmentProcessProbe()
+    {
+        string? root = Environment.GetEnvironmentVariable("RIMTEST_WORKSPACE_PROBE_ROOT");
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return;
+        }
+        WorkspaceIntegrityAuditResult audit = ProjectRuntimeBindingResolver.Audit(
+            Path.Combine(root!, "DemoMod"),
+            repair: true);
+        Assert(audit.Status == "READY", "workspace probe did not resolve a ready workspace");
+        Assert(audit.Projects.Single().Health is ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired,
+            "workspace probe did not observe a canonical healthy enrollment");
+    }
+
+    private static Process StartProbe(TestEnvironment environment, string filter)
+    {
+        string processPath = Environment.ProcessPath ?? throw new InvalidOperationException("test process path is unavailable");
+        var start = new ProcessStartInfo(processPath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            start.ArgumentList.Add(typeof(Program).Assembly.Location);
+        }
+        start.ArgumentList.Add("--filter");
+        start.ArgumentList.Add(filter);
+        start.Environment["RIMTEST_WORKSPACE_PROBE_ROOT"] = environment.Root;
+        start.Environment["RIMDEV_ROOT"] = environment.Root;
+        return Process.Start(start) ?? throw new InvalidOperationException("workspace probe did not start");
+    }
+
     private static void Assert(bool condition, string message)
     {
         if (!condition)
@@ -380,12 +553,12 @@ internal static class RuntimeRootEnrollmentTests
         public string ModsRoot { get; }
         public string WorkspacePath { get; }
 
-        public static TestEnvironment Create()
+        public static TestEnvironment Create(bool sourceUnderMods = false)
         {
             string root = Path.Combine(Path.GetTempPath(), "rimliaison-runtime-binding-" + Guid.NewGuid().ToString("N"));
-            string project = Path.Combine(root, "DemoMod");
             string rimWorld = Path.Combine(root, "RimWorld");
             string mods = Path.Combine(rimWorld, "Mods");
+            string project = sourceUnderMods ? Path.Combine(mods, "DemoMod") : Path.Combine(root, "DemoMod");
             Directory.CreateDirectory(Path.Combine(project, ".git"));
             Directory.CreateDirectory(Path.Combine(project, ".rimdev"));
             Directory.CreateDirectory(Path.Combine(project, "Source"));

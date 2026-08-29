@@ -11,6 +11,7 @@ internal static class ProjectBindingHealthStates
     public const string RuntimeRootConflict = "RUNTIME_ROOT_CONFLICT";
     public const string ProjectIdentityConflict = "PROJECT_IDENTITY_CONFLICT";
     public const string SourceEqualsRuntime = "SOURCE_EQUALS_RUNTIME";
+    public const string SourceUnderMods = "SOURCE_UNDER_MODS";
     public const string RuntimeOutsideMods = "RUNTIME_OUTSIDE_MODS";
     public const string Ambiguous = "AMBIGUOUS";
     public const string Unknown = "UNKNOWN";
