@@ -126,6 +126,7 @@ public static class ToolchainPromotionService
         string lockPath = manifestPath + ".promotion.lock";
         FileStream? promotionLock = null;
         string? stagedRoot = null;
+        ProductionToolchainManifest? previous = null;
         bool promotionCommitted = false;
         try
         {
@@ -198,7 +199,7 @@ public static class ToolchainPromotionService
                     nextAction: "Commit or restore the qualified source and rebuild the promotion package.");
             }
 
-            ProductionToolchainManifest? previous = ReadProductionManifest(manifestPath, out string? manifestError);
+            previous = ReadProductionManifest(manifestPath, out string? manifestError);
             if (previous is null)
             {
                 return ToolchainPromotionResult.Blocked(
@@ -394,12 +395,9 @@ public static class ToolchainPromotionService
                 "PROMOTION_LOCKED",
                 "Another production promotion is already in progress.");
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or OperationCanceledException)
         {
-            if (stagedRoot is not null)
-            {
-                TryDelete(stagedRoot);
-            }
+            TryRestoreProductionManifest(manifestPath, previous);
             return ToolchainPromotionResult.Blocked("PROMOTION_TRANSACTION_FAILED", exception.Message);
         }
         finally
@@ -413,9 +411,26 @@ public static class ToolchainPromotionService
     }
 
         }
+    private static void TryRestoreProductionManifest(
+        string manifestPath,
+        ProductionToolchainManifest? previous)
+    {
+        if (previous is null)
+        {
+            return;
+        }
+        try
+        {
+            AtomicReplace(manifestPath, JsonSerializer.Serialize(previous, WriteOptions));
+        }
+        catch (Exception) when (File.Exists(manifestPath))
+        {
+        }
+    }
     private static ToolchainPromotionPackage? ReadPackage(string path, out string? error)
     {
         error = null;
+
         try
         {
             ToolchainPromotionPackage? package = JsonSerializer.Deserialize<ToolchainPromotionPackage>(
@@ -689,7 +704,7 @@ public static class ToolchainPromotionService
 
             return new ProductionHealthResult(true, JsonSerializer.Serialize(checks, WriteOptions), null);
         }
-        catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException or OperationCanceledException)
         {
             return HealthFailure(checks, exception.Message);
         }
