@@ -66,6 +66,7 @@ internal sealed record CliRequest(
     bool UiInputCheck,
     bool Explain,
     bool ContextVerbose,
+    bool WorkspaceAudit,
     string? AffectedBase,
     IReadOnlyList<string> ChangedPaths,
     IReadOnlyDictionary<string, string> DependencyFingerprints,
@@ -134,6 +135,7 @@ internal static class CliParser
         bool uiInputCheck = false;
         bool explain = false;
         bool contextVerbose = false;
+        bool workspaceAudit = false;
         string? affectedBase = null;
         bool depthSpecified = false;
         bool limitSpecified = false;
@@ -261,6 +263,9 @@ internal static class CliParser
                 case "--content-reuse-source":
                     contentReuseSource = ReadOptionValue(args, ref index, argument);
                     break;
+                case "--workspace":
+                    workspaceAudit = true;
+                    break;
                 case "--verbose":
                     contextVerbose = true;
                     break;
@@ -381,6 +386,7 @@ internal static class CliParser
                 uiInputCheck,
                 explain,
                 contextVerbose,
+                workspaceAudit,
                 null,
                 [],
                 dependencyFingerprints,
@@ -772,6 +778,7 @@ internal static class CliParser
             uiInputCheck,
             explain,
             contextVerbose,
+            workspaceAudit,
             affectedBase,
             positionals.Skip(1).ToArray(),
             dependencyFingerprints,

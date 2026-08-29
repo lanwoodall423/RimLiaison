@@ -53,6 +53,18 @@ never treats the source checkout as a runtime destination. `rimliaison preflight
 this binding before build, test, packaging, or launch and reports `rimliaison-project-binding/v1`
 evidence, including one repair attempt when safe.
 
+`rimliaison doctor --json` performs the same bounded workspace-integrity check before probing
+lower-level tools and includes `workspaceIntegrity` in machine-readable output. Use
+`rimliaison doctor --workspace --json` for a static audit of every managed production project;
+it may safely repair only unique missing, moved-source, or stale-runtime bindings. Conflicts,
+ambiguity, missing canonical RimWorld roots, malformed metadata, and source/runtime collisions
+remain blocked with an issue code and next action.
+
+Agents must not edit machine-local runtime paths manually, commit absolute runtime paths, copy
+source repositories into `RimWorld\Mods`, create junctions or symlinks, or bypass RimLiaison's
+production toolchain. Invoke the canonical doctor/preflight workflow and consume its structured
+repair or failure result.
+
 Tooling repositories may retain only explicitly classified non-production descriptors:
 `entityType` must be `fixture`, `test`, `internal`, or `example`, and `productionEligible` must
 be `false`. Unclassified, missing, malformed, or contradictory production metadata fails closed

@@ -21,6 +21,33 @@ internal sealed record ProjectRuntimeBindingResult(
     string? Error = null,
     string? NextAction = null)
 {
+    public string Health { get; init; } = Succeeded
+        ? (RepairOccurred ? ProjectBindingHealthStates.Repaired : ProjectBindingHealthStates.Healthy)
+        : ProjectBindingHealthStates.Unknown;
+
+    public bool Repairable { get; init; }
+
+    public string? OriginalRuntimeRoot { get; init; }
+
+    public string? RepairedRuntimeRoot { get; init; }
+
+    public string? TimestampUtc { get; init; }
+
+    public string? WorkflowId { get; init; }
+
+    public WorkspaceIntegrityEntry ToIntegrityEntry() => new(
+        ProjectId,
+        SourceRoot,
+        RuntimeRoot,
+        Health,
+        Repairable,
+        ErrorCode,
+        OriginalRuntimeRoot,
+        RepairedRuntimeRoot,
+        ResolutionMethod,
+        WorkspaceEntryStatus,
+        TimestampUtc,
+        WorkflowId);
     public object ToEvidence() => new
     {
         schemaVersion = "rimliaison-project-binding/v1",
@@ -31,8 +58,14 @@ internal sealed record ProjectRuntimeBindingResult(
         rimWorldRoot = RimWorldRoot,
         resolutionMethod = ResolutionMethod,
         workspaceEntryStatus = WorkspaceEntryStatus,
+        health = Health,
+        repairable = Repairable,
+        originalRuntimeRoot = OriginalRuntimeRoot,
+        repairedRuntimeRoot = RepairedRuntimeRoot,
         repairAttempted = RepairAttempted,
         repairOccurred = RepairOccurred,
+        timestampUtc = TimestampUtc,
+        workflowId = WorkflowId,
         evidenceId = EvidenceId,
         errorCode = ErrorCode,
         error = Error,
@@ -165,6 +198,12 @@ internal static class ProjectRuntimeBindingResolver
         }
 
         string evidenceId = EvidenceId(projectId, sourceRoot, runtimeRoot, rimWorldRoot);
+        bool needsRepair = !HasPersistedRegistration(workspace, sourceRoot);
+        bool staleSource = needsRepair && HasStaleRegistration(workspace, sourceRoot, manifest);
+        bool staleRuntime = string.Equals(
+            candidateResult.ResolutionMethod,
+            "stale-runtime-package-id",
+            StringComparison.Ordinal);
         if (!enroll)
         {
             return new(
@@ -177,7 +216,19 @@ internal static class ProjectRuntimeBindingResolver
                 candidateResult.WorkspaceEntryStatus,
                 false,
                 false,
-                evidenceId);
+                evidenceId)
+            {
+                Health = staleSource
+                    ? ProjectBindingHealthStates.StaleSourceRootRepairable
+                    : staleRuntime
+                        ? ProjectBindingHealthStates.StaleRuntimeRootRepairable
+                        : needsRepair
+                            ? ProjectBindingHealthStates.MissingRegistrationRepairable
+                            : ProjectBindingHealthStates.Healthy,
+                Repairable = needsRepair || staleRuntime,
+                TimestampUtc = DateTimeOffset.UtcNow.ToString("O"),
+                OriginalRuntimeRoot = candidateResult.OriginalRuntimeRoot
+            };
         }
 
         EnrollmentResult enrollment = Enroll(
@@ -211,7 +262,123 @@ internal static class ProjectRuntimeBindingResolver
             enrollment.EntryStatus,
             enrollment.Changed,
             enrollment.Changed,
-            evidenceId);
+            evidenceId)
+        {
+            Health = enrollment.Changed
+                ? ProjectBindingHealthStates.Repaired
+                : ProjectBindingHealthStates.Healthy,
+            Repairable = enrollment.Changed,
+            TimestampUtc = DateTimeOffset.UtcNow.ToString("O"),
+            OriginalRuntimeRoot = candidateResult.OriginalRuntimeRoot,
+            RepairedRuntimeRoot = enrollment.Changed ? runtimeRoot : null
+        };
+    }
+    public static WorkspaceIntegrityAuditResult Audit(
+        string startDirectory,
+        bool repair = true,
+        string? workflowId = null)
+    {
+        RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, startDirectory);
+        if (!workspace.Succeeded)
+        {
+            return new(
+                false,
+                "BLOCKED",
+                [],
+                workspace.ErrorCode ?? "PROJECT_WORKSPACE_UNAVAILABLE",
+                workspace.Error ?? "The managed workspace configuration could not be resolved.",
+                "repair the managed machine-local .rimdev/workspace.json");
+        }
+
+        var projects = new List<WorkspaceIntegrityEntry>();
+        foreach (RimDevRepository repository in workspace.Repositories)
+        {
+            string sourceRoot = repository.Path;
+            try
+            {
+                sourceRoot = Path.GetFullPath(Path.Combine(workspace.RootPath, repository.Path));
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+            {
+            }
+
+            if (!repository.Manifest.IsValid)
+            {
+                if (!Directory.Exists(sourceRoot))
+                {
+                    projects.Add(new WorkspaceIntegrityEntry(
+                        repository.Name,
+                        sourceRoot,
+                        null,
+                        ProjectBindingHealthStates.Unknown,
+                        false,
+                        "PROJECT_SOURCE_ROOT_MISSING",
+                        null,
+                        null,
+                        "workspace-audit",
+                        "missing",
+                        DateTimeOffset.UtcNow.ToString("O")));
+                    continue;
+                }
+
+                if (!ClaimsProduction(sourceRoot))
+                {
+                    continue;
+                }
+                projects.Add(new WorkspaceIntegrityEntry(
+                    repository.Name,
+                    sourceRoot,
+                    null,
+                    ProjectBindingHealthStates.Unknown,
+                    false,
+                    repository.Manifest.ErrorCode ?? "PROJECT_METADATA_INVALID",
+                    null,
+                    null,
+                    "workspace-audit",
+                    "unknown"));
+                continue;
+            }
+
+            if (!string.Equals(repository.Manifest.Workload, "production", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!Directory.Exists(sourceRoot))
+            {
+                projects.Add(new WorkspaceIntegrityEntry(
+                    repository.Manifest.DevBridgeProject ?? repository.Manifest.Project!,
+                    sourceRoot,
+                    null,
+                    ProjectBindingHealthStates.Unknown,
+                    false,
+                    "PROJECT_SOURCE_ROOT_MISSING",
+                    null,
+                    null,
+                    "workspace-audit",
+                    "missing"));
+                continue;
+            }
+
+            StackManifestResolution resolution = StackManifestResolver.Discover(sourceRoot);
+            ProjectRuntimeBindingResult binding = resolution.Manifest is null
+                ? Failure(
+                    repository.Name,
+                    sourceRoot,
+                    resolution.ErrorCode ?? "PROJECT_METADATA_INVALID",
+                    resolution.Error ?? "The production project manifest is invalid.")
+                : Resolve(sourceRoot, resolution.Manifest, repair);
+            if (!string.IsNullOrWhiteSpace(workflowId))
+            {
+                binding = binding with { WorkflowId = workflowId };
+            }
+
+            projects.Add(binding.ToIntegrityEntry());
+        }
+
+        bool blocked = projects.Any(project =>
+            project.Health is not (ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired));
+        return new(true, blocked ? "BLOCKED" : "READY", projects);
     }
 
     private static ResolutionCandidateResult FindCandidate(
@@ -220,9 +387,9 @@ internal static class ProjectRuntimeBindingResolver
         string sourceRoot,
         string modsRoot)
     {
-        string projectId = manifest.DevBridgeProject ?? manifest.Project;
         var candidates = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var explicitPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var staleExplicitPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, string> mapping in workspace.Configuration?.PackageMappings ??
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase))
@@ -260,9 +427,18 @@ internal static class ProjectRuntimeBindingResolver
             candidates[path] = "project-runtime-folder";
         }
 
-        foreach (string path in EnumeratePackageMatches(modsRoot, manifest.PackageId))
+        string[] installedPackagePaths = EnumeratePackageMatches(modsRoot, manifest.PackageId).ToArray();
+        foreach (string path in installedPackagePaths)
         {
             candidates.TryAdd(path, "installed-package-id");
+        }
+        if (explicitPaths.Count(path => !Directory.Exists(path)) == 1 &&
+            installedPackagePaths.Length == 1)
+        {
+            string stalePath = explicitPaths.Single(path => !Directory.Exists(path));
+            candidates.Remove(stalePath);
+            candidates[installedPackagePaths[0]] = "stale-runtime-package-id";
+            staleExplicitPaths.Add(stalePath);
         }
 
         if (candidates.Count == 0)
@@ -283,6 +459,11 @@ internal static class ProjectRuntimeBindingResolver
         {
             foreach (string path in explicitPaths)
             {
+                if (staleExplicitPaths.Contains(path))
+                {
+                    continue;
+                }
+
                 if (!candidates.ContainsKey(path))
                 {
                     return CandidateFailure(
@@ -320,7 +501,16 @@ internal static class ProjectRuntimeBindingResolver
                 candidates.Values.Single());
         }
 
-        return new(true, runtimeRoot, candidates.Values.Single(), WorkspaceStatus(workspace, sourceRoot), null, null, null);
+        string? originalRuntimeRoot = staleExplicitPaths.SingleOrDefault();
+        return new(
+            true,
+            runtimeRoot,
+            candidates.Values.Single(),
+            WorkspaceStatus(workspace, sourceRoot),
+            null,
+            null,
+            null,
+            originalRuntimeRoot);
     }
 
     private static string? FindOwnershipConflict(
@@ -670,22 +860,89 @@ internal static class ProjectRuntimeBindingResolver
         }
     }
 
-    private static string WorkspaceStatus(RimDevWorkspaceDiscovery workspace, string sourceRoot) =>
-        workspace.Repositories.Any(repository => SamePath(repository.Path, sourceRoot))
-            ? "present"
-            : "missing";
+    private static bool HasPersistedRegistration(
+        RimDevWorkspaceDiscovery workspace,
+        string sourceRoot) =>
+        workspace.Configuration?.Repositories?.Any(repository =>
+        {
+            try
+            {
+                return SamePath(
+                    Path.Combine(workspace.RootPath, repository.Path),
+                    sourceRoot);
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+            {
+                return false;
+            }
+        }) == true;
+    private static bool HasStaleRegistration(
+        RimDevWorkspaceDiscovery workspace,
+        string sourceRoot,
+        RimDevStackManifest manifest)
+    {
+        foreach (RimDevWorkspaceRepository repository in workspace.Configuration?.Repositories ?? [])
+        {
+            try
+            {
+                string candidate = Path.GetFullPath(Path.Combine(workspace.RootPath, repository.Path));
+                string leaf = Path.GetFileName(candidate);
+                bool identityMatch = new[] { manifest.Project, manifest.DevBridgeProject, manifest.RuntimeFolder }
+                    .Where(value => value is not null)
+                    .Select(value => NormalizeIdentity(value!))
+                    .Contains(NormalizeIdentity(leaf), StringComparer.Ordinal);
+                if (identityMatch && !SamePath(candidate, sourceRoot))
+                {
+                    return true;
+                }
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+            {
+            }
+        }
 
+        return false;
+    }
+    private static bool ClaimsProduction(string sourceRoot)
+    {
+        string manifestPath = Path.Combine(sourceRoot, ".rimdev", "stack.json");
+        try
+        {
+            if (!File.Exists(manifestPath) || new FileInfo(manifestPath).Length > 128 * 1024)
+            {
+                return false;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            return document.RootElement.TryGetProperty("workload", out JsonElement workload) &&
+                string.Equals(workload.GetString(), "production", StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
     private static string EvidenceId(string project, string source, string runtime, string rimWorld)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", project, source, runtime, rimWorld)));
         return "rrb-" + Convert.ToHexString(hash[..12]).ToLowerInvariant();
     }
+    private static string WorkspaceStatus(RimDevWorkspaceDiscovery workspace, string sourceRoot) =>
+        HasPersistedRegistration(workspace, sourceRoot)
+            ? "present"
+            : "missing";
 
     private static ResolutionCandidateResult CandidateFailure(
         string code,
         string error,
-        string method) => new(false, null, method, "unknown", code, error, "repair the machine-local runtime identity");
-
+        string method) => new(
+            false,
+            null,
+            method,
+            "unknown",
+            code,
+            error,
+            "repair the machine-local runtime identity");
     private static ProjectRuntimeBindingResult Failure(
         string project,
         string source,
@@ -695,7 +952,23 @@ internal static class ProjectRuntimeBindingResolver
         string? method = null,
         string workspaceStatus = "unknown",
         bool repairAttempted = false,
-        string? nextAction = null) => new(
+        string? nextAction = null)
+    {
+        (string health, bool repairable) = code switch
+        {
+            "PROJECT_RIMWORLD_ROOT_MISSING" => (ProjectBindingHealthStates.RimWorldRootMissing, false),
+            "PROJECT_RUNTIME_ROOT_CONFLICT" when error.Contains("identity", StringComparison.OrdinalIgnoreCase) =>
+                (ProjectBindingHealthStates.ProjectIdentityConflict, false),
+            "PROJECT_RUNTIME_ROOT_CONFLICT" => (ProjectBindingHealthStates.RuntimeRootConflict, false),
+            "PROJECT_RUNTIME_ROOT_AMBIGUOUS" => (ProjectBindingHealthStates.Ambiguous, false),
+            "PROJECT_RUNTIME_ROOT_INVALID" when error.Contains("source repository", StringComparison.OrdinalIgnoreCase) =>
+                (ProjectBindingHealthStates.SourceEqualsRuntime, false),
+            "PROJECT_RUNTIME_ROOT_OUTSIDE_MODS" => (ProjectBindingHealthStates.RuntimeOutsideMods, false),
+            _ when code.StartsWith("PROJECT_METADATA_", StringComparison.Ordinal) =>
+                (ProjectBindingHealthStates.ProjectIdentityConflict, false),
+            _ => (ProjectBindingHealthStates.Unknown, false)
+        };
+        return new(
             false,
             project,
             source,
@@ -708,7 +981,13 @@ internal static class ProjectRuntimeBindingResolver
             null,
             code,
             error,
-            nextAction ?? "repair the project binding and retry once");
+            nextAction ?? "repair the project binding and retry once")
+        {
+            Health = health,
+            Repairable = repairable,
+            TimestampUtc = DateTimeOffset.UtcNow.ToString("O")
+        };
+    }
 
     private static void TryDeleteLock(string path)
     {
@@ -731,7 +1010,8 @@ internal static class ProjectRuntimeBindingResolver
         string WorkspaceEntryStatus,
         string? ErrorCode,
         string? Error,
-        string? NextAction);
+        string? NextAction,
+        string? OriginalRuntimeRoot = null);
 
     private sealed record EnrollmentResult(
         bool Succeeded,

@@ -7,6 +7,7 @@ using RimLiaison.RimContext;
 using RimLiaison.RimError;
 using RimLiaison.Recovery;
 using RimLiaison.Observability;
+using RimLiaison.RimDev;
 using RimLiaison.Stack;
 
 namespace RimLiaison.Doctor;
@@ -27,6 +28,7 @@ internal sealed class RimTestDoctorRunner
     private const int MaximumProbeStderrBytes = 16 * 1024;
 
     private readonly TextWriter stderr;
+    private WorkspaceIntegrityAuditResult? workspaceIntegrity;
 
     public RimTestDoctorRunner(TextWriter stderr)
     {
@@ -95,6 +97,12 @@ internal sealed class RimTestDoctorRunner
                 FallbackSuite = request.FallbackSuite ?? repaired.Manifest.FallbackSuite
             };
         }
+        if (request.WorkspaceAudit)
+        {
+            return WorkspaceAuditResult(ProjectRuntimeBindingResolver.Audit(
+                request.StackManifest.RepositoryRoot,
+                repair: true));
+        }
         if (!request.StackManifest.Found ||
             request.StackManifest.Manifest is null)
         {
@@ -104,6 +112,31 @@ internal sealed class RimTestDoctorRunner
                 request.StackManifest.Manifest is null && request.StackManifest.Found
                     ? "rimliaison init --json --manifest-only --force"
                     : "rimliaison init --json");
+        }
+        WorkspaceIntegrityAuditResult integrity = ProjectRuntimeBindingResolver.Audit(
+            request.StackManifest.RepositoryRoot,
+            repair: true);
+        workspaceIntegrity = integrity;
+        if (request.WorkspaceAudit)
+        {
+            return WorkspaceAuditResult(integrity);
+        }
+
+        if (!integrity.Succeeded || integrity.HasBlockedProjects)
+        {
+            string issueCode = integrity.ErrorCode ??
+                integrity.Projects.FirstOrDefault(project =>
+                    !IsHealthy(project.Health))?.IssueCode ??
+                "PROJECT_WORKSPACE_UNAVAILABLE";
+            return Blocked(
+                "workspace",
+                issueCode,
+                integrity.NextAction ?? "repair the reported project binding",
+                details: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["workspaceIntegrity"] = integrity.ToEvidence(),
+                    ["repairAttempted"] = true
+                });
         }
 
         if (string.IsNullOrWhiteSpace(request.DevBridgeProject))
@@ -263,12 +296,14 @@ internal sealed class RimTestDoctorRunner
             ["devbridge"] = "ok",
             ["rimerror"] = "ok",
             ["rimbridge"] = devBridgeProbe.IntegrationStatus ?? "unknown",
-            ["nextAction"] = AffectedNextAction
+            ["nextAction"] = AffectedNextAction,
+            ["workspaceIntegrity"] = integrity.ToEvidence()
         };
         if (manifestRecovery is not null)
         {
             readyOutput["manifestRecovery"] = manifestRecovery;
         }
+
         return new DoctorRunResult(0, readyOutput);
     }
 
@@ -717,8 +752,28 @@ internal sealed class RimTestDoctorRunner
         }
         return details;
     }
+    private static DoctorRunResult WorkspaceAuditResult(WorkspaceIntegrityAuditResult audit)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = RimTestDoctorSchema.Current,
+            ["status"] = audit.HasBlockedProjects ? "blocked" : "ready",
+            ["component"] = "workspace",
+            ["workspaceIntegrity"] = audit.ToEvidence()
+        };
+        if (!string.IsNullOrWhiteSpace(audit.NextAction))
+        {
+            output["nextAction"] = audit.NextAction;
+        }
 
-    private static DoctorRunResult Blocked(
+        return new DoctorRunResult(audit.HasBlockedProjects ? 3 : 0, output);
+    }
+
+    private static bool IsHealthy(string health) =>
+        health is ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired;
+
+
+    private DoctorRunResult Blocked(
         string component,
         string code,
         string? nextAction = null,
@@ -738,6 +793,10 @@ internal sealed class RimTestDoctorRunner
             {
                 output[key] = value;
             }
+        }
+        if (workspaceIntegrity is not null)
+        {
+            output["workspaceIntegrity"] = workspaceIntegrity.ToEvidence();
         }
         if (!string.IsNullOrWhiteSpace(nextAction))
         {
@@ -767,7 +826,7 @@ internal sealed class RimTestDoctorRunner
         IReadOnlyList<CatalogIssue> errors,
         string fallback) => errors.FirstOrDefault()?.Code ?? fallback;
 
-    private static DoctorRunResult? ValidateFallback(
+    private DoctorRunResult? ValidateFallback(
         CliRequest request,
         CatalogDocument catalog)
     {

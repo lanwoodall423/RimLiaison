@@ -89,8 +89,8 @@ internal static class RuntimeRootEnrollmentTests
         });
 
         ProjectRuntimeBindingResult result = environment.Resolve();
-        Assert(!result.Succeeded, "a source collision must fail closed");
         Assert(result.ErrorCode is "PROJECT_RUNTIME_ROOT_OUTSIDE_MODS" or "PROJECT_RUNTIME_ROOT_INVALID", "source collision returned the wrong structured error");
+        Assert(result.Health is ProjectBindingHealthStates.RuntimeOutsideMods or ProjectBindingHealthStates.SourceEqualsRuntime, "source collision returned the wrong health state");
     }
 
     public static void RuntimeRootOutsideModsIsRejected()
@@ -106,8 +106,8 @@ internal static class RuntimeRootEnrollmentTests
         });
 
         ProjectRuntimeBindingResult result = environment.Resolve();
-        Assert(!result.Succeeded, "an active root outside canonical Mods must fail");
         Assert(result.ErrorCode == "PROJECT_RUNTIME_ROOT_OUTSIDE_MODS", "outside Mods must have a precise error");
+        Assert(result.Health == ProjectBindingHealthStates.RuntimeOutsideMods, "outside Mods must have a precise health state");
     }
 
     public static void TwoProjectsClaimingRuntimeRootFailClosed()
@@ -132,7 +132,7 @@ internal static class RuntimeRootEnrollmentTests
         ProjectRuntimeBindingResult result = environment.Resolve();
         Assert(!result.Succeeded, "duplicate runtime ownership must fail closed");
         Assert(result.ErrorCode == "PROJECT_RUNTIME_ROOT_CONFLICT", "duplicate ownership must have a conflict error");
-        Assert(second.Length > 0, "second project setup failed");
+        Assert(result.Health is ProjectBindingHealthStates.RuntimeRootConflict or ProjectBindingHealthStates.ProjectIdentityConflict, "duplicate ownership must have a conflict health state");
     }
 
     public static void AmbiguousRuntimeFolderIdentityFailsClosed()
@@ -166,6 +166,7 @@ internal static class RuntimeRootEnrollmentTests
         ProjectRuntimeBindingResult result = environment.Resolve();
         Assert(!result.Succeeded, "missing RimWorld root must fail before runtime work");
         Assert(result.ErrorCode == "PROJECT_RIMWORLD_ROOT_MISSING", "missing root must be reported precisely");
+        Assert(result.Health == ProjectBindingHealthStates.RimWorldRootMissing, "missing root must have a precise health state");
     }
 
     public static void ConcurrentEnrollmentIsIdempotent()
@@ -242,6 +243,117 @@ internal static class RuntimeRootEnrollmentTests
         ProjectRuntimeBindingResult result = environment.Resolve();
         Assert(!result.Succeeded, "unsafe self-heal must fail");
         Assert(!string.IsNullOrWhiteSpace(result.ErrorCode) && !string.IsNullOrWhiteSpace(result.NextAction), "failed self-heal must return structured reason and one next action");
+    }
+
+    public static void WorkspaceAuditReportsHealthyProjects()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Assert(environment.Resolve().Succeeded, "initial enrollment failed");
+
+        WorkspaceIntegrityAuditResult audit = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: false);
+        WorkspaceIntegrityEntry project = audit.Projects.Single();
+
+        Assert(audit.Succeeded && audit.Status == "READY", "healthy workspace audit must be ready");
+        Assert(project.Health == ProjectBindingHealthStates.Healthy, "enrolled project must be healthy");
+        Assert(project.IssueCode is null, "healthy project must not expose an issue");
+        string evidence = JsonSerializer.Serialize(audit.ToEvidence());
+        Assert(evidence.Contains("rimliaison-workspace-integrity/v1", StringComparison.Ordinal), "audit evidence schema is unstable");
+    }
+
+    public static void WorkspaceAuditRepairsMissingEnrollment()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+
+        WorkspaceIntegrityAuditResult before = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: false);
+        Assert(before.Projects.Single().Health == ProjectBindingHealthStates.MissingRegistrationRepairable, "missing enrollment must be repairable");
+
+        WorkspaceIntegrityAuditResult repaired = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: true);
+        Assert(repaired.Projects.Single().Health == ProjectBindingHealthStates.Repaired, "safe missing enrollment was not repaired");
+        Assert(ProjectRuntimeBindingResolver.Audit(environment.ProjectRoot, repair: false).Projects.Single().Health == ProjectBindingHealthStates.Healthy, "repaired enrollment did not become healthy");
+    }
+
+    public static void WorkspaceAuditRepairsStaleRuntimeMapping()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        environment.WriteWorkspace(new
+        {
+            schemaVersion = RimDevSchemas.Workspace,
+            rimWorldRoot = environment.RimWorldRoot,
+            activeModsRoot = environment.ModsRoot,
+            repositories = new[] { new { path = "DemoMod" } },
+            packageMappings = new Dictionary<string, string> { ["demo"] = "OldFolder" }
+        });
+        string about = Path.Combine(environment.ModsRoot, "NewFolder", "About");
+        Directory.CreateDirectory(about);
+        File.WriteAllText(Path.Combine(about, "About.xml"), "<ModMetaData><packageId>lan.demo</packageId></ModMetaData>");
+
+        WorkspaceIntegrityAuditResult before = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: false);
+        Assert(before.Projects.Single().Health == ProjectBindingHealthStates.StaleRuntimeRootRepairable, "stale runtime mapping was not classified");
+
+        WorkspaceIntegrityAuditResult repaired = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: true);
+        WorkspaceIntegrityEntry project = repaired.Projects.Single();
+        Assert(project.Health == ProjectBindingHealthStates.Repaired, "stale runtime mapping was not repaired");
+        Assert(project.OriginalRuntimeRoot?.EndsWith("OldFolder", StringComparison.OrdinalIgnoreCase) == true, "original runtime mapping was not retained");
+        Assert(project.RepairedRuntimeRoot?.EndsWith("NewFolder", StringComparison.OrdinalIgnoreCase) == true, "repaired runtime mapping was not reported");
+    }
+
+    public static void WorkspaceAuditIsolatesBlockedProject()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        string second = environment.CreateSecondProject("OtherMod", "lan.other");
+        string secondManifestPath = Path.Combine(second, ".rimdev", "stack.json");
+        File.WriteAllText(
+            secondManifestPath,
+            File.ReadAllText(secondManifestPath).Replace("\"devBridgeProject\":\"demo\"", "\"devBridgeProject\":\"other\"", StringComparison.Ordinal));
+        environment.WriteWorkspace(new
+        {
+            schemaVersion = RimDevSchemas.Workspace,
+            rimWorldRoot = environment.RimWorldRoot,
+            activeModsRoot = environment.ModsRoot,
+            repositories = new[] { new { path = "DemoMod" }, new { path = "OtherMod" } },
+            packageMappings = new Dictionary<string, string> { ["DemoMod"] = "DemoMod", ["other"] = "../outside" }
+        });
+
+        WorkspaceIntegrityAuditResult audit = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: true);
+        WorkspaceIntegrityEntry healthy = audit.Projects.Single(project => project.Project == "demo");
+        WorkspaceIntegrityEntry blocked = audit.Projects.Single(project => project.Project == "other");
+        Assert(healthy.Health is ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired, "one project was corrupted by another project's failure");
+        Assert(blocked.IssueCode == "PROJECT_RUNTIME_ROOT_OUTSIDE_MODS", "blocked project did not retain its precise issue");
+        Assert(audit.Status == "BLOCKED", "mixed audit must report blocked status");
+        Assert(second.Length > 0, "second project setup failed");
+    }
+
+    public static void WorkspaceAuditReportsDisappearedProject()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        environment.WriteWorkspace(new
+        {
+            schemaVersion = RimDevSchemas.Workspace,
+            rimWorldRoot = environment.RimWorldRoot,
+            activeModsRoot = environment.ModsRoot,
+            repositories = new[] { new { path = "Deleted/DemoMod" } },
+            packageMappings = new { }
+        });
+
+        WorkspaceIntegrityAuditResult audit = ProjectRuntimeBindingResolver.Audit(
+            environment.ProjectRoot,
+            repair: true);
+        WorkspaceIntegrityEntry missing = audit.Projects.Single(project =>
+            project.IssueCode == "PROJECT_SOURCE_ROOT_MISSING");
+        Assert(missing.Health == ProjectBindingHealthStates.Unknown, "disappeared project must be blocked explicitly");
+        Assert(!missing.Repairable, "a disappeared project must not be auto-repaired");
     }
 
     private static void Assert(bool condition, string message)

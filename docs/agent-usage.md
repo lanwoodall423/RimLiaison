@@ -24,6 +24,12 @@ Once stable, run `rimliaison golden-path --json` as the complete production path
 `rimliaison preflight --json` for a compact readiness answer; use `doctor` only when diagnosis
 is needed.
 
+`rimliaison preflight`, `affected`, and production release workflows perform a bounded static
+workspace-binding check before expensive work. When diagnosis is needed, use
+`rimliaison doctor --workspace --json` to audit every managed production project. Consume its
+health, repairability, issue code, and `nextAction`; never hand-edit workspace paths, copy source
+into `RimWorld\Mods`, create links, or bypass the production toolchain.
+
 Both affected commands own changed-file impact selection, test selection, execution,
 DevBridge2 coordination, and bounded results. It calls `RimContext.Core` and `RimError.Core`
 in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff files for the normal
