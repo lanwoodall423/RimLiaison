@@ -57,7 +57,9 @@ public sealed record QualificationAggregate(
     IReadOnlyDictionary<string, int> FailureSignatures,
     IReadOnlyList<QualificationRunResult> Runs,
     DateTimeOffset StartedAt,
-    DateTimeOffset CompletedAt)
+    DateTimeOffset CompletedAt,
+    string? SourceCommit = null,
+    IReadOnlyDictionary<string, string>? QualifiedArtifactHashes = null)
 {
     [JsonIgnore]
     public bool IsPromotionReady =>

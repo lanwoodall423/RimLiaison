@@ -25,6 +25,18 @@ before broad repository reads. Expand only its bounded RimContext handles. After
 its packet prediction is advisory. Missing static packet evidence remains explicit and does not
 authorize narrower validation.
 
+Canonical tooling promotion is owned by RimLiaison. After the complete burn-in
+and a verified promotion package, run:
+
+```text
+rimliaison qualification promote --promotion-package <qualified-toolchain-package.json> --json
+```
+
+The command verifies qualification provenance, artifact hashes, pinned DevBridge
+compatibility, an exclusive promotion lock, atomic production-manifest replacement,
+installed identity, and production doctor. Agents MUST NOT copy binaries or edit
+production manifests manually.
+
 Affected selection also computes `rimtest-validation-plan/v1` from the actual diff when indexed
 impact and catalog coverage are available. Treat required plan entries as non-reducible; agents may
 add validation, but removal requires an accepted source-identity-matching override. Learned impact
@@ -71,6 +83,18 @@ the owner workflow.
 
 Preserve stable `rimtest-*` schemas, `RIMTEST_*` identifiers, `.rimdev` conventions, catalog
 fields, bounded-output rules, and DevBridge contracts.
+
+Project metadata ownership:
+
+- Production project identity is declared by the owning repository's `.rimdev/stack.json`.
+- The production manifest owns workload, package identity, source project, configuration,
+  expected assembly, deployment target, test recipe, runtime package, and dependencies.
+- RimLiaison may materialize a temporary DevBridge execution contract from that manifest, but
+  must not resolve production metadata from `DevBridge2/DevelopmentProjects`.
+- Missing, malformed, or contradictory production metadata fails closed with a structured
+  `PROJECT_METADATA_*` error. Repair the owning repository; do not add a tooling descriptor.
+- Tooling repositories may retain only explicitly classified `fixture`, `test`, `internal`, or
+  `example` descriptors with `productionEligible: false`.
 
 For changes to this tooling repository, use the single change-aware validation selector used by
 CI instead of manually stacking all internal suites. Calculate the plan from the actual Git base

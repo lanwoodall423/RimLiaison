@@ -137,7 +137,7 @@ public static class CliApplication
             ObservabilityEntityIdentity observabilityEntity =
                 ResolveObservabilityEntity(request);
             bool experimentalToolchain = request.ExperimentalToolchain ||
-                request.Command == CliCommand.Qualification;
+                request.Command is CliCommand.Qualification or CliCommand.ToolchainPromotion;
             string workloadKind = request.Command == CliCommand.Qualification
                 ? "qualification"
                 : "production";
@@ -288,6 +288,20 @@ public static class CliApplication
                 ? WorkflowCorrelation.Create()
                 : null;
             profiler.SetWorkflow(workflowId);
+            if (request.Command == CliCommand.ToolchainPromotion)
+            {
+                ToolchainPromotionResult promotion = await ToolchainPromotionService.PromoteAsync(
+                        request.StackManifest.RepositoryRoot,
+                        request.PromotionPackagePath,
+                        request.QualificationOutputPath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                WriteJson(stdout, promotion);
+                exitCode = promotion.Status == "promoted"
+                    ? CliExitCodes.Success
+                    : CliExitCodes.ConservativeSelection;
+                return exitCode;
+            }
             if (request.Command == CliCommand.Qualification)
             {
                 string profile = string.Equals(request.Id, "burn-in", StringComparison.OrdinalIgnoreCase)
@@ -298,6 +312,11 @@ public static class CliApplication
                     profile,
                     eventStore,
                     toolchainState: "experimental");
+                aggregate = await AttachQualificationProvenanceAsync(
+                        aggregate,
+                        request.StackManifest.RepositoryRoot,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 string outputPath = request.QualificationOutputPath ??
                     Path.Combine(".rimdev", "qualification", "latest.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
@@ -4459,6 +4478,32 @@ public static class CliApplication
             CliCommand.GoldenPath ||
         request.Command == CliCommand.Affected && request.RunSelected ||
         request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
+
+    private static async Task<QualificationAggregate> AttachQualificationProvenanceAsync(
+        QualificationAggregate aggregate,
+        string sourceRoot,
+        CancellationToken cancellationToken)
+    {
+        GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
+            .ReadAsync(sourceRoot, cancellationToken)
+            .ConfigureAwait(false);
+        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string assemblyPath = typeof(CliApplication).Assembly.Location;
+        string executablePath = Path.ChangeExtension(assemblyPath, ".exe");
+        if (File.Exists(executablePath))
+        {
+            hashes["rimLiaisonExecutableSha256"] = ToolchainFileHash.Sha256(executablePath);
+        }
+        if (File.Exists(assemblyPath))
+        {
+            hashes["rimLiaisonAssemblySha256"] = ToolchainFileHash.Sha256(assemblyPath);
+        }
+        return aggregate with
+        {
+            SourceCommit = source.State?.HeadSha,
+            QualifiedArtifactHashes = hashes
+        };
+    }
 
     private static string? ResolveLogicalAgentId()
     {

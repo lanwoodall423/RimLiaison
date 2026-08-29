@@ -1,6 +1,7 @@
 using System.Xml;
 using System.Xml.Linq;
 
+using RimLiaison.Stack;
 namespace RimLiaison.Observability;
 
 public sealed record ObservabilityProjectIdentity(
@@ -19,6 +20,16 @@ public static class ObservabilityProjectIdentityResolver
         string root = Path.GetFullPath(repositoryRoot);
         string? packageId = TryReadAboutValue(root, "packageId");
         string? modName = TryReadAboutValue(root, "name");
+        StackManifestResolution stack = StackManifestResolver.Discover(root);
+        if (stack.Manifest is { Workload: "production" })
+        {
+            ProjectIdentity identity = ProjectIdentityResolver.Resolve(stack.Manifest, root);
+            return new(
+                identity.CanonicalProjectId,
+                modName ?? identity.DisplayName,
+                "stack-manifest");
+        }
+
         if (!string.IsNullOrWhiteSpace(packageId))
         {
             return new(packageId, modName ?? packageId, "mod-package");

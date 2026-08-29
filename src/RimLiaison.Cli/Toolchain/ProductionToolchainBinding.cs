@@ -107,6 +107,12 @@ internal sealed class ProductionToolchainManifest
     public string? TransactionConsumerSha256 { get; init; }
     [JsonPropertyName("compatibilityContract")]
     public string? CompatibilityContract { get; init; }
+    [JsonPropertyName("qualifiedSourceCommit")]
+    public string? QualifiedSourceCommit { get; init; }
+    [JsonPropertyName("qualificationArtifactPath")]
+    public string? QualificationArtifactPath { get; init; }
+    [JsonPropertyName("qualificationArtifactSha256")]
+    public string? QualificationArtifactSha256 { get; init; }
 }
 
 internal static class ProductionToolchainBindingResolver
@@ -321,7 +327,7 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
-        string fingerprint = ComputeFingerprint(
+        string fingerprint = ComputeExecutionFingerprint(
             manifest.PromotedFingerprint!,
             cliHash,
             assemblyHash,
@@ -430,7 +436,7 @@ internal static class ProductionToolchainBindingResolver
             : string.Empty;
     }
 
-    private static string ComputeFingerprint(params string[] values)
+    internal static string ComputeExecutionFingerprint(params string[] values)
     {
         string payload = string.Join("\n", values);
         byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(payload));

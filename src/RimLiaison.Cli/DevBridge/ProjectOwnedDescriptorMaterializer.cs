@@ -61,13 +61,14 @@ internal static class ProjectOwnedDescriptorMaterializer
         }
 
         RimDevStackManifest manifest = resolution.Manifest;
-        if (!string.Equals(manifest.Project, project, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(manifest.DevBridgeProject, project, StringComparison.OrdinalIgnoreCase))
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, sourceRoot);
+        if (!ProjectIdentityResolver.Matches(identity, project))
         {
             errorCode = "PROJECT_METADATA_OWNER_MISMATCH";
-            error = "The project manifest identity does not match the resolved project.";
+            error = "The project manifest identity does not match the resolved canonical project identity.";
             return null;
         }
+        string canonicalProjectId = identity.CanonicalProjectId;
 
         errorCode = ProjectMetadataValidator.Validate(manifest, resolution.RepositoryRoot);
         if (errorCode is not null)
@@ -90,7 +91,8 @@ internal static class ProjectOwnedDescriptorMaterializer
             var fields = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["schemaVersion"] = DevBridgeModDevelopmentSchemas.Current,
-                ["project"] = project,
+                ["project"] = canonicalProjectId,
+                ["canonicalProjectId"] = canonicalProjectId,
                 ["metadataOwner"] = manifest.Project,
                 ["metadataSource"] = Path.Combine(sourceRoot, ".rimdev", "stack.json"),
                 ["contractProducer"] = "RimLiaison",
@@ -108,13 +110,19 @@ internal static class ProjectOwnedDescriptorMaterializer
                 JsonSerializer.Serialize(fields, new JsonSerializerOptions { WriteIndented = true }));
             var descriptor = new DevBridgeDevelopmentDescriptor(
                 DevBridgeModDevelopmentSchemas.Current,
-                project,
+                canonicalProjectId,
                 manifest.SourceProject!,
                 manifest.Configuration!,
                 manifest.ExpectedAssembly!,
                 manifest.DeploymentTarget!,
                 manifest.TestRecipe!,
-                manifest.RuntimePackage);
+                manifest.RuntimePackage,
+                null,
+                canonicalProjectId,
+                manifest.Project,
+                Path.Combine(sourceRoot, ".rimdev", "stack.json"),
+                "RimLiaison",
+                descriptorPath);
             return new ProjectOwnedDescriptorMaterialization(descriptorPath, descriptor, temporaryRoot);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or

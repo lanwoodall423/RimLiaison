@@ -27,6 +27,7 @@ internal enum CliCommand
     PublishCheck,
     Benchmarks,
     Qualification,
+    ToolchainPromotion,
     Content,
     RimDev
 }
@@ -80,6 +81,7 @@ internal sealed record CliRequest(
     StackManifestResolution StackManifest,
     int QualificationRuns,
     string? QualificationOutputPath,
+    string? PromotionPackagePath,
     bool HelpRequested,
     bool ExperimentalToolchain,
     string? ContentKind,
@@ -151,6 +153,7 @@ internal static class CliParser
         var dependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
         int qualificationRuns = 1;
         string? qualificationOutputPath = null;
+        string? promotionPackagePath = null;
         string? contentKind = null;
         string? contentRole = null;
         string? contentReuseSource = null;
@@ -314,8 +317,8 @@ internal static class CliParser
                         throw new CliParseException("Option --runs must be a positive integer.");
                     }
                     break;
-                case "--qualification-output":
-                    qualificationOutputPath = ReadOptionValue(args, ref index, argument);
+                case "--promotion-package":
+                    promotionPackagePath = ReadOptionValue(args, ref index, argument);
                     break;
                 case "--max-bytes":
                     contentMaxBytes = ReadPositiveBoundedInt(
@@ -400,6 +403,7 @@ internal static class CliParser
                 stackManifest,
                 qualificationRuns,
                 qualificationOutputPath,
+                promotionPackagePath,
                 true,
                 experimentalToolchain,
                 contentKind,
@@ -515,6 +519,11 @@ internal static class CliParser
                     string.Equals(positionals[1], "burn-in", StringComparison.OrdinalIgnoreCase)):
                 command = CliCommand.Qualification;
                 id = positionals.Count == 2 ? "burn-in" : "qualification";
+                break;
+            case "qualification" when positionals.Count == 2 &&
+                string.Equals(positionals[1], "promote", StringComparison.OrdinalIgnoreCase):
+                command = CliCommand.ToolchainPromotion;
+                id = "promote";
                 break;
             case "list":
             case "show":
@@ -724,7 +733,7 @@ internal static class CliParser
                 stackManifest.Manifest?.Workload,
                 "production",
                 StringComparison.OrdinalIgnoreCase) &&
-            command != CliCommand.Qualification)
+            command is not (CliCommand.Qualification or CliCommand.ToolchainPromotion))
         {
             throw new CliParseException(
                 "--experimental is not valid for a production workload.");
@@ -792,6 +801,7 @@ internal static class CliParser
             stackManifest,
             qualificationRuns,
             qualificationOutputPath,
+            promotionPackagePath,
             false,
             experimentalToolchain,
             contentKind,
@@ -825,9 +835,8 @@ internal static class CliParser
                 "context",
                 "content query [<selector>]",
                 "publish check",
-                "benchmarks",
                 "qualification [burn-in]",
-                "rimdev [status|sync|build|test|deploy|push|merge|all|help]",
+                "qualification promote",
                 "init",
                 "recipe show <recipe>",
                 "recipe plan <recipe>",
@@ -850,6 +859,7 @@ internal static class CliParser
                 "--depth <1..8>",
                 "--max-bytes <256..1048576> (with content)",
                 "--content-kind <kind>",
+                "--promotion-package <qualified-toolchain-package.json>",
                 "--content-role <role>",
                 "--content-reuse-source <source>",
                 "--limit <1..100>",

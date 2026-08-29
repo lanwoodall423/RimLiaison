@@ -1,0 +1,828 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using RimLiaison.Git;
+
+namespace RimLiaison.Toolchain;
+
+public static class ToolchainPromotionSchemas
+{
+    public const string Package = "rimliaison-toolchain-promotion/v1";
+    public const string Result = "rimliaison-toolchain-promotion-result/v1";
+}
+
+public sealed class ToolchainPromotionPackage
+{
+    [JsonPropertyName("schemaVersion")]
+    public string? SchemaVersion { get; init; }
+    [JsonPropertyName("sourceCommit")]
+    public string? SourceCommit { get; init; }
+    [JsonPropertyName("qualificationArtifactPath")]
+    public string? QualificationArtifactPath { get; init; }
+    [JsonPropertyName("qualificationArtifactSha256")]
+    public string? QualificationArtifactSha256 { get; init; }
+    [JsonPropertyName("artifactRoot")]
+    public string? ArtifactRoot { get; init; }
+    [JsonPropertyName("rimLiaisonExecutableRelativePath")]
+    public string? RimLiaisonExecutableRelativePath { get; init; }
+    [JsonPropertyName("rimLiaisonAssemblyRelativePath")]
+    public string? RimLiaisonAssemblyRelativePath { get; init; }
+    [JsonPropertyName("rimLiaisonExecutableSha256")]
+    public string? RimLiaisonExecutableSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonAssemblySha256")]
+    public string? RimLiaisonAssemblySha256 { get; init; }
+    [JsonPropertyName("devBridgeRuntimeRoot")]
+    public string? DevBridgeRuntimeRoot { get; init; }
+    [JsonPropertyName("devBridgePackageSha256")]
+    public string? DevBridgePackageSha256 { get; init; }
+    [JsonPropertyName("transactionConsumerPath")]
+    public string? TransactionConsumerPath { get; init; }
+    [JsonPropertyName("transactionConsumerSha256")]
+    public string? TransactionConsumerSha256 { get; init; }
+    [JsonPropertyName("compatibilityContract")]
+    public string? CompatibilityContract { get; init; }
+}
+
+public sealed record ToolchainPromotionResult(
+    string SchemaVersion,
+    string Status,
+    string? ErrorCode,
+    string? Error,
+    string? SourceCommit,
+    string? QualificationArtifactPath,
+    string? QualificationArtifactSha256,
+    IReadOnlyDictionary<string, string>? QualifiedHashes,
+    IReadOnlyDictionary<string, string>? InstalledHashes,
+    string? PromotedFingerprint,
+    string? PreviousFingerprint,
+    IReadOnlyList<string> ChangedComponents,
+    string Verification,
+    string ProductionDoctor,
+    string CampaignConsequence,
+    string? InstalledRoot,
+    string? NextAction)
+{
+    public static ToolchainPromotionResult Blocked(
+        string code,
+        string error,
+        string? sourceCommit = null,
+        string? qualificationArtifactPath = null,
+        string? qualificationArtifactSha256 = null,
+        string? previousFingerprint = null,
+        string? nextAction = null) => new(
+        ToolchainPromotionSchemas.Result,
+        "blocked",
+        code,
+        error,
+        sourceCommit,
+        qualificationArtifactPath,
+        qualificationArtifactSha256,
+        null,
+        null,
+        null,
+        previousFingerprint,
+        [],
+        "not-verified",
+        "not-run",
+        "unchanged",
+        null,
+        nextAction);
+}
+
+public static class ToolchainPromotionService
+{
+    private const string ProductionManifestEnvironment = "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST";
+    private const string DefaultProductionManifest = "C:/RimDev/.rimdev/production-toolchain.json";
+    private static readonly JsonSerializerOptions ReadOptions = new()
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
+    private static readonly JsonSerializerOptions WriteOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = true
+    };
+
+    public static async Task<ToolchainPromotionResult> PromoteAsync(
+        string sourceRoot,
+        string? packagePath,
+        string? qualificationArtifactPath,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(packagePath))
+        {
+            return ToolchainPromotionResult.Blocked(
+                "PROMOTION_PACKAGE_MISSING",
+                "A qualified toolchain promotion package is required.",
+                nextAction: "Build a qualified promotion package and retry rimliaison qualification promote --json.");
+        }
+
+        string manifestPath = Environment.GetEnvironmentVariable(ProductionManifestEnvironment) ??
+            DefaultProductionManifest;
+        string lockPath = manifestPath + ".promotion.lock";
+        FileStream? promotionLock = null;
+        string? stagedRoot = null;
+        bool promotionCommitted = false;
+        try
+        {
+            promotionLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            ToolchainPromotionPackage? package = ReadPackage(packagePath, out string? packageError);
+            if (package is null)
+            {
+                return ToolchainPromotionResult.Blocked("PROMOTION_PACKAGE_INVALID", packageError ?? "The promotion package is invalid.");
+            }
+            string sourceCommit = package.SourceCommit!;
+
+            string artifactPath = Path.GetFullPath(package.QualificationArtifactPath ?? qualificationArtifactPath ?? string.Empty);
+            if (!File.Exists(artifactPath))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_QUALIFICATION_MISSING",
+                    "The qualification artifact referenced by the promotion package is missing.",
+                    package.SourceCommit,
+                    artifactPath,
+                    package.QualificationArtifactSha256,
+                    nextAction: "Run the complete qualification profile and rebuild the promotion package.");
+            }
+
+            string qualificationHash = ToolchainFileHash.Sha256(artifactPath);
+            if (!string.Equals(qualificationHash, package.QualificationArtifactSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_QUALIFICATION_HASH_MISMATCH",
+                    "The qualification artifact hash differs from the package declaration.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Rebuild the promotion package from the exact qualification artifact.");
+            }
+
+            using JsonDocument qualification = JsonDocument.Parse(File.ReadAllText(artifactPath));
+            if (!PromotionProofIsComplete(qualification.RootElement, package.SourceCommit, out string? proofError))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_QUALIFICATION_NOT_PROVEN",
+                    proofError ?? "The qualification artifact is not a complete PASS proof.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Run the complete burn-in profile for the current source commit.");
+            }
+
+            GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
+                .ReadAsync(sourceRoot, cancellationToken)
+                .ConfigureAwait(false);
+            if (!source.Resolved || source.State?.HeadSha is null ||
+                !string.Equals(source.State.HeadSha, package.SourceCommit, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_SOURCE_FINGERPRINT_STALE",
+                    "The current source HEAD does not match the qualified source commit.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Commit or restore the qualified source and rebuild the promotion package.");
+            }
+
+            ProductionToolchainManifest? previous = ReadProductionManifest(manifestPath, out string? manifestError);
+            if (previous is null)
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_PRODUCTION_MANIFEST_INVALID",
+                    manifestError ?? "The current production manifest could not be read.");
+            }
+
+            if (!string.Equals(package.CompatibilityContract, previous.CompatibilityContract, StringComparison.Ordinal) ||
+                !string.Equals(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(package.DevBridgePackageSha256, previous.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(package.TransactionConsumerPath, previous.TransactionConsumerPath, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(package.TransactionConsumerSha256, previous.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_CONSUMER_COMPATIBILITY_MISMATCH",
+                    "The qualified package does not match the installed DevBridge consumer contract.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Run the pinned cross-stack compatibility gate and rebuild the promotion package.");
+            }
+
+            string artifactRoot = Path.GetFullPath(package.ArtifactRoot ?? string.Empty);
+            string? executableCandidate = SafeArtifactPath(artifactRoot, package.RimLiaisonExecutableRelativePath);
+            string? assemblyCandidate = SafeArtifactPath(artifactRoot, package.RimLiaisonAssemblyRelativePath);
+            if (executableCandidate is null || assemblyCandidate is null ||
+                !File.Exists(executableCandidate) || !File.Exists(assemblyCandidate))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_ARTIFACT_MISSING",
+                    "A qualified RimLiaison artifact is missing from the promotion package.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint);
+            }
+
+            string executableSource = executableCandidate;
+            string assemblySource = assemblyCandidate;
+            string executableHash = ToolchainFileHash.Sha256(executableSource);
+            string assemblyHash = ToolchainFileHash.Sha256(assemblySource);
+            if (!string.Equals(executableHash, package.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_ARTIFACT_HASH_MISMATCH",
+                    "A qualified RimLiaison artifact hash differs from the package declaration.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Rebuild the promotion package from the qualified artifacts.");
+            }
+
+            string productionCliDirectory = Path.GetDirectoryName(Path.GetFullPath(previous.RimLiaisonExecutablePath!))!;
+            string productionParent = Directory.GetParent(productionCliDirectory)!.FullName;
+            string promotedRootName = "cli-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];
+            stagedRoot = Path.Combine(productionParent, promotedRootName);
+            if (Directory.Exists(stagedRoot))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_DESTINATION_EXISTS",
+                    "The bounded promotion destination already exists; refusing to reuse it.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint);
+            }
+
+            CopyDirectory(artifactRoot, stagedRoot);
+            string installedExecutable = Path.Combine(stagedRoot, Path.GetFileName(executableSource));
+            string installedAssembly = Path.Combine(stagedRoot, Path.GetFileName(assemblySource));
+            string installedExecutableHash = ToolchainFileHash.Sha256(installedExecutable);
+            string installedAssemblyHash = ToolchainFileHash.Sha256(installedAssembly);
+            if (!string.Equals(installedExecutableHash, executableHash, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(installedAssemblyHash, assemblyHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_INSTALL_HASH_MISMATCH",
+                    "Installed staged artifacts do not match the qualified artifact hashes.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint);
+            }
+
+            string promotedFingerprint = ComputePromotedFingerprint(
+                sourceCommit,
+                executableHash,
+                assemblyHash,
+                previous.DevBridgePackageSha256!,
+                previous.TransactionConsumerSha256!,
+                previous.CompatibilityContract!);
+            string executionFingerprint = ProductionToolchainBindingResolver.ComputeExecutionFingerprint(
+                promotedFingerprint,
+                installedExecutableHash,
+                installedAssemblyHash,
+                previous.DevBridgeRuntimeRoot!,
+                previous.DevBridgePackageSha256!,
+                previous.TransactionConsumerPath!,
+                previous.TransactionConsumerSha256!,
+                previous.CompatibilityContract!);
+            var updated = new ProductionToolchainManifest
+            {
+                SchemaVersion = previous.SchemaVersion,
+                PromotedFingerprint = promotedFingerprint,
+                Fingerprint = executionFingerprint,
+                RimLiaisonExecutablePath = installedExecutable,
+                RimLiaisonExecutableSha256 = installedExecutableHash,
+                RimLiaisonAssemblyPath = installedAssembly,
+                RimLiaisonAssemblySha256 = installedAssemblyHash,
+                DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
+                DevBridgePackageSha256 = previous.DevBridgePackageSha256,
+                TransactionConsumerPath = previous.TransactionConsumerPath,
+                TransactionConsumerSha256 = previous.TransactionConsumerSha256,
+                CompatibilityContract = previous.CompatibilityContract,
+                QualifiedSourceCommit = package.SourceCommit,
+                QualificationArtifactPath = artifactPath,
+                QualificationArtifactSha256 = qualificationHash
+            };
+            AtomicReplace(manifestPath, JsonSerializer.Serialize(updated, WriteOptions));
+
+            ProductionToolchainBindingResolution installed = ProductionToolchainBindingResolver.Resolve(
+                sourceRoot,
+                currentExecutablePath: installedExecutable);
+            if (!installed.Succeeded)
+            {
+                AtomicReplace(manifestPath, JsonSerializer.Serialize(previous, WriteOptions));
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
+                    installed.Failure?.Error ?? "The installed production identity could not be verified.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint);
+            }
+
+            ProductionHealthResult health = await RunProductionHealthAsync(
+                installedExecutable,
+                previous.DevBridgeRuntimeRoot!,
+                cancellationToken).ConfigureAwait(false);
+            if (!health.Passed)
+            {
+                AtomicReplace(manifestPath, JsonSerializer.Serialize(previous, WriteOptions));
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_PRODUCTION_HEALTH_FAILED",
+                    health.Error ?? "The promoted production health checks did not pass.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Repair the production control plane, then retry the supported promotion command.");
+            }
+
+            string doctor = health.Summary;
+
+            promotionCommitted = true;
+            return new(
+                ToolchainPromotionSchemas.Result,
+                "promoted",
+                null,
+                null,
+                package.SourceCommit,
+                artifactPath,
+                qualificationHash,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["rimLiaisonExecutableSha256"] = executableHash,
+                    ["rimLiaisonAssemblySha256"] = assemblyHash,
+                    ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
+                    ["transactionConsumerSha256"] = previous.TransactionConsumerSha256!
+                },
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["rimLiaisonExecutableSha256"] = installedExecutableHash,
+                    ["rimLiaisonAssemblySha256"] = installedAssemblyHash,
+                    ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
+                    ["transactionConsumerSha256"] = previous.TransactionConsumerSha256!
+                },
+                promotedFingerprint,
+                previous.PromotedFingerprint,
+                ["RimLiaison"],
+                "verified",
+                doctor,
+                "start-new-reliability-campaign-collecting",
+                stagedRoot,
+                null);
+        }
+        catch (IOException exception) when (exception.HResult == unchecked((int)0x800700B7))
+        {
+            return ToolchainPromotionResult.Blocked(
+                "PROMOTION_LOCKED",
+                "Another production promotion is already in progress.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            if (stagedRoot is not null)
+            {
+                TryDelete(stagedRoot);
+            }
+            return ToolchainPromotionResult.Blocked("PROMOTION_TRANSACTION_FAILED", exception.Message);
+        }
+        finally
+        {
+            promotionLock?.Dispose();
+            if (!promotionCommitted && stagedRoot is not null)
+            {
+                TryDelete(stagedRoot);
+            }
+            TryDelete(lockPath);
+    }
+
+        }
+    private static ToolchainPromotionPackage? ReadPackage(string path, out string? error)
+    {
+        error = null;
+        try
+        {
+            ToolchainPromotionPackage? package = JsonSerializer.Deserialize<ToolchainPromotionPackage>(
+                File.ReadAllText(Path.GetFullPath(path)), ReadOptions);
+            if (package is null ||
+                package.SchemaVersion != ToolchainPromotionSchemas.Package ||
+                string.IsNullOrWhiteSpace(package.SourceCommit) ||
+                string.IsNullOrWhiteSpace(package.QualificationArtifactPath) ||
+                string.IsNullOrWhiteSpace(package.QualificationArtifactSha256) ||
+                string.IsNullOrWhiteSpace(package.ArtifactRoot) ||
+                string.IsNullOrWhiteSpace(package.RimLiaisonExecutableRelativePath) ||
+                string.IsNullOrWhiteSpace(package.RimLiaisonAssemblyRelativePath) ||
+                string.IsNullOrWhiteSpace(package.RimLiaisonExecutableSha256) ||
+                string.IsNullOrWhiteSpace(package.RimLiaisonAssemblySha256))
+            {
+                error = "The promotion package is incomplete or uses an unsupported schema.";
+                return null;
+            }
+            return package;
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
+        {
+            error = exception.Message;
+            return null;
+        }
+    }
+
+    private static ProductionToolchainManifest? ReadProductionManifest(string path, out string? error)
+    {
+        error = null;
+        try
+        {
+            ProductionToolchainManifest? manifest = JsonSerializer.Deserialize<ProductionToolchainManifest>(
+                File.ReadAllText(path), ReadOptions);
+            if (manifest is null ||
+                manifest.SchemaVersion != "rimliaison-production-toolchain/v1" ||
+                string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
+                string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
+                string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
+                string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot) ||
+                string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
+                string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
+                string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
+                string.IsNullOrWhiteSpace(manifest.CompatibilityContract))
+            {
+                error = "The production manifest is incomplete or unsupported.";
+                return null;
+            }
+            return manifest;
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
+        {
+            error = exception.Message;
+            return null;
+        }
+    }
+
+    private static bool PromotionProofIsComplete(JsonElement root, string? sourceCommit, out string? error)
+    {
+        error = null;
+        if (!TryString(root, "SourceCommit", out string? artifactCommit) &&
+            !TryString(root, "sourceCommit", out artifactCommit))
+        {
+            error = "The qualification artifact has no source commit provenance.";
+            return false;
+        }
+        if (!string.Equals(artifactCommit, sourceCommit, StringComparison.OrdinalIgnoreCase) ||
+            !TryInt(root, "Passes", out int passes) && !TryInt(root, "passes", out passes) ||
+            !TryInt(root, "TotalRuns", out int total) && !TryInt(root, "totalRuns", out total) ||
+            !TryInt(root, "InfrastructureFailures", out int infra) && !TryInt(root, "infrastructureFailures", out infra) ||
+            !TryInt(root, "FixtureFailures", out int fixtures) && !TryInt(root, "fixtureFailures", out fixtures) ||
+            passes != total || infra != 0 || fixtures != 0)
+        {
+            error = "The qualification artifact is stale or is not a complete PASS profile.";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryString(JsonElement root, string name, out string? value)
+    {
+        value = root.TryGetProperty(name, out JsonElement element) && element.ValueKind == JsonValueKind.String
+            ? element.GetString()
+            : null;
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool TryInt(JsonElement root, string name, out int value)
+    {
+        value = 0;
+        return root.TryGetProperty(name, out JsonElement element) && element.TryGetInt32(out value);
+    }
+
+    private static string? SafeArtifactPath(string root, string? relative)
+    {
+        if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) || relative.Contains(':'))
+        {
+            return null;
+        }
+        string candidate = Path.GetFullPath(Path.Combine(root, relative));
+        string boundary = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar;
+        return candidate.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) ? candidate : null;
+    }
+
+    private static string ComputePromotedFingerprint(
+        string sourceCommit,
+        string executableHash,
+        string assemblyHash,
+        string devBridgeHash,
+        string consumerHash,
+        string compatibility)
+    {
+        string payload = string.Join("\n", [
+            ToolchainPromotionSchemas.Package,
+            sourceCommit,
+            executableHash,
+            assemblyHash,
+            devBridgeHash,
+            consumerHash,
+            compatibility]);
+        return "tc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+    }
+
+    private sealed record ProductionHealthResult(bool Passed, string Summary, string? Error);
+    private static async Task<ProductionHealthResult> RunProductionHealthAsync(
+        string executable,
+        string devBridgeRoot,
+        CancellationToken cancellationToken)
+    {
+        var checks = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["rimLiaisonDoctor"] = "not-run",
+            ["devBridgeStatus"] = "not-run",
+            ["devBridgeDoctor"] = "not-run",
+            ["coordinatorProbe"] = "not-run",
+            ["capabilities"] = "not-run",
+            ["activeLeases"] = "unknown",
+            ["coordinatorCount"] = "unknown"
+        };
+        try
+        {
+            (int exitCode, string output) liaisonDoctor = await RunJsonCommandAsync(
+                executable,
+                ["doctor"],
+                cancellationToken).ConfigureAwait(false);
+            checks["rimLiaisonDoctor"] = IsReady(liaisonDoctor.exitCode, liaisonDoctor.output)
+                ? "ready"
+                : "failed";
+
+            string devBridgeCommand = Path.Combine(devBridgeRoot, "DevBridge.cmd");
+            if (!File.Exists(devBridgeCommand))
+            {
+                return HealthFailure(checks, "The installed DevBridge command is missing.");
+            }
+
+            (int exitCode, string output) status = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "status"],
+                cancellationToken).ConfigureAwait(false);
+            checks["devBridgeStatus"] = IsReady(status.exitCode, status.output) ? "ready" : "failed";
+            if (!TryParse(status.output, out JsonDocument? statusDocument))
+            {
+                return HealthFailure(checks, "DevBridge status did not return structured JSON.");
+            }
+            using (statusDocument)
+            {
+                JsonElement statusRoot = statusDocument!.RootElement;
+                if (!IsReady(status.exitCode, statusRoot.GetRawText()))
+                {
+                    return HealthFailure(checks, "DevBridge status is not READY.");
+                }
+                int activeTests = statusRoot.TryGetProperty("activeTests", out JsonElement active)
+                    && active.TryGetInt32(out int activeValue)
+                    ? activeValue
+                    : -1;
+                checks["activeLeases"] = activeTests == 0 ? "zero" : "nonzero-or-unknown";
+                if (activeTests != 0)
+                {
+                    return HealthFailure(checks, "DevBridge reports an active test or lease owner.");
+                }
+            }
+
+            (int exitCode, string output) doctor = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "doctor"],
+                cancellationToken).ConfigureAwait(false);
+            checks["devBridgeDoctor"] = IsHealthy(doctor.exitCode, doctor.output) ? "healthy" : "failed";
+            if (!TryParse(doctor.output, out JsonDocument? doctorDocument))
+            {
+                return HealthFailure(checks, "DevBridge doctor did not return structured JSON.");
+            }
+            using (doctorDocument)
+            {
+                JsonElement root = doctorDocument!.RootElement;
+                if (!IsHealthy(doctor.exitCode, root.GetRawText()) ||
+                    !TryFindingLeaseCount(root, out int leaseCount) ||
+                    leaseCount != 0)
+                {
+                    return HealthFailure(checks, "DevBridge doctor did not prove healthy zero-lease state.");
+                }
+            }
+
+            (int exitCode, string output) probe = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "coordinator", "probe"],
+                cancellationToken).ConfigureAwait(false);
+            checks["coordinatorProbe"] = IsResponsive(probe.exitCode, probe.output)
+                ? "responsive"
+                : "failed";
+            if (!TryParse(probe.output, out JsonDocument? probeDocument))
+            {
+                return HealthFailure(checks, "Coordinator probe did not return structured JSON.");
+            }
+            using (probeDocument)
+            {
+                JsonElement root = probeDocument!.RootElement;
+                if (!IsResponsive(probe.exitCode, root.GetRawText()) ||
+                    !root.TryGetProperty("coordinatorPid", out JsonElement pid) ||
+                    !pid.TryGetInt32(out int coordinatorPid) ||
+                    coordinatorPid <= 0)
+                {
+                    return HealthFailure(checks, "Coordinator probe did not prove one live coordinator.");
+                }
+                checks["coordinatorCount"] = "one";
+            }
+
+            (int exitCode, string output) capabilities = await RunJsonCommandAsync(
+                executable,
+                ["capabilities"],
+                cancellationToken).ConfigureAwait(false);
+            checks["capabilities"] = IsReady(capabilities.exitCode, capabilities.output)
+                ? "ready"
+                : "failed";
+            if (!IsReady(capabilities.exitCode, capabilities.output))
+            {
+                return HealthFailure(checks, "The promoted executable did not return READY capabilities.");
+            }
+
+            return new ProductionHealthResult(true, JsonSerializer.Serialize(checks, WriteOptions), null);
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException)
+        {
+            return HealthFailure(checks, exception.Message);
+        }
+    }
+
+    private static ProductionHealthResult HealthFailure(
+        IReadOnlyDictionary<string, string> checks,
+        string error) =>
+        new(false, JsonSerializer.Serialize(checks, WriteOptions), error);
+
+    private static async Task<(int exitCode, string output)> RunJsonCommandAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                WorkingDirectory = Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+        foreach (string argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+        if (!process.Start())
+        {
+            return (-1, string.Empty);
+        }
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+        return (process.ExitCode, await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false));
+    }
+
+    private static bool TryParse(string output, out JsonDocument? document)
+    {
+        try
+        {
+            document = JsonDocument.Parse(output);
+            return true;
+        }
+        catch (JsonException)
+        {
+            document = null;
+            return false;
+        }
+    }
+
+    private static bool IsReady(int exitCode, string output)
+    {
+        return exitCode == 0 && TryParse(output, out JsonDocument? document) &&
+            IsReady(exitCode, document!);
+    }
+
+    private static bool IsReady(int exitCode, JsonDocument document)
+    {
+        using (document)
+        {
+            JsonElement root = document.RootElement;
+            return exitCode == 0 &&
+                ((root.TryGetProperty("status", out JsonElement status) &&
+                    string.Equals(status.GetString(), "ready", StringComparison.OrdinalIgnoreCase)) ||
+                 (root.TryGetProperty("state", out JsonElement state) &&
+                    string.Equals(state.GetString(), "READY", StringComparison.OrdinalIgnoreCase)));
+        }
+    }
+
+    private static bool IsHealthy(int exitCode, string output)
+    {
+        return exitCode == 0 && TryParse(output, out JsonDocument? document) &&
+            IsHealthy(exitCode, document!);
+    }
+
+    private static bool IsHealthy(int exitCode, JsonDocument document)
+    {
+        using (document)
+        {
+            JsonElement root = document.RootElement;
+            return IsReady(exitCode, root.GetRawText()) &&
+                root.TryGetProperty("healthy", out JsonElement healthy) &&
+                healthy.ValueKind == JsonValueKind.True;
+        }
+    }
+
+    private static bool IsResponsive(int exitCode, string output)
+    {
+        return exitCode == 0 && TryParse(output, out JsonDocument? document) &&
+            IsResponsive(exitCode, document!);
+    }
+
+    private static bool IsResponsive(int exitCode, JsonDocument document)
+    {
+        using (document)
+        {
+            return exitCode == 0 &&
+                document.RootElement.TryGetProperty("state", out JsonElement state) &&
+                string.Equals(state.GetString(), "Responsive", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool TryFindingLeaseCount(JsonElement root, out int count)
+    {
+        if (root.TryGetProperty("findings", out JsonElement findings) &&
+            findings.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement finding in findings.EnumerateArray())
+            {
+                if (finding.TryGetProperty("code", out JsonElement code) &&
+                    code.GetString() == "LEASES_VALIDATED" &&
+                    finding.TryGetProperty("details", out JsonElement details) &&
+                    details.TryGetProperty("leaseCount", out JsonElement leaseCount) &&
+                    int.TryParse(leaseCount.GetString(), out count))
+                {
+                    return true;
+                }
+            }
+        }
+        count = -1;
+        return false;
+    }
+
+
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        }
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(destination, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, overwrite: false);
+        }
+    }
+
+    private static void AtomicReplace(string path, string content)
+    {
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temporary, content);
+        try
+        {
+            File.Replace(temporary, path, null);
+        }
+        finally
+        {
+            TryDelete(temporary);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            else if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}
+
+internal static class ToolchainFileHash
+{
+    public static string Sha256(string path)
+    {
+        using FileStream stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+}

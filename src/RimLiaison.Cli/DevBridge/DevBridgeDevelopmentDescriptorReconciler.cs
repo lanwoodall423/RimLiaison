@@ -21,7 +21,12 @@ public sealed record DevBridgeDevelopmentDescriptor(
     string DeploymentTarget,
     string TestRecipe,
     JsonElement? RuntimePackage = null,
-    string? DeploymentRole = null);
+    string? DeploymentRole = null,
+    string? CanonicalProjectId = null,
+    string? MetadataOwner = null,
+    string? MetadataSource = null,
+    string? ContractProducer = null,
+    string? MaterializedContractPath = null);
 
 public sealed record DevBridgeDescriptorReconciliationResult(
     PrerequisiteRecoveryState State,
@@ -214,7 +219,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             deploymentTarget,
             testRecipe,
             currentFields?.RuntimePackage,
-            currentFields?.DeploymentRole);
+            currentFields?.DeploymentRole,
+            currentFields?.CanonicalProjectId,
+            currentFields?.MetadataOwner,
+            currentFields?.MetadataSource,
+            currentFields?.ContractProducer,
+            currentFields?.MaterializedContractPath);
         if (!ValidateDescriptor(
                 descriptor,
                 project,
@@ -421,7 +431,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             GetString(root, "deploymentTarget"),
             GetString(root, "testRecipe"),
             runtimePackage,
-            GetString(root, "deploymentRole"));
+            GetString(root, "deploymentRole"),
+            GetString(root, "canonicalProjectId"),
+            GetString(root, "metadataOwner"),
+            GetString(root, "metadataSource"),
+            GetString(root, "contractProducer"),
+            GetString(root, "materializedContractPath"));
     }
 
     private static bool TryCreateDescriptor(
@@ -458,7 +473,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             fields.DeploymentTarget!,
             fields.TestRecipe!,
             fields.RuntimePackage,
-            fields.DeploymentRole);
+            fields.DeploymentRole,
+            fields.CanonicalProjectId,
+            fields.MetadataOwner,
+            fields.MetadataSource,
+            fields.ContractProducer,
+            fields.MaterializedContractPath);
         return true;
     }
 
@@ -886,6 +906,11 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             ["deploymentTarget"] = descriptor.DeploymentTarget,
             ["testRecipe"] = descriptor.TestRecipe
         };
+        AddIfPresent(fields, "canonicalProjectId", descriptor.CanonicalProjectId);
+        AddIfPresent(fields, "metadataOwner", descriptor.MetadataOwner);
+        AddIfPresent(fields, "metadataSource", descriptor.MetadataSource);
+        AddIfPresent(fields, "contractProducer", descriptor.ContractProducer);
+        AddIfPresent(fields, "materializedContractPath", descriptor.MaterializedContractPath);
         if (descriptor.RuntimePackage is JsonElement runtimePackage)
         {
             fields["runtimePackage"] = runtimePackage;
@@ -898,6 +923,14 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         return JsonSerializer.Serialize(
             fields,
             new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private static void AddIfPresent(Dictionary<string, object?> fields, string name, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            fields[name] = value;
+        }
     }
 
     private static bool IsExplicitNonProductionDescriptor(string descriptorPath)
@@ -995,7 +1028,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         string? DeploymentTarget,
         string? TestRecipe,
         JsonElement? RuntimePackage,
-        string? DeploymentRole);
+        string? DeploymentRole,
+        string? CanonicalProjectId,
+        string? MetadataOwner,
+        string? MetadataSource,
+        string? ContractProducer,
+        string? MaterializedContractPath);
 
     private sealed record DescriptorCandidate(
         string SourceProject,

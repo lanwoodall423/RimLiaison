@@ -94,7 +94,8 @@ internal static class ProjectRuntimeBindingResolver
             return Failure(manifest.Project, repositoryRoot, "PROJECT_SOURCE_ROOT_INVALID", "The project source root is invalid.");
         }
 
-        string projectId = manifest.DevBridgeProject ?? manifest.Project;
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, sourceRoot);
+        string projectId = identity.CanonicalProjectId;
         RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, sourceRoot);
         if (!workspace.Succeeded)
         {
@@ -421,6 +422,7 @@ internal static class ProjectRuntimeBindingResolver
         RimDevStackManifest manifest,
         string sourceRoot)
     {
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, sourceRoot);
         foreach (RimDevRepository repository in workspace.Repositories)
         {
             if (SamePath(repository.Path, sourceRoot) ||
@@ -436,23 +438,16 @@ internal static class ProjectRuntimeBindingResolver
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(manifest.PackageId) &&
-                string.Equals(manifest.PackageId, other.PackageId, StringComparison.OrdinalIgnoreCase))
+            ProjectIdentity otherIdentity = ProjectIdentityResolver.Resolve(other, repository.Path);
+            if (identity.PackageId is not null &&
+                string.Equals(identity.PackageId, otherIdentity.PackageId, StringComparison.OrdinalIgnoreCase))
             {
-                return $"The package identity '{manifest.PackageId}' is already claimed by project '{repository.Name}'.";
+                return $"The package identity '{identity.PackageId}' is already claimed by project '{repository.Name}'.";
             }
 
-            string[] identities = new[] { manifest.Project, manifest.DevBridgeProject }
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => NormalizeIdentity(value!))
-                .ToArray();
-            string[] otherIdentities = new[] { other.Project, other.DevBridgeProject }
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => NormalizeIdentity(value!))
-                .ToArray();
-            if (identities.Intersect(otherIdentities, StringComparer.Ordinal).Any())
+            if (identity.Aliases.Intersect(otherIdentity.Aliases, StringComparer.OrdinalIgnoreCase).Any())
             {
-                return $"The project identity is already claimed by project '{repository.Name}'.";
+                return $"The canonical project identity is already claimed by project '{repository.Name}'.";
             }
         }
 
@@ -521,7 +516,9 @@ internal static class ProjectRuntimeBindingResolver
 
         if (candidates.Count == 0)
         {
-            string? projectFolder = SafeChildPath(modsRoot, manifest.Project);
+            string? projectFolder = SafeChildPath(
+                modsRoot,
+                ProjectIdentityResolver.Resolve(manifest, sourceRoot).RuntimeFolder);
             if (projectFolder is null)
             {
                 return CandidateFailure(
@@ -864,23 +861,16 @@ internal static class ProjectRuntimeBindingResolver
         }
 
         string leaf = Path.GetFileName(path.Replace('/', Path.DirectorySeparatorChar));
-        return new[] { manifest.Project, manifest.DevBridgeProject, manifest.RuntimeFolder }
-            .Where(value => value is not null)
-            .Select(value => NormalizeIdentity(value!))
-            .Contains(NormalizeIdentity(leaf), StringComparer.Ordinal);
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, string.Empty);
+        return identity.Aliases.Contains(leaf, StringComparer.OrdinalIgnoreCase) ||
+            string.Equals(identity.RuntimeFolder, leaf, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IdentityMatches(string key, RimDevStackManifest manifest)
     {
-        string normalized = NormalizeIdentity(key);
-        return new[] { manifest.Project, manifest.DevBridgeProject, manifest.PackageId }
-            .Where(value => value is not null)
-            .Select(value => NormalizeIdentity(value!))
-            .Any(value => string.Equals(value, normalized, StringComparison.Ordinal));
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, string.Empty);
+        return ProjectIdentityResolver.Matches(identity, key);
     }
-
-    private static string NormalizeIdentity(string value) =>
-        new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     private static string? SafeChildPath(string root, string? child)
     {
@@ -965,10 +955,9 @@ internal static class ProjectRuntimeBindingResolver
             {
                 string candidate = Path.GetFullPath(Path.Combine(workspace.RootPath, repository.Path));
                 string leaf = Path.GetFileName(candidate);
-                bool identityMatch = new[] { manifest.Project, manifest.DevBridgeProject, manifest.RuntimeFolder }
-                    .Where(value => value is not null)
-                    .Select(value => NormalizeIdentity(value!))
-                    .Contains(NormalizeIdentity(leaf), StringComparer.Ordinal);
+                ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, sourceRoot);
+                bool identityMatch = identity.Aliases.Contains(leaf, StringComparer.OrdinalIgnoreCase) ||
+                    string.Equals(identity.RuntimeFolder, leaf, StringComparison.OrdinalIgnoreCase);
                 if (identityMatch && !SamePath(candidate, sourceRoot))
                 {
                     return true;

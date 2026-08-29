@@ -33,7 +33,20 @@ Both commands emit machine-readable aggregate JSON and write:
 - `.rimdev/qualification/latest.json`
 - `.rimdev/qualification/tooling-improvement-backlog.json`
 
-Aggregate fields include total runs, passes, infrastructure failures, fixture failures, recovery successes, recommendation counts, and failure signatures.
+The aggregate includes source-commit provenance and qualified artifact hashes.
+
+Supported promotion command:
+
+```powershell
+rimliaison qualification promote `
+  --promotion-package <qualified-toolchain-package.json> --json
+```
+
+The package must reference the complete burn-in artifact and exact published
+RimLiaison files. Promotion verifies the source commit, qualification hash,
+artifact hashes, pinned DevBridge consumer compatibility, an exclusive lock,
+atomic production-manifest replacement, installed hashes, and production
+doctor. A failed verification leaves the previous production manifest active.
 
 ## Promotion criteria
 
