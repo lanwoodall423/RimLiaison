@@ -748,6 +748,8 @@ public static class ToolchainPromotionService
         {
             return (-1, string.Empty);
         }
+        Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+        Task<string> errorTask = process.StandardError.ReadToEndAsync();
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
@@ -760,9 +762,11 @@ public static class ToolchainPromotionService
             {
                 process.Kill(entireProcessTree: true);
             }
+            await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
             throw;
         }
-        return (process.ExitCode, await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false));
+        await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
+        return (process.ExitCode, outputTask.Result);
     }
 
     private static bool TryParse(string output, out JsonDocument? document)
