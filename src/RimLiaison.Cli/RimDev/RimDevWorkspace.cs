@@ -67,6 +67,7 @@ internal static class RimDevWorkspaceDiscoverer
         StackManifestResolution currentManifest = StackManifestResolver.Discover(startDirectory);
         if (string.IsNullOrWhiteSpace(explicitRoot) &&
             currentManifest.Manifest is not null &&
+            string.Equals(currentManifest.Manifest.Workload, "production", StringComparison.Ordinal) &&
             !string.Equals(currentManifest.RepositoryRoot, root, StringComparison.OrdinalIgnoreCase))
         {
             string currentPath = Path.GetRelativePath(root, currentManifest.RepositoryRoot);
