@@ -3248,7 +3248,8 @@ public static class CliApplication
     private static IDevBridgeRecipeAdapter CreateAdapter(
         CliRequest request,
         IDevBridgeRecipeAdapter? recipeAdapter,
-        IDevBridgeProcessTransport? processTransport = null)
+        IDevBridgeProcessTransport? processTransport = null,
+        string? recipeFilePath = null)
     {
         if (recipeAdapter is not null)
         {
@@ -3257,7 +3258,10 @@ public static class CliApplication
 
         DevBridgeAdapterOptions options = DevBridgeAdapterOptions.Discover(
             request.DevBridgePath,
-            request.DevBridgeRootPath);
+            request.DevBridgeRootPath) with
+        {
+            RecipeFilePath = recipeFilePath
+        };
         return new DevBridgeRecipeAdapter(
             processTransport ?? new SystemDevBridgeProcessTransport(),
             options);
@@ -3396,7 +3400,8 @@ public static class CliApplication
         IDevBridgeRecipeAdapter adapter = CreateAdapter(
             request,
             recipeAdapter,
-            bridgeTransport);
+            bridgeTransport,
+            ProjectRecipeFilePath(request, validationRecipeIds));
         var executor = CreateTestExecutor(
             request,
             adapter,
@@ -3729,6 +3734,26 @@ public static class CliApplication
         }
         WriteJson(stdout, result);
         return SuiteExitCodeFor(result.Status);
+    }
+
+    private static string? ProjectRecipeFilePath(
+        CliRequest request,
+        IReadOnlyList<string> recipeIds)
+    {
+        RimDevStackManifest? manifest = request.StackManifest.Manifest;
+        if (manifest is null ||
+            string.IsNullOrWhiteSpace(manifest.TestRecipePath) ||
+            string.IsNullOrWhiteSpace(manifest.TestRecipe) ||
+            recipeIds.Count != 1 ||
+            !string.Equals(recipeIds[0], manifest.TestRecipe, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        string path = Path.GetFullPath(Path.Combine(
+            request.StackManifest.RepositoryRoot,
+            manifest.TestRecipePath.Replace('/', Path.DirectorySeparatorChar)));
+        return File.Exists(path) ? path : null;
     }
 
     private static void RecordSuiteCompletion(
