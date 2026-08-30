@@ -179,7 +179,8 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 "-p:IntermediateOutputPath=" + Path.Combine(intermediateRoot, "intermediate") + Path.DirectorySeparatorChar,
                 "-p:MSBuildProjectExtensionsPath=" + Path.Combine(intermediateRoot, "extensions") + Path.DirectorySeparatorChar,
                 "-p:OutputPath=" + stagingRoot + Path.DirectorySeparatorChar,
-                "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot)
+                "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot),
+                "-p:RIMWORLD_ROOT=" + Path.GetFullPath(rimWorldRoot)
             ];
             DevBridgeProcessResult build = await transport.ExecuteAsync(
                 new DevBridgeProcessRequest(
