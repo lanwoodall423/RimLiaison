@@ -9718,6 +9718,10 @@ internal static class Program
                     }
                 }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
             string descriptorPath = Path.Combine(temporaryRoot, "descriptor.json");
+            Directory.CreateDirectory(Path.Combine(temporaryRoot, ".rimdev", "recipes"));
+            File.WriteAllText(
+                Path.Combine(temporaryRoot, ".rimdev", "recipes", "mod-development-smoke.json"),
+                """{"schemaVersion":"devbridge-test-recipe/v1","id":"mod-development-smoke","description":"fixture","projects":["frontier"],"inputs":{"quicktest":true},"requiresReady":true,"success":{"quicktestReady":true}}""");
             File.WriteAllText(
                 descriptorPath,
                 JsonSerializer.Serialize(new
