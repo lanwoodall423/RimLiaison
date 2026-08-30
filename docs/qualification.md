@@ -17,6 +17,10 @@ Genuine required-capability blockers are recorded as blocking issues and fixed p
 validation gaps, unsupported obscure checks, and broader improvement opportunities are recorded as
 non-blocking recommendations. They remain inspectable in the existing Observability Recommendations
 surface and in `.rimdev/qualification/tooling-improvement-backlog.json`.
+Project-owned validation failures are reported as `MOD_FAILURE` in the unified orchestration
+envelope and do not fail tooling qualification. They remain project health findings; only current
+tooling/runtime infrastructure failures block the unified production qualification gate.
+
 
 ## Fixture and scenarios
 
