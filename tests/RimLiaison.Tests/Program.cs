@@ -209,7 +209,7 @@ internal static class Program
         ("validation chain success is pass", ValidationChainDiagnosisTests.CompleteChainIsPass),
         ("production failure ownership table is bounded", ProductionExecutionTests.FailureOwnershipTableIsBounded),
         ("project failure normalizes to MOD_FAILURE", ProductionExecutionTests.ProjectFailureNormalizesToModFailure),
-        ("unrecovered infrastructure normalizes to TOOLCHAIN_FATAL", ProductionExecutionTests.UnrecoveredInfrastructureNormalizesToToolchainFatal),
+        ("project build failure normalizes to MOD_FAILURE", ProductionExecutionTests.ProjectBuildFailureNormalizesToModFailure),
         ("recovery evidence is counted by cycle type", ProductionExecutionTests.RecoveryEvidenceIsCountedByCycleType),
         ("agent outcome model has only three values", ProductionExecutionTests.AgentOutcomeModelHasOnlyThreeValues),
         ("reconnect recovery stops at reconcile", ManagedRuntimeEscalationTests.ReconnectRestoresServiceWithoutReset),

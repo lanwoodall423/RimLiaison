@@ -1,3 +1,4 @@
+using RimLiaison.DevBridge;
 using RimLiaison.Execution;
 using RimLiaison.Recovery;
 using RimLiaison.Results;
@@ -49,6 +50,25 @@ internal static class ProductionExecutionTests
         AssertEqual("MOD_FAILURE", result.Orchestration!.AgentOutcome);
         AssertEqual("ProjectConfigurationFailure", result.Orchestration.Failure!.Classification);
     }
+    public static void ProjectBuildFailureNormalizesToModFailure()
+    {
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
+            new CatalogSuiteExecutionResult("affected", [], 0, Cancelled: false),
+            0,
+            artifactFreshness: new RimTestArtifactFreshness
+            {
+                EvaluationStatus = "FAILED",
+                ErrorCode = "DEVELOPMENT_BUILD_FAILED"
+            },
+            freshnessStatus: new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                "DEVELOPMENT_BUILD_FAILED"),
+            freshnessRequested: true);
+
+        AssertEqual("MOD_FAILURE", result.Orchestration!.AgentOutcome);
+        AssertEqual("ProjectConfigurationFailure", result.Orchestration.Failure!.Classification);
+    }
+
 
     public static void UnrecoveredInfrastructureNormalizesToToolchainFatal()
     {

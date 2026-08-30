@@ -229,6 +229,10 @@ internal static class RimTestOrchestrationProjector
         ProductionFailureAssessment assessment =
             ProductionExecutionPolicy.Classify(primaryErrorCode);
         bool projectOwnedFailure = execution.Tests.Any(IsProjectTestFailure) ||
+            ProductionExecutionPolicy.IsProjectOwned(selectionErrorCode) ||
+            ProductionExecutionPolicy.IsProjectOwned(freshnessStatus?.ErrorCode) ||
+            ProductionExecutionPolicy.IsProjectOwned(freshness?.ErrorCode) ||
+            ProductionExecutionPolicy.IsProjectOwned(testErrorCode) ||
             assessment.IsProjectFailure;
         bool recoveryFailed = HasRecoveryState(
             execution.PrerequisiteRecovery,
