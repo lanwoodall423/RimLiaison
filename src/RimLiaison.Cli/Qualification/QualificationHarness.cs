@@ -59,7 +59,9 @@ public sealed record QualificationAggregate(
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
     string? SourceCommit = null,
-    IReadOnlyDictionary<string, string>? QualifiedArtifactHashes = null)
+    IReadOnlyDictionary<string, string>? QualifiedArtifactHashes = null,
+    string? QualificationArtifactPath = null,
+    string? QualifiedPromotionPackagePath = null)
 {
     [JsonIgnore]
     public bool IsPromotionReady =>

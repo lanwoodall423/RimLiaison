@@ -44,10 +44,13 @@ rimliaison qualification burn-in --runs 25
 
 Both commands emit machine-readable aggregate JSON and write:
 
-- `.rimdev/qualification/latest.json`
-- `.rimdev/qualification/tooling-improvement-backlog.json`
+- `.rimdev/qualification/latest.json` as a convenience projection;
+- an immutable, source-qualified artifact under `.rimdev/qualification/`;
+- an immutable `qualified-toolchain-package-<commit>-<run>.json`;
+- `.rimdev/qualification/tooling-improvement-backlog.json`.
 
-The aggregate includes source-commit provenance and qualified artifact hashes.
+The promotion package references the immutable qualification artifact, not `latest.json`.
+It records the exact qualified CLI hashes, installed runtime hashes, and transaction consumer hash.
 
 Supported promotion command:
 

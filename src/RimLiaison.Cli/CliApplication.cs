@@ -343,11 +343,43 @@ public static class CliApplication
                     .ConfigureAwait(false);
                 string outputPath = request.QualificationOutputPath ??
                     Path.Combine(".rimdev", "qualification", "latest.json");
-                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
+                string qualificationDirectory = Path.GetDirectoryName(
+                    Path.GetFullPath(outputPath))!;
+                Directory.CreateDirectory(qualificationDirectory);
+                string sourceCommit = aggregate.SourceCommit ??
+                    throw new InvalidDataException(
+                        "Qualification did not resolve the current source commit.");
+                string qualificationId = DateTimeOffset.UtcNow.ToString(
+                    "yyyyMMddTHHmmssfffZ");
+                string qualificationArtifactPath = Path.Combine(
+                    qualificationDirectory,
+                    "qualification-" + sourceCommit + "-" + qualificationId + ".json");
+                string packagePath = Path.Combine(
+                    qualificationDirectory,
+                    "qualified-toolchain-package-" + sourceCommit + "-" + qualificationId + ".json");
+                aggregate = aggregate with
+                {
+                    QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
+                    QualifiedPromotionPackagePath = Path.GetFullPath(packagePath)
+                };
                 string json = JsonSerializer.Serialize(
                     aggregate,
                     new JsonSerializerOptions { WriteIndented = true });
+                using (StreamWriter writer = new(
+                           new FileStream(
+                               qualificationArtifactPath,
+                               FileMode.CreateNew,
+                               FileAccess.Write,
+                               FileShare.Read)))
+                {
+                    writer.Write(json);
+                }
                 File.WriteAllText(outputPath, json);
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    aggregate,
+                    qualificationArtifactPath,
+                    packagePath,
+                    Path.GetDirectoryName(typeof(CliApplication).Assembly.Location)!);
                 string backlogPath = Path.Combine(
                     Path.GetDirectoryName(outputPath) ?? ".",
                     "tooling-improvement-backlog.json");

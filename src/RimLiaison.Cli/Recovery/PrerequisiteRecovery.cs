@@ -106,6 +106,12 @@ public sealed record DevBridgeCapabilityRecoveryResult(
 
 public static class DevBridgeCapabilityRecovery
 {
+    private static readonly TimeSpan ReconcileTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan CoordinatorRecycleTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan FullResetShutdownTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan FullResetRestartTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan FullResetWaitReadyTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ReadinessVerificationTimeout = TimeSpan.FromSeconds(10);
     private static readonly ConcurrentDictionary<
         string,
         Lazy<Task<DevBridgeCapabilityRecoveryResult>>> InFlight = [];
@@ -166,7 +172,8 @@ public static class DevBridgeCapabilityRecovery
                     transport,
                     options,
                     ["doctor", "--json"],
-                    workflowId)
+                    workflowId,
+                    ReconcileTimeout)
                 .ConfigureAwait(false);
         AddAction(
             actions,
@@ -203,7 +210,8 @@ public static class DevBridgeCapabilityRecovery
                 transport,
                 options,
                 ["coordinator", "recover", "--json"],
-                workflowId)
+                workflowId,
+                CoordinatorRecycleTimeout)
             .ConfigureAwait(false);
         AddAction(
             actions,
@@ -226,7 +234,12 @@ public static class DevBridgeCapabilityRecovery
                 started);
         }
         (bool ready, DevBridgeProcessResult? readyProcess, string? readyCode, string? readyError) =
-            await VerifyReadyAsync(transport, options, workflowId).ConfigureAwait(false);
+            await VerifyReadyAsync(
+                    transport,
+                    options,
+                    workflowId,
+                    ReadinessVerificationTimeout)
+                .ConfigureAwait(false);
         if (ready)
         {
             return Recovered(
@@ -242,7 +255,8 @@ public static class DevBridgeCapabilityRecovery
                 transport,
                 options,
                 ["coordinator", "shutdown", "--json"],
-                workflowId)
+                workflowId,
+                FullResetShutdownTimeout)
             .ConfigureAwait(false);
         AddAction(
             actions,
@@ -256,7 +270,8 @@ public static class DevBridgeCapabilityRecovery
                 transport,
                 options,
                 ["restart", "--json"],
-                workflowId)
+                workflowId,
+                FullResetRestartTimeout)
             .ConfigureAwait(false);
         bool rimWorldRestarted = IsSuccessfulProcess(process);
         AddAction(
@@ -271,7 +286,8 @@ public static class DevBridgeCapabilityRecovery
                 transport,
                 options,
                 ["wait-ready", "--json"],
-                workflowId)
+                workflowId,
+                FullResetWaitReadyTimeout)
             .ConfigureAwait(false);
         AddAction(
             actions,
@@ -281,7 +297,12 @@ public static class DevBridgeCapabilityRecovery
             ReadErrorCode(process?.Stdout),
             started);
         (ready, readyProcess, readyCode, readyError) =
-            await VerifyReadyAsync(transport, options, workflowId).ConfigureAwait(false);
+            await VerifyReadyAsync(
+                    transport,
+                    options,
+                    workflowId,
+                    ReadinessVerificationTimeout)
+                .ConfigureAwait(false);
         if (ready)
         {
             return Recovered(
@@ -309,13 +330,15 @@ public static class DevBridgeCapabilityRecovery
             IDevBridgeProcessTransport transport,
             DevBridgeAdapterOptions options,
             IReadOnlyList<string> command,
-            string? workflowId)
+            string? workflowId,
+            TimeSpan timeout)
     {
         DevBridgeProcessResult process = await ExecuteCommandAsync(
                 transport,
                 options,
                 command,
-                workflowId)
+                workflowId,
+                timeout)
             .ConfigureAwait(false);
         return (process, ReadErrorCode(process.Stdout), ReadError(process.Stdout));
     }
@@ -324,7 +347,8 @@ public static class DevBridgeCapabilityRecovery
         IDevBridgeProcessTransport transport,
         DevBridgeAdapterOptions options,
         IReadOnlyList<string> command,
-        string? workflowId)
+        string? workflowId,
+        TimeSpan? timeout = null)
     {
         try
         {
@@ -333,7 +357,7 @@ public static class DevBridgeCapabilityRecovery
                         options.CommandPath,
                         options.RootPath,
                         ["--root", options.RootPath, .. command],
-                        options.ShowPlanTimeout,
+                        timeout ?? options.ShowPlanTimeout,
                         Math.Min(options.MaxStdoutBytes, 512 * 1024),
                         Math.Min(options.MaxStderrBytes, 16 * 1024),
                         DevBridgeProcessEnvironment.ForWorkflow(workflowId)),
@@ -354,13 +378,15 @@ public static class DevBridgeCapabilityRecovery
         VerifyReadyAsync(
             IDevBridgeProcessTransport transport,
             DevBridgeAdapterOptions options,
-            string? workflowId)
+            string? workflowId,
+            TimeSpan timeout)
     {
         DevBridgeProcessResult status = await ExecuteCommandAsync(
                 transport,
                 options,
                 ["status", "--json"],
-                workflowId)
+                workflowId,
+                timeout)
             .ConfigureAwait(false);
         if (!IsReadyProcess(status))
         {
@@ -371,7 +397,8 @@ public static class DevBridgeCapabilityRecovery
                 transport,
                 options,
                 ["doctor", "--json"],
-                workflowId)
+                workflowId,
+                timeout)
             .ConfigureAwait(false);
         return (
             IsReadyProcess(doctor),
@@ -396,7 +423,7 @@ public static class DevBridgeCapabilityRecovery
         !process.TimedOut &&
         !process.Cancelled &&
         process.StartError is null &&
-        process.ExitCode is null or 0 &&
+        process.ExitCode == 0 &&
         TryParseLastObject(process.Stdout, out JsonDocument? document) &&
         UsesSuccessEnvelope(document!);
 
@@ -405,7 +432,7 @@ public static class DevBridgeCapabilityRecovery
         !process.TimedOut &&
         !process.Cancelled &&
         process.StartError is null &&
-        process.ExitCode is null or 0 &&
+        process.ExitCode == 0 &&
         TryParseLastObject(process.Stdout, out JsonDocument? document) &&
         UsesReadyEnvelope(document!);
 

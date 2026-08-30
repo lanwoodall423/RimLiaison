@@ -116,6 +116,52 @@ internal static class ManagedRuntimeEscalationTests
         AssertEqual("DEVBRIDGE_NO_STRUCTURED_RESPONSE", result.Trigger);
         Assert(result.ElapsedRecoveryMilliseconds >= 0, "recovery timing must be recorded");
     }
+    public static void RecoveryUsesBoundedStageBudgets()
+    {
+        int calls = 0;
+        ScriptedTransport transport = new(request =>
+        {
+            calls++;
+            return calls switch
+            {
+                1 => Process("", exitCode: 2),
+                2 => Process("{\"success\":true,\"state\":\"Responsive\"}"),
+                3 => Process("{\"status\":\"READY\",\"healthy\":true,\"generation\":8,\"coordinatorCount\":1,\"activeLeases\":0}"),
+                _ => Process("{\"status\":\"READY\",\"healthy\":true,\"generation\":8,\"coordinatorCount\":1,\"activeLeases\":0}")
+            };
+        });
+        DevBridgeCapabilityRecoveryResult result = Recover(transport);
+
+        Assert(result.Succeeded, "bounded-stage recovery should still recover");
+        AssertEqual(TimeSpan.FromSeconds(10), transport.Requests[0].Timeout);
+        AssertEqual(TimeSpan.FromSeconds(20), transport.Requests[1].Timeout);
+        AssertEqual(TimeSpan.FromSeconds(10), transport.Requests[2].Timeout);
+        AssertEqual(TimeSpan.FromSeconds(10), transport.Requests[3].Timeout);
+    }
+
+    public static void RestartPredicateRequiresCompletedProcess()
+    {
+        int calls = 0;
+        ScriptedTransport transport = new(request =>
+        {
+            calls++;
+            return calls switch
+            {
+                1 => Process("", exitCode: 2),
+                2 => Process("{\"success\":false,\"errorCode\":\"DEVBRIDGE_COORDINATOR_RECOVERY_FAILED\"}", 2),
+                3 => Process("{\"success\":false,\"errorCode\":\"DEVBRIDGE_COORDINATOR_UNRESPONSIVE\"}", 2),
+                4 => Process("{\"success\":true}", exitCode: 0),
+                5 => new(null, "{\"success\":true}", string.Empty),
+                6 => Process("{\"status\":\"READY\",\"healthy\":true,\"generation\":9}"),
+                _ => Process("{\"status\":\"READY\",\"healthy\":true,\"generation\":9}")
+            };
+        });
+        DevBridgeCapabilityRecoveryResult result = Recover(transport);
+
+        Assert(result.Succeeded, "readiness should be independently verified");
+        AssertEqual(false, result.RimWorldRestarted);
+    }
+
     public static void ArtifactTransactionUsesSharedRecoveryOnce()
     {
         string directory = Path.Combine(

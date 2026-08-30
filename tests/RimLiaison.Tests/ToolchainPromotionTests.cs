@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using RimLiaison.DevBridge;
+using RimLiaison.Qualification;
 using RimLiaison.Toolchain;
 namespace RimLiaison.Tests;
 
@@ -100,6 +100,181 @@ internal static class ToolchainPromotionTests
         }
         finally
         {
+            Delete(root);
+        }
+    }
+
+    public static void QualifiedPackageIsImmutableAndExact()
+    {
+        string root = CreateRoot();
+        string? previousManifest = Environment.GetEnvironmentVariable(
+            "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
+        try
+        {
+            string artifactRoot = Path.Combine(root, "artifacts");
+            string runtimeRoot = Path.Combine(root, "runtime");
+            string packageRoot = Path.Combine(root, "unified");
+            Directory.CreateDirectory(Path.Combine(artifactRoot));
+            Directory.CreateDirectory(Path.Combine(runtimeRoot, "Coordinator"));
+            Directory.CreateDirectory(packageRoot);
+            string executablePath = Path.Combine(artifactRoot, "rimliaison.exe");
+            string assemblyPath = Path.Combine(artifactRoot, "rimliaison.dll");
+            string coordinatorPath = Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe");
+            string consumerPath = Path.Combine(packageRoot, "transaction-components", "mod-test.ps1");
+            string unifiedManifestPath = Path.Combine(packageRoot, "unified-package.json");
+            File.WriteAllText(executablePath, "qualified-executable");
+            File.WriteAllText(assemblyPath, "qualified-assembly");
+            File.WriteAllText(coordinatorPath, "qualified-coordinator");
+            Directory.CreateDirectory(Path.GetDirectoryName(consumerPath)!);
+            File.WriteAllText(consumerPath, "qualified-consumer");
+            File.WriteAllText(unifiedManifestPath, "{}");
+            string coordinatorHash = Hash(coordinatorPath);
+            string consumerHash = Hash(consumerPath);
+            File.WriteAllText(
+                Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
+                JsonSerializer.Serialize(new
+                {
+                    packageSha256 = "runtime-package",
+                    files = new[]
+                    {
+                        new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = coordinatorHash }
+                    }
+                }));
+            string manifestPath = Path.Combine(root, "production-toolchain.json");
+            File.WriteAllText(
+                manifestPath,
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimliaison-production-toolchain/v1",
+                    promotedFingerprint = "previous",
+                    fingerprint = "previous",
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                    rimLiaisonExecutablePath = executablePath,
+                    rimLiaisonExecutableSha256 = Hash(executablePath),
+                    rimLiaisonAssemblyPath = assemblyPath,
+                    rimLiaisonAssemblySha256 = Hash(assemblyPath),
+                    devBridgeRuntimeRoot = runtimeRoot,
+                    devBridgePackageSha256 = "runtime-package",
+                    devBridgeCoordinatorSha256 = coordinatorHash,
+                    transactionConsumerPath = consumerPath,
+                    transactionConsumerSha256 = consumerHash,
+                    unifiedManifestPath,
+                    unifiedManifestSha256 = Hash(unifiedManifestPath),
+                    runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract,
+                    qualificationArtifactPath = "previous-qualification.json",
+                    qualificationArtifactSha256 = "previous-qualification-hash"
+                }));
+            Environment.SetEnvironmentVariable(
+                "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST",
+                manifestPath);
+
+            string qualificationPath = Path.Combine(root, "qualification.json");
+            File.WriteAllText(qualificationPath, "{\"proof\":\"pass\"}");
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            QualificationRunResult run = new(
+                QualificationSchemas.Run,
+                1,
+                "run-1",
+                "burn-in-25",
+                "qualification",
+                "experimental",
+                QualificationOutcome.Pass,
+                [],
+                0,
+                0,
+                1,
+                0,
+                [],
+                now,
+                now);
+            string executableHash = Hash(executablePath);
+            string assemblyHash = Hash(assemblyPath);
+            QualificationAggregate qualification = new(
+                QualificationSchemas.Aggregate,
+                "burn-in-25",
+                "qualification",
+                "experimental",
+                1,
+                1,
+                0,
+                0,
+                1,
+                0,
+                new Dictionary<string, int>(),
+                [run],
+                now,
+                now,
+                "source-commit",
+                new Dictionary<string, string>
+                {
+                    ["rimLiaisonExecutableSha256"] = executableHash,
+                    ["rimLiaisonAssemblySha256"] = assemblyHash
+                });
+            string packagePath = Path.Combine(root, "package.json");
+            string packagePath2 = Path.Combine(root, "package-copy.json");
+            string generated = ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                qualification,
+                qualificationPath,
+                packagePath,
+                artifactRoot);
+            string generatedCopy = ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                qualification,
+                qualificationPath,
+                packagePath2,
+                artifactRoot);
+            using JsonDocument package = JsonDocument.Parse(File.ReadAllText(generated));
+            JsonElement packageRootJson = package.RootElement;
+            Assert(generated == Path.GetFullPath(packagePath), "package path must be absolute");
+            Assert(packageRootJson.GetProperty("sourceCommit").GetString() == "source-commit",
+                "package must bind the qualified source");
+            Assert(packageRootJson.GetProperty("qualificationArtifactSha256").GetString() == Hash(qualificationPath),
+                "package must hash the exact qualification artifact");
+            Assert(packageRootJson.GetProperty("rimLiaisonExecutableSha256").GetString() == executableHash,
+                "package must capture the qualified executable hash");
+            Assert(packageRootJson.GetProperty("rimLiaisonAssemblySha256").GetString() == assemblyHash,
+                "package must capture the qualified assembly hash");
+            Assert(packageRootJson.GetProperty("devBridgeCoordinatorSha256").GetString() == coordinatorHash,
+                "package must capture the installed coordinator hash");
+            Assert(packageRootJson.GetProperty("transactionConsumerSha256").GetString() == consumerHash,
+                "package must capture the transaction consumer hash");
+            Assert(File.ReadAllText(generated) == File.ReadAllText(generatedCopy),
+                "package serialization must be deterministic");
+            bool immutable = false;
+            try
+            {
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    qualification,
+                    qualificationPath,
+                    packagePath,
+                    artifactRoot);
+            }
+            catch (IOException)
+            {
+                immutable = true;
+            }
+            Assert(immutable, "qualified package must not be overwritten");
+            File.WriteAllText(executablePath, "substituted-executable");
+            bool substitutionRejected = false;
+            try
+            {
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    qualification,
+                    qualificationPath,
+                    Path.Combine(root, "substituted.json"),
+                    artifactRoot);
+            }
+            catch (InvalidDataException)
+            {
+                substitutionRejected = true;
+            }
+            Assert(substitutionRejected, "artifact substitution must fail closed");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST",
+                previousManifest);
             Delete(root);
         }
     }

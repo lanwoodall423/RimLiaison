@@ -5,6 +5,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimLiaison.Git;
 using RimLiaison.DevBridge;
+using RimLiaison.Qualification;
+
 
 
 namespace RimLiaison.Toolchain;
@@ -131,6 +133,125 @@ public static class ToolchainPromotionService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = true
     };
+    public static string WriteQualifiedPromotionPackage(
+        QualificationAggregate qualification,
+        string qualificationArtifactPath,
+        string packagePath,
+        string artifactRoot)
+    {
+        if (!qualification.IsPromotionReady ||
+            string.IsNullOrWhiteSpace(qualification.SourceCommit) ||
+            qualification.QualifiedArtifactHashes is null)
+        {
+            throw new InvalidDataException(
+                "A complete qualification PASS with source and artifact hashes is required.");
+        }
+
+        string manifestPath = Environment.GetEnvironmentVariable(ProductionManifestEnvironment) ??
+            DefaultProductionManifest;
+        ProductionToolchainManifest? installed = ReadProductionManifest(
+            manifestPath,
+            out string? manifestError);
+        if (installed is null)
+            throw new InvalidDataException(manifestError ?? "The installed production manifest is invalid.");
+        if (string.IsNullOrWhiteSpace(installed.DevBridgeRuntimeRoot) ||
+            string.IsNullOrWhiteSpace(installed.TransactionConsumerPath) ||
+            string.IsNullOrWhiteSpace(installed.UnifiedManifestPath) ||
+            string.IsNullOrWhiteSpace(installed.RuntimeProtocolContract))
+        {
+            throw new InvalidDataException("The installed production manifest is incomplete.");
+        }
+
+        string fullArtifactRoot = Path.GetFullPath(artifactRoot);
+        string executablePath = Path.Combine(fullArtifactRoot, "rimliaison.exe");
+        string assemblyPath = Path.Combine(fullArtifactRoot, "rimliaison.dll");
+        string executableHash = ToolchainFileHash.Sha256(executablePath);
+        string assemblyHash = ToolchainFileHash.Sha256(assemblyPath);
+        if (!qualification.QualifiedArtifactHashes.TryGetValue(
+                "rimLiaisonExecutableSha256",
+                out string? qualifiedExecutableHash) ||
+            !qualification.QualifiedArtifactHashes.TryGetValue(
+                "rimLiaisonAssemblySha256",
+                out string? qualifiedAssemblyHash) ||
+            !string.Equals(executableHash, qualifiedExecutableHash, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(assemblyHash, qualifiedAssemblyHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The current Release artifacts do not equal the artifacts captured by qualification.");
+        }
+
+        string runtimeManifestPath = Path.Combine(
+            installed.DevBridgeRuntimeRoot,
+            ".devbridge-runtime-manifest.json");
+        string packageHash = ReadRuntimePackageHash(runtimeManifestPath);
+        string coordinatorHash = ReadRuntimeFileHash(
+            runtimeManifestPath,
+            "Coordinator/DevBridge.Coordinator.exe");
+        string coordinatorPath = Path.Combine(
+            installed.DevBridgeRuntimeRoot,
+            "Coordinator",
+            "DevBridge.Coordinator.exe");
+        if (!string.Equals(packageHash, installed.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(coordinatorHash, installed.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(coordinatorPath))
+        {
+            throw new InvalidDataException(
+                "The installed DevBridge runtime does not match its production manifest.");
+        }
+
+        string consumerPath = Path.GetFullPath(installed.TransactionConsumerPath);
+        string packageRoot = Path.GetDirectoryName(Path.GetFullPath(installed.UnifiedManifestPath))!;
+        string consumerRelativePath = NormalizeRelativePath(
+            Path.GetRelativePath(packageRoot, consumerPath));
+        if (consumerRelativePath.StartsWith("../", StringComparison.Ordinal) ||
+            consumerRelativePath == ".." ||
+            !File.Exists(consumerPath))
+        {
+            throw new InvalidDataException(
+                "The installed transaction consumer is outside the unified package.");
+        }
+
+        ToolchainPromotionPackage package = new()
+        {
+            SchemaVersion = ToolchainPromotionSchemas.Package,
+            OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
+            RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+            SourceCommit = qualification.SourceCommit,
+            QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
+            QualificationArtifactSha256 = ToolchainFileHash.Sha256(qualificationArtifactPath),
+            ArtifactRoot = fullArtifactRoot,
+            RimLiaisonExecutableRelativePath = NormalizeRelativePath(
+                Path.GetRelativePath(fullArtifactRoot, executablePath)),
+            RimLiaisonAssemblyRelativePath = NormalizeRelativePath(
+                Path.GetRelativePath(fullArtifactRoot, assemblyPath)),
+            RimLiaisonExecutableSha256 = executableHash,
+            RimLiaisonAssemblySha256 = assemblyHash,
+            DevBridgeRuntimeRoot = Path.GetFullPath(installed.DevBridgeRuntimeRoot),
+            DevBridgePackageSha256 = packageHash,
+            DevBridgeCoordinatorSha256 = coordinatorHash,
+            TransactionConsumerPath = consumerPath,
+            TransactionConsumerRelativePath = consumerRelativePath,
+            TransactionConsumerSha256 = ToolchainFileHash.Sha256(consumerPath),
+            UnifiedManifestRelativePath = "unified-package.json",
+            RuntimeProtocolContract = installed.RuntimeProtocolContract
+        };
+
+        string fullPackagePath = Path.GetFullPath(packagePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPackagePath)!);
+        if (File.Exists(fullPackagePath))
+            throw new IOException("The qualified promotion package already exists and is immutable.");
+        using FileStream stream = new(
+            fullPackagePath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read);
+        JsonSerializer.Serialize(stream, package, WriteOptions);
+        return fullPackagePath;
+    }
+
+    private static string NormalizeRelativePath(string path) =>
+        path.Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/');
 
     public static async Task<ToolchainPromotionResult> PromoteAsync(
         string sourceRoot,
