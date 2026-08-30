@@ -287,7 +287,7 @@ public static class ToolchainPromotionService
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_ARTIFACT_HASH_MISMATCH",
-                    "A unified production input hash differs from the package declaration.",
+                    $"A unified production input hash differs from the package declaration (executable={string.Equals(executableHash, package.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase)}, assembly={string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase)}, transactionConsumer={string.Equals(consumerHash, package.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase)}).",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
