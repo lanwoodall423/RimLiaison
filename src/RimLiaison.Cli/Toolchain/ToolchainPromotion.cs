@@ -733,7 +733,7 @@ public static class ToolchainPromotionService
     private static string ReadRuntimePackageHash(string runtimeManifestPath)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
-        return document.RootElement.TryGetProperty("packageHash", out JsonElement hash) &&
+        return document.RootElement.TryGetProperty("packageSha256", out JsonElement hash) &&
             hash.ValueKind == JsonValueKind.String
             ? hash.GetString() ?? string.Empty
             : string.Empty;
