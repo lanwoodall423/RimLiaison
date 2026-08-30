@@ -1342,7 +1342,8 @@ public static class CliApplication
                                 contentCapture: contentCapture,
                                 validationPlan: validationPlan,
                                 protectRepositoryWorktree: true,
-                                impactGraph: packetGeneration.Graph)
+                                impactGraph: packetGeneration.Graph,
+                                transactionConsumerPath: productionBinding?.TransactionConsumerPath)
                             .ConfigureAwait(false);
                     }
 
