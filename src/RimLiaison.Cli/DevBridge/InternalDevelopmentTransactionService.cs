@@ -463,10 +463,8 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 entries.Add(new PackageEntry(file, relative, HashFile(staged)!, new FileInfo(staged).Length));
             }
         }
-        if (entries.Any(entry => string.Equals(entry.TargetPath, assemblyRelative, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new InvalidOperationException("runtime package content collides with the built assembly destination.");
-        }
+        entries.RemoveAll(entry =>
+            string.Equals(entry.TargetPath, assemblyRelative, StringComparison.OrdinalIgnoreCase));
         entries.Add(new PackageEntry(expectedArtifact, assemblyRelative, HashFile(expectedArtifact)!, new FileInfo(expectedArtifact).Length));
         return entries.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).ToList();
     }
