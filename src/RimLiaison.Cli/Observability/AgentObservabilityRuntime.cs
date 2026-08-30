@@ -340,7 +340,7 @@ public sealed class AgentObservabilitySession : IDisposable
             DevBridgePackageSha256 = productionBinding?.DevBridgePackageHash,
             TransactionConsumerPath = productionBinding?.TransactionConsumerPath,
             TransactionConsumerSha256 = productionBinding?.TransactionConsumerHash,
-            ToolchainCompatibilityContract = productionBinding?.CompatibilityContract,
+            ToolchainCompatibilityContract = productionBinding?.RuntimeProtocolContract,
             QualificationProfile = qualificationProfile,
             Status = AgentStatus.Created,
             CurrentStage = DevelopmentStage.Analysis,

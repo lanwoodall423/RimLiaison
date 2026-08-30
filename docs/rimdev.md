@@ -40,11 +40,12 @@ make the set and deployment metadata explicit with `.rimdev/workspace.json`:
 ```
 
 Repository paths are relative to the workspace. `deploymentRoot` and `deploymentTarget` are
-configuration, not personal hard-coded defaults; the existing DevBridge development descriptor
-is used when those fields are omitted. Use `--root <workspace-root>` when discovery should start
-from a particular workspace.
+configuration, not personal hard-coded defaults; the existing runtime development descriptor is
+used when those fields are omitted. Use `--root <workspace-root>` when discovery should start from
+a particular workspace.
 
-The same machine-local manifest may also carry the runtime identity used by managed live gates:
+The same machine-local manifest may also carry the RimLiaison Runtime identity used by managed live
+gates:
 
 ```json
 {
@@ -55,10 +56,11 @@ The same machine-local manifest may also carry the runtime identity used by mana
 }
 ```
 
-These values identify the installed runtime, not a repository or pinned worktree. `RIMWORLD_ROOT`
-and `RIMWORLD_EXECUTABLE` are deliberate per-process overrides and take precedence over the
-manifest. A missing or invalid explicit override fails closed; there is no unrelated-install
-fallback. The manifest is next, followed only by DevBridge's validated installed-layout fallback.
+The `devBridge*` field names are retained as technical configuration keys for compatibility. They
+identify the installed RimLiaison.Runtime component, not an independently promoted product.
+`RIMWORLD_ROOT` and `RIMWORLD_EXECUTABLE` are deliberate per-process overrides and take precedence
+over the manifest. A missing or invalid explicit override fails closed; there is no unrelated-install
+fallback. The manifest is next, followed only by the runtime's validated installed-layout fallback.
 Publish, sync, and source-only build operations do not require these live identity values.
 
 ## Operations
@@ -66,9 +68,7 @@ Publish, sync, and source-only build operations do not require these live identi
 | Command | Behavior |
 | --- | --- |
 | `rimdev status` | Read-only table of repository paths, branches, worktree state, ahead/behind, build/deployment cache state, and PR readiness when GitHub information is available. |
-| `rimdev sync` | Fetches remotes and performs only safe `--ff-only` updates. Dirty-behind, detached, missing-upstream, and diverged repositories are reported without changing them. |
-| `rimdev build` | Builds only repositories with affected build inputs, plus downstream repositories whose configured dependencies changed, in dependency order; source/output identity is recorded outside the worktree. |
-| `rimdev test` | Delegates affected selection and execution to `rimliaison affected --run --json`, including downstream consumers of changed workspace dependencies; a proven unchanged source identity can reuse a prior RimTest result. |
+| `rimdev test` | Delegates affected selection and execution to `rimliaison affected --run --fail-fast --json`, including downstream consumers of changed workspace dependencies; a proven unchanged source identity can reuse a prior RimTest result. |
 | `rimdev push` | Fetches first, then requires the canonical RimTest/RimLiaison publication-evidence check for each repository before pushing committed ahead work. Valid reusable evidence is reused; missing, failed, invalidated, stale, or infrastructure-blocked evidence prevents that repository's push. Dirty files are left alone and explained. |
 | `rimdev merge` | Finds one open, non-draft, mergeable PR with passing checks and matching source/target identities. If several candidates exist, it asks for the exact PR number. It prints a compact plan and asks for explicit confirmation; Enter means No. `--yes` is available for a deliberate scripted confirmation. |
 | `rimdev all` | Runs sync, affected test, affected build, deployment, canonical publication-evidence check, and safe push per repository, then reports PR readiness. It never merges; run `rimdev merge` separately. One repository's failure does not globally abort unrelated repositories; configured dependents are conservatively blocked. |

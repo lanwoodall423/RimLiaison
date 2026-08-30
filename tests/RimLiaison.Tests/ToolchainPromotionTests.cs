@@ -120,6 +120,8 @@ internal static class ToolchainPromotionTests
                 rimLiaisonAssemblyRelativePath = "rimliaison.dll",
                 rimLiaisonExecutableSha256 = "unused",
                 rimLiaisonAssemblySha256 = "unused",
+                ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
                 devBridgeRuntimeRoot = "unused",
                 devBridgePackageSha256 = "unused",
                 devBridgeCoordinatorSha256 = "unused",
@@ -127,7 +129,7 @@ internal static class ToolchainPromotionTests
                 transactionConsumerRelativePath = "transaction-components/mod-test.ps1",
                 transactionConsumerSha256 = "unused",
                 unifiedManifestRelativePath = "unified-package.json",
-                compatibilityContract = "devbridge-mod-development/v1"
+                runtimeProtocolContract = "devbridge-mod-development/v1"
             }));
         return packagePath;
     }

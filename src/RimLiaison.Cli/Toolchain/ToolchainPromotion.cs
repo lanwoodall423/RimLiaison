@@ -13,6 +13,9 @@ public static class ToolchainPromotionSchemas
 {
     public const string Package = "rimliaison-toolchain-promotion/v2";
     public const string Result = "rimliaison-toolchain-promotion-result/v1";
+    public const string OwnerProduct = "RimLiaison";
+    public const string RuntimeSubsystem = "RimLiaison.Runtime";
+    public const string RimBridgeServerBoundary = "external-game-side";
 }
 
 public sealed class ToolchainPromotionPackage
@@ -35,6 +38,10 @@ public sealed class ToolchainPromotionPackage
     public string? RimLiaisonExecutableSha256 { get; init; }
     [JsonPropertyName("rimLiaisonAssemblySha256")]
     public string? RimLiaisonAssemblySha256 { get; init; }
+    [JsonPropertyName("ownerProduct")]
+    public string? OwnerProduct { get; init; }
+    [JsonPropertyName("runtimeSubsystem")]
+    public string? RuntimeSubsystem { get; init; }
     [JsonPropertyName("devBridgeRuntimeRoot")]
     public string? DevBridgeRuntimeRoot { get; init; }
     [JsonPropertyName("devBridgePackageSha256")]
@@ -49,8 +56,8 @@ public sealed class ToolchainPromotionPackage
     public string? TransactionConsumerSha256 { get; init; }
     [JsonPropertyName("unifiedManifestRelativePath")]
     public string? UnifiedManifestRelativePath { get; init; }
-    [JsonPropertyName("compatibilityContract")]
-    public string? CompatibilityContract { get; init; }
+    [JsonPropertyName("runtimeProtocolContract")]
+    public string? RuntimeProtocolContract { get; init; }
 }
 
 public sealed record ToolchainPromotionResult(
@@ -227,7 +234,11 @@ public static class ToolchainPromotionService
                     manifestError ?? "The current production manifest could not be read.");
             }
 
-            if (!string.Equals(package.CompatibilityContract, previous.CompatibilityContract, StringComparison.Ordinal) ||
+            if (!string.Equals(package.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+                !string.Equals(package.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
+                !string.Equals(previous.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+                !string.Equals(previous.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
+                !string.Equals(package.RuntimeProtocolContract, previous.RuntimeProtocolContract, StringComparison.Ordinal) ||
                 !SamePath(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot))
             {
                 return ToolchainPromotionResult.Blocked(
@@ -370,13 +381,21 @@ public static class ToolchainPromotionService
                 coordinatorHash,
                 package.DevBridgePackageSha256!,
                 consumerHash,
-                previous.CompatibilityContract!);
+                previous.RuntimeProtocolContract!,
+                ToolchainPromotionSchemas.OwnerProduct,
+                ToolchainPromotionSchemas.RuntimeSubsystem);
             var unifiedManifest = new
             {
-                schemaVersion = "rimliaison-unified-production-package/v1",
+                schemaVersion = "rimliaison-unified-production-package/v2",
                 productFingerprint = promotedFingerprint,
+                ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                rimBridgeServer = new
+                {
+                    boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
+                    ownership = "RimBridgeServer"
+                },
                 sourceCommit,
-                compatibilityContract = previous.CompatibilityContract,
                 rimLiaison = new
                 {
                     executablePath = Path.GetRelativePath(stagedRoot, installedExecutable),
@@ -384,7 +403,7 @@ public static class ToolchainPromotionService
                     assemblyPath = Path.GetRelativePath(stagedRoot, installedAssembly),
                     assemblySha256 = installedAssemblyHash
                 },
-                devBridge = new
+                runtime = new
                 {
                     packageSha256 = package.DevBridgePackageSha256,
                     coordinatorSha256 = coordinatorHash
@@ -427,6 +446,8 @@ public static class ToolchainPromotionService
             var updated = new ProductionToolchainManifest
             {
                 SchemaVersion = previous.SchemaVersion,
+                OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
                 PromotedFingerprint = promotedFingerprint,
                 Fingerprint = promotedFingerprint,
                 RimLiaisonExecutablePath = installedExecutable,
@@ -440,7 +461,7 @@ public static class ToolchainPromotionService
                 TransactionConsumerSha256 = installedConsumerHash,
                 UnifiedManifestPath = unifiedManifestPath,
                 UnifiedManifestSha256 = unifiedManifestHash,
-                CompatibilityContract = previous.CompatibilityContract,
+                RuntimeProtocolContract = previous.RuntimeProtocolContract,
                 QualifiedSourceCommit = package.SourceCommit,
                 QualificationArtifactPath = artifactPath,
                 QualificationArtifactSha256 = qualificationHash
@@ -556,9 +577,9 @@ public static class ToolchainPromotionService
     private static ToolchainPromotionPackage? ReadPackage(string path, out string? error)
     {
         error = null;
-
         try
         {
+
             ToolchainPromotionPackage? package = JsonSerializer.Deserialize<ToolchainPromotionPackage>(
                 File.ReadAllText(Path.GetFullPath(path)), ReadOptions);
             if (package is null ||
@@ -571,6 +592,8 @@ public static class ToolchainPromotionService
                 string.IsNullOrWhiteSpace(package.RimLiaisonAssemblyRelativePath) ||
                 string.IsNullOrWhiteSpace(package.RimLiaisonExecutableSha256) ||
                 string.IsNullOrWhiteSpace(package.RimLiaisonAssemblySha256) ||
+                !string.Equals(package.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+                !string.Equals(package.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
                 string.IsNullOrWhiteSpace(package.DevBridgeRuntimeRoot) ||
                 string.IsNullOrWhiteSpace(package.DevBridgePackageSha256) ||
                 string.IsNullOrWhiteSpace(package.DevBridgeCoordinatorSha256) ||
@@ -578,7 +601,7 @@ public static class ToolchainPromotionService
                 string.IsNullOrWhiteSpace(package.TransactionConsumerRelativePath) ||
                 string.IsNullOrWhiteSpace(package.TransactionConsumerSha256) ||
                 string.IsNullOrWhiteSpace(package.UnifiedManifestRelativePath) ||
-                string.IsNullOrWhiteSpace(package.CompatibilityContract))
+                string.IsNullOrWhiteSpace(package.RuntimeProtocolContract))
             {
                 error = "The promotion package is incomplete or uses an unsupported schema.";
                 return null;
@@ -604,11 +627,13 @@ public static class ToolchainPromotionService
                 string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
                 string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
                 string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
+                !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+                !string.Equals(manifest.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
                 string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot) ||
                 string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
-                string.IsNullOrWhiteSpace(manifest.CompatibilityContract))
+                string.IsNullOrWhiteSpace(manifest.RuntimeProtocolContract))
             {
                 error = "The production manifest is incomplete or unsupported.";
                 return null;
@@ -746,11 +771,15 @@ public static class ToolchainPromotionService
         string coordinatorHash,
         string devBridgeHash,
         string consumerHash,
-        string compatibility)
+        string compatibility,
+        string ownerProduct,
+        string runtimeSubsystem)
     {
         string payload = string.Join("\n", [
             ToolchainPromotionSchemas.Package,
-            "unified-production-package/v1",
+            "unified-production-package/v2",
+            ownerProduct,
+            runtimeSubsystem,
             sourceCommit,
             executableHash,
             assemblyHash,

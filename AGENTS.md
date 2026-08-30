@@ -32,10 +32,9 @@ and a verified promotion package, run:
 rimliaison qualification promote --promotion-package <qualified-toolchain-package.json> --json
 ```
 
-The command verifies qualification provenance, artifact hashes, pinned DevBridge
-compatibility, an exclusive promotion lock, atomic production-manifest replacement,
-installed identity, and production doctor. Agents MUST NOT copy binaries or edit
-production manifests manually.
+The command verifies qualification provenance, artifact hashes, the pinned internal runtime
+component contract, an exclusive promotion lock, atomic production-manifest replacement, installed
+identity, and production doctor. Agents MUST NOT copy binaries or edit production manifests manually.
 
 Affected selection also computes `rimtest-validation-plan/v1` from the actual diff when indexed
 impact and catalog coverage are available. Treat required plan entries as non-reducible; agents may
@@ -70,16 +69,16 @@ RimLiaison
   ├─ RimContext: static source/dependency/affected knowledge
   ├─ orchestration: test selection, execution, bounded results
   ├─ RimError: bounded diagnostic/root-cause analysis
-  └─ DevBridge client
-       ↓
-     DevBridge2: lifecycle/deploy/generations/leases
+  └─ RimLiaison.Runtime: lifecycle/deploy/generations/leases
        ↓
      RimBridgeServer: live in-game control/inspection
 ```
 
-DevBridge2 owns RimWorld lifecycle, profiles, generations, readiness, leases, deployment, and
-recovery. Do not launch RimWorld manually, edit ModsConfig, read Player.log directly, or bypass
-the owner workflow.
+RimLiaison owns the production product, qualification, promotion, and reliability identity.
+`RimLiaison.Runtime` is the modular internal implementation of lifecycle, profiles, generations,
+readiness, leases, deployment, and recovery. The installed runtime under `RimWorld\Mods` is not an
+independent DevBridge product. Do not launch RimWorld manually, edit ModsConfig, read Player.log
+directly, or bypass the owner workflow.
 
 Preserve stable `rimtest-*` schemas, `RIMTEST_*` identifiers, `.rimdev` conventions, catalog
 fields, bounded-output rules, and DevBridge contracts.
@@ -89,8 +88,8 @@ Project metadata ownership:
 - Production project identity is declared by the owning repository's `.rimdev/stack.json`.
 - The production manifest owns workload, package identity, source project, configuration,
   expected assembly, deployment target, test recipe, runtime package, and dependencies.
-- RimLiaison may materialize a temporary DevBridge execution contract from that manifest, but
-  must not resolve production metadata from `DevBridge2/DevelopmentProjects`.
+- RimLiaison materializes the temporary RimLiaison.Runtime execution contract from that manifest;
+  it must not resolve production metadata from `DevBridge2/DevelopmentProjects`.
 - Missing, malformed, or contradictory production metadata fails closed with a structured
   `PROJECT_METADATA_*` error. Repair the owning repository; do not add a tooling descriptor.
 - Tooling repositories may retain only explicitly classified `fixture`, `test`, `internal`, or

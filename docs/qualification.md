@@ -2,11 +2,21 @@
 
 ## Operating model
 
-Normal mod production runs on the promoted toolchain described by `qualification/toolchain-known-good.json`. Production remains the primary operator workflow and is visible in Observability as workload `production` with toolchain state `promoted`.
+Normal mod production runs on the one promoted RimLiaison product described by
+`qualification/toolchain-known-good.json`. Its internal `RimLiaison.Runtime` component is
+qualified and fingerprinted as part of that product; it has no independent production release,
+promotion, or reliability campaign. Production remains the primary operator workflow and is
+visible in Observability as workload `production` with toolchain state `promoted`.
 
-Tooling changes are qualified independently with `qualification/fixture`, a small reference mod that is not a release dependency for production mods. Qualification runs are visible as workload `qualification` with toolchain state `experimental`. Experimental changes do not automatically change the normal agent path.
+Tooling changes are qualified independently with `qualification/fixture`, a small reference mod
+that is not a release dependency for production mods. Qualification runs are visible as workload
+`qualification` with toolchain state `experimental`. Experimental changes do not automatically
+change the normal agent path.
 
-Genuine required-capability blockers are recorded as blocking issues and fixed promptly. Optional validation gaps, unsupported obscure checks, and broader improvement opportunities are recorded as non-blocking recommendations. They remain inspectable in the existing Observability Recommendations surface and in `.rimdev/qualification/tooling-improvement-backlog.json`.
+Genuine required-capability blockers are recorded as blocking issues and fixed promptly. Optional
+validation gaps, unsupported obscure checks, and broader improvement opportunities are recorded as
+non-blocking recommendations. They remain inspectable in the existing Observability Recommendations
+surface and in `.rimdev/qualification/tooling-improvement-backlog.json`.
 
 ## Fixture and scenarios
 
@@ -42,11 +52,12 @@ rimliaison qualification promote `
   --promotion-package <qualified-toolchain-package.json> --json
 ```
 
-The package must reference the complete burn-in artifact and exact published
-RimLiaison files. Promotion verifies the source commit, qualification hash,
-artifact hashes, pinned DevBridge consumer compatibility, an exclusive lock,
-atomic production-manifest replacement, installed hashes, and production
-doctor. A failed verification leaves the previous production manifest active.
+The package must reference the complete burn-in artifact and exact published RimLiaison files.
+Promotion verifies the source commit, qualification hash, artifact hashes, the pinned internal
+runtime protocol contract, an exclusive lock, atomic production-manifest replacement, installed
+hashes, and production doctor. A failed verification leaves the previous production manifest
+active. DevBridge runtime release scripts are component-build tools only; they cannot publish an
+independent production identity.
 
 ## Promotion criteria
 
@@ -56,9 +67,11 @@ Promote only after:
 2. the 25-run profile has zero unexplained infrastructure failures;
 3. restart/recovery and clean-start qualification pass;
 4. parallel/concurrency coverage passes when the stack supports it;
-5. the qualification artifact and component versions are recorded in the promoted manifest.
+5. the qualification artifact and component versions are recorded in the single promoted manifest.
 
-A working-tree or experimental manifest is never used as the normal mod-agent version merely because its local build succeeds. Update `qualification/toolchain-known-good.json` only after the promotion profile succeeds and the change is intentionally promoted.
+A working-tree or experimental manifest is never used as the normal mod-agent version merely because
+its local build succeeds. Update `qualification/toolchain-known-good.json` only after the promotion
+profile succeeds and the change is intentionally promoted.
 
 ## Backlog discipline
 

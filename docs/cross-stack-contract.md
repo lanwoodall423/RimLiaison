@@ -55,25 +55,24 @@ Coordinator.Core, and FakeRimWorld compiled `bin`/`obj` outputs; it never caches
 state and never skips this contract execution. The independent validation-proof layer may skip the
 whole stage only after a complete PASS proof is found.
 
-Each component still owns its independent guarantee:
+Each component still owns an independent internal guarantee; only RimLiaison owns the production
+product identity:
 
 - RimContext is an internal module that owns static indexing and affected-impact analysis
-  (`rimctx/v1`); RimLiaison consumes `RimContext.Core` in-process, while the merged Windows CI
-  also runs the complete deterministic direct-CLI fixture executable.
-- RimLiaison owns catalog selection, orchestration, compact results, and artifact-freshness
-  policy; the merged CI runs its offline CLI suite and this composition gate.
-- DevBridge2 owns lifecycle, profiles, generations, leases, artifact deployment, recipe semantics,
-  and raw/bounded build diagnostics. `scripts/mod-test.ps1` owns the bounded compiler/MSBuild
-  capture and the `devbridge-mod-development/v1` wire projection; its `failure` object repeats the
-  primary stage/code/message and truncation state for older consumers. Its focused process E2E
-  fixture and existing Windows validation cover the owner-side serialization.
-- RimLiaison owns persistence of the bounded owner response as canonical evidence and assembles the
-  user-facing `rimliaison-agent-diagnostic-bundle/v2`; it must not launch a replacement build or
-  read an unbounded log to fill missing fields. The full-SHA manifest and CI checkout select the
-  DevBridge2 revision used by validation; normal agents resolve the configured `DevBridge.cmd`
-  installation/sibling and should use the same published revision.
+  (`rimctx/v1`); RimLiaison consumes `RimContext.Core` in-process, while merged Windows CI also runs
+  the complete deterministic direct-CLI fixture executable.
+- RimLiaison owns catalog selection, orchestration, compact results, artifact-freshness policy,
+  qualification, promotion, and the single production fingerprint.
+- `RimLiaison.Runtime` is the internal modular lifecycle component. Its coordinator, profiles,
+  generations, leases, artifact deployment, recipe semantics, and raw/bounded diagnostics remain
+  separately validated. `scripts/mod-test.ps1` owns bounded compiler/MSBuild capture and the
+  `devbridge-mod-development/v1` wire projection; that wire contract is protocol plumbing, not a
+  second production product.
+- `RimBridgeServer` remains a separate game-side control boundary. The full-SHA manifest and CI
+  checkout select the pinned runtime source used by validation; production promotion binds its
+  installed component into the RimLiaison product.
 - RimError is an internal module that owns bounded diagnostic parsing, root-cause reporting, and
-  correlation; RimLiaison consumes `RimError.Core` in-process, while the merged Windows CI runs its
+  correlation; RimLiaison consumes `RimError.Core` in-process, while merged Windows CI runs its
   complete deterministic xUnit suite and direct-CLI compatibility coverage.
 
 Only the DevBridge2 self-hosted `live-stack-smoke.yml` / `scripts/live-stack-smoke.ps1` gate proves

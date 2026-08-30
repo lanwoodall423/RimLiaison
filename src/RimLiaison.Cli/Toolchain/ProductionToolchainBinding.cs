@@ -14,6 +14,8 @@ internal enum ToolchainMode
 public sealed record ProductionToolchainBinding(
     string Fingerprint,
     string PromotedFingerprint,
+    string OwnerProduct,
+    string RuntimeSubsystem,
     string RimLiaisonExecutablePath,
     string RimLiaisonExecutableHash,
     string RimLiaisonAssemblyPath,
@@ -26,13 +28,15 @@ public sealed record ProductionToolchainBinding(
     string TransactionConsumerHash,
     string UnifiedManifestPath,
     string UnifiedManifestHash,
-    string CompatibilityContract)
+    string RuntimeProtocolContract)
 {
     public object ToEvidence() => new
     {
         mode = "production",
         fingerprint = Fingerprint,
         promotedFingerprint = PromotedFingerprint,
+        ownerProduct = OwnerProduct,
+        runtimeSubsystem = RuntimeSubsystem,
         rimLiaison = new
         {
             executablePath = RimLiaisonExecutablePath,
@@ -40,12 +44,17 @@ public sealed record ProductionToolchainBinding(
             assemblyPath = RimLiaisonAssemblyPath,
             assemblySha256 = RimLiaisonAssemblyHash
         },
-        devBridge = new
+        runtime = new
         {
             commandPath = DevBridgeCommandPath,
             runtimeRoot = DevBridgeRuntimeRoot,
             packageSha256 = DevBridgePackageHash,
             coordinatorSha256 = DevBridgeCoordinatorHash
+        },
+        rimBridgeServer = new
+        {
+            boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
+            ownership = "RimBridgeServer"
         },
         transactionConsumer = new
         {
@@ -57,7 +66,7 @@ public sealed record ProductionToolchainBinding(
             path = UnifiedManifestPath,
             sha256 = UnifiedManifestHash
         },
-        compatibilityContract = CompatibilityContract
+        runtimeProtocolContract = RuntimeProtocolContract
     };
 }
 
@@ -98,6 +107,10 @@ internal sealed class ProductionToolchainManifest
     public string? PromotedFingerprint { get; init; }
     [JsonPropertyName("fingerprint")]
     public string? Fingerprint { get; init; }
+    [JsonPropertyName("ownerProduct")]
+    public string? OwnerProduct { get; init; }
+    [JsonPropertyName("runtimeSubsystem")]
+    public string? RuntimeSubsystem { get; init; }
     [JsonPropertyName("rimLiaisonExecutablePath")]
     public string? RimLiaisonExecutablePath { get; init; }
     [JsonPropertyName("rimLiaisonExecutableSha256")]
@@ -114,8 +127,8 @@ internal sealed class ProductionToolchainManifest
     public string? TransactionConsumerPath { get; init; }
     [JsonPropertyName("transactionConsumerSha256")]
     public string? TransactionConsumerSha256 { get; init; }
-    [JsonPropertyName("compatibilityContract")]
-    public string? CompatibilityContract { get; init; }
+    [JsonPropertyName("runtimeProtocolContract")]
+    public string? RuntimeProtocolContract { get; init; }
     [JsonPropertyName("qualifiedSourceCommit")]
     public string? QualifiedSourceCommit { get; init; }
     [JsonPropertyName("qualificationArtifactPath")]
@@ -133,7 +146,7 @@ internal sealed class ProductionToolchainManifest
 internal static class ProductionToolchainBindingResolver
 {
     private const string ManifestSchema = "rimliaison-production-toolchain/v1";
-    private const string CompatibilityContract = "devbridge-mod-development/v1";
+    private const string RuntimeProtocolContract = "devbridge-mod-development/v1";
     private const string ManifestEnvironment = "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST";
     private const string CliEnvironment = "RIMLIAISON_PRODUCTION_CLI";
 
@@ -165,7 +178,8 @@ internal static class ProductionToolchainBindingResolver
         }
 
         if (!string.Equals(manifest!.SchemaVersion, ManifestSchema, StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
+            !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+            !string.Equals(manifest.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
             string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
             string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutableSha256) ||
             string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
@@ -177,7 +191,7 @@ internal static class ProductionToolchainBindingResolver
             string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
             string.IsNullOrWhiteSpace(manifest.UnifiedManifestPath) ||
             string.IsNullOrWhiteSpace(manifest.UnifiedManifestSha256) ||
-            !string.Equals(manifest.CompatibilityContract, CompatibilityContract, StringComparison.Ordinal))
+            !string.Equals(manifest.RuntimeProtocolContract, RuntimeProtocolContract, StringComparison.Ordinal))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_MANIFEST_INVALID",
@@ -348,6 +362,20 @@ internal static class ProductionToolchainBindingResolver
                 currentCli,
                 runtimeRoot);
         }
+        if (!UnifiedManifestOwnsProductionRuntime(
+                unifiedManifestPath,
+                manifest.PromotedFingerprint))
+        {
+            return Fail(
+                "PRODUCTION_TOOLCHAIN_MANIFEST_INVALID",
+                "The staged unified manifest does not identify RimLiaison as its production owner.",
+                "Re-promote the unified package with the RimLiaison runtime ownership metadata.",
+                rejected,
+                manifestPath,
+                manifest.PromotedFingerprint,
+                currentCli,
+                runtimeRoot);
+        }
 
         string fingerprint = manifest.PromotedFingerprint!;
         if (!string.IsNullOrWhiteSpace(manifest.Fingerprint) &&
@@ -368,6 +396,8 @@ internal static class ProductionToolchainBindingResolver
             new ProductionToolchainBinding(
                 fingerprint,
                 manifest.PromotedFingerprint!,
+                manifest.OwnerProduct!,
+                manifest.RuntimeSubsystem!,
                 cliPath,
                 cliHash,
                 assemblyPath,
@@ -380,7 +410,7 @@ internal static class ProductionToolchainBindingResolver
                 consumerHash,
                 unifiedManifestPath,
                 unifiedManifestHash,
-                manifest.CompatibilityContract!),
+                manifest.RuntimeProtocolContract!),
             null);
     }
 
@@ -472,6 +502,30 @@ internal static class ProductionToolchainBindingResolver
             }
         }
         return string.Empty;
+    }
+
+    private static bool UnifiedManifestOwnsProductionRuntime(string path, string? fingerprint)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            bool ownerMatches = root.TryGetProperty("ownerProduct", out JsonElement owner) &&
+                string.Equals(owner.GetString(), ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal);
+            bool subsystemMatches = root.TryGetProperty("runtimeSubsystem", out JsonElement subsystem) &&
+                string.Equals(subsystem.GetString(), ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal);
+            bool boundaryMatches = root.TryGetProperty("rimBridgeServer", out JsonElement bridge) &&
+                bridge.TryGetProperty("boundary", out JsonElement boundary) &&
+                string.Equals(boundary.GetString(), ToolchainPromotionSchemas.RimBridgeServerBoundary, StringComparison.Ordinal);
+            bool fingerprintMatches = fingerprint is null ||
+                root.TryGetProperty("productFingerprint", out JsonElement productFingerprint) &&
+                string.Equals(productFingerprint.GetString(), fingerprint, StringComparison.OrdinalIgnoreCase);
+            return ownerMatches && subsystemMatches && boundaryMatches && fingerprintMatches;
+        }
+        catch (Exception) when (File.Exists(path))
+        {
+            return false;
+        }
     }
 
     private static bool IsWithin(string root, string path)

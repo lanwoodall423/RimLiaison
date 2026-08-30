@@ -170,11 +170,12 @@ exception diagnostics go to stderr. Queries never scan, build, launch the game, 
 
 ## Unified production distribution
 
-Production is one immutable product: the promoted RimLiaison CLI and assembly, the packaged
-transaction consumer, and the qualified DevBridge runtime identity are bound by one product
-fingerprint. The production manifest contains only staged package paths and hashes; source
-checkout paths are qualification inputs, never runtime inputs. The package manifest records the
-same component inventory and compatibility contract.
+Production is one immutable RimLiaison product: the promoted CLI and assembly, the packaged
+transaction consumer, and the qualified `RimLiaison.Runtime` component are bound by one product
+fingerprint. The runtime is installed under `RimWorld\Mods` for technical reasons, but that
+installation is a RimLiaison-owned component, not an independently released or promoted DevBridge
+product. The production manifest contains only staged package paths and hashes; source checkout
+paths are qualification inputs, never runtime inputs.
 
 The pre-consolidation execution boundary was:
 
@@ -186,11 +187,17 @@ agent -> RimLiaison -> DevBridge command -> source transaction consumer
 The consolidated boundary is:
 
 ```text
-agent -> RimLiaison production package
-       -> internal development transaction service
-       -> shared DevBridge runtime/deployment API
-       -> DevBridge Coordinator -> RimWorld
+agent -> RimLiaison production product
+       -> RimLiaison.Runtime development transaction service
+       -> RimLiaison-owned lifecycle/deployment implementation
+       -> RimBridgeServer game-side boundary -> RimWorld
 ```
+
+`RimLiaison.Runtime` keeps internal coordinator, generation, readiness, lease, deployment, and
+recovery modules separated. `RimBridgeServer` remains an explicit external game-side boundary; it
+is not absorbed into RimLiaison. DevBridge source and package contracts remain internal component
+contracts only. They do not create an independent production fingerprint, promotion flow, or agent
+release path.
 
 The packaged `mod-test.ps1` remains only for development and compatibility callers. Canonical
 production validation does not spawn PowerShell, serialize a child transaction result, or carry

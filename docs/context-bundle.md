@@ -88,17 +88,18 @@ not a replacement database:
 | Repository state | Git | Read-only branch, revision, status, and generated-file classification. |
 | Static source/dependency context | RimContext | Typed topology/static context and affected-impact inputs. |
 | Test selection and evidence reuse | RimTest/RimLiaison | Selection decisions, cache state, invalidation, and validation policy. |
-| Build/deployment/freshness | DevBridge2 | Existing transaction, artifact, generation, and proof evidence. |
-| Live runtime and leases | DevBridge2/RimBridgeServer | Read-only doctor/bridge state; no game launch from `context`. |
+| Build/deployment/freshness | RimLiaison.Runtime | Existing transaction, artifact, generation, and proof evidence. |
+| Live runtime and leases | RimLiaison.Runtime/RimBridgeServer | Read-only doctor/bridge state; no game launch from `context`. |
 | Failure classification | RimError/RimLiaison | Existing bounded issues and recovery references. |
 | Orchestration | RimLiaison | Cross-owner correlation and compact execution projection. |
 
 The context command does not edit `ModsConfig.xml`, launch RimWorld, create a daemon, or write a
-context database. It uses only read-only DevBridge2 `doctor --json` and `agent snapshot --json`
-probes; it never starts, stops, restarts, acquires a lease, or asks RimBridgeServer for mutating
-game operations. Observability is read from the canonical app-data store. Generated/build state
-remains outside the repository or is classified under `repository.generatedFiles`; it is never
-reported as a meaningful source input.
+context database. It uses only read-only RimLiaison Runtime `doctor --json` and `agent snapshot
+--json` probes; it never starts, stops, restarts, acquires a lease, or asks RimBridgeServer for
+mutating game operations.
+Observability is read from the canonical app-data store. Generated/build state remains outside the
+repository or is classified under `repository.generatedFiles`; it is never reported as a meaningful
+source input.
 
 Git dirtiness is reported only as repository state. It is not converted into a test-policy answer:
 `testing.additionalValidationRequired` remains `null` until RimTest/RimLiaison supplies a decision,

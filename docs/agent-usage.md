@@ -1,28 +1,24 @@
 # RimLiaison agent usage
 
-Use the narrow Golden Path for ordinary mod work:
-
-```text
-rimliaison preflight --json
-establish task and repository requirements
-edit
-rimliaison golden-path --json       # alias: rimliaison develop --json
-```
-
-Golden Path coordinates affected selection, build/deploy, Quicktest readiness and runtime
-validation, evidence collection, classification, publication state, and completion. It emits
-structured production state continuously; agents should not scrape prose or repair supporting
-repositories.
-
-For an edit loop where readiness is already known, use:
+Use the only ordinary agent workflow:
 
 ```text
 rimliaison affected --run --fail-fast --json
 ```
 
-Once stable, run `rimliaison golden-path --json` as the complete production path. Use
-`rimliaison preflight --json` for a compact readiness answer; use `doctor` only when diagnosis
-is needed.
+This command coordinates affected selection, build/deploy, readiness, runtime validation, evidence
+collection, classification, and cleanup. It emits structured production state; agents must not
+scrape prose, invoke DevBridge commands, select a transaction consumer, or repair supporting
+repositories.
+
+`rimliaison preflight --json` is a read-only startup packet when readiness is unknown. Use
+`rimliaison doctor --workspace --json` for diagnosis. Human administration—`doctor`, `status`,
+`reset`, `recover`, qualification, and promotion—is exposed through RimLiaison; do not operate
+the installed runtime independently.
+
+The complete ownership contract is in [docs/architecture.md](architecture.md). `RimLiaison.Runtime`
+contains the internal lifecycle/deployment implementation and remains modular. The runtime is
+installed under `RimWorld\Mods` but is not an independently released DevBridge product.
 
 `rimliaison preflight`, `affected`, and production release workflows perform a bounded static
 workspace-binding check before expensive work. When diagnosis is needed, use
@@ -30,11 +26,10 @@ workspace-binding check before expensive work. When diagnosis is needed, use
 health, repairability, issue code, and `nextAction`; never hand-edit workspace paths, copy source
 into `RimWorld\Mods`, create links, or bypass the production toolchain.
 
-Both affected commands own changed-file impact selection, test selection, execution,
-DevBridge2 coordination, and bounded results. It calls `RimContext.Core` and `RimError.Core`
-in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff files for the normal
-path. DevBridge2 remains the external lifecycle/deployment boundary and RimBridgeServer remains the
-external live-game control boundary.
+The affected command owns changed-file impact selection, test selection, execution, internal
+`RimLiaison.Runtime` coordination, and bounded results. It calls `RimContext.Core` and
+`RimError.Core` in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff files
+for the normal path. `RimBridgeServer` remains the external live-game control boundary.
 
 When an agent needs cross-stack state without starting a validation run, request the read-only
 context bundle:
@@ -231,13 +226,13 @@ Observability store as work progresses; the UI does not need to scrape agent out
 generations, coordinator roots, handshake details, evidence paths, and process ownership remain
 expandable diagnostic evidence.
 
-RimLiaison owns orchestration; DevBridge2 owns lifecycle, deployment, and readiness; RimTest owns
-selection and validation; RimContext owns compact static context; RimError owns diagnosis and
-classification. A bounded safe retry may run once. Persistent infrastructure failure creates a
-tooling incident and never starts tooling-repository development or mutates a supporting repo.
-Unrelated deterministic validation continues, and successful evidence remains credited. Optional
-runtime capability gaps can still produce `PASS` with a visible recommendation; required gaps
-block only the claims that depend on them.
+RimLiaison owns orchestration and the production product; `RimLiaison.Runtime` owns lifecycle,
+deployment, and readiness implementation; RimTest owns selection and validation; RimContext owns
+compact static context; RimError owns diagnosis and classification. A bounded safe retry may run
+once. Persistent infrastructure failure creates a tooling incident and never starts tooling-repository
+development or mutates a supporting repo. Unrelated deterministic validation continues, and
+successful evidence remains credited. Optional runtime capability gaps can still produce `PASS` with
+a visible recommendation; required gaps block only the claims that depend on them.
 
 Agents must finish the mod whenever defined requirements and REQUIRED validation permit it.
 Report tooling opportunities separately with owner, capability gap, impact, evidence/reproduction,

@@ -250,7 +250,19 @@ internal static class ProjectMetadataOwnershipTests
             File.WriteAllText(Path.Combine(runtimeRoot, "DevBridge.cmd"), "runtime");
             File.WriteAllText(coordinatorPath, "coordinator");
             File.WriteAllText(consumerPath, "consumer");
-            File.WriteAllText(unifiedManifestPath, "unified");
+            File.WriteAllText(
+                unifiedManifestPath,
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimliaison-unified-production-package/v2",
+                    productFingerprint = "tc-promoted",
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                    rimBridgeServer = new
+                    {
+                        boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary
+                    }
+                }));
             File.WriteAllText(
                 Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
                 JsonSerializer.Serialize(new
@@ -271,6 +283,8 @@ internal static class ProjectMetadataOwnershipTests
                     rimLiaisonAssemblySha256 = Sha256(assemblyPath),
                     rimLiaisonExecutablePath = cliPath,
                     rimLiaisonExecutableSha256 = Sha256(cliPath),
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
                     devBridgeRuntimeRoot = runtimeRoot,
                     devBridgePackageSha256 = "package-hash",
                     devBridgeCoordinatorSha256 = Sha256(coordinatorPath),
@@ -278,7 +292,7 @@ internal static class ProjectMetadataOwnershipTests
                     transactionConsumerSha256 = Sha256(consumerPath),
                     unifiedManifestPath,
                     unifiedManifestSha256 = Sha256(unifiedManifestPath),
-                    compatibilityContract = "devbridge-mod-development/v1"
+                    runtimeProtocolContract = "devbridge-mod-development/v1"
                 }));
             Environment.SetEnvironmentVariable(
                 "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST",
@@ -301,6 +315,13 @@ internal static class ProjectMetadataOwnershipTests
                     root,
                     currentExecutablePath: cliPath);
             Assert(accepted.Succeeded, accepted.Failure?.Error ?? "promoted identity was rejected");
+            Assert(accepted.Binding!.OwnerProduct == ToolchainPromotionSchemas.OwnerProduct &&
+                   accepted.Binding.RuntimeSubsystem == ToolchainPromotionSchemas.RuntimeSubsystem,
+                "production binding must identify RimLiaison.Runtime as an internal component");
+            string evidence = JsonSerializer.Serialize(accepted.Binding.ToEvidence());
+            Assert(evidence.Contains("\"runtime\"", StringComparison.Ordinal) &&
+                   evidence.Contains("\"rimBridgeServer\"", StringComparison.Ordinal),
+                "production evidence must retain the runtime and RimBridgeServer boundaries");
             Assert(
                 accepted.Binding!.Fingerprint.StartsWith("tc-", StringComparison.Ordinal),
                 "production fingerprint must be the single unified product identity");
