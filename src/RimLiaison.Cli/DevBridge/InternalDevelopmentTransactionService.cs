@@ -355,6 +355,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         }
         catch (Exception exception)
         {
+            Console.Error.WriteLine("INTERNAL_TRANSACTION_EXCEPTION: " + exception);
             return Failure(project, workflowId, transactionId, "DEVBRIDGE_INTERNAL_TRANSACTION_FAILED", Bound(exception.Message));
         }
         finally
