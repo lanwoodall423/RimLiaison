@@ -349,21 +349,14 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
-        string fingerprint = ComputeExecutionFingerprint(
-            manifest.PromotedFingerprint!,
-            cliHash,
-            assemblyHash,
-            coordinatorHash,
-            packageHash,
-            consumerHash,
-            manifest.CompatibilityContract!);
+        string fingerprint = manifest.PromotedFingerprint!;
         if (!string.IsNullOrWhiteSpace(manifest.Fingerprint) &&
             !string.Equals(manifest.Fingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
-                "The production fingerprint does not match its unified immutable components.",
-                "Re-promote the complete unified toolchain atomically and retry.",
+                "The production manifest exposes more than one product fingerprint.",
+                "Re-promote the unified package so its product fingerprint is the sole runtime identity.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,

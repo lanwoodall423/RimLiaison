@@ -360,14 +360,6 @@ public static class ToolchainPromotionService
                 previous.DevBridgePackageSha256!,
                 consumerHash,
                 previous.CompatibilityContract!);
-            string executionFingerprint = ProductionToolchainBindingResolver.ComputeExecutionFingerprint(
-                promotedFingerprint,
-                installedExecutableHash,
-                installedAssemblyHash,
-                coordinatorHash,
-                previous.DevBridgePackageSha256!,
-                installedConsumerHash,
-                previous.CompatibilityContract!);
             var unifiedManifest = new
             {
                 schemaVersion = "rimliaison-unified-production-package/v1",
@@ -426,7 +418,7 @@ public static class ToolchainPromotionService
             {
                 SchemaVersion = previous.SchemaVersion,
                 PromotedFingerprint = promotedFingerprint,
-                Fingerprint = executionFingerprint,
+                Fingerprint = promotedFingerprint,
                 RimLiaisonExecutablePath = installedExecutable,
                 RimLiaisonExecutableSha256 = installedExecutableHash,
                 RimLiaisonAssemblyPath = installedAssembly,

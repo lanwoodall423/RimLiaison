@@ -302,8 +302,8 @@ internal static class ProjectMetadataOwnershipTests
                     currentExecutablePath: cliPath);
             Assert(accepted.Succeeded, accepted.Failure?.Error ?? "promoted identity was rejected");
             Assert(
-                accepted.Binding!.Fingerprint.StartsWith("tcx-", StringComparison.Ordinal),
-                "production fingerprint must include immutable execution identities");
+                accepted.Binding!.Fingerprint.StartsWith("tc-", StringComparison.Ordinal),
+                "production fingerprint must be the single unified product identity");
         }
         finally
         {
