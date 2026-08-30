@@ -322,6 +322,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         changed ? "package-manifest-plus-new-owned-generation" : "package-manifest-plus-owned-generation-state",
                         transactionId,
                         workflowId,
+                        activeLeaseId,
                         null,
                         BuiltPackageSha256: packageHash,
                         DeployedPackageSha256: packageHash,
