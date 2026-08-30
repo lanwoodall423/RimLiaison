@@ -228,7 +228,7 @@ public static class ToolchainPromotionService
             }
 
             if (!string.Equals(package.CompatibilityContract, previous.CompatibilityContract, StringComparison.Ordinal) ||
-                !string.Equals(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot, StringComparison.OrdinalIgnoreCase) ||
+                !SamePath(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot) ||
                 !string.Equals(package.DevBridgePackageSha256, previous.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
@@ -699,6 +699,13 @@ public static class ToolchainPromotionService
         string boundary = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar;
         return candidate.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) ? candidate : null;
     }
+    private static bool SamePath(string? left, string? right) =>
+        !string.IsNullOrWhiteSpace(left) &&
+        !string.IsNullOrWhiteSpace(right) &&
+        string.Equals(
+            Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
 
     private static string ReadRuntimeFileHash(string runtimeManifestPath, string relativePath)
     {
