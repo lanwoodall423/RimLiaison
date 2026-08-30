@@ -218,7 +218,8 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             string manifestPath = DeploymentManifestPath(options.RootPath, project, targetRoot);
 
             using Mutex deploymentLock = new(false, "Global\\RimLiaison-DevBridge-Deployment-" + HashText(targetRoot)[..24]);
-            if (!deploymentLock.WaitOne(options.Timeout))
+            bool deploymentLockHeld = deploymentLock.WaitOne(options.Timeout);
+            if (!deploymentLockHeld)
             {
                 return Failure(project, workflowId, transactionId, "DEVBRIDGE_DEPLOYMENT_LOCK_TIMEOUT", "The production deployment boundary was busy.");
             }
@@ -346,7 +347,11 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     try { await new DevBridgeLeaseAdapter(transport, ToBridgeOptions()).EndLeaseAsync(leaseId, workflowId, CancellationToken.None).ConfigureAwait(false); }
                     catch { }
                 }
-                deploymentLock.ReleaseMutex();
+                if (deploymentLockHeld)
+                {
+                    try { deploymentLock.ReleaseMutex(); }
+                    catch (ApplicationException) { }
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -355,7 +360,6 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine("INTERNAL_TRANSACTION_EXCEPTION: " + exception);
             return Failure(project, workflowId, transactionId, "DEVBRIDGE_INTERNAL_TRANSACTION_FAILED", Bound(exception.Message));
         }
         finally
