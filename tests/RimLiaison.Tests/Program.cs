@@ -48,16 +48,19 @@ internal static class Program
         ("Insight Canvas project-owned metadata passes", ProjectMetadataOwnershipTests.InsightCanvasProjectOwnedMetadataPasses),
         ("wrong metadata owner fails closed", ProjectMetadataOwnershipTests.WrongMetadataOwnerFailsClosed),
         ("project-owned recipe resolves", ValidationRecipeResolverTests.ProjectOwnedRecipeResolves),
+        ("project-owned recipe resolves by convention", ValidationRecipeResolverTests.ProjectOwnedRecipeResolvesByConvention),
         ("builtin recipe resolves", ValidationRecipeResolverTests.BuiltinRecipeResolves),
         ("missing recipe returns structured failure", ValidationRecipeResolverTests.MissingRecipeReturnsStructuredFailure),
         ("project recipe does not require central runtime", ValidationRecipeResolverTests.ProjectRecipeDoesNotRequireCentralRuntime),
         ("relative recipe path survives repository move", ValidationRecipeResolverTests.RelativeRecipePathSurvivesRepositoryMove),
+        ("recipe id traversal is rejected", ValidationRecipeResolverTests.RecipeIdTraversalIsRejected),
         ("absolute recipe path is rejected", ValidationRecipeResolverTests.AbsoluteRecipePathIsRejected),
         ("foreign project recipe is rejected", ValidationRecipeResolverTests.ForeignProjectRecipeIsRejected),
         ("ambiguous legacy ownership fails closed", ValidationRecipeResolverTests.AmbiguousLegacyOwnershipFailsClosed),
         ("legacy recipe resolves deterministically", ValidationRecipeResolverTests.LegacyProjectRecipeMigratesDeterministically),
         ("recipe hash and schema are recorded", ValidationRecipeResolverTests.RecipeHashAndSchemaAreRecorded),
         ("ecosystem recipes resolve", ValidationRecipeResolverTests.EcosystemRecipesResolve),
+        ("ecosystem recipes resolve by convention", ValidationRecipeResolverTests.EcosystemRecipesResolveByConvention),
         ("managed project identity map explicit", CanonicalProjectIdentityTests.ManagedProjectIdentityMapIsExplicit),
         ("DRF display and routing share canonical identity", CanonicalProjectIdentityTests.DrfDisplayNameAndRoutingSlugResolveSameCanonical),
         ("Frontier identifiers resolve correctly", CanonicalProjectIdentityTests.FrontierIdentifiersResolveCorrectly),
@@ -8932,7 +8935,6 @@ internal static class Program
                   "expectedAssembly":"Fixture.dll",
                   "deploymentTarget":"1.6/Assemblies/Fixture.dll",
                   "testRecipe":"fixture",
-                  "testRecipePath":".rimdev/recipes/fixture.json",
                   "runtimePackage":{"sourceRoot":".","include":["About/**"]}
                 }
                 """);
@@ -9059,6 +9061,7 @@ internal static class Program
                 {
                   "schemaVersion": "rimdev-stack/v1",
                   "project": "Fixture",
+                  "devBridgeProject": "fixture",
                   "catalog": "TestCatalog/catalog.json",
                   "rimBridge": "via-devbridge",
                   "workload": "production",
@@ -9076,6 +9079,10 @@ internal static class Program
                   }
                 }
                 """);
+            Directory.CreateDirectory(Path.Combine(repository, ".rimdev", "recipes"));
+            File.WriteAllText(
+                Path.Combine(repository, ".rimdev", "recipes", "fixture-development.json"),
+                """{"schemaVersion":"devbridge-test-recipe/v1","id":"fixture-development","description":"fixture","projects":["fixture"],"inputs":{"quicktest":true},"requiresReady":true,"success":{"quicktestReady":true}}""");
 
             var transport = new FakeTransport((_, _) => ProcessResult(
                 JsonSerializer.Serialize(new

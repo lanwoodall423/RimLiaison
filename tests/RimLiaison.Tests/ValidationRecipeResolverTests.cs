@@ -13,6 +13,19 @@ internal static class ValidationRecipeResolverTests
             "demo", "demo-smoke", repo.Root, ".rimdev/recipes/demo-smoke.json", null);
         Assert(result.IsSuccess && result.Recipe is { Source: "PROJECT_OWNED" }, "project recipe must resolve from metadata");
     }
+    public static void ProjectOwnedRecipeResolvesByConvention()
+    {
+        using TempRepo repo = TempRepo.Create("convention");
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
+            "demo", "demo-smoke", repo.Root, null, null);
+        Assert(result.IsSuccess &&
+               result.Recipe is { Source: "PROJECT_OWNED" } &&
+               result.Recipe.Path.Equals(
+                   Path.Combine(repo.Root, ".rimdev", "recipes", "demo-smoke.json"),
+                   StringComparison.OrdinalIgnoreCase),
+            "project recipe ids must resolve through the canonical project convention");
+    }
+
 
     public static void BuiltinRecipeResolves()
     {
@@ -36,7 +49,7 @@ internal static class ValidationRecipeResolverTests
     {
         using TempRepo repo = TempRepo.Create("no-central");
         ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
-            "demo", "demo-smoke", repo.Root, ".rimdev/recipes/demo-smoke.json", null);
+            "demo", "demo-smoke", repo.Root, null, null);
         Assert(result.IsSuccess, "project-owned recipe must resolve without a central catalog");
     }
 
@@ -49,6 +62,15 @@ internal static class ValidationRecipeResolverTests
         ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
             "demo", "demo-smoke", second.Root, ".rimdev/recipes/demo-smoke.json", null);
         Assert(result.IsSuccess && result.Recipe!.Path.StartsWith(moved, StringComparison.OrdinalIgnoreCase), "relative recipe metadata must survive a repository move");
+    }
+
+    public static void RecipeIdTraversalIsRejected()
+    {
+        using TempRepo repo = TempRepo.Create("traversal");
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
+            "demo", "../other", repo.Root, null, null);
+        Assert(result.ErrorCode == "PROJECT_RECIPE_ID_INVALID",
+            "recipe ids must reject path traversal before path construction");
     }
 
     public static void AbsoluteRecipePathIsRejected()
@@ -96,6 +118,19 @@ internal static class ValidationRecipeResolverTests
         Assert(result.IsSuccess && result.Recipe!.Sha256 == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) &&
                result.Recipe.SchemaVersion == "devbridge-test-recipe/v1", "recipe hash and schema must be recorded");
     }
+    public static void EcosystemRecipesResolveByConvention()
+    {
+        AssertResolveByConvention("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke");
+        AssertResolveByConvention("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke");
+        AssertResolveByConvention("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite");
+    }
+
+    private static void AssertResolveByConvention(string root, string project, string id)
+    {
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(project, id, root, null, null);
+        Assert(result.IsSuccess, $"{id} must resolve by convention: {result.ErrorCode} {result.Error}");
+    }
+
 
     public static void EcosystemRecipesResolve()
     {

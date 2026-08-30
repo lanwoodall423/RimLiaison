@@ -595,6 +595,10 @@ internal static class RuntimeRootEnrollmentTests
                     exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
                 }
             }));
+            Directory.CreateDirectory(Path.Combine(project, ".rimdev", "recipes"));
+            File.WriteAllText(
+                Path.Combine(project, ".rimdev", "recipes", "demo-smoke.json"),
+                """{"schemaVersion":"devbridge-test-recipe/v1","id":"demo-smoke","description":"fixture","projects":["demo"],"inputs":{"quicktest":true},"requiresReady":true,"success":{"quicktestReady":true}}""");
             var environment = new TestEnvironment(root, project, rimWorld, mods);
             environment.WriteWorkspace(new
             {

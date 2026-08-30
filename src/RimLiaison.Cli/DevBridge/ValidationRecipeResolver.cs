@@ -20,9 +20,11 @@ public sealed record ValidationRecipeResolutionResult(
 }
 
 /// <summary>
-/// Resolves validation recipes from project metadata first. Only an explicit
-/// project-relative path or a bounded central builtin/legacy compatibility path
-/// is considered; source/worktree searching is intentionally forbidden.
+/// Resolves validation recipes from the requesting project first. A project
+/// recipe uses its explicit project-relative path when declared, otherwise the
+/// canonical .rimdev/recipes/{id}.json convention. Only after that bounded
+/// project lookup may a legacy central compatibility path be considered.
+/// Source/worktree searching is intentionally forbidden.
 /// </summary>
 public static class ValidationRecipeResolver
 {
@@ -40,6 +42,9 @@ public static class ValidationRecipeResolver
     {
         if (string.IsNullOrWhiteSpace(ownerProject) || string.IsNullOrWhiteSpace(recipeId))
             return Failure("PROJECT_RECIPE_REQUEST_INVALID", "A project and recipe id are required.");
+
+        if (!IsSafeToken(recipeId))
+            return Failure("PROJECT_RECIPE_ID_INVALID", "Recipe ids must be portable single-file tokens.");
 
         string sourceRoot;
         try
@@ -63,22 +68,38 @@ public static class ValidationRecipeResolver
             return ReadAndValidate(path, ownerProject, recipeId, "PROJECT_OWNED");
         }
 
-        string? centralPath = null;
         if (BuiltinIds.Contains(recipeId))
         {
-            centralPath = ExactCentralPath(toolchainRoot, recipeId);
-            return centralPath is null
+            string? centralBuiltinPath = ExactCentralPath(toolchainRoot, recipeId);
+            return centralBuiltinPath is null
                 ? Failure("TEST_RECIPE_NOT_FOUND", "The declared toolchain builtin recipe is unavailable.")
-                : ReadAndValidate(centralPath, ownerProject, recipeId, "TOOLCHAIN_BUILTIN");
+                : ReadAndValidate(centralBuiltinPath, ownerProject, recipeId, "TOOLCHAIN_BUILTIN");
         }
 
-        // Compatibility is bounded to one exact legacy file and one unambiguous
-        // project owner. It is never a search across source or worktree paths.
-        centralPath = ExactCentralPath(toolchainRoot, recipeId);
+        string projectConventionPath = Path.Combine(
+            sourceRoot,
+            ".rimdev",
+            "recipes",
+            recipeId + ".json");
+        if (IsWithin(projectConventionPath, sourceRoot) && File.Exists(projectConventionPath))
+            return ReadAndValidate(projectConventionPath, ownerProject, recipeId, "PROJECT_OWNED");
+
+        // Compatibility is bounded to one exact legacy file and one
+        // unambiguous project owner. It is never a search across paths.
+        string? centralPath = ExactCentralPath(toolchainRoot, recipeId);
         if (centralPath is null)
-            return Failure("PROJECT_RECIPE_NOT_FOUND", "The project-owned recipe is not declared and no bounded legacy file exists.");
+            return Failure("PROJECT_RECIPE_NOT_FOUND",
+                $"The project-owned recipe '{recipeId}' was not found at the canonical project path.");
         return ReadAndValidate(centralPath, ownerProject, recipeId, "LEGACY_CENTRAL_PROJECT_RECIPE");
     }
+
+
+    private static bool IsSafeToken(string value) =>
+        value.Length is > 0 and <= 128 &&
+        value.All(character =>
+            character is (>= 'A' and <= 'Z') or
+            (>= 'a' and <= 'z') or
+            (>= '0' and <= '9') or '.' or '_' or '-');
 
     private static ValidationRecipeResolutionResult ReadAndValidate(
         string path,

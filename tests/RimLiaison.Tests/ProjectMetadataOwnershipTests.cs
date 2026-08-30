@@ -159,6 +159,7 @@ internal static class ProjectMetadataOwnershipTests
                     exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
                 }
             });
+            WriteProjectRecipe(root, "mod-development-smoke", devBridgeProject);
             WriteManifest(root, manifest);
             string runtimeRoot = Path.Combine(Path.GetTempPath(), project + "-Runtime");
             ProjectOwnedDescriptorMaterialization? materialization =
@@ -375,8 +376,8 @@ internal static class ProjectMetadataOwnershipTests
             "<ModMetaData><packageId>lan.frontier</packageId></ModMetaData>");
         return root;
     }
-
-    private static void WriteProductionManifest(string root, string expectedAssembly = "Frontier.dll") =>
+    private static void WriteProductionManifest(string root, string expectedAssembly = "Frontier.dll")
+    {
         WriteManifest(root, JsonSerializer.Serialize(new
         {
             schemaVersion = "rimdev-stack/v1",
@@ -398,6 +399,24 @@ internal static class ProjectMetadataOwnershipTests
                 exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
             }
         }));
+        WriteProjectRecipe(root, "mod-development-smoke", "Frontier");
+    }
+
+    private static void WriteProjectRecipe(string root, string id, string owner)
+    {
+        string path = Path.Combine(root, ".rimdev", "recipes", id + ".json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, JsonSerializer.Serialize(new
+        {
+            schemaVersion = "devbridge-test-recipe/v1",
+            id,
+            description = "test",
+            projects = new[] { owner },
+            inputs = new { quicktest = true },
+            requiresReady = true,
+            success = new { quicktestReady = true }
+        }));
+    }
 
     private static void WriteManifest(string root, string json) =>
         File.WriteAllText(Path.Combine(root, ".rimdev", "stack.json"), json);
