@@ -140,43 +140,46 @@ producer's `logicalAgentId`; run/session IDs remain visible for diagnosis.
 Generated observability, profiles, indexes, and proof records belong to their ignored or external
 owners; they are not source changes and should not be committed.
 
-For an affected run, Tooling also owns routine prerequisite recovery: safe descriptor reconciliation,
-one partial-index rebuild/retry, bounded readiness recovery, routine lease acquisition/release, and
-transactional viewport restoration. Inspect `orchestration` in the JSON result for separate
-source/build, static/test, deployment/artifact, runtime, and infrastructure dimensions. In
-particular, `artifactFreshness.evaluationStatus=NOT_EVALUATED` means the transaction never reached
-freshness evaluation; it is not evidence of a stale deployed artifact. Only ambiguity, active
-contention, unsafe or unwritable state, owner refusal, or another result explicitly marked as
-requiring intervention should stop for manual repair.
+For an affected run, RimLiaison owns routine prerequisite recovery through the same bounded
+service used by `doctor`, `affected`, and release/promotion operations. Its fixed escalation
+ladder is:
+
+`normal -> RECONCILE -> COORDINATOR_RECYCLE -> FULL_RUNTIME_RESET -> ready -> retry once`
+
+`RECONCILE` reconnects and re-probes. `COORDINATOR_RECYCLE` uses the managed coordinator
+control plane and only the exact owned coordinator. `FULL_RUNTIME_RESET` uses the managed
+runtime shutdown, RimWorld restart, wait-ready, and readiness verification commands. The
+full reset is permitted only at `PRE_MUTATION`; after deployment, lease acquisition, or
+assertions begin, recovery is conservative and never replays a stateful operation.
+The original operation is retried at most once after readiness is proven. Successful internal
+repair reports `toolchainRecovery` plus the compatibility `toolchainRecoveryCount` and
+`toolchainRecoveryTypes` evidence without changing the project result.
 
 Affected JSON includes additive `validationDiagnosis` evidence for the chain
 `source -> build -> deploy -> artifact-freshness -> readiness -> lease -> runtime -> evidence`.
-Use `result` as the agent-facing classification:
+The canonical agent result is:
 
-- `PASS`: every boundary completed with current-artifact evidence.
-- `PROJECT_VALIDATION_FAILED`: project runtime executed and returned an assertion failure.
-- `INFRASTRUCTURE_BLOCKED`: a tooling boundary stopped validation before a project assertion,
-  or runtime infrastructure failed.
-- `NOT_PROVEN`: evidence is incomplete or ambiguous; do not infer project failure.
+- `PASS`: validation completed with current-artifact evidence, with or without internal recovery.
+- `MOD_FAILURE`: the toolchain executed and found a project compile, runtime assertion, or
+  project-owned configuration/recipe failure. Fix the project and rerun.
+- `TOOLCHAIN_FATAL`: RimLiaison exhausted one safe recovery cycle or could not prove identity,
+  freshness, or replay safety. Stop project changes and report the attached handoff.
 
-`firstFailedBoundary`, `code`, `probableOwner`, `ownershipConfidence`,
-`projectRuntimeExecuted`, `artifactFreshness`, `readiness`, `lease`, and `evidenceIds` explain
-where the chain stopped. A `DEVELOPMENT_BUILD_FAILED` result before lease/runtime is
-`INFRASTRUCTURE_BLOCKED`, never a mod failure. Follow `nextAction` and rerun the canonical
-affected command after the owning boundary is repaired.
+The failure object preserves the original code, classification, recovery attempt/result, last safe
+checkpoint, workflow/transaction/lease/generation identities, and evidence references. Internal
+codes remain diagnostic; agents do not decide ownership from them.
 
-Shared RimLiaison Runtime transitions are bounded and owner-mediated. For a
-`READINESS_IDENTITY_MISMATCH`, RimLiaison classifies the returned field before acting:
-generation/process churn and same-root stale descriptor/profile registration are recovery
-candidates; coordinator changes require same-root evidence; installation/root/owner,
-protocol/schema, and unknown mismatches are hard failures. A recoverable mismatch records the
-authoritative configured root and responding identity, refreshes/reconciles through the internal
-runtime, waits for a fresh READY generation, rechecks the source fingerprint, and retries the
-complete development/freshness transaction up to three times. Successful recovery reports
-`recovered`; refusal or exhaustion reports `INFRASTRUCTURE_FAILURE` with `NOT_RUN`, the mismatch
-details, and the recovery attempt count. The old generation, lease, artifact proof, and runtime
-evidence are never reused. Agents must not kill, restart, or take over another valid
-RimLiaison Runtime/RimWorld owner.
+RimLiaison may recover a known legacy central project recipe only when the exact owner, schema, id,
+and SHA-256 are proven. It records the legacy source and resolved identity; it never invents test
+semantics. A genuinely missing project recipe is `MOD_FAILURE`. Missing toolchain builtin recipes
+are reconciled as toolchain state, or become `TOOLCHAIN_FATAL` if qualification is ambiguous.
+
+For timeouts or no-response results, RimLiaison first determines whether the request was
+pre-mutation/idempotent or reconciles durable transaction evidence. It retries a stateful action
+only with at-most-once proof. Otherwise it fails `TOOLCHAIN_FATAL`; agents must not replay it.
+
+Agents must not manually run coordinator recovery, edit workspace bindings, copy runtime files,
+acquire leases, choose slots/endpoints/generations, or invoke old DevBridge recovery commands.
 
 ### Production-first validation policy
 

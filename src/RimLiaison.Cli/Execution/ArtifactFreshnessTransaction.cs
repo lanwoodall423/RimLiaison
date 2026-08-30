@@ -30,18 +30,24 @@ public sealed class ArtifactFreshnessTransaction
     private readonly IDevBridgeLeaseAdapter? leaseAdapter;
     private readonly IDevBridgeFreshGenerationAdapter? readinessAdapter;
     private readonly IGitRepositoryStateProvider? repositoryStateProvider;
+    private readonly IDevBridgeProcessTransport? recoveryTransport;
+    private readonly DevBridgeAdapterOptions? recoveryOptions;
 
     public ArtifactFreshnessTransaction(
         IDevBridgeModDevelopmentAdapter developmentAdapter,
         IDevBridgeLeaseAdapter? leaseAdapter = null,
         IDevBridgeFreshGenerationAdapter? readinessAdapter = null,
-        IGitRepositoryStateProvider? repositoryStateProvider = null)
+        IGitRepositoryStateProvider? repositoryStateProvider = null,
+        IDevBridgeProcessTransport? recoveryTransport = null,
+        DevBridgeAdapterOptions? recoveryOptions = null)
     {
         this.developmentAdapter = developmentAdapter ??
             throw new ArgumentNullException(nameof(developmentAdapter));
         this.leaseAdapter = leaseAdapter;
         this.readinessAdapter = readinessAdapter;
         this.repositoryStateProvider = repositoryStateProvider;
+        this.recoveryTransport = recoveryTransport;
+        this.recoveryOptions = recoveryOptions;
     }
 
     public async Task<ArtifactFreshnessTransactionResult> PrepareAsync(
@@ -141,6 +147,99 @@ public sealed class ArtifactFreshnessTransaction
         }
 
         List<RimTestPrerequisiteRecovery>? recoveryEvents = null;
+        bool managedRecoveryUsed = false;
+        if (string.IsNullOrWhiteSpace(request.LeaseId) &&
+            recoveryTransport is not null &&
+            recoveryOptions is not null &&
+            ProductionExecutionPolicy.RequiresPreMutationEscalation(
+                result.Status.ErrorCode))
+        {
+            managedRecoveryUsed = true;
+            DevBridgeCapabilityRecoveryResult managedRecovery =
+                await DevBridgeCapabilityRecovery.RecoverAsync(
+                        recoveryTransport,
+                        recoveryOptions,
+                        request.WorkflowId,
+                        cancellationToken,
+                        triggerCode: result.Status.ErrorCode,
+                        checkpoint: ProductionCheckpoint.PreMutation)
+                    .ConfigureAwait(false);
+            recoveryEvents =
+            [
+                new RimTestPrerequisiteRecovery(
+                    "managed-runtime-reset",
+                    managedRecovery.Succeeded
+                        ? "recovered"
+                        : "recoveryFailed",
+                    managedRecovery.Attempts,
+                    result.Status.ErrorCode,
+                    managedRecovery.HighestLevel,
+                    request.WorkflowId,
+                    null,
+                    Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                        ProductionCheckpoint.PreMutation),
+                    ElapsedRecoveryMilliseconds:
+                        managedRecovery.ElapsedRecoveryMilliseconds)
+            ];
+            if (!managedRecovery.Succeeded)
+            {
+                return Failure(
+                    request,
+                    result.Status with
+                    {
+                        ErrorCode = managedRecovery.ErrorCode ?? result.Status.ErrorCode,
+                        Error = managedRecovery.Error ?? result.Status.Error,
+                        RecoveryState = PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts = managedRecovery.Attempts,
+                        RecoveryAction = managedRecovery.HighestLevel
+                    },
+                    freshness: RimTestArtifactFreshness.From(result, request.WorkflowId),
+                    recoveryEvents: recoveryEvents);
+            }
+
+            try
+            {
+                result = await developmentAdapter.RunAsync(
+                        request.Project,
+                        request.RepositoryRoot,
+                        request.SourceFingerprint,
+                        request.WorkflowId,
+                        executionContext: null,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                exception is OperationCanceledException or
+                IOException or InvalidOperationException)
+            {
+                result = result with
+                {
+                    Status = new DevBridgeAdapterStatus(
+                        exception is OperationCanceledException
+                            ? DevBridgeOutcomeKind.Cancelled
+                            : DevBridgeOutcomeKind.InfrastructureFailure,
+                        exception is OperationCanceledException
+                            ? "RIMTEST_CANCELLED"
+                            : "DEVBRIDGE_MOD_TRANSACTION_FAILED",
+                        Bound(exception.Message),
+                        RecoveryState: PrerequisiteRecoveryState.RecoveryFailed,
+                        RecoveryAttempts: managedRecovery.Attempts,
+                        RecoveryAction: "retry-after-managed-runtime-reset")
+                };
+            }
+            result = result with
+            {
+                Status = result.Status with
+                {
+                    RecoveryState = managedRecovery.Succeeded
+                        ? PrerequisiteRecoveryState.Recovered
+                        : PrerequisiteRecoveryState.RecoveryFailed,
+                    RecoveryAttempts = managedRecovery.Attempts,
+                    RecoveryAction = "retry-after-managed-runtime-reset"
+                }
+            };
+        }
+
         if (DevBridgeIdentityMismatchPolicy.IsIdentityMismatch(result.Status))
         {
             IdentityRecoveryResult identityRecovery =
@@ -160,7 +259,8 @@ public sealed class ArtifactFreshnessTransaction
                     recoveryEvents: recoveryEvents);
             }
         }
-        else if (RuntimeTransitionRecoveryClassifier.IsRecoverable(result.Status))
+        else if (!managedRecoveryUsed &&
+            RuntimeTransitionRecoveryClassifier.IsRecoverable(result.Status))
         {
             recoveryEvents = [];
             int? previousGeneration = result.Generation ?? result.Freshness?.Generation;
@@ -171,7 +271,9 @@ public sealed class ArtifactFreshnessTransaction
                 result.Status.ErrorCode,
                 RuntimeTransitionRecoveryClassifier.RecoverAction,
                 request.WorkflowId,
-                previousGeneration));
+                previousGeneration,
+                Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                    ProductionCheckpoint.PreMutation)));
             RecordTransitionRecovery(
                 AgentEventTypes.RetryStarted,
                 "Waiting for DevBridge to settle a shared runtime transition.",
@@ -439,6 +541,17 @@ public sealed class ArtifactFreshnessTransaction
             }
 
             recoveryAttempts = Math.Max(1, recoveryAttempts + 1);
+            recoveryEvents ??= [];
+            recoveryEvents.Add(new RimTestPrerequisiteRecovery(
+                "lease",
+                "recovering",
+                recoveryAttempts,
+                result.Status.ErrorCode,
+                "acquire-compatible-lease",
+                request.WorkflowId,
+                result.Generation ?? result.Freshness?.Generation,
+                Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                    ProductionCheckpoint.PreMutation)));
             DevBridgeLeaseResult lease;
             try
             {
@@ -449,6 +562,14 @@ public sealed class ArtifactFreshnessTransaction
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                recoveryEvents!.Add(new RimTestPrerequisiteRecovery(
+                    "lease",
+                    "recoveryFailed",
+                    recoveryAttempts,
+                    "RIMTEST_CANCELLED",
+                    "acquire-compatible-lease",
+                    request.WorkflowId,
+                    result.Generation ?? result.Freshness?.Generation));
                 return Failure(
                     request,
                     new DevBridgeAdapterStatus(
@@ -461,6 +582,14 @@ public sealed class ArtifactFreshnessTransaction
             }
             catch (Exception exception)
             {
+                recoveryEvents!.Add(new RimTestPrerequisiteRecovery(
+                    "lease",
+                    "recoveryFailed",
+                    recoveryAttempts,
+                    "DEVBRIDGE_LEASE_ACQUIRE_FAILED",
+                    "acquire-compatible-lease",
+                    request.WorkflowId,
+                    result.Generation ?? result.Freshness?.Generation));
                 return Failure(
                     request,
                     new DevBridgeAdapterStatus(
@@ -476,6 +605,14 @@ public sealed class ArtifactFreshnessTransaction
             if (!lease.IsUsable)
             {
                 PrerequisiteRecoveryState state = LeaseRecoveryState(lease.Status);
+                recoveryEvents!.Add(new RimTestPrerequisiteRecovery(
+                    "lease",
+                    LeaseRecoveryState(lease.Status).ToWireName(),
+                    recoveryAttempts,
+                    lease.Status.ErrorCode ?? result.Status.ErrorCode,
+                    "acquire-compatible-lease",
+                    request.WorkflowId,
+                    result.Generation ?? result.Freshness?.Generation));
                 return Failure(
                     request,
                     result.Status with
@@ -583,6 +720,20 @@ public sealed class ArtifactFreshnessTransaction
                     }
                 };
             }
+            recoveryEvents!.Add(new RimTestPrerequisiteRecovery(
+                "lease",
+                released && result.Status.IsSuccess
+                    ? "recovered"
+                    : "recoveryFailed",
+                recoveryAttempts,
+                result.Status.ErrorCode ?? releaseErrorCode,
+                released
+                    ? "retry-after-lease-acquisition"
+                    : "release-recovered-lease",
+                request.WorkflowId,
+                result.Generation ?? result.Freshness?.Generation,
+                Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                    ProductionCheckpoint.PreMutation)));
         }
 
         RimTestArtifactFreshness freshness = RimTestArtifactFreshness.From(

@@ -40,6 +40,21 @@ public sealed class RimTestOrchestrationSummary
     [JsonPropertyName("infrastructure")]
     public required string Infrastructure { get; init; }
 
+    [JsonPropertyName("toolchainRecoveryCount")]
+    public int? ToolchainRecoveryCount { get; init; }
+
+    [JsonPropertyName("toolchainRecoveryTypes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ToolchainRecoveryTypes { get; init; }
+
+    [JsonPropertyName("toolchainRecovery")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimTestToolchainRecovery? ToolchainRecovery { get; init; }
+
+    [JsonPropertyName("lastSafeCheckpoint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastSafeCheckpoint { get; init; }
+
     [JsonPropertyName("failure")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RimTestOrchestrationFailure? Failure { get; init; }
@@ -110,6 +125,12 @@ public sealed class RimTestOrchestrationFailure
 
     [JsonPropertyName("recoveryResult")]
     public required string RecoveryResult { get; init; }
+
+    [JsonPropertyName("classification")]
+    public required string Classification { get; init; }
+    [JsonPropertyName("lastSafeCheckpoint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastSafeCheckpoint { get; init; }
 
     [JsonPropertyName("retrySafe")]
     public bool RetrySafe { get; init; }
@@ -201,6 +222,14 @@ internal static class RimTestOrchestrationProjector
         bool freshnessStale = freshnessRequested &&
             freshness?.EvaluationStatus == "STALE";
         string? freshnessErrorCode = freshnessStatus?.ErrorCode ?? freshness?.ErrorCode;
+        string? testErrorCode = execution.Tests
+            .Select(static test => test.ErrorCode)
+            .FirstOrDefault(static code => !string.IsNullOrWhiteSpace(code));
+        string? primaryErrorCode = selectionErrorCode ?? freshnessErrorCode ?? testErrorCode;
+        ProductionFailureAssessment assessment =
+            ProductionExecutionPolicy.Classify(primaryErrorCode);
+        bool projectOwnedFailure = execution.Tests.Any(IsProjectTestFailure) ||
+            assessment.IsProjectFailure;
         bool recoveryFailed = HasRecoveryState(
             execution.PrerequisiteRecovery,
             "recoveryFailed",
@@ -229,6 +258,16 @@ internal static class RimTestOrchestrationProjector
             hasInfrastructureFailure ||
             cleanupFailed ||
             ((freshnessFailed || freshnessStale) && !sourceBuildFailure);
+
+        string[] recoveryTypes = (execution.PrerequisiteRecovery ?? [])
+            .Select(static recovery => recovery.Component)
+            .Where(static component => !string.IsNullOrWhiteSpace(component))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static component => component, StringComparer.Ordinal)
+            .Take(16)
+            .ToArray();
+        RimTestToolchainRecovery? toolchainRecovery =
+            RimTestSuiteResultFactory.ProjectToolchainRecovery(execution.PrerequisiteRecovery);
 
         string staticTests = execution.Tests.Count == 0
             ? "NOT_RUN"
@@ -299,18 +338,25 @@ internal static class RimTestOrchestrationProjector
         return new RimTestOrchestrationSummary
         {
             Overall = overall,
-            AgentOutcome = hasCancelled
-                ? "INFRASTRUCTURE_FAILURE"
-                : hasTestFailure || sourceBuildFailure
+            AgentOutcome = overall == "PASS"
+                ? "PASS"
+                : projectOwnedFailure
                     ? "MOD_FAILURE"
-                    : overall == "PASS"
-                        ? "PASS"
-                        : "INFRASTRUCTURE_FAILURE",
+                    : "TOOLCHAIN_FATAL",
             SourceBuild = sourceBuild,
             StaticTests = staticTests,
             Deployment = deployment,
             RuntimeValidation = runtime,
             Infrastructure = infrastructure,
+            ToolchainRecoveryCount = recoveryTypes.Length == 0 ? null : recoveryTypes.Length,
+            ToolchainRecovery = toolchainRecovery,
+            ToolchainRecoveryTypes = recoveryTypes.Length == 0 ? null : recoveryTypes,
+            LastSafeCheckpoint = overall == "PASS" && recoveryTypes.Length == 0
+                ? null
+                : LastSafeCheckpointFor(
+                    execution,
+                    freshnessRequested,
+                    freshness),
             Failure = failure,
             Cleanup = execution.Cleanup
         };
@@ -391,8 +437,13 @@ internal static class RimTestOrchestrationProjector
             CausalChain = CausalChainFor(execution.SuiteId, owner, failureSurface, project),
             RecoveryAttempted = recoveryAttempted,
             RecoveryResult = recoveryResult,
-            RetrySafe = retrySafe,
+            Classification = ProductionExecutionPolicy.Classify(errorCode).Classification.ToString(),
+            LastSafeCheckpoint = LastSafeCheckpointFor(
+                execution,
+                freshnessStatus is not null || freshness is not null,
+                freshness),
             ManualInterventionRequired = ManualInterventionFor(errorCode, recoveryResult),
+            RetrySafe = retrySafe,
             NextAction = selectionNextAction ?? child?.NextAction ??
                 freshnessStatus?.RecoveryAction ??
                 (owner == "DevBridge2" ? "DevBridge.cmd doctor --json" : null),
@@ -436,6 +487,29 @@ internal static class RimTestOrchestrationProjector
             : $"Validation orchestration failed ({errorCode})";
     }
 
+    private static string LastSafeCheckpointFor(
+        CatalogSuiteExecutionResult execution,
+        bool freshnessRequested,
+        RimTestArtifactFreshness? freshness)
+    {
+        if (execution.Tests.Count > 0)
+        {
+            return ProductionExecutionPolicy.CheckpointName(
+                ProductionCheckpoint.AssertionsStarted);
+        }
+
+        if (freshness?.DeploymentDecision is "deployed" or "unchanged")
+        {
+            return ProductionExecutionPolicy.CheckpointName(
+                ProductionCheckpoint.DeploymentCommitted);
+        }
+
+        return ProductionExecutionPolicy.CheckpointName(
+            freshnessRequested
+                ? ProductionCheckpoint.PreMutation
+                : ProductionCheckpoint.BuildComplete);
+    }
+
     private static IReadOnlyList<RimTestCausalAttribution> CausalChainFor(
         string suiteId,
         string owner,
@@ -468,9 +542,15 @@ internal static class RimTestOrchestrationProjector
         (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
          errorCode.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
          errorCode.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
-         errorCode.StartsWith("DEVBRIDGE_BUILD", StringComparison.OrdinalIgnoreCase) ||
-         errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase) ||
-         errorCode.Contains("COMPIL", StringComparison.OrdinalIgnoreCase));
+         errorCode.Contains("COMPIL", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsProjectTestFailure(RimTestResult test) =>
+        test.Status == RimTestValidationStates.Fail &&
+        (string.IsNullOrWhiteSpace(test.ErrorCode) ||
+         ProductionExecutionPolicy.IsProjectOwned(test.ErrorCode) ||
+         test.ErrorCode.StartsWith("TEST_", StringComparison.OrdinalIgnoreCase) ||
+         test.ErrorCode.Contains("ASSERTION", StringComparison.OrdinalIgnoreCase));
 
     private static string OwnerFor(string errorCode) =>
         errorCode.StartsWith("RIMCONTEXT_", StringComparison.Ordinal)

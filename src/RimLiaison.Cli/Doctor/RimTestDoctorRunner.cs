@@ -247,6 +247,29 @@ internal sealed class RimTestDoctorRunner
                 transport,
                 cancellationToken)
             .ConfigureAwait(false);
+        if (!devBridgeProbe.Ready &&
+            ProductionExecutionPolicy.IsRecoverable(devBridgeProbe.Code))
+        {
+            DevBridgeCapabilityRecoveryResult recovery =
+                await DevBridgeCapabilityRecovery.RecoverAsync(
+                        transport,
+                        devBridge,
+                        workflowId: null,
+                        cancellationToken,
+                        triggerCode: devBridgeProbe.Code)
+                    .ConfigureAwait(false);
+            if (recovery.Succeeded)
+            {
+                devBridgeProbe = RecoveredProbe(recovery);
+            }
+            else
+            {
+                devBridgeProbe = devBridgeProbe with
+                {
+                    Details = MergeRecoveryDetails(devBridgeProbe.Details, recovery)
+                };
+            }
+        }
         if (!devBridgeProbe.Ready)
         {
             WriteDiagnostic("devbridge", devBridgeProbe.Code);
@@ -809,6 +832,54 @@ internal sealed class RimTestDoctorRunner
         }
 
         return new DoctorRunResult(3, output);
+    }
+
+    private static ProbeResult RecoveredProbe(
+        DevBridgeCapabilityRecoveryResult recovery)
+    {
+        string? integrationStatus = null;
+        if (!string.IsNullOrWhiteSpace(recovery.Process?.Stdout))
+        {
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(recovery.Process.Stdout);
+                integrationStatus = ReadRimBridgeStatus(document.RootElement);
+            }
+            catch (JsonException)
+            {
+                // Readiness was already established by the bounded recovery.
+            }
+        }
+
+        return Success(integrationStatus) with
+        {
+            Details = MergeRecoveryDetails(null, recovery)
+        };
+    }
+
+    private static IReadOnlyDictionary<string, object?> MergeRecoveryDetails(
+        IReadOnlyDictionary<string, object?>? details,
+        DevBridgeCapabilityRecoveryResult recovery)
+    {
+        var merged = new Dictionary<string, object?>(
+            details ?? new Dictionary<string, object?>(),
+            StringComparer.Ordinal);
+        merged["recovery"] = new
+        {
+            attempted = true,
+            state = recovery.State.ToWireName(),
+            attempts = recovery.Attempts,
+            trigger = recovery.Trigger,
+            highestLevel = recovery.HighestLevel,
+            rimWorldRestarted = recovery.RimWorldRestarted,
+            finalState = recovery.FinalState,
+            elapsedRecoveryMs = recovery.ElapsedRecoveryMilliseconds,
+            actions = recovery.Actions,
+            errorCode = recovery.ErrorCode,
+            error = recovery.Error,
+            action = "escalate-managed-runtime-and-reprobe"
+        };
+        return merged;
     }
 
     private static ProbeResult Success(string? integrationStatus = null) =>

@@ -1890,7 +1890,8 @@ public static class CliApplication
                         recoveryContext.Transport,
                         recoveryContext.Options,
                         workflowId,
-                        cancellationToken)
+                        cancellationToken,
+                        triggerCode: result.Status.ErrorCode)
                     .ConfigureAwait(false);
                 AgentObservabilityRuntime.Record(
                     DevelopmentStage.Analysis,
@@ -1999,6 +2000,12 @@ public static class CliApplication
                 state = recovery.State.ToString(),
                 attempts = recovery.Attempts,
                 errorCode = recovery.ErrorCode,
+                trigger = recovery.Trigger,
+                highestLevel = recovery.HighestLevel,
+                rimWorldRestarted = recovery.RimWorldRestarted,
+                finalState = recovery.FinalState,
+                elapsedRecoveryMs = recovery.ElapsedRecoveryMilliseconds,
+                actions = recovery.Actions,
                 error = recovery.Error
             };
         }
@@ -3442,7 +3449,9 @@ public static class CliApplication
                             freshGenerationAdapter,
                             protectRepositoryWorktree
                                 ? new SystemGitRepositoryStateProvider()
-                                : null)
+                                : null,
+                            recoveryTransport: bridgeTransport,
+                            recoveryOptions: bridgeOptions)
                         .PrepareAsync(freshnessRequest, cancellationToken),
                     (activity, value) =>
                     {
@@ -3857,6 +3866,10 @@ public static class CliApplication
                         loadedArtifactFreshnessProven = freshness.LoadedArtifactFreshnessProven
                     },
                 overall = result.Orchestration?.Overall,
+                agentOutcome = result.Orchestration?.AgentOutcome,
+                toolchainRecoveryCount = result.Orchestration?.ToolchainRecoveryCount,
+                toolchainRecoveryTypes = result.Orchestration?.ToolchainRecoveryTypes,
+                lastSafeCheckpoint = result.Orchestration?.LastSafeCheckpoint,
                 sourceBuild = result.Orchestration?.SourceBuild,
                 staticTests = result.Orchestration?.StaticTests,
                 deployment = result.Orchestration?.Deployment,
@@ -3873,6 +3886,10 @@ public static class CliApplication
                 errorCode = failure?.ErrorCode,
                 nextAction = failure?.NextAction,
                 retryable = failure?.RetrySafe,
+                classification = failure?.Classification,
+                recoveryAttempted = failure?.RecoveryAttempted,
+                recoveryResult = failure?.RecoveryResult,
+                retrySafe = failure?.RetrySafe,
                 failureSummary = failure?.Summary,
                 reportingTool = failure?.ReportingTool,
                 causalComponent = failure?.CausalComponent,

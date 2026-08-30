@@ -206,10 +206,11 @@ generation/readiness, lease lifetime, bounded recovery, freshness, and cleanup; 
 slot/pipe/endpoint details remain diagnostic evidence only.
 
 Agents see one autonomous command and one normalized outcome. The agent-facing
-`orchestration.agentOutcome` is exactly `PASS`, `MOD_FAILURE`, or `INFRASTRUCTURE_FAILURE`;
-detailed inner ownership and lifecycle evidence remains available in the failure object. The
-agent does not select a source checkout consumer, invoke Coordinator subcommands, or manage
-routine leases.
+`orchestration.agentOutcome` is exactly `PASS`, `MOD_FAILURE`, or `TOOLCHAIN_FATAL`;
+detailed inner ownership, recovery, checkpoint, fingerprint, and lifecycle evidence remains
+available in the failure object. The agent does not select a source checkout consumer, invoke
+Coordinator subcommands, or manage routine leases. A recoverable infrastructure condition gets one
+managed recovery cycle and one safe replay; ambiguous mutation state is reconciled or fails closed.
 
 ## Validation recipe ownership
 
@@ -294,12 +295,17 @@ object. Lease release and suite-session cleanup run from `finally` paths; transa
 restoration runs even when inspection fails; and a cleanup failure remains visible alongside the
 original test failure rather than replacing it.
 
-Recovery budgets are stage-owned and bounded: descriptor reconciliation and partial-index repair
-are each single recovery actions, a stopped/stale live generation receives at most one restart and
-development-transaction retry, and a lease-required operation receives at most one acquisition,
-retry, and release. The suite runner may use a compatible existing lease or perform its own one
-runtime lease recovery, but it does not recursively re-enter the lower-layer recovery loops.
-Ambiguous project metadata, active lease contention, unsafe paths, unavailable credentials, an
+Recovery is a shared, checkpoint-aware ladder used by doctor, affected execution, and release or
+promotion operations. The pre-mutation sequence is bounded to:
+
+`normal -> RECONCILE -> COORDINATOR_RECYCLE -> FULL_RUNTIME_RESET -> ready -> one retry`
+
+`RECONCILE` is the cheap reconnect and probe. `COORDINATOR_RECYCLE` delegates exact-process
+recovery to the managed control plane. `FULL_RUNTIME_RESET` delegates shutdown, controlled
+RimWorld restart, wait-ready, and coherent status/doctor verification. The full reset is legal
+only before mutation; later checkpoints do not replay stateful work. A successful recovery is
+reported as prerequisite evidence and does not change project ownership.
+Ambiguous promoted identity, active lease contention, unsafe paths, unavailable credentials, an
 unwritable recovery root, or an owner refusal remain explicit blockers requiring the reported
 `nextAction` or human intervention.
 

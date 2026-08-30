@@ -45,6 +45,18 @@ public sealed class RimTestSuiteResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<RimTestPrerequisiteRecovery>? PrerequisiteRecovery { get; init; }
 
+    [JsonPropertyName("toolchainRecovery")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RimTestToolchainRecovery? ToolchainRecovery { get; init; }
+
+    [JsonPropertyName("toolchainRecoveryCount")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ToolchainRecoveryCount { get; init; }
+
+    [JsonPropertyName("toolchainRecoveryTypes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ToolchainRecoveryTypes { get; init; }
+
     [JsonPropertyName("reuse")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public CatalogSuiteReuseSummary? Reuse { get; init; }
@@ -140,6 +152,16 @@ public sealed class RimTestSuiteResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NextAction { get; init; }
 }
+
+
+public sealed record RimTestToolchainRecovery(
+    [property: JsonPropertyName("attempted")] bool Attempted,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("trigger")] string? Trigger,
+    [property: JsonPropertyName("highestLevel")] string HighestLevel,
+    [property: JsonPropertyName("rimWorldRestarted")] bool RimWorldRestarted,
+    [property: JsonPropertyName("finalState")] string FinalState,
+    [property: JsonPropertyName("elapsedRecoveryMs")] long ElapsedRecoveryMilliseconds);
 
 public sealed class RimTestSuiteBlockedTest
 {
@@ -291,12 +313,22 @@ public static class RimTestSuiteResultFactory
             child.ValidationOutcome == "PREREQUISITE_BLOCKED");
         bool includeAccounting = blocked > 0 || infrastructureFailures > 0;
         int cancelledChildren = children.Count(static child => child.Status == "cancelled");
+        RimTestToolchainRecovery? toolchainRecovery =
+            ProjectToolchainRecovery(execution.PrerequisiteRecovery);
         int cancelled = cancelledChildren > 0
             ? cancelledChildren
             : execution.Cancelled ? 1 : 0;
         ValidationPolicyResult validation = EvaluateValidation(children);
         bool failFastIncomplete =
             execution.FailFast is { ValidationCompleted: false } or { NotLaunched: > 0 };
+
+        string[] recoveryTypes = (execution.PrerequisiteRecovery ?? [])
+            .Where(static recovery => !string.IsNullOrWhiteSpace(recovery.Component))
+            .Select(static recovery => recovery.Component)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static component => component, StringComparer.Ordinal)
+            .Take(16)
+            .ToArray();
 
         string status = execution.Cancelled || cancelled > 0
             ? "cancelled"
@@ -409,6 +441,9 @@ public static class RimTestSuiteResultFactory
                     workflowId)
                 : null,
             PrerequisiteRecovery = execution.PrerequisiteRecovery,
+            ToolchainRecovery = toolchainRecovery,
+            ToolchainRecoveryCount = recoveryTypes.Length == 0 ? null : recoveryTypes.Length,
+            ToolchainRecoveryTypes = recoveryTypes.Length == 0 ? null : recoveryTypes,
             Reuse = execution.Reuse,
             FailFast = execution.FailFast,
             Failures = failures.Length == 0 ? null : failures,
@@ -441,6 +476,46 @@ public static class RimTestSuiteResultFactory
                     .Select(static child => child.NextAction)
                     .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action))
         };
+    }
+
+    internal static RimTestToolchainRecovery? ProjectToolchainRecovery(
+        IReadOnlyList<RimTestPrerequisiteRecovery>? recoveries)
+    {
+        RimTestPrerequisiteRecovery[] items = (recoveries ?? [])
+            .Where(static recovery => recovery.Attempts > 0)
+            .Take(16)
+            .ToArray();
+        if (items.Length == 0)
+        {
+            return null;
+        }
+
+        RimTestPrerequisiteRecovery? managedReset = items.FirstOrDefault(
+            static recovery => recovery.Component == "managed-runtime-reset");
+        string highestLevel = managedReset?.Action ??
+            items.Select(static recovery => recovery.Action)
+                .FirstOrDefault(static action => !string.IsNullOrWhiteSpace(action)) ??
+            "RECONCILE";
+        return new(
+            Attempted: true,
+            Count: items.Select(static recovery => recovery.Component)
+                .Distinct(StringComparer.Ordinal)
+                .Count(),
+            Trigger: managedReset?.ErrorCode ??
+                items.Select(static recovery => recovery.ErrorCode)
+                    .FirstOrDefault(static code => !string.IsNullOrWhiteSpace(code)),
+            HighestLevel: highestLevel,
+            RimWorldRestarted: string.Equals(
+                highestLevel,
+                "FULL_RUNTIME_RESET",
+                StringComparison.Ordinal),
+            FinalState: items.Any(static recovery => recovery.State == "recovered")
+                ? "READY"
+                : "UNAVAILABLE",
+            ElapsedRecoveryMilliseconds: items
+                .Select(static recovery => recovery.ElapsedRecoveryMilliseconds ?? 0)
+                .DefaultIfEmpty()
+                .Max());
     }
     private static ValidationPolicyResult EvaluateValidation(
         IReadOnlyList<RimTestResult> children)
