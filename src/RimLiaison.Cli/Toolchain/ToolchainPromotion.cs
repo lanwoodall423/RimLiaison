@@ -11,7 +11,7 @@ namespace RimLiaison.Toolchain;
 
 public static class ToolchainPromotionSchemas
 {
-    public const string Package = "rimliaison-toolchain-promotion/v1";
+    public const string Package = "rimliaison-toolchain-promotion/v2";
     public const string Result = "rimliaison-toolchain-promotion-result/v1";
 }
 
@@ -39,10 +39,16 @@ public sealed class ToolchainPromotionPackage
     public string? DevBridgeRuntimeRoot { get; init; }
     [JsonPropertyName("devBridgePackageSha256")]
     public string? DevBridgePackageSha256 { get; init; }
+    [JsonPropertyName("devBridgeCoordinatorSha256")]
+    public string? DevBridgeCoordinatorSha256 { get; init; }
     [JsonPropertyName("transactionConsumerPath")]
     public string? TransactionConsumerPath { get; init; }
+    [JsonPropertyName("transactionConsumerRelativePath")]
+    public string? TransactionConsumerRelativePath { get; init; }
     [JsonPropertyName("transactionConsumerSha256")]
     public string? TransactionConsumerSha256 { get; init; }
+    [JsonPropertyName("unifiedManifestRelativePath")]
+    public string? UnifiedManifestRelativePath { get; init; }
     [JsonPropertyName("compatibilityContract")]
     public string? CompatibilityContract { get; init; }
 }
@@ -133,19 +139,19 @@ public static class ToolchainPromotionService
                 "A qualified toolchain promotion package is required.",
                 nextAction: "Build a qualified promotion package and retry rimliaison qualification promote --json.");
         }
-
         string manifestPath = Environment.GetEnvironmentVariable(ProductionManifestEnvironment) ??
             DefaultProductionManifest;
         string lockPath = manifestPath + ".promotion.lock";
         FileStream? promotionLock = null;
         string? stagedRoot = null;
         ProductionToolchainManifest? previous = null;
+        ToolchainPromotionPackage? package = null;
         bool promotionCommitted = false;
         try
         {
             promotionLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             string promotionTransactionId = "promotion-" + Guid.NewGuid().ToString("N");
-            ToolchainPromotionPackage? package = ReadPackage(packagePath, out string? packageError);
+            package = ReadPackage(packagePath, out string? packageError);
             if (package is null)
             {
                 return ToolchainPromotionResult.Blocked("PROMOTION_PACKAGE_INVALID", packageError ?? "The promotion package is invalid.");
@@ -223,29 +229,31 @@ public static class ToolchainPromotionService
 
             if (!string.Equals(package.CompatibilityContract, previous.CompatibilityContract, StringComparison.Ordinal) ||
                 !string.Equals(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(package.DevBridgePackageSha256, previous.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(package.TransactionConsumerPath, previous.TransactionConsumerPath, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(package.TransactionConsumerSha256, previous.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(package.DevBridgePackageSha256, previous.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_CONSUMER_COMPATIBILITY_MISMATCH",
-                    "The qualified package does not match the installed DevBridge consumer contract.",
+                    "PROMOTION_RUNTIME_COMPATIBILITY_MISMATCH",
+                    "The qualified package does not match the installed DevBridge runtime contract.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
                     previous.PromotedFingerprint,
-                    "Run the pinned cross-stack compatibility gate and rebuild the promotion package.");
+                    "Run the pinned cross-stack compatibility gate and rebuild the unified promotion package.");
             }
 
             string artifactRoot = Path.GetFullPath(package.ArtifactRoot ?? string.Empty);
             string? executableCandidate = SafeArtifactPath(artifactRoot, package.RimLiaisonExecutableRelativePath);
             string? assemblyCandidate = SafeArtifactPath(artifactRoot, package.RimLiaisonAssemblyRelativePath);
+            string? consumerSource = string.IsNullOrWhiteSpace(package.TransactionConsumerPath)
+                ? null
+                : Path.GetFullPath(package.TransactionConsumerPath);
             if (executableCandidate is null || assemblyCandidate is null ||
-                !File.Exists(executableCandidate) || !File.Exists(assemblyCandidate))
+                consumerSource is null || !File.Exists(executableCandidate) ||
+                !File.Exists(assemblyCandidate) || !File.Exists(consumerSource))
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_ARTIFACT_MISSING",
-                    "A qualified RimLiaison artifact is missing from the promotion package.",
+                    "A unified production input is missing from the promotion package.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
@@ -256,17 +264,35 @@ public static class ToolchainPromotionService
             string assemblySource = assemblyCandidate;
             string executableHash = ToolchainFileHash.Sha256(executableSource);
             string assemblyHash = ToolchainFileHash.Sha256(assemblySource);
+            string consumerHash = ToolchainFileHash.Sha256(consumerSource);
             if (!string.Equals(executableHash, package.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(consumerHash, package.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_ARTIFACT_HASH_MISMATCH",
-                    "A qualified RimLiaison artifact hash differs from the package declaration.",
+                    "A unified production input hash differs from the package declaration.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
                     previous.PromotedFingerprint,
-                    "Rebuild the promotion package from the qualified artifacts.");
+                    "Rebuild the unified promotion package from the qualified artifacts.");
+            }
+
+            string runtimeManifestPath = Path.Combine(previous.DevBridgeRuntimeRoot!, ".devbridge-runtime-manifest.json");
+            string coordinatorHash = ReadRuntimeFileHash(
+                runtimeManifestPath,
+                "Coordinator/DevBridge.Coordinator.exe");
+            if (!string.Equals(coordinatorHash, package.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_COORDINATOR_IDENTITY_MISMATCH",
+                    "The installed DevBridge Coordinator is not the qualified unified runtime component.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Publish the qualified DevBridge runtime, then rebuild the unified promotion package.");
             }
 
             string productionCliDirectory = Path.GetDirectoryName(Path.GetFullPath(previous.RimLiaisonExecutablePath!))!;
@@ -285,16 +311,41 @@ public static class ToolchainPromotionService
             }
 
             CopyDirectory(artifactRoot, stagedRoot);
-            string installedExecutable = Path.Combine(stagedRoot, Path.GetFileName(executableSource));
-            string installedAssembly = Path.Combine(stagedRoot, Path.GetFileName(assemblySource));
+            string installedExecutable = Path.Combine(
+                stagedRoot,
+                Path.GetRelativePath(artifactRoot, executableSource));
+            string installedAssembly = Path.Combine(
+                stagedRoot,
+                Path.GetRelativePath(artifactRoot, assemblySource));
+            string? consumerRelativePath = SafeArtifactPath(
+                stagedRoot,
+                package.TransactionConsumerRelativePath);
+            string? unifiedManifestPath = SafeArtifactPath(
+                stagedRoot,
+                package.UnifiedManifestRelativePath);
+            if (consumerRelativePath is null || unifiedManifestPath is null)
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_PACKAGE_PATH_INVALID",
+                    "Unified package component paths must remain relative to the staged package.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint);
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(consumerRelativePath)!);
+            File.Copy(consumerSource, consumerRelativePath, overwrite: false);
+
             string installedExecutableHash = ToolchainFileHash.Sha256(installedExecutable);
             string installedAssemblyHash = ToolchainFileHash.Sha256(installedAssembly);
+            string installedConsumerHash = ToolchainFileHash.Sha256(consumerRelativePath);
             if (!string.Equals(installedExecutableHash, executableHash, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(installedAssemblyHash, assemblyHash, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(installedAssemblyHash, assemblyHash, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(installedConsumerHash, consumerHash, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_INSTALL_HASH_MISMATCH",
-                    "Installed staged artifacts do not match the qualified artifact hashes.",
+                    "Installed staged artifacts do not match the unified qualified hashes.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
@@ -305,18 +356,46 @@ public static class ToolchainPromotionService
                 sourceCommit,
                 executableHash,
                 assemblyHash,
+                coordinatorHash,
                 previous.DevBridgePackageSha256!,
-                previous.TransactionConsumerSha256!,
+                consumerHash,
                 previous.CompatibilityContract!);
             string executionFingerprint = ProductionToolchainBindingResolver.ComputeExecutionFingerprint(
                 promotedFingerprint,
                 installedExecutableHash,
                 installedAssemblyHash,
-                previous.DevBridgeRuntimeRoot!,
+                coordinatorHash,
                 previous.DevBridgePackageSha256!,
-                previous.TransactionConsumerPath!,
-                previous.TransactionConsumerSha256!,
+                installedConsumerHash,
                 previous.CompatibilityContract!);
+            var unifiedManifest = new
+            {
+                schemaVersion = "rimliaison-unified-production-package/v1",
+                productFingerprint = promotedFingerprint,
+                sourceCommit,
+                compatibilityContract = previous.CompatibilityContract,
+                rimLiaison = new
+                {
+                    executablePath = Path.GetRelativePath(stagedRoot, installedExecutable),
+                    executableSha256 = installedExecutableHash,
+                    assemblyPath = Path.GetRelativePath(stagedRoot, installedAssembly),
+                    assemblySha256 = installedAssemblyHash
+                },
+                devBridge = new
+                {
+                    runtimeRoot = previous.DevBridgeRuntimeRoot,
+                    packageSha256 = previous.DevBridgePackageSha256,
+                    coordinatorSha256 = coordinatorHash
+                },
+                transactionConsumer = new
+                {
+                    path = Path.GetRelativePath(stagedRoot, consumerRelativePath),
+                    sha256 = installedConsumerHash
+                }
+            };
+            File.WriteAllText(unifiedManifestPath, JsonSerializer.Serialize(unifiedManifest, WriteOptions));
+            string unifiedManifestHash = ToolchainFileHash.Sha256(unifiedManifestPath);
+
             ProductionHealthResult health = await RunProductionHealthAsync(
                 installedExecutable,
                 previous.DevBridgeRuntimeRoot!,
@@ -325,6 +404,13 @@ public static class ToolchainPromotionService
                 promotionLeaseOrchestrator).ConfigureAwait(false);
             if (!health.Passed)
             {
+                WriteFailureHandoff(
+                    packagePath,
+                    package,
+                    previous,
+                    "PROMOTION_PRODUCTION_HEALTH_FAILED",
+                    health.Error ?? "The promoted production health checks did not pass.",
+                    "Repair the production control plane, then retry the supported promotion command.");
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_PRODUCTION_HEALTH_FAILED",
                     health.Error ?? "The promoted production health checks did not pass.",
@@ -347,8 +433,11 @@ public static class ToolchainPromotionService
                 RimLiaisonAssemblySha256 = installedAssemblyHash,
                 DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
                 DevBridgePackageSha256 = previous.DevBridgePackageSha256,
-                TransactionConsumerPath = previous.TransactionConsumerPath,
-                TransactionConsumerSha256 = previous.TransactionConsumerSha256,
+                DevBridgeCoordinatorSha256 = coordinatorHash,
+                TransactionConsumerPath = consumerRelativePath,
+                TransactionConsumerSha256 = installedConsumerHash,
+                UnifiedManifestPath = unifiedManifestPath,
+                UnifiedManifestSha256 = unifiedManifestHash,
                 CompatibilityContract = previous.CompatibilityContract,
                 QualifiedSourceCommit = package.SourceCommit,
                 QualificationArtifactPath = artifactPath,
@@ -387,14 +476,16 @@ public static class ToolchainPromotionService
                     ["rimLiaisonExecutableSha256"] = executableHash,
                     ["rimLiaisonAssemblySha256"] = assemblyHash,
                     ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
-                    ["transactionConsumerSha256"] = previous.TransactionConsumerSha256!
+                    ["devBridgeCoordinatorSha256"] = coordinatorHash,
+                    ["transactionConsumerSha256"] = consumerHash
                 },
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["rimLiaisonExecutableSha256"] = installedExecutableHash,
                     ["rimLiaisonAssemblySha256"] = installedAssemblyHash,
                     ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
-                    ["transactionConsumerSha256"] = previous.TransactionConsumerSha256!
+                    ["devBridgeCoordinatorSha256"] = coordinatorHash,
+                    ["transactionConsumerSha256"] = installedConsumerHash
                 },
                 promotedFingerprint,
                 previous.PromotedFingerprint,
@@ -417,6 +508,13 @@ public static class ToolchainPromotionService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or OperationCanceledException)
         {
             TryRestoreProductionManifest(manifestPath, previous);
+            WriteFailureHandoff(
+                packagePath,
+                package,
+                previous,
+                "PROMOTION_TRANSACTION_FAILED",
+                exception.Message,
+                "Repair the unified package inputs or production control plane, then retry rimliaison qualification promote --json.");
             return ToolchainPromotionResult.Blocked("PROMOTION_TRANSACTION_FAILED", exception.Message);
         }
         finally
@@ -463,7 +561,15 @@ public static class ToolchainPromotionService
                 string.IsNullOrWhiteSpace(package.RimLiaisonExecutableRelativePath) ||
                 string.IsNullOrWhiteSpace(package.RimLiaisonAssemblyRelativePath) ||
                 string.IsNullOrWhiteSpace(package.RimLiaisonExecutableSha256) ||
-                string.IsNullOrWhiteSpace(package.RimLiaisonAssemblySha256))
+                string.IsNullOrWhiteSpace(package.RimLiaisonAssemblySha256) ||
+                string.IsNullOrWhiteSpace(package.DevBridgeRuntimeRoot) ||
+                string.IsNullOrWhiteSpace(package.DevBridgePackageSha256) ||
+                string.IsNullOrWhiteSpace(package.DevBridgeCoordinatorSha256) ||
+                string.IsNullOrWhiteSpace(package.TransactionConsumerPath) ||
+                string.IsNullOrWhiteSpace(package.TransactionConsumerRelativePath) ||
+                string.IsNullOrWhiteSpace(package.TransactionConsumerSha256) ||
+                string.IsNullOrWhiteSpace(package.UnifiedManifestRelativePath) ||
+                string.IsNullOrWhiteSpace(package.CompatibilityContract))
             {
                 error = "The promotion package is incomplete or uses an unsupported schema.";
                 return null;
@@ -587,19 +693,43 @@ public static class ToolchainPromotionService
         return candidate.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) ? candidate : null;
     }
 
+    private static string ReadRuntimeFileHash(string runtimeManifestPath, string relativePath)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
+        if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
+            files.ValueKind != JsonValueKind.Array)
+        {
+            return string.Empty;
+        }
+
+        foreach (JsonElement file in files.EnumerateArray())
+        {
+            if (file.TryGetProperty("path", out JsonElement path) &&
+                string.Equals(path.GetString(), relativePath, StringComparison.OrdinalIgnoreCase) &&
+                file.TryGetProperty("sha256", out JsonElement hash))
+            {
+                return hash.GetString() ?? string.Empty;
+            }
+        }
+        return string.Empty;
+    }
+
     private static string ComputePromotedFingerprint(
         string sourceCommit,
         string executableHash,
         string assemblyHash,
+        string coordinatorHash,
         string devBridgeHash,
         string consumerHash,
         string compatibility)
     {
         string payload = string.Join("\n", [
             ToolchainPromotionSchemas.Package,
+            "unified-production-package/v1",
             sourceCommit,
             executableHash,
             assemblyHash,
+            coordinatorHash,
             devBridgeHash,
             consumerHash,
             compatibility]);
@@ -619,10 +749,9 @@ public static class ToolchainPromotionService
             ["rimLiaisonDoctor"] = "not-run",
             ["devBridgeStatus"] = "not-run",
             ["devBridgeDoctor"] = "not-run",
-            ["coordinatorProbe"] = "not-run",
             ["capabilities"] = "not-run",
             ["activeLeases"] = "unknown",
-            ["coordinatorCount"] = "unknown"
+            ["coordinatorCount"] = "status-bound"
         };
         try
         {
@@ -698,29 +827,6 @@ public static class ToolchainPromotionService
                 }
             }
 
-            (int exitCode, string output) probe = await RunJsonCommandAsync(
-                "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "coordinator", "probe", "--json"],
-                cancellationToken).ConfigureAwait(false);
-            checks["coordinatorProbe"] = IsResponsive(probe.exitCode, probe.output)
-                ? "responsive"
-                : "failed";
-            if (!TryParse(probe.output, out JsonDocument? probeDocument))
-            {
-                return HealthFailure(checks, "Coordinator probe did not return structured JSON.");
-            }
-            using (probeDocument)
-            {
-                JsonElement root = probeDocument!.RootElement;
-                if (!IsResponsive(probe.exitCode, root.GetRawText()) ||
-                    !root.TryGetProperty("coordinatorPid", out JsonElement pid) ||
-                    !pid.TryGetInt32(out int coordinatorPid) ||
-                    coordinatorPid <= 0)
-                {
-                    return HealthFailure(checks, "Coordinator probe did not prove one live coordinator.");
-                }
-                checks["coordinatorCount"] = "one";
-            }
             DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
                 rootPath: devBridgeRoot);
             var transport = new SystemDevBridgeProcessTransport();
@@ -875,6 +981,40 @@ public static class ToolchainPromotionService
             }
             leaseId = value.GetString();
             return !string.IsNullOrWhiteSpace(leaseId);
+        }
+    }
+
+    private static void WriteFailureHandoff(
+        string packagePath,
+        ToolchainPromotionPackage? package,
+        ProductionToolchainManifest? previous,
+        string errorCode,
+        string error,
+        string nextAction)
+    {
+        try
+        {
+            string root = Path.Combine("C:\\RimDev", ".rimdev", "failure-handoffs");
+            Directory.CreateDirectory(root);
+            string timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffZ");
+            File.WriteAllText(
+                Path.Combine(root, "unified-production-package-" + timestamp + ".json"),
+                JsonSerializer.Serialize(
+                    new
+                    {
+                        schemaVersion = "rimliaison-unified-production-failure-handoff/v1",
+                        createdUtc = DateTimeOffset.UtcNow,
+                        packagePath = Path.GetFullPath(packagePath),
+                        errorCode,
+                        error,
+                        nextAction,
+                        package,
+                        previousProductionManifest = previous
+                    },
+                    WriteOptions));
+        }
+        catch (Exception)
+        {
         }
     }
 

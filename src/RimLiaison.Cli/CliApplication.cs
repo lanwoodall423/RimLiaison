@@ -114,8 +114,6 @@ public static class CliApplication
         AgentObservabilitySession? observabilityAgent = null;
         IAgentObservabilityStore? eventStore = null;
         IDisposable? observabilityActivation = null;
-        string? priorProductionConsumerRoot = null;
-        bool productionConsumerOverrideApplied = false;
         try
         {
             CliRequest request = CliParser.Parse(args);
@@ -224,13 +222,6 @@ public static class CliApplication
                     DevBridgePath = productionBinding.DevBridgeCommandPath,
                     DevBridgeRootPath = productionBinding.DevBridgeRuntimeRoot
                 };
-                priorProductionConsumerRoot =
-                    Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT");
-                Environment.SetEnvironmentVariable(
-                    "DEVBRIDGE_SOURCE_ROOT",
-                    Path.GetDirectoryName(
-                        Path.GetDirectoryName(productionBinding.TransactionConsumerPath)));
-                productionConsumerOverrideApplied = true;
             }
 
             string toolchainState = experimentalToolchain
@@ -652,7 +643,8 @@ public static class CliApplication
                         workflowId,
                         developmentAdapter,
                         freshGenerationRecoveryAdapter,
-                        capabilityAdapter),
+                        capabilityAdapter,
+                        productionBinding),
                     AnnotateExit,
                     phase: "command",
                     scope: request.Command.ToString())
@@ -827,12 +819,6 @@ public static class CliApplication
                 {
                 }
             }
-            if (productionConsumerOverrideApplied)
-            {
-                Environment.SetEnvironmentVariable(
-                    "DEVBRIDGE_SOURCE_ROOT",
-                    priorProductionConsumerRoot);
-            }
             observabilityActivation?.Dispose();
             observabilityRun?.Dispose();
             profiler.Complete(exitCode, cancellationToken.IsCancellationRequested);
@@ -926,7 +912,8 @@ public static class CliApplication
         string? workflowId,
         IDevBridgeModDevelopmentAdapter? developmentAdapter,
         IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter,
-        IDevBridgeCapabilityAdapter? capabilityAdapter)
+        IDevBridgeCapabilityAdapter? capabilityAdapter,
+        ProductionToolchainBinding? productionBinding)
     {
         CatalogLoadResult loaded = CatalogLoader.Load(request.CatalogPath);
         if (loaded.Catalog is null)
@@ -1026,7 +1013,8 @@ public static class CliApplication
                             started,
                             cancellationToken,
                             workflowId: workflowId,
-                            providedCapabilityAdapter: capabilityAdapter)
+                            providedCapabilityAdapter: capabilityAdapter,
+                            transactionConsumerPath: productionBinding?.TransactionConsumerPath)
                         .ConfigureAwait(false);
                 }
             case CliCommand.Affected:
@@ -1399,6 +1387,7 @@ public static class CliApplication
                             workflowId: workflowId,
                             freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
                             providedCapabilityAdapter: capabilityAdapter,
+                            transactionConsumerPath: productionBinding?.TransactionConsumerPath,
                             singleTestOutput: true)
                         .ConfigureAwait(false);
                 }
@@ -3376,7 +3365,8 @@ public static class CliApplication
         ContentIntelligenceCapture? contentCapture = null,
         ValidationPlan? validationPlan = null,
         ImpactGraph? impactGraph = null,
-        bool singleTestOutput = false)
+        bool singleTestOutput = false,
+        string? transactionConsumerPath = null)
     {
         string[] validationRecipeIds = testIds
             .Select(testId => catalog.Tests.FirstOrDefault(test => test.Id == testId)?.Recipe)
@@ -3436,7 +3426,7 @@ public static class CliApplication
         if (freshnessRequest is not null)
         {
             IDevBridgeModDevelopmentAdapter owner = developmentAdapter ??
-                CreateDevelopmentAdapter(request, bridgeTransport, freshnessRequest);
+                CreateDevelopmentAdapter(request, bridgeTransport, freshnessRequest, transactionConsumerPath);
             freshnessTransaction = await ProfilerActivity.ObserveAsync(
                     "artifact-freshness.transaction",
                     "build-deploy",
@@ -3930,7 +3920,8 @@ public static class CliApplication
     private static IDevBridgeModDevelopmentAdapter CreateDevelopmentAdapter(
         CliRequest request,
         IDevBridgeProcessTransport? processTransport,
-        ArtifactFreshnessTransactionRequest? freshnessRequest)
+        ArtifactFreshnessTransactionRequest? freshnessRequest,
+        string? transactionConsumerPath = null)
     {
         DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
             request.DevBridgePath,
@@ -3940,6 +3931,7 @@ public static class CliApplication
             DevBridgeModDevelopmentAdapterOptions.Discover(bridgeOptions.RootPath) with
             {
                 ScriptRootPath = bridgeOptions.SourceRootPath,
+                TransactionConsumerPath = transactionConsumerPath,
                 DeploymentRoot = ResolveProjectRuntimeRoot(request, repositoryRoot),
                 ChangedPaths = freshnessRequest?.ChangedPaths,
                 TestRecipe = freshnessRequest?.TestRecipe

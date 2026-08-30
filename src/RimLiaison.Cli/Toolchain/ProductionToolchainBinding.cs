@@ -21,8 +21,11 @@ public sealed record ProductionToolchainBinding(
     string DevBridgeCommandPath,
     string DevBridgeRuntimeRoot,
     string DevBridgePackageHash,
+    string DevBridgeCoordinatorHash,
     string TransactionConsumerPath,
     string TransactionConsumerHash,
+    string UnifiedManifestPath,
+    string UnifiedManifestHash,
     string CompatibilityContract)
 {
     public object ToEvidence() => new
@@ -41,12 +44,18 @@ public sealed record ProductionToolchainBinding(
         {
             commandPath = DevBridgeCommandPath,
             runtimeRoot = DevBridgeRuntimeRoot,
-            packageSha256 = DevBridgePackageHash
+            packageSha256 = DevBridgePackageHash,
+            coordinatorSha256 = DevBridgeCoordinatorHash
         },
         transactionConsumer = new
         {
             path = TransactionConsumerPath,
             sha256 = TransactionConsumerHash
+        },
+        unifiedManifest = new
+        {
+            path = UnifiedManifestPath,
+            sha256 = UnifiedManifestHash
         },
         compatibilityContract = CompatibilityContract
     };
@@ -113,6 +122,12 @@ internal sealed class ProductionToolchainManifest
     public string? QualificationArtifactPath { get; init; }
     [JsonPropertyName("qualificationArtifactSha256")]
     public string? QualificationArtifactSha256 { get; init; }
+    [JsonPropertyName("devBridgeCoordinatorSha256")]
+    public string? DevBridgeCoordinatorSha256 { get; init; }
+    [JsonPropertyName("unifiedManifestPath")]
+    public string? UnifiedManifestPath { get; init; }
+    [JsonPropertyName("unifiedManifestSha256")]
+    public string? UnifiedManifestSha256 { get; init; }
 }
 
 internal static class ProductionToolchainBindingResolver
@@ -144,7 +159,7 @@ internal static class ProductionToolchainBindingResolver
             return Fail(
                 "PRODUCTION_TOOLCHAIN_MANIFEST_MISSING",
                 manifestError ?? "The promoted production toolchain manifest could not be loaded.",
-                "Install and promote the production RimLiaison toolchain, then retry.",
+                "Install and promote the unified production toolchain, then retry.",
                 rejected,
                 manifestPath);
         }
@@ -157,14 +172,17 @@ internal static class ProductionToolchainBindingResolver
             string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblySha256) ||
             string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot) ||
             string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
+            string.IsNullOrWhiteSpace(manifest.DevBridgeCoordinatorSha256) ||
             string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
             string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
+            string.IsNullOrWhiteSpace(manifest.UnifiedManifestPath) ||
+            string.IsNullOrWhiteSpace(manifest.UnifiedManifestSha256) ||
             !string.Equals(manifest.CompatibilityContract, CompatibilityContract, StringComparison.Ordinal))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_MANIFEST_INVALID",
-                "The promoted production toolchain manifest is incomplete or incompatible.",
-                "Regenerate the production manifest from the promoted artifacts.",
+                "The unified production toolchain manifest is incomplete or incompatible.",
+                "Regenerate the production manifest from the unified promoted package.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint);
@@ -173,32 +191,17 @@ internal static class ProductionToolchainBindingResolver
         string cliPath = FullPath(manifest.RimLiaisonExecutablePath!);
         string assemblyPath = FullPath(manifest.RimLiaisonAssemblyPath!);
         string? configuredCli = Environment.GetEnvironmentVariable(CliEnvironment);
-        if (!string.IsNullOrWhiteSpace(configuredCli) &&
-            !SamePath(configuredCli, cliPath))
+        if (!string.IsNullOrWhiteSpace(configuredCli) && !SamePath(configuredCli, cliPath))
         {
             rejected.Add(FullPath(configuredCli));
             return Fail(
                 "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
-                "A production CLI override does not match the promoted immutable CLI.",
+                "A production CLI override does not match the unified promoted CLI.",
                 "Use the promoted CLI recorded by the production manifest.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
                 configuredCli);
-        }
-
-        if (!string.IsNullOrWhiteSpace(requestedCliPath) &&
-            !SamePath(requestedCliPath, cliPath))
-        {
-            rejected.Add(FullPath(requestedCliPath));
-            return Fail(
-                "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
-                "The requested CLI is not the promoted production CLI.",
-                "Remove the source-checkout override and invoke the promoted CLI.",
-                rejected,
-                manifestPath,
-                manifest.PromotedFingerprint,
-                requestedCliPath);
         }
 
         string currentCli = FullPath(currentExecutablePath ?? Environment.ProcessPath ?? string.Empty);
@@ -222,7 +225,7 @@ internal static class ProductionToolchainBindingResolver
             rejected.Add(FullPath(requestedDevBridgeRoot));
             return Fail(
                 "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
-                "The requested DevBridge root is not the promoted runtime root.",
+                "The requested DevBridge root is not the unified promoted runtime root.",
                 "Use the installed DevBridge runtime root recorded by the production manifest.",
                 rejected,
                 manifestPath,
@@ -238,7 +241,7 @@ internal static class ProductionToolchainBindingResolver
             rejected.Add(FullPath(requestedDevBridgePath));
             return Fail(
                 "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
-                "The requested DevBridge command is not the promoted runtime command.",
+                "The requested DevBridge command is not the unified promoted runtime command.",
                 "Use the installed DevBridge.cmd recorded by the production manifest.",
                 rejected,
                 manifestPath,
@@ -247,30 +250,46 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
+        string consumerPath = FullPath(manifest.TransactionConsumerPath!);
+        string unifiedManifestPath = FullPath(manifest.UnifiedManifestPath!);
+        string packageRoot = FullPath(Path.GetDirectoryName(unifiedManifestPath) ?? string.Empty);
         if (!File.Exists(cliPath) || !File.Exists(assemblyPath) ||
-            !File.Exists(commandPath) || !File.Exists(manifest.TransactionConsumerPath!))
+            !File.Exists(commandPath) || !File.Exists(consumerPath) ||
+            !File.Exists(unifiedManifestPath))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_ARTIFACT_MISSING",
-                "A promoted production toolchain artifact is missing.",
-                "Repair or reinstall the promoted production toolchain.",
+                "A unified production toolchain artifact is missing.",
+                "Repair or reinstall the unified promoted production package.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
                 currentCli,
                 runtimeRoot);
         }
+
+        if (!IsWithin(packageRoot, consumerPath) || !IsWithin(packageRoot, unifiedManifestPath))
+        {
+            return Fail(
+                "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
+                "The production transaction consumer or unified manifest escapes the immutable package.",
+                "Re-promote the unified package with all RimLiaison-owned inputs staged beneath the promoted CLI.",
+                rejected,
+                manifestPath,
+                manifest.PromotedFingerprint,
+                currentCli,
+                runtimeRoot);
+        }
+
         foreach (string variable in new[] { "DEVBRIDGE_SOURCE_ROOT", "RIMTEST_DEVBRIDGE_ROOT" })
         {
             string? value = Environment.GetEnvironmentVariable(variable);
-            if (!string.IsNullOrWhiteSpace(value) &&
-                !SamePath(Path.Combine(FullPath(value), "scripts", "mod-test.ps1"),
-                    manifest.TransactionConsumerPath!))
+            if (!string.IsNullOrWhiteSpace(value) && !SamePath(value, runtimeRoot))
             {
                 return Fail(
                     "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
-                    $"Production environment variable {variable} points at an unpinned DevBridge source tree.",
-                    "Clear the source-checkout override or point it at the pinned transaction consumer.",
+                    $"Production environment variable {variable} points at a source checkout instead of the installed runtime.",
+                    "Clear the source-checkout override; production binds the staged transaction consumer directly.",
                     rejected,
                     manifestPath,
                     manifest.PromotedFingerprint,
@@ -279,13 +298,12 @@ internal static class ProductionToolchainBindingResolver
             }
         }
 
-        if (!string.Equals(Path.GetFileName(FullPath(manifest.TransactionConsumerPath!)),
-            "mod-test.ps1", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(Path.GetFileName(consumerPath), "mod-test.ps1", StringComparison.OrdinalIgnoreCase))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_CONSUMER_INVALID",
                 "The production transaction consumer is not the supported mod-test.ps1 consumer.",
-                "Regenerate the production manifest from the supported DevBridge consumer.",
+                "Regenerate the unified production package from the supported DevBridge consumer.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
@@ -309,17 +327,21 @@ internal static class ProductionToolchainBindingResolver
 
         string cliHash = Sha256(cliPath);
         string assemblyHash = Sha256(assemblyPath);
-        string consumerHash = Sha256(manifest.TransactionConsumerPath!);
+        string consumerHash = Sha256(consumerPath);
+        string unifiedManifestHash = Sha256(unifiedManifestPath);
         string packageHash = ReadRuntimePackageHash(runtimeManifestPath);
+        string coordinatorHash = ReadRuntimeFileHash(runtimeManifestPath, "Coordinator/DevBridge.Coordinator.exe");
         if (!string.Equals(cliHash, manifest.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(assemblyHash, manifest.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(packageHash, manifest.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(consumerHash, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(coordinatorHash, manifest.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(consumerHash, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(unifiedManifestHash, manifest.UnifiedManifestSha256, StringComparison.OrdinalIgnoreCase))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
-                "Promoted toolchain artifact hashes do not match the production manifest.",
-                "Re-promote the complete toolchain atomically and retry.",
+                "Unified production artifact hashes do not match the production manifest.",
+                "Re-promote the complete unified toolchain atomically and retry.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
@@ -331,9 +353,8 @@ internal static class ProductionToolchainBindingResolver
             manifest.PromotedFingerprint!,
             cliHash,
             assemblyHash,
-            runtimeRoot,
+            coordinatorHash,
             packageHash,
-            manifest.TransactionConsumerPath!,
             consumerHash,
             manifest.CompatibilityContract!);
         if (!string.IsNullOrWhiteSpace(manifest.Fingerprint) &&
@@ -341,14 +362,15 @@ internal static class ProductionToolchainBindingResolver
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
-                "The production manifest fingerprint does not match its immutable components.",
-                "Re-promote the complete toolchain atomically and retry.",
+                "The production fingerprint does not match its unified immutable components.",
+                "Re-promote the complete unified toolchain atomically and retry.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
                 currentCli,
                 runtimeRoot);
         }
+
         return new ProductionToolchainBindingResolution(
             new ProductionToolchainBinding(
                 fingerprint,
@@ -360,8 +382,11 @@ internal static class ProductionToolchainBindingResolver
                 commandPath,
                 runtimeRoot,
                 packageHash,
-                FullPath(manifest.TransactionConsumerPath!),
+                coordinatorHash,
+                consumerPath,
                 consumerHash,
+                unifiedManifestPath,
+                unifiedManifestHash,
                 manifest.CompatibilityContract!),
             null);
     }
@@ -434,6 +459,36 @@ internal static class ProductionToolchainBindingResolver
         return document.RootElement.TryGetProperty("packageSha256", out JsonElement packageHash)
             ? packageHash.GetString() ?? string.Empty
             : string.Empty;
+    }
+    private static string ReadRuntimeFileHash(string runtimeManifestPath, string relativePath)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
+        if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
+            files.ValueKind != JsonValueKind.Array)
+        {
+            return string.Empty;
+        }
+
+        foreach (JsonElement file in files.EnumerateArray())
+        {
+            if (file.TryGetProperty("path", out JsonElement path) &&
+                string.Equals(path.GetString(), relativePath, StringComparison.OrdinalIgnoreCase) &&
+                file.TryGetProperty("sha256", out JsonElement hash))
+            {
+                return hash.GetString() ?? string.Empty;
+            }
+        }
+        return string.Empty;
+    }
+
+    private static bool IsWithin(string root, string path)
+    {
+        string normalizedRoot = FullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        string normalizedPath = FullPath(path);
+        return normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) ||
+            SamePath(normalizedRoot.TrimEnd(Path.DirectorySeparatorChar), normalizedPath);
     }
 
     internal static string ComputeExecutionFingerprint(params string[] values)

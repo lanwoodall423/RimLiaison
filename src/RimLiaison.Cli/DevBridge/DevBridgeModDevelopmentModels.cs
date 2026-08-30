@@ -112,6 +112,7 @@ public sealed record DevBridgeModDevelopmentAdapterOptions
 {
     public required string RootPath { get; init; }
     public string? ScriptRootPath { get; init; }
+    public string? TransactionConsumerPath { get; init; }
     public string? DescriptorPath { get; init; }
     public string? DeploymentRoot { get; init; }
     public IReadOnlyList<string>? ChangedPaths { get; init; }

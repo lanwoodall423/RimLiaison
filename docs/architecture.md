@@ -168,6 +168,36 @@ display paths.
 All successful commands write one JSON object and a newline to stdout. Logging and unexpected
 exception diagnostics go to stderr. Queries never scan, build, launch the game, or repair an index.
 
+## Unified production distribution
+
+Production is one immutable product: the promoted RimLiaison CLI and assembly, the packaged
+transaction consumer, and the qualified DevBridge runtime identity are bound by one product
+fingerprint. The production manifest contains only staged package paths and hashes; source
+checkout paths are qualification inputs, never runtime inputs. The package manifest records the
+same component inventory and compatibility contract.
+
+The pre-consolidation execution boundary was:
+
+```text
+agent -> RimLiaison -> DevBridge command -> source transaction consumer
+       -> DevBridge Coordinator -> RimWorld
+```
+
+The consolidated boundary is:
+
+```text
+agent -> RimLiaison production package
+       -> packaged transaction consumer + installed qualified DevBridge runtime
+       -> DevBridge Coordinator -> RimWorld
+```
+
+Agents see one autonomous command and one normalized outcome. RimLiaison owns production
+identity binding, transaction invocation, bounded recovery coordination, result projection, and
+cleanup. DevBridge remains the authority for lifecycle, descriptor validation, build/deploy,
+generations, leases, and loaded-artifact evidence; RimBridgeServer remains the live-game owner.
+The agent does not select a source checkout consumer, invoke Coordinator subcommands, or manage
+routine leases.
+
 ## Affected-run prerequisite ownership
 
 Tooling-owned runtime prerequisites should be recovered by Tooling when recovery is safe and
@@ -197,19 +227,17 @@ or `recoveryFailed`, with bounded attempt counts and an action field where appli
 
 `rimliaison affected --run --json` is the autonomous validation boundary. An agent invoking it
 does not need to create DevBridge development descriptors, repair a supported partial RimContext
-index, acquire a routine RimBridge lease, or change display preferences for a supported test. The
-workflow coordinates those owner operations in this order, when the selected change requires them:
+index, acquire a routine RimBridge lease, or select a transaction consumer. The workflow
+coordinates those owner operations in this order, when the selected change requires them:
 
 ```text
 affected discovery -> descriptor/index readiness -> build -> deploy
 -> artifact identity/freshness -> live readiness/lease -> runtime assertions
--> requested UI evidence -> scoped diagnostics -> restoration/cleanup -> result
+-> requested UI evidence -> scoped diagnostics -> restoration/cleanup -> normalized result
 ```
 
-The owning component still performs the specialized work. RimContext.Core owns static indexing and
-impact selection; DevBridge2 owns lifecycle, descriptor validation, build/deploy, generations,
-leases, and authoritative loaded-artifact evidence; RimBridgeServer owns live-game operations; and
-RimLiaison owns selection, bounded recovery coordination, result projection, and cleanup reporting.
+The owning component still performs specialized work; the production package removes the
+agent-visible source-consumer and Coordinator-command boundaries.
 
 Affected runs add an `orchestration` object with schema `rimtest-orchestration/v1` while retaining
 the existing suite-result fields. Its dimensions are:

@@ -122,8 +122,11 @@ internal static class ToolchainPromotionTests
                 rimLiaisonAssemblySha256 = "unused",
                 devBridgeRuntimeRoot = "unused",
                 devBridgePackageSha256 = "unused",
+                devBridgeCoordinatorSha256 = "unused",
                 transactionConsumerPath = "unused",
+                transactionConsumerRelativePath = "transaction-components/mod-test.ps1",
                 transactionConsumerSha256 = "unused",
+                unifiedManifestRelativePath = "unified-package.json",
                 compatibilityContract = "devbridge-mod-development/v1"
             }));
         return packagePath;

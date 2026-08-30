@@ -359,6 +359,7 @@ internal static class Program
         ("affected incomplete freshness metadata blocks pass", AffectedIncompleteFreshnessMetadataBlocksPass),
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
+        ("mod-development adapter uses packaged transaction consumer", ModDevelopmentAdapterUsesPackagedTransactionConsumer),
         ("mod-development adapter uses the source script root", ModDevelopmentAdapterUsesSourceScriptRoot),
         ("mod-development owner manifest uses runtime deployment root", ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot),
         ("mod-development response contract matrix is deterministic", ModDevelopmentResponseContractMatrix),
@@ -8852,6 +8853,36 @@ internal static class Program
                 "-File") + 1]);
         AssertEqual(4096, transport.Requests[0].MaxStdoutBytes);
     }
+    private static void ModDevelopmentAdapterUsesPackagedTransactionConsumer()
+    {
+        var transport = new FakeTransport((_, _) => ProcessResult(
+            """{"schemaVersion":"devbridge-mod-development/v1","project":"fixture","success":true,"transactionId":"tx-package","workflowId":"wf-package"}"""));
+        const string packagedConsumer = "PromotedPackage/transaction-components/mod-test.ps1";
+        var adapter = new DevBridgeModDevelopmentAdapter(
+            transport,
+            new DevBridgeModDevelopmentAdapterOptions
+            {
+                RootPath = "DevBridgeRoot",
+                ScriptRootPath = "SourceDevBridgeRoot",
+                TransactionConsumerPath = packagedConsumer,
+                DescriptorPath = "DevBridgeRoot/fixture.json",
+                DeploymentRoot = "DeploymentRoot",
+                PowerShellPath = "pwsh",
+                Timeout = TimeSpan.FromSeconds(1)
+            });
+
+        DevBridgeModDevelopmentResult result = adapter.RunAsync(
+                "fixture",
+                "RepositoryRoot",
+                new string('a', 64),
+                "wf-package")
+            .GetAwaiter()
+            .GetResult();
+        Assert(result.Status.IsSuccess, "The packaged consumer request should succeed.");
+        string[] arguments = transport.Requests[0].Arguments.ToArray();
+        AssertEqual(packagedConsumer, arguments[Array.IndexOf(arguments, "-File") + 1]);
+    }
+
 
     private static void ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot()
     {

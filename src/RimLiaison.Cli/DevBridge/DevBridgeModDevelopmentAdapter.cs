@@ -133,7 +133,7 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             ? options.DeploymentRoot!
             : ResolveDeploymentRoot(descriptorPath, fullRepositoryRoot);
         string scriptRootPath = options.ScriptRootPath ?? options.RootPath;
-        string scriptPath = Path.Combine(scriptRootPath, "scripts", "mod-test.ps1");
+        string scriptPath = options.TransactionConsumerPath ?? Path.Combine(scriptRootPath, "scripts", "mod-test.ps1");
         var arguments = new List<string>
         {
             "-NoProfile",

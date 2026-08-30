@@ -231,7 +231,9 @@ internal static class ProjectMetadataOwnershipTests
         string sourceCliPath = Path.Combine(root, "source", "rimliaison.exe");
         string assemblyPath = Path.Combine(root, "rimliaison.dll");
         string runtimeRoot = Path.Combine(root, "runtime");
-        string consumerPath = Path.Combine(root, "DevBridge", "scripts", "mod-test.ps1");
+        string consumerPath = Path.Combine(root, "promoted", "transaction-components", "mod-test.ps1");
+        string unifiedManifestPath = Path.Combine(root, "promoted", "unified-package.json");
+        string coordinatorPath = Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe");
         string manifestPath = Path.Combine(root, "production-toolchain.json");
         string? priorManifest = Environment.GetEnvironmentVariable(
             "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
@@ -240,16 +242,25 @@ internal static class ProjectMetadataOwnershipTests
         {
             Directory.CreateDirectory(Path.GetDirectoryName(cliPath)!);
             Directory.CreateDirectory(Path.GetDirectoryName(sourceCliPath)!);
-            Directory.CreateDirectory(Path.Combine(runtimeRoot, "Coordinator"));
+            Directory.CreateDirectory(Path.GetDirectoryName(coordinatorPath)!);
             Directory.CreateDirectory(Path.GetDirectoryName(consumerPath)!);
             File.WriteAllText(cliPath, "promoted");
             File.WriteAllText(assemblyPath, "assembly");
             File.WriteAllText(sourceCliPath, "source");
             File.WriteAllText(Path.Combine(runtimeRoot, "DevBridge.cmd"), "runtime");
+            File.WriteAllText(coordinatorPath, "coordinator");
             File.WriteAllText(consumerPath, "consumer");
+            File.WriteAllText(unifiedManifestPath, "unified");
             File.WriteAllText(
                 Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
-                """{"packageSha256":"package-hash"}""");
+                JsonSerializer.Serialize(new
+                {
+                    packageSha256 = "package-hash",
+                    files = new[]
+                    {
+                        new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = Sha256(coordinatorPath) }
+                    }
+                }));
             File.WriteAllText(
                 manifestPath,
                 JsonSerializer.Serialize(new
@@ -262,8 +273,11 @@ internal static class ProjectMetadataOwnershipTests
                     rimLiaisonExecutableSha256 = Sha256(cliPath),
                     devBridgeRuntimeRoot = runtimeRoot,
                     devBridgePackageSha256 = "package-hash",
+                    devBridgeCoordinatorSha256 = Sha256(coordinatorPath),
                     transactionConsumerPath = consumerPath,
                     transactionConsumerSha256 = Sha256(consumerPath),
+                    unifiedManifestPath,
+                    unifiedManifestSha256 = Sha256(unifiedManifestPath),
                     compatibilityContract = "devbridge-mod-development/v1"
                 }));
             Environment.SetEnvironmentVariable(
@@ -271,7 +285,7 @@ internal static class ProjectMetadataOwnershipTests
                 manifestPath);
             Environment.SetEnvironmentVariable(
                 "DEVBRIDGE_SOURCE_ROOT",
-                Path.GetDirectoryName(Path.GetDirectoryName(consumerPath))!);
+                Path.Combine(root, "source"));
 
             ProductionToolchainBindingResolution rejected =
                 ProductionToolchainBindingResolver.Resolve(
@@ -281,6 +295,7 @@ internal static class ProjectMetadataOwnershipTests
                 rejected.Failure?.ErrorCode == "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
                 "source executable must be rejected before production execution");
 
+            Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", runtimeRoot);
             ProductionToolchainBindingResolution accepted =
                 ProductionToolchainBindingResolver.Resolve(
                     root,
