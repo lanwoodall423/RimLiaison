@@ -451,6 +451,13 @@ public static class ToolchainPromotionService
             if (!installed.Succeeded)
             {
                 TryRestoreProductionManifest(manifestPath, previous);
+                WriteFailureHandoff(
+                    packagePath,
+                    package,
+                    previous,
+                    "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
+                    installed.Failure?.Error ?? "The installed production identity could not be verified.",
+                    "Repair the unified package manifest and retry the supported promotion command.");
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
                     installed.Failure?.Error ?? "The installed production identity could not be verified.",
