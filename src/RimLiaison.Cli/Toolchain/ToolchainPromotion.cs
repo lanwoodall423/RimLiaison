@@ -228,8 +228,7 @@ public static class ToolchainPromotionService
             }
 
             if (!string.Equals(package.CompatibilityContract, previous.CompatibilityContract, StringComparison.Ordinal) ||
-                !SamePath(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot) ||
-                !string.Equals(package.DevBridgePackageSha256, previous.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
+                !SamePath(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot))
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_RUNTIME_COMPATIBILITY_MISMATCH",
@@ -280,6 +279,18 @@ public static class ToolchainPromotionService
             }
 
             string runtimeManifestPath = Path.Combine(previous.DevBridgeRuntimeRoot!, ".devbridge-runtime-manifest.json");
+            string installedPackageHash = ReadRuntimePackageHash(runtimeManifestPath);
+            if (!string.Equals(installedPackageHash, package.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_RUNTIME_IDENTITY_MISMATCH",
+                    "The installed DevBridge runtime package differs from the qualified package declaration.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Publish the exact qualified DevBridge runtime, then rebuild the unified promotion package.");
+            }
             string coordinatorHash = ReadRuntimeFileHash(
                 runtimeManifestPath,
                 "Coordinator/DevBridge.Coordinator.exe");
@@ -357,7 +368,7 @@ public static class ToolchainPromotionService
                 executableHash,
                 assemblyHash,
                 coordinatorHash,
-                previous.DevBridgePackageSha256!,
+                package.DevBridgePackageSha256!,
                 consumerHash,
                 previous.CompatibilityContract!);
             var unifiedManifest = new
@@ -375,8 +386,7 @@ public static class ToolchainPromotionService
                 },
                 devBridge = new
                 {
-                    runtimeRoot = previous.DevBridgeRuntimeRoot,
-                    packageSha256 = previous.DevBridgePackageSha256,
+                    packageSha256 = package.DevBridgePackageSha256,
                     coordinatorSha256 = coordinatorHash
                 },
                 transactionConsumer = new
@@ -424,7 +434,7 @@ public static class ToolchainPromotionService
                 RimLiaisonAssemblyPath = installedAssembly,
                 RimLiaisonAssemblySha256 = installedAssemblyHash,
                 DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
-                DevBridgePackageSha256 = previous.DevBridgePackageSha256,
+                DevBridgePackageSha256 = package.DevBridgePackageSha256,
                 DevBridgeCoordinatorSha256 = coordinatorHash,
                 TransactionConsumerPath = consumerRelativePath,
                 TransactionConsumerSha256 = installedConsumerHash,
@@ -474,7 +484,7 @@ public static class ToolchainPromotionService
                 {
                     ["rimLiaisonExecutableSha256"] = executableHash,
                     ["rimLiaisonAssemblySha256"] = assemblyHash,
-                    ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
+                    ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
                     ["devBridgeCoordinatorSha256"] = coordinatorHash,
                     ["transactionConsumerSha256"] = consumerHash
                 },
@@ -482,7 +492,7 @@ public static class ToolchainPromotionService
                 {
                     ["rimLiaisonExecutableSha256"] = installedExecutableHash,
                     ["rimLiaisonAssemblySha256"] = installedAssemblyHash,
-                    ["devBridgePackageSha256"] = previous.DevBridgePackageSha256!,
+                    ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
                     ["devBridgeCoordinatorSha256"] = coordinatorHash,
                     ["transactionConsumerSha256"] = installedConsumerHash
                 },
@@ -718,6 +728,15 @@ public static class ToolchainPromotionService
             }
         }
         return string.Empty;
+    }
+
+    private static string ReadRuntimePackageHash(string runtimeManifestPath)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
+        return document.RootElement.TryGetProperty("packageHash", out JsonElement hash) &&
+            hash.ValueKind == JsonValueKind.String
+            ? hash.GetString() ?? string.Empty
+            : string.Empty;
     }
 
     private static string ComputePromotedFingerprint(
