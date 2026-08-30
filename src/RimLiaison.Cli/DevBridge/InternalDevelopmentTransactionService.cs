@@ -292,7 +292,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
 
                 WriteDeploymentManifest(manifestPath, targetRoot, package, packageHash, generationAfter);
                 WriteArtifactState(options.RootPath, targetRoot, project, package, packageHash, generationAfter, manifestPath);
-
+                await RequireCoordinatorSuccess(["test", "renew", activeLeaseId, "--json"], "DEVBRIDGE_LEASE_RENEW_FAILED", workflowId, cancellationToken).ConfigureAwait(false);
                 DevBridgeLeaseResult released = await leaseAdapter.EndLeaseAsync(leaseId!, workflowId, CancellationToken.None).ConfigureAwait(false);
                 if (!released.Status.IsSuccess)
                 {
