@@ -165,17 +165,18 @@ where the chain stopped. A `DEVELOPMENT_BUILD_FAILED` result before lease/runtim
 `INFRASTRUCTURE_BLOCKED`, never a mod failure. Follow `nextAction` and rerun the canonical
 affected command after the owning boundary is repaired.
 
-Shared DevBridge runtime transitions are bounded and owner-mediated. For a
+Shared RimLiaison Runtime transitions are bounded and owner-mediated. For a
 `READINESS_IDENTITY_MISMATCH`, RimLiaison classifies the returned field before acting:
 generation/process churn and same-root stale descriptor/profile registration are recovery
 candidates; coordinator changes require same-root evidence; installation/root/owner,
 protocol/schema, and unknown mismatches are hard failures. A recoverable mismatch records the
-authoritative configured root and responding identity, refreshes/reconciles through DevBridge2,
-waits for a fresh READY generation, rechecks the source fingerprint, and retries the complete
-development/freshness transaction up to three times. Successful recovery reports `recovered`;
-refusal or exhaustion reports `INFRASTRUCTURE_FAILURE` with `NOT_RUN`, the mismatch details, and
-the recovery attempt count. The old generation, lease, artifact proof, and runtime evidence are
-never reused. Agents must not kill, restart, or take over another valid DevBridge/RimWorld owner.
+authoritative configured root and responding identity, refreshes/reconciles through the internal
+runtime, waits for a fresh READY generation, rechecks the source fingerprint, and retries the
+complete development/freshness transaction up to three times. Successful recovery reports
+`recovered`; refusal or exhaustion reports `INFRASTRUCTURE_FAILURE` with `NOT_RUN`, the mismatch
+details, and the recovery attempt count. The old generation, lease, artifact proof, and runtime
+evidence are never reused. Agents must not kill, restart, or take over another valid
+RimLiaison Runtime/RimWorld owner.
 
 ### Production-first validation policy
 
