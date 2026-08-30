@@ -22,6 +22,8 @@ public sealed class RimTestOrchestrationSummary
 
     [JsonPropertyName("overall")]
     public required string Overall { get; init; }
+    [JsonPropertyName("agentOutcome")]
+    public required string AgentOutcome { get; init; }
 
     [JsonPropertyName("sourceBuild")]
     public required string SourceBuild { get; init; }
@@ -297,6 +299,13 @@ internal static class RimTestOrchestrationProjector
         return new RimTestOrchestrationSummary
         {
             Overall = overall,
+            AgentOutcome = hasCancelled
+                ? "INFRASTRUCTURE_FAILURE"
+                : hasTestFailure || sourceBuildFailure
+                    ? "MOD_FAILURE"
+                    : overall == "PASS"
+                        ? "PASS"
+                        : "INFRASTRUCTURE_FAILURE",
             SourceBuild = sourceBuild,
             StaticTests = staticTests,
             Deployment = deployment,

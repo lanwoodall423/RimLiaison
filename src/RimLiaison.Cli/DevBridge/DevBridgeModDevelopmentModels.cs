@@ -121,6 +121,7 @@ public sealed record DevBridgeModDevelopmentAdapterOptions
     public string? DeploymentTarget { get; init; }
     public bool EnableDescriptorRecovery { get; init; } = true;
     public bool PreserveDescriptorBackup { get; init; } = true;
+    public bool UseInternalTransaction { get; init; }
     public string PowerShellPath { get; init; } = "pwsh";
     public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(20);
     public int MaxStdoutBytes { get; init; } = 1024 * 1024;

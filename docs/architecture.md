@@ -187,15 +187,21 @@ The consolidated boundary is:
 
 ```text
 agent -> RimLiaison production package
-       -> packaged transaction consumer + installed qualified DevBridge runtime
+       -> internal development transaction service
+       -> shared DevBridge runtime/deployment API
        -> DevBridge Coordinator -> RimWorld
 ```
 
-Agents see one autonomous command and one normalized outcome. RimLiaison owns production
-identity binding, transaction invocation, bounded recovery coordination, result projection, and
-cleanup. DevBridge remains the authority for lifecycle, descriptor validation, build/deploy,
-generations, leases, and loaded-artifact evidence; RimBridgeServer remains the live-game owner.
-The agent does not select a source checkout consumer, invoke Coordinator subcommands, or manage
+The packaged `mod-test.ps1` remains only for development and compatibility callers. Canonical
+production validation does not spawn PowerShell, serialize a child transaction result, or carry
+routine lease IDs between commands. The internal service owns build/package/deployment,
+generation/readiness, lease lifetime, bounded recovery, freshness, and cleanup; Coordinator
+slot/pipe/endpoint details remain diagnostic evidence only.
+
+Agents see one autonomous command and one normalized outcome. The agent-facing
+`orchestration.agentOutcome` is exactly `PASS`, `MOD_FAILURE`, or `INFRASTRUCTURE_FAILURE`;
+detailed inner ownership and lifecycle evidence remains available in the failure object. The
+agent does not select a source checkout consumer, invoke Coordinator subcommands, or manage
 routine leases.
 
 ## Affected-run prerequisite ownership
@@ -203,8 +209,9 @@ routine leases.
 Tooling-owned runtime prerequisites should be recovered by Tooling when recovery is safe and
 deterministic. `RimLiaison` is the canonical recovery owner for the normal
 `rimliaison affected --run --json` transaction; `RimContext.Core` remains the index owner and
-DevBridge2 remains the lifecycle, descriptor-validation, deployment, and lease owner. RimLiaison
-does not launch RimWorld or replace DevBridge2's authoritative checks.
+the shared DevBridge runtime remains the lifecycle, descriptor-validation, deployment, and
+low-level lease owner. RimLiaison does not launch RimWorld or replace DevBridge's authoritative
+checks.
 
 Before the freshness anchor runs, RimLiaison reconciles a missing, malformed, or stale
 `DevelopmentProjects/<project>.json` only when the repository/catalog metadata identifies one
@@ -212,16 +219,11 @@ project file, recipe, and deployment target. Existing valid descriptors are reus
 are written atomically and stale files are retained as bounded recovery backups. Ambiguous source,
 recipe, or deployment metadata remains an explicit `RECOVERY_REQUIRED` blocker.
 
-If the in-process affected query returns a partial index, RimLiaison asks the canonical Core
-service for one forced rebuild and retries the affected query once. A second partial result keeps
-the bounded index diagnostics and reports `RIMCONTEXT_INDEX_RECOVERY_FAILED`.
-
-For `RIMBRIDGE_LEASE_REQUIRED`, RimLiaison first reuses the compatible lease already held by a
-supported suite transaction. Without one, it makes one canonical lease acquisition attempt,
-passes that lease to the blocked owner/recipe operation, retries once, and releases it in a
-`finally` path. Active ownership is never stolen; contention is reported as `contended`. Recovery
-events use structured states `ready`, `recovered`, `recoveryRequired`, `contended`, `unavailable`,
-or `recoveryFailed`, with bounded attempt counts and an action field where applicable.
+For ordinary production mod transactions, the internal development transaction service acquires,
+uses, renews only when required, and releases the DevBridge lease inside one bounded call. The
+agent and ordinary caller do not carry the lease between commands. Other typed DevBridge
+operations retain low-level lease enforcement and structured recovery states
+`ready`, `recovered`, `recoveryRequired`, `contended`, `unavailable`, or `recoveryFailed`.
 
 ## Canonical affected-run orchestration contract
 

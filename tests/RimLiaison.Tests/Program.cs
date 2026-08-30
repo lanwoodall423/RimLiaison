@@ -360,6 +360,7 @@ internal static class Program
         ("affected propagates transaction identities", AffectedPropagatesTransactionIdentities),
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
         ("mod-development adapter uses packaged transaction consumer", ModDevelopmentAdapterUsesPackagedTransactionConsumer),
+        ("internal transaction service avoids PowerShell boundary", InternalTransactionServiceAvoidsPowerShellBoundary),
         ("mod-development adapter uses the source script root", ModDevelopmentAdapterUsesSourceScriptRoot),
         ("mod-development owner manifest uses runtime deployment root", ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot),
         ("mod-development response contract matrix is deterministic", ModDevelopmentResponseContractMatrix),
@@ -8881,6 +8882,117 @@ internal static class Program
         Assert(result.Status.IsSuccess, "The packaged consumer request should succeed.");
         string[] arguments = transport.Requests[0].Arguments.ToArray();
         AssertEqual(packagedConsumer, arguments[Array.IndexOf(arguments, "-File") + 1]);
+    }
+    private static void InternalTransactionServiceAvoidsPowerShellBoundary()
+    {
+        string root = CreateTempDirectory();
+        string deployment = CreateTempDirectory();
+        string rimWorld = CreateTempDirectory();
+        try
+        {
+            string descriptorPath = Path.Combine(root, "fixture.json");
+            File.WriteAllText(
+                descriptorPath,
+                """
+                {
+                  "schemaVersion":"devbridge-mod-development/v1",
+                  "project":"fixture",
+                  "sourceProject":"Source/Fixture.csproj",
+                  "configuration":"Release",
+                  "expectedAssembly":"Fixture.dll",
+                  "deploymentTarget":"1.6/Assemblies/Fixture.dll",
+                  "testRecipe":"fixture",
+                  "runtimePackage":{"sourceRoot":".","include":["About/**"]}
+                }
+                """);
+            Directory.CreateDirectory(Path.Combine(root, "About"));
+            File.WriteAllText(Path.Combine(root, "About", "About.xml"), "<ModMetaData><packageId>fixture</packageId></ModMetaData>");
+            File.WriteAllText(Path.Combine(root, "Source.csproj"), "<Project />");
+            string coordinatorCommand = Path.Combine(root, "DevBridge.cmd");
+            File.WriteAllText(coordinatorCommand, string.Empty);
+            string? stagedOutput = null;
+            var transport = new FakeTransport((request, _) =>
+            {
+                if (string.Equals(request.FileName, "dotnet", StringComparison.OrdinalIgnoreCase))
+                {
+                    stagedOutput = request.Arguments[Array.IndexOf(request.Arguments.ToArray(), "--output") + 1];
+                    Directory.CreateDirectory(stagedOutput);
+                    File.WriteAllText(Path.Combine(stagedOutput, "Fixture.dll"), "fixture");
+                    return ProcessResult("build succeeded");
+                }
+
+                if (request.Arguments.Contains("recipe", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("show", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"schemaVersion":"devbridge-test-recipe-show/v1","recipe":{"schemaVersion":"devbridge-test-recipe/v1","id":"fixture","projects":["fixture"]},"errorCode":null,"error":null}""");
+                }
+                if (request.Arguments.Contains("recipe", StringComparer.OrdinalIgnoreCase) &&
+                    request.Arguments.Contains("plan", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"schemaVersion":"devbridge-test-recipe-plan/v1","recipe":"fixture","alreadySatisfied":false,"estimatedRimWorldLaunches":1,"nextAction":"run","blockedBy":[],"steps":[]}""");
+                }
+                if (request.Arguments.Contains("status", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult($$"""{"success":true,"generation":7,"rimworldRoot":"{{rimWorld.Replace("\\", "\\\\")}}"}""");
+                }
+                if (request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"success":true,"exitCode":0,"generation":7,"leaseId":"lease-00000000000000000000000000000001"}""");
+                }
+                if (request.Arguments.Contains("wait-ready", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"success":true,"state":"READY","generation":8}""");
+                }
+                if (request.Arguments.Contains("stop", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"success":true,"gameState":"STOPPED"}""");
+                }
+                if (request.Arguments.Contains("end", StringComparer.OrdinalIgnoreCase))
+                {
+                    return ProcessResult("""{"success":true,"exitCode":0,"generation":8,"leaseId":"lease-00000000000000000000000000000001"}""");
+                }
+                return ProcessResult("""{"success":true}""");
+            });
+            var service = new InternalDevelopmentTransactionService(
+                transport,
+                new DevBridgeModDevelopmentAdapterOptions
+                {
+                    RootPath = root,
+                    DescriptorPath = descriptorPath,
+                    DeploymentRoot = deployment,
+                    Timeout = TimeSpan.FromSeconds(5),
+                    MaxStdoutBytes = 4096,
+                    MaxStderrBytes = 1024
+                });
+
+            DevBridgeModDevelopmentResult result = service.RunAsync(
+                    "fixture",
+                    root,
+                    new string('a', 64),
+                    "wf-internal")
+                .GetAwaiter()
+                .GetResult();
+
+            Assert(result.Status.IsSuccess, result.Status.Error ?? "The internal transaction should pass.");
+            Assert(result.Freshness?.LoadedArtifactFreshnessProven == true,
+                "The internal transaction must prove freshness.");
+            Assert(stagedOutput is not null, "The internal transaction must invoke dotnet directly.");
+            Assert(transport.Requests.All(request =>
+                !string.Equals(request.FileName, "pwsh", StringComparison.OrdinalIgnoreCase) &&
+                !request.Arguments.Any(argument => argument.EndsWith("mod-test.ps1", StringComparison.OrdinalIgnoreCase))),
+                "The internal transaction must not invoke the PowerShell consumer.");
+            Assert(transport.Requests.Any(request => request.Arguments.Contains("ensure-ready", StringComparer.OrdinalIgnoreCase)),
+                "The internal transaction must own readiness.");
+            Assert(transport.Requests.Any(request => request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase)),
+                "The internal transaction must own lease acquisition.");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(root);
+            DeleteDirectoryIncludingReadOnlyFiles(deployment);
+            DeleteDirectoryIncludingReadOnlyFiles(rimWorld);
+        }
     }
 
 

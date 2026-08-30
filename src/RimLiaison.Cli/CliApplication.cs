@@ -3934,11 +3934,14 @@ public static class CliApplication
                 TransactionConsumerPath = transactionConsumerPath,
                 DeploymentRoot = ResolveProjectRuntimeRoot(request, repositoryRoot),
                 ChangedPaths = freshnessRequest?.ChangedPaths,
-                TestRecipe = freshnessRequest?.TestRecipe
+                TestRecipe = freshnessRequest?.TestRecipe,
+                UseInternalTransaction = transactionConsumerPath is not null
             };
-        return new DevBridgeModDevelopmentAdapter(
-            processTransport ?? new SystemDevBridgeProcessTransport(),
-            modOptions);
+        IDevBridgeProcessTransport ownerTransport =
+            processTransport ?? new SystemDevBridgeProcessTransport();
+        return modOptions.UseInternalTransaction
+            ? new InternalDevelopmentTransactionService(ownerTransport, modOptions)
+            : new DevBridgeModDevelopmentAdapter(ownerTransport, modOptions);
     }
 
     private static string? ResolveProjectRuntimeRoot(
