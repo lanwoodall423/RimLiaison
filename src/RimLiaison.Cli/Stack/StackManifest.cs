@@ -62,6 +62,10 @@ public sealed class RimDevStackManifest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TestRecipe { get; init; }
 
+    [JsonPropertyName("testRecipePath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TestRecipePath { get; init; }
+
     [JsonPropertyName("runtimePackage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonElement? RuntimePackage { get; init; }

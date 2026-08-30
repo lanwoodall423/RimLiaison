@@ -439,6 +439,7 @@ internal static class RimDevWorkspaceDiscoverer
             resolution.Manifest.ExpectedAssembly,
             resolution.Manifest.DeploymentTarget,
             resolution.Manifest.TestRecipe,
+            resolution.Manifest.TestRecipePath,
             resolution.Manifest.RuntimePackage,
             resolution.Manifest.RuntimeFolder,
             resolution.Manifest.Dependencies,
@@ -448,7 +449,7 @@ internal static class RimDevWorkspaceDiscoverer
 
     private static StackManifestState InvalidManifest(string errorCode, string error) =>
         new(false, null, null, null, null, null, null, null, null, null, null, null, null,
-            null, null, null, null, errorCode, error);
+            null, null, null, null, null, errorCode, error);
 
     private static RimDevWorkspaceDiscovery Failure(string root, string code, string error) =>
         new(false, root, [], code, error);

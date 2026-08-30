@@ -47,6 +47,8 @@ internal static class ProjectMetadataValidator
             !IsAssembly(manifest.ExpectedAssembly) ||
             !IsToken(manifest.Configuration) ||
             !IsToken(manifest.TestRecipe) ||
+            (manifest.TestRecipePath is not null &&
+                !IsRelativePath(manifest.TestRecipePath, ".json")) ||
             (manifest.Dependencies is not null &&
                 manifest.Dependencies.Any(dependency => !IsToken(dependency))))
         {

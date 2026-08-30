@@ -23,7 +23,12 @@ public sealed record DevBridgeArtifactFreshness(
     string? ErrorCode = null,
     string? BuiltPackageSha256 = null,
     string? DeployedPackageSha256 = null,
-    string? DeploymentManifestPath = null);
+    string? DeploymentManifestPath = null,
+    string? RecipeId = null,
+    string? RecipeOwner = null,
+    string? RecipeSource = null,
+    string? RecipeSha256 = null,
+    string? RecipeSchemaVersion = null);
 
 /// <summary>
 /// Structured diagnostics returned by the DevBridge2 mod-development

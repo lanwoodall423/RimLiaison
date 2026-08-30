@@ -26,7 +26,12 @@ public sealed record DevBridgeDevelopmentDescriptor(
     string? MetadataOwner = null,
     string? MetadataSource = null,
     string? ContractProducer = null,
-    string? MaterializedContractPath = null);
+    string? MaterializedContractPath = null,
+    string? TestRecipePath = null,
+    string? ResolvedRecipePath = null,
+    string? RecipeSource = null,
+    string? RecipeSha256 = null,
+    string? RecipeSchemaVersion = null);
 
 public sealed record DevBridgeDescriptorReconciliationResult(
     PrerequisiteRecoveryState State,
@@ -224,7 +229,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             currentFields?.MetadataOwner,
             currentFields?.MetadataSource,
             currentFields?.ContractProducer,
-            currentFields?.MaterializedContractPath);
+            currentFields?.MaterializedContractPath,
+            currentFields?.TestRecipePath,
+            currentFields?.ResolvedRecipePath,
+            currentFields?.RecipeSource,
+            currentFields?.RecipeSha256,
+            currentFields?.RecipeSchemaVersion);
         if (!ValidateDescriptor(
                 descriptor,
                 project,
@@ -436,7 +446,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             GetString(root, "metadataOwner"),
             GetString(root, "metadataSource"),
             GetString(root, "contractProducer"),
-            GetString(root, "materializedContractPath"));
+            GetString(root, "materializedContractPath"),
+            GetString(root, "testRecipePath"),
+            GetString(root, "resolvedRecipePath"),
+            GetString(root, "recipeSource"),
+            GetString(root, "recipeSha256"),
+            GetString(root, "recipeSchemaVersion"));
     }
 
     private static bool TryCreateDescriptor(
@@ -457,6 +472,8 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             !IsSafeAssembly(fields.ExpectedAssembly) ||
             !IsSafeRelativePath(fields.DeploymentTarget, requireExtension: null) ||
             !IsSafeToken(fields.TestRecipe) ||
+            (!string.IsNullOrWhiteSpace(fields.TestRecipePath) &&
+                !IsSafeRelativePath(fields.TestRecipePath, requireExtension: ".json")) ||
             (!string.IsNullOrWhiteSpace(fields.DeploymentRole) &&
                 fields.DeploymentRole is not ("mod" or "tooling-only")))
         {
@@ -478,7 +495,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             fields.MetadataOwner,
             fields.MetadataSource,
             fields.ContractProducer,
-            fields.MaterializedContractPath);
+            fields.MaterializedContractPath,
+            fields.TestRecipePath,
+            fields.ResolvedRecipePath,
+            fields.RecipeSource,
+            fields.RecipeSha256,
+            fields.RecipeSchemaVersion);
         return true;
     }
 
@@ -498,6 +520,8 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             !IsSafeAssembly(descriptor.ExpectedAssembly) ||
             !IsSafeRelativePath(descriptor.DeploymentTarget, null) ||
             !IsSafeToken(descriptor.TestRecipe) ||
+            (!string.IsNullOrWhiteSpace(descriptor.TestRecipePath) &&
+                !IsSafeRelativePath(descriptor.TestRecipePath, ".json")) ||
             (!string.IsNullOrWhiteSpace(descriptor.DeploymentRole) &&
                 descriptor.DeploymentRole is not ("mod" or "tooling-only")))
         {
@@ -906,6 +930,11 @@ public static class DevBridgeDevelopmentDescriptorReconciler
             ["deploymentTarget"] = descriptor.DeploymentTarget,
             ["testRecipe"] = descriptor.TestRecipe
         };
+        AddIfPresent(fields, "testRecipePath", descriptor.TestRecipePath);
+        AddIfPresent(fields, "resolvedRecipePath", descriptor.ResolvedRecipePath);
+        AddIfPresent(fields, "recipeSource", descriptor.RecipeSource);
+        AddIfPresent(fields, "recipeSha256", descriptor.RecipeSha256);
+        AddIfPresent(fields, "recipeSchemaVersion", descriptor.RecipeSchemaVersion);
         AddIfPresent(fields, "canonicalProjectId", descriptor.CanonicalProjectId);
         AddIfPresent(fields, "metadataOwner", descriptor.MetadataOwner);
         AddIfPresent(fields, "metadataSource", descriptor.MetadataSource);
@@ -1016,7 +1045,7 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         }
 
         string trimmed = value.Trim();
-        return trimmed.Length <= 1024 ? trimmed : trimmed[..1024];
+        return trimmed.Length <= 4096 ? trimmed : trimmed[..4096];
     }
 
     private sealed record DescriptorFields(
@@ -1033,8 +1062,12 @@ public static class DevBridgeDevelopmentDescriptorReconciler
         string? MetadataOwner,
         string? MetadataSource,
         string? ContractProducer,
-        string? MaterializedContractPath);
-
+        string? MaterializedContractPath,
+        string? TestRecipePath,
+        string? ResolvedRecipePath,
+        string? RecipeSource,
+        string? RecipeSha256,
+        string? RecipeSchemaVersion);
     private sealed record DescriptorCandidate(
         string SourceProject,
         string AssemblyName,

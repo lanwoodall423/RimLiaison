@@ -102,13 +102,35 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     "Tooling-only projects are not eligible for production deployment.");
             }
 
+            ValidationRecipeResolutionResult recipeResolution =
+                ValidationRecipeResolver.Resolve(
+                    project,
+                    descriptor.TestRecipe,
+                    sourceRoot,
+                    descriptor.TestRecipePath,
+                    options.RootPath);
+            if (!recipeResolution.IsSuccess || recipeResolution.Recipe is null)
+            {
+                return Failure(project, workflowId, transactionId,
+                    recipeResolution.ErrorCode ?? "PROJECT_RECIPE_NOT_FOUND",
+                    recipeResolution.Error ?? "The declared development recipe could not be resolved.");
+            }
+            if (!string.IsNullOrWhiteSpace(descriptor.RecipeSha256) &&
+                !string.Equals(descriptor.RecipeSha256, recipeResolution.Recipe.Sha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Failure(project, workflowId, transactionId,
+                    "PROJECT_RECIPE_HASH_MISMATCH",
+                    "The resolved validation recipe changed after metadata materialization.");
+            }
+
             string transactionRoot = Path.Combine(Path.GetTempPath(), "RimLiaison-development-" + transactionId);
             string stagingRoot = Path.Combine(transactionRoot, "staging");
             string intermediateRoot = Path.Combine(transactionRoot, "obj");
             Directory.CreateDirectory(stagingRoot);
             Directory.CreateDirectory(intermediateRoot);
 
-            DevBridgeRecipeAdapter recipeAdapter = new(transport, ToBridgeOptions());
+            DevBridgeRecipeAdapter recipeAdapter = new(transport, ToBridgeOptions(recipeResolution.Recipe.Path));
             DevBridgeRecipeShowResult show = await recipeAdapter.ShowAsync(descriptor.TestRecipe, cancellationToken).ConfigureAwait(false);
             if (!show.Status.IsSuccess || show.Definition is null)
             {
@@ -302,7 +324,12 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         null,
                         BuiltPackageSha256: packageHash,
                         DeployedPackageSha256: packageHash,
-                        DeploymentManifestPath: manifestPath),
+                        DeploymentManifestPath: manifestPath,
+                        RecipeId: recipeResolution.Recipe.Id,
+                        RecipeOwner: recipeResolution.Recipe.OwnerProject,
+                        RecipeSource: recipeResolution.Recipe.Source,
+                        RecipeSha256: recipeResolution.Recipe.Sha256,
+                        RecipeSchemaVersion: recipeResolution.Recipe.SchemaVersion),
                     BuildDiagnostics(build, buildProject, stagingRoot, transactionId, workflowId),
                     []);
             }
@@ -338,12 +365,13 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         }
     }
 
-    private DevBridgeAdapterOptions ToBridgeOptions() => new()
+    private DevBridgeAdapterOptions ToBridgeOptions(string? recipeFilePath = null) => new()
     {
         CommandPath = options.RootPath.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
             ? options.RootPath
             : Path.Combine(options.RootPath, "DevBridge.cmd"),
         RootPath = options.RootPath,
+        RecipeFilePath = recipeFilePath,
         ShowPlanTimeout = options.Timeout,
         RunTimeout = options.Timeout,
         MaxStdoutBytes = options.MaxStdoutBytes,
@@ -395,7 +423,11 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             value("schemaVersion"), descriptorProject, value("sourceProject"), value("configuration"),
             value("expectedAssembly"), value("deploymentTarget"), value("testRecipe"),
             root.TryGetProperty("runtimePackage", out JsonElement package) ? package.Clone() : null,
-            root.TryGetProperty("deploymentRole", out JsonElement role) ? role.GetString() : null);
+            root.TryGetProperty("deploymentRole", out JsonElement role) ? role.GetString() : null,
+            value("canonicalProjectId"), value("metadataOwner"), value("metadataSource"),
+            value("contractProducer"), value("materializedContractPath"),
+            value("testRecipePath"), value("resolvedRecipePath"), value("recipeSource"),
+            value("recipeSha256"), value("recipeSchemaVersion"));
     }
 
     private static bool RecipeContainsProject(JsonElement definition, string project) =>

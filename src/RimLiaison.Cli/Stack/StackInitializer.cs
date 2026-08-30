@@ -191,6 +191,7 @@ internal static class StackInitializer
             ExpectedAssembly = existing?.ExpectedAssembly,
             DeploymentTarget = existing?.DeploymentTarget,
             TestRecipe = existing?.TestRecipe,
+            TestRecipePath = existing?.TestRecipePath,
             RuntimePackage = existing?.RuntimePackage,
             RuntimeFolder = existing?.RuntimeFolder,
             Dependencies = existing?.Dependencies
@@ -258,6 +259,7 @@ internal static class StackInitializer
         string.Equals(left.ExpectedAssembly, right.ExpectedAssembly, StringComparison.Ordinal) &&
         string.Equals(left.DeploymentTarget, right.DeploymentTarget, StringComparison.Ordinal) &&
         string.Equals(left.TestRecipe, right.TestRecipe, StringComparison.Ordinal) &&
+        string.Equals(left.TestRecipePath, right.TestRecipePath, StringComparison.Ordinal) &&
         string.Equals(left.RuntimeFolder, right.RuntimeFolder, StringComparison.Ordinal) &&
         string.Equals(left.RuntimePackage?.GetRawText(), right.RuntimePackage?.GetRawText(), StringComparison.Ordinal) &&
         (left.Dependencies ?? []).SequenceEqual(right.Dependencies ?? [], StringComparer.Ordinal);

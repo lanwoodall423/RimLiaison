@@ -204,6 +204,29 @@ detailed inner ownership and lifecycle evidence remains available in the failure
 agent does not select a source checkout consumer, invoke Coordinator subcommands, or manage
 routine leases.
 
+## Validation recipe ownership
+
+Validation recipe schema and execution remain toolchain responsibilities, but project-specific recipe
+semantics are owned by the project they validate. A production `.rimdev/stack.json` may declare
+`testRecipePath` as a repository-relative JSON path. RimLiaison resolves that path deterministically,
+checks the declared DevBridge project owner, schema, id, and SHA-256, and passes the immutable
+resolved file to the DevBridge recipe command.
+
+The resolver permits only three sources: an explicitly declared project-owned recipe, a bounded
+allowlist of genuinely generic toolchain builtins, or an exact single-owner legacy file during
+migration. It never searches arbitrary source/worktree paths. Ambiguous or cross-project legacy
+ownership fails closed. Recipe evidence records id, owner, source, schema version, and hash.
+
+Current catalog classification is explicit: `quicktest-smoke` is `TOOLCHAIN_BUILTIN`.
+`deferred-reality-development-smoke`, `mod-development-smoke`, and
+`insightcanvas-in-game-suite` are `PROJECT_OWNED` and now reside in their owning
+repositories. `aquaculture-development-smoke`, `horticulture-in-game-suite`,
+`knowledge-framework-development-smoke`, `wildlife-in-game-suite`,
+`live-stack-smoke`, and `live-stack-diagnostic` remain `PROJECT_OWNED` semantics
+served only through the bounded exact legacy-central compatibility path until their
+owning repositories declare portable paths. No recipe is classified `UNKNOWN` or
+`TEST_FIXTURE_ONLY` in the production catalog.
+
 ## Affected-run prerequisite ownership
 
 Tooling-owned runtime prerequisites should be recovered by Tooling when recovery is safe and

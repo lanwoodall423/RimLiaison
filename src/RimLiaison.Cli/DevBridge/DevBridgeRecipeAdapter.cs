@@ -372,6 +372,11 @@ public sealed class DevBridgeRecipeAdapter :
             recipeId,
             "--json"
         };
+        if (!string.IsNullOrWhiteSpace(options.RecipeFilePath))
+        {
+            arguments.Add("--recipe-file");
+            arguments.Add(options.RecipeFilePath);
+        }
         if (!string.IsNullOrWhiteSpace(workflowId))
         {
             arguments.Add("--workflow-id");

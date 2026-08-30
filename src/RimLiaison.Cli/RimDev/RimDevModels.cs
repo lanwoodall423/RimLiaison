@@ -79,6 +79,7 @@ public sealed record StackManifestState(
     string? ExpectedAssembly,
     string? DeploymentTarget,
     string? TestRecipe,
+    string? TestRecipePath,
     JsonElement? RuntimePackage,
     string? RuntimeFolder,
     IReadOnlyList<string>? Dependencies,

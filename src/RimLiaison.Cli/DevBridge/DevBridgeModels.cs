@@ -206,6 +206,7 @@ public sealed record DevBridgeAdapterOptions
     public string? SourceRootPath { get; init; }
     public string? RuntimeRootPath { get; init; }
     public string? PinnedWorktreeRootPath { get; init; }
+    public string? RecipeFilePath { get; init; }
     public TimeSpan ShowPlanTimeout { get; init; } = TimeSpan.FromSeconds(75);
     public TimeSpan RunTimeout { get; init; } = TimeSpan.FromMinutes(16);
     public int MaxStdoutBytes { get; init; } = 1024 * 1024;

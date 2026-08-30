@@ -82,6 +82,29 @@ internal static class ProjectOwnedDescriptorMaterializer
             return null;
         }
 
+        ResolvedValidationRecipe? resolvedRecipe = null;
+        if (!string.IsNullOrWhiteSpace(manifest.TestRecipePath))
+        {
+            ValidationRecipeResolutionResult recipeResolution = ValidationRecipeResolver.Resolve(
+                canonicalProjectId,
+                manifest.TestRecipe!,
+                sourceRoot,
+                manifest.TestRecipePath,
+                null);
+            if (!recipeResolution.IsSuccess)
+            {
+                errorCode = recipeResolution.ErrorCode ?? "PROJECT_RECIPE_NOT_FOUND";
+                error = recipeResolution.Error;
+                return null;
+            }
+            resolvedRecipe = recipeResolution.Recipe;
+        }
+
+        string? resolvedRecipePath = resolvedRecipe?.Path;
+        string? recipeSource = resolvedRecipe?.Source;
+        string? recipeSha256 = resolvedRecipe?.Sha256;
+        string? recipeSchemaVersion = resolvedRecipe?.SchemaVersion;
+
         string temporaryRoot = Path.Combine(
             Path.GetTempPath(),
             "rimliaison-project-contract-" + Guid.NewGuid().ToString("N"));
@@ -101,6 +124,11 @@ internal static class ProjectOwnedDescriptorMaterializer
                 ["expectedAssembly"] = manifest.ExpectedAssembly,
                 ["deploymentTarget"] = manifest.DeploymentTarget,
                 ["testRecipe"] = manifest.TestRecipe,
+                ["testRecipePath"] = manifest.TestRecipePath,
+                ["resolvedRecipePath"] = resolvedRecipePath,
+                ["recipeSource"] = recipeSource,
+                ["recipeSha256"] = recipeSha256,
+                ["recipeSchemaVersion"] = recipeSchemaVersion,
                 ["runtimePackage"] = manifest.RuntimePackage!.Value
             };
             string descriptorPath = Path.Combine(temporaryRoot, "devbridge-execution-contract.json");
@@ -122,7 +150,12 @@ internal static class ProjectOwnedDescriptorMaterializer
                 manifest.Project,
                 Path.Combine(sourceRoot, ".rimdev", "stack.json"),
                 "RimLiaison",
-                descriptorPath);
+                descriptorPath,
+                manifest.TestRecipePath,
+                resolvedRecipePath,
+                recipeSource,
+                recipeSha256,
+                recipeSchemaVersion);
             return new ProjectOwnedDescriptorMaterialization(descriptorPath, descriptor, temporaryRoot);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or

@@ -47,6 +47,17 @@ internal static class Program
         ("Frontier project-owned metadata passes", ProjectMetadataOwnershipTests.FrontierProjectOwnedMetadataPasses),
         ("Insight Canvas project-owned metadata passes", ProjectMetadataOwnershipTests.InsightCanvasProjectOwnedMetadataPasses),
         ("wrong metadata owner fails closed", ProjectMetadataOwnershipTests.WrongMetadataOwnerFailsClosed),
+        ("project-owned recipe resolves", ValidationRecipeResolverTests.ProjectOwnedRecipeResolves),
+        ("builtin recipe resolves", ValidationRecipeResolverTests.BuiltinRecipeResolves),
+        ("missing recipe returns structured failure", ValidationRecipeResolverTests.MissingRecipeReturnsStructuredFailure),
+        ("project recipe does not require central runtime", ValidationRecipeResolverTests.ProjectRecipeDoesNotRequireCentralRuntime),
+        ("relative recipe path survives repository move", ValidationRecipeResolverTests.RelativeRecipePathSurvivesRepositoryMove),
+        ("absolute recipe path is rejected", ValidationRecipeResolverTests.AbsoluteRecipePathIsRejected),
+        ("foreign project recipe is rejected", ValidationRecipeResolverTests.ForeignProjectRecipeIsRejected),
+        ("ambiguous legacy ownership fails closed", ValidationRecipeResolverTests.AmbiguousLegacyOwnershipFailsClosed),
+        ("legacy recipe resolves deterministically", ValidationRecipeResolverTests.LegacyProjectRecipeMigratesDeterministically),
+        ("recipe hash and schema are recorded", ValidationRecipeResolverTests.RecipeHashAndSchemaAreRecorded),
+        ("ecosystem recipes resolve", ValidationRecipeResolverTests.EcosystemRecipesResolve),
         ("managed project identity map explicit", CanonicalProjectIdentityTests.ManagedProjectIdentityMapIsExplicit),
         ("DRF display and routing share canonical identity", CanonicalProjectIdentityTests.DrfDisplayNameAndRoutingSlugResolveSameCanonical),
         ("Frontier identifiers resolve correctly", CanonicalProjectIdentityTests.FrontierIdentifiersResolveCorrectly),
@@ -8890,6 +8901,10 @@ internal static class Program
         string rimWorld = CreateTempDirectory();
         try
         {
+            Directory.CreateDirectory(Path.Combine(root, ".rimdev", "recipes"));
+            File.WriteAllText(
+                Path.Combine(root, ".rimdev", "recipes", "fixture.json"),
+                """{"schemaVersion":"devbridge-test-recipe/v1","id":"fixture","description":"fixture","projects":["fixture"],"inputs":{"quicktest":true},"requiresReady":true,"success":{"quicktestReady":true}}""");
             string descriptorPath = Path.Combine(root, "fixture.json");
             File.WriteAllText(
                 descriptorPath,
@@ -8902,6 +8917,7 @@ internal static class Program
                   "expectedAssembly":"Fixture.dll",
                   "deploymentTarget":"1.6/Assemblies/Fixture.dll",
                   "testRecipe":"fixture",
+                  "testRecipePath":".rimdev/recipes/fixture.json",
                   "runtimePackage":{"sourceRoot":".","include":["About/**"]}
                 }
                 """);
@@ -8976,11 +8992,22 @@ internal static class Program
             Assert(result.Status.IsSuccess, result.Status.Error ?? "The internal transaction should pass.");
             Assert(result.Freshness?.LoadedArtifactFreshnessProven == true,
                 "The internal transaction must prove freshness.");
+            AssertEqual("fixture", result.Freshness!.RecipeId);
+            AssertEqual("fixture", result.Freshness.RecipeOwner);
+            AssertEqual("PROJECT_OWNED", result.Freshness.RecipeSource);
+            Assert(result.Freshness.RecipeSha256 is { Length: 64 },
+                "The internal transaction must export the resolved recipe hash.");
             Assert(stagedOutput is not null, "The internal transaction must invoke dotnet directly.");
             Assert(transport.Requests.All(request =>
                 !string.Equals(request.FileName, "pwsh", StringComparison.OrdinalIgnoreCase) &&
                 !request.Arguments.Any(argument => argument.EndsWith("mod-test.ps1", StringComparison.OrdinalIgnoreCase))),
                 "The internal transaction must not invoke the PowerShell consumer.");
+            var recipeRequest = transport.Requests.First(request =>
+                request.Arguments.Contains("recipe", StringComparer.OrdinalIgnoreCase) &&
+                request.Arguments.Contains("show", StringComparer.OrdinalIgnoreCase));
+            Assert(recipeRequest.Arguments.Contains("--recipe-file", StringComparer.OrdinalIgnoreCase) &&
+                recipeRequest.Arguments.Contains(Path.Combine(root, ".rimdev", "recipes", "fixture.json"), StringComparer.OrdinalIgnoreCase),
+                "the internal transaction must pass the semantic resolved recipe file to DevBridge");
             Assert(transport.Requests.Any(request => request.Arguments.Contains("ensure-ready", StringComparer.OrdinalIgnoreCase)),
                 "The internal transaction must own readiness.");
             Assert(transport.Requests.Any(request => request.Arguments.Contains("test", StringComparer.OrdinalIgnoreCase) &&
