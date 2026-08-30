@@ -129,6 +129,9 @@ internal sealed class ProductionToolchainManifest
     public string? TransactionConsumerSha256 { get; init; }
     [JsonPropertyName("runtimeProtocolContract")]
     public string? RuntimeProtocolContract { get; init; }
+    // Read once for migration from the previous product-manifest field name.
+    [JsonPropertyName("compatibilityContract")]
+    public string? LegacyCompatibilityContract { get; init; }
     [JsonPropertyName("qualifiedSourceCommit")]
     public string? QualifiedSourceCommit { get; init; }
     [JsonPropertyName("qualificationArtifactPath")]

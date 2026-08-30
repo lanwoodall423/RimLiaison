@@ -14,6 +14,7 @@ public static class ToolchainPromotionSchemas
     public const string Package = "rimliaison-toolchain-promotion/v2";
     public const string Result = "rimliaison-toolchain-promotion-result/v1";
     public const string OwnerProduct = "RimLiaison";
+    public const string RuntimeProtocolContract = "devbridge-mod-development/v1";
     public const string RuntimeSubsystem = "RimLiaison.Runtime";
     public const string RimBridgeServerBoundary = "external-game-side";
 }
@@ -233,12 +234,17 @@ public static class ToolchainPromotionService
                     "PROMOTION_PRODUCTION_MANIFEST_INVALID",
                     manifestError ?? "The current production manifest could not be read.");
             }
+            string previousOwnerProduct = previous.OwnerProduct ?? ToolchainPromotionSchemas.OwnerProduct;
+            string previousRuntimeSubsystem = previous.RuntimeSubsystem ?? ToolchainPromotionSchemas.RuntimeSubsystem;
+            string previousRuntimeProtocolContract = previous.RuntimeProtocolContract ??
+                previous.LegacyCompatibilityContract ??
+                ToolchainPromotionSchemas.RuntimeProtocolContract;
 
             if (!string.Equals(package.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
                 !string.Equals(package.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
-                !string.Equals(previous.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
-                !string.Equals(previous.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
-                !string.Equals(package.RuntimeProtocolContract, previous.RuntimeProtocolContract, StringComparison.Ordinal) ||
+                !string.Equals(previousOwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
+                !string.Equals(previousRuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
+                !string.Equals(package.RuntimeProtocolContract, previousRuntimeProtocolContract, StringComparison.Ordinal) ||
                 !SamePath(package.DevBridgeRuntimeRoot, previous.DevBridgeRuntimeRoot))
             {
                 return ToolchainPromotionResult.Blocked(
@@ -461,9 +467,8 @@ public static class ToolchainPromotionService
                 TransactionConsumerSha256 = installedConsumerHash,
                 UnifiedManifestPath = unifiedManifestPath,
                 UnifiedManifestSha256 = unifiedManifestHash,
-                RuntimeProtocolContract = previous.RuntimeProtocolContract,
                 QualifiedSourceCommit = package.SourceCommit,
-                QualificationArtifactPath = artifactPath,
+                RuntimeProtocolContract = previousRuntimeProtocolContract,
                 QualificationArtifactSha256 = qualificationHash
             };
             AtomicReplace(manifestPath, JsonSerializer.Serialize(updated, WriteOptions));
@@ -627,13 +632,15 @@ public static class ToolchainPromotionService
                 string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
                 string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
                 string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
-                !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
-                !string.Equals(manifest.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal) ||
-                string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot) ||
+                (!string.IsNullOrWhiteSpace(manifest.OwnerProduct) &&
+                    !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal)) ||
+                (!string.IsNullOrWhiteSpace(manifest.RuntimeSubsystem) &&
+                    !string.Equals(manifest.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal)) ||
                 string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
-                string.IsNullOrWhiteSpace(manifest.RuntimeProtocolContract))
+                string.IsNullOrWhiteSpace(manifest.RuntimeProtocolContract) &&
+                    !string.Equals(manifest.LegacyCompatibilityContract, ToolchainPromotionSchemas.RuntimeProtocolContract, StringComparison.Ordinal))
             {
                 error = "The production manifest is incomplete or unsupported.";
                 return null;
