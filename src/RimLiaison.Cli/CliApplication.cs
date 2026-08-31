@@ -4539,7 +4539,8 @@ public static class CliApplication
             CliCommand.RunTest or
             CliCommand.SuiteRun or
             CliCommand.GoldenPath or
-            CliCommand.Doctor ||
+            CliCommand.Doctor or
+            CliCommand.Preflight ||
         request.Command == CliCommand.Affected && request.RunSelected;
     private static bool RequiresProjectBinding(CliRequest request) =>
         string.Equals(

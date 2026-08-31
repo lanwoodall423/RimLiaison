@@ -210,6 +210,7 @@ internal static class Program
         ("production failure ownership table is bounded", ProductionExecutionTests.FailureOwnershipTableIsBounded),
         ("project failure normalizes to MOD_FAILURE", ProductionExecutionTests.ProjectFailureNormalizesToModFailure),
         ("project build failure normalizes to MOD_FAILURE", ProductionExecutionTests.ProjectBuildFailureNormalizesToModFailure),
+        ("explicit build owner controls classification", ProductionExecutionTests.ExplicitBuildOwnerControlsClassification),
         ("recovery evidence is counted by cycle type", ProductionExecutionTests.RecoveryEvidenceIsCountedByCycleType),
         ("agent outcome model has only three values", ProductionExecutionTests.AgentOutcomeModelHasOnlyThreeValues),
         ("reconnect recovery stops at reconcile", ManagedRuntimeEscalationTests.ReconnectRestoresServiceWithoutReset),
@@ -391,6 +392,7 @@ internal static class Program
         ("mod-development adapter uses packaged transaction consumer", ModDevelopmentAdapterUsesPackagedTransactionConsumer),
         ("internal transaction service avoids PowerShell boundary", InternalTransactionServiceAvoidsPowerShellBoundary),
         ("mod-development adapter uses the source script root", ModDevelopmentAdapterUsesSourceScriptRoot),
+        ("mod-development source root ignores whitespace override", ModDevelopmentSourceRootIgnoresWhitespaceOverride),
         ("mod-development owner manifest uses runtime deployment root", ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot),
         ("mod-development response contract matrix is deterministic", ModDevelopmentResponseContractMatrix),
         ("mod-development adapter binds descriptor output provenance", ModDevelopmentAdapterBindsDescriptorOutputProvenance),
@@ -7269,6 +7271,28 @@ internal static class Program
             "doctor diagnostics must identify the originating component and code");
     }
 
+    private static void ModDevelopmentSourceRootIgnoresWhitespaceOverride()
+    {
+        string directory = CreateTempDirectory();
+        string? previousSourceRoot = Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT");
+        string? previousBridgeRoot = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT");
+        try
+        {
+            Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", " ");
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", " ");
+            DevBridgeModDevelopmentAdapterOptions options =
+                DevBridgeModDevelopmentAdapterOptions.Discover(directory);
+
+            AssertEqual(Path.GetFullPath(directory), options.ScriptRootPath);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", previousSourceRoot);
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", previousBridgeRoot);
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
     private static void DevBridgeRootSelectsBatchLauncher()
     {
         string directory = CreateTempDirectory();
@@ -9014,6 +9038,11 @@ internal static class Program
             AssertEqual("PROJECT_OWNED", result.Freshness.RecipeSource);
             Assert(result.Freshness.RecipeSha256 is { Length: 64 },
                 "The internal transaction must export the resolved recipe hash.");
+            AssertEqual("PROJECT_BUILD", result.Build?.BuildOwnerType);
+            AssertEqual("fixture", result.Build?.BuildOwnerProject);
+            AssertEqual("Source/Fixture.csproj", result.Build?.BuildTarget);
+            AssertEqual("dotnet build", result.Build?.BuildCommandIdentity);
+            AssertEqual("build:fixture", result.Build?.BuildEvidenceId);
             Assert(stagedOutput is not null, "The internal transaction must invoke dotnet directly.");
             Assert(transport.Requests.All(request =>
                 !string.Equals(request.FileName, "pwsh", StringComparison.OrdinalIgnoreCase) &&

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using RimLiaison.Recovery;
+using RimLiaison.Observability;
 
 namespace RimLiaison.DevBridge;
 
@@ -198,15 +199,15 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             }
             if (build.TimedOut)
             {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout.", DevBridgeOutcomeKind.InfrastructureFailure, BuildDiagnostics(build, buildProject, stagingRoot, transactionId, workflowId));
+                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout.", DevBridgeOutcomeKind.InfrastructureFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout."));
             }
             if (build.ExitCode is not 0 || build.StartError is not null)
             {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, buildProject, stagingRoot, transactionId, workflowId));
+                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed."));
             }
             if (!File.Exists(expectedArtifact))
             {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, buildProject, stagingRoot, transactionId, workflowId));
+                return Failure(project, workflowId, transactionId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly."));
             }
 
             string targetRoot = Path.GetFullPath(options.DeploymentRoot!);
@@ -332,7 +333,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         RecipeSource: recipeResolution.Recipe.Source,
                         RecipeSha256: recipeResolution.Recipe.Sha256,
                         RecipeSchemaVersion: recipeResolution.Recipe.SchemaVersion),
-                    BuildDiagnostics(build, buildProject, stagingRoot, transactionId, workflowId),
+                    BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId),
                     []);
             }
             finally
@@ -620,8 +621,70 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
     private static string[] GetStringArray(JsonElement root, string name) => root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [];
     private static string Bound(string? value) => string.IsNullOrWhiteSpace(value) ? "The internal development transaction failed." : value.Length <= 4096 ? value : value[..4096];
 
-    private static DevBridgeBuildDiagnostics BuildDiagnostics(DevBridgeProcessResult process, string sourceProject, string staging, string transactionId, string? workflowId) =>
-        new("dotnet build", process.ExitCode, Bound(process.Stdout), sourceProject, staging, process.TimedOut, null, Bound(process.Stderr), Bound(process.Stderr), null, process.Cancelled, null, workflowId, null, null, null, null, null, null, null, null, null, "RimLiaison", "project-build", null, null, null);
+    private static DevBridgeBuildDiagnostics BuildDiagnostics(
+        DevBridgeProcessResult process,
+        string project,
+        string sourceRoot,
+        string sourceProject,
+        string staging,
+        string transactionId,
+        string? workflowId,
+        string? errorCode = null,
+        string? failureMessage = null)
+    {
+        string buildTarget = NormalizeRelative(Path.GetRelativePath(sourceRoot, sourceProject));
+        string owner = ProjectOwnerName(sourceRoot, project);
+        return new(
+            Command: "dotnet build",
+            ExitCode: process.ExitCode,
+            Output: Bound(process.Stdout),
+            SourceProject: sourceProject,
+            StagingPath: staging,
+            TimedOut: process.TimedOut,
+            BuiltSha256: null,
+            DiagnosticOutput: Bound(process.Stderr),
+            ErrorOutput: Bound(process.Stderr),
+            Configuration: null,
+            FailureMessage: failureMessage,
+            TransactionId: transactionId,
+            WorkflowId: workflowId,
+            ErrorCode: errorCode,
+            OutputTruncated: process.StdoutTruncated,
+            CausalDiagnostic: Bound(process.Stderr),
+            CausalDiagnosticTruncated: process.StderrTruncated,
+            DiagnosticSignature: null,
+            RawStdoutPath: null,
+            RawStderrPath: null,
+            RawNativeStdoutPath: null,
+            RawNativeStderrPath: null,
+            Orchestrator: "RimLiaison",
+            FailureSurface: "project-build",
+            LikelyOwner: owner,
+            OwnershipConfidence: "explicit",
+            OwnershipBasis: "project-owned descriptor source project",
+            Discrimination: null,
+            BuildOwnerType: "PROJECT_BUILD",
+            BuildOwnerProject: project,
+            BuildTarget: buildTarget,
+            BuildSourceRoot: sourceRoot,
+            BuildCommandIdentity: "dotnet build",
+            BuildEvidenceId: "build:" + project,
+            BuildDurationMilliseconds: process.Evidence?.DurationMilliseconds);
+    }
+
+    private static string ProjectOwnerName(string sourceRoot, string project)
+    {
+        try
+        {
+            string? name = ObservabilityProjectIdentityResolver.Resolve(sourceRoot, project).ModName;
+            return string.IsNullOrWhiteSpace(name) ? project : name;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+            return project;
+        }
+    }
 
     private static DevBridgeModDevelopmentResult Failure(string project, string? workflowId, string transactionId, string code, string? error, DevBridgeOutcomeKind outcome = DevBridgeOutcomeKind.InfrastructureFailure, DevBridgeBuildDiagnostics? build = null, string? leaseId = null, int? generation = null) =>
         new(project, new DevBridgeAdapterStatus(outcome, code, Bound(error)), false, transactionId, workflowId, generation, leaseId, null, build, []);

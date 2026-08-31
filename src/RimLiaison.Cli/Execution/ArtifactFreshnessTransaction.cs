@@ -152,7 +152,8 @@ public sealed class ArtifactFreshnessTransaction
             recoveryTransport is not null &&
             recoveryOptions is not null &&
             ProductionExecutionPolicy.RequiresPreMutationEscalation(
-                result.Status.ErrorCode))
+                result.Status.ErrorCode,
+                result.Build?.BuildOwnerType))
         {
             managedRecoveryUsed = true;
             DevBridgeCapabilityRecoveryResult managedRecovery =

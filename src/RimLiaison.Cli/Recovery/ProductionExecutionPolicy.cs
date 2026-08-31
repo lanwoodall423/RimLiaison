@@ -121,11 +121,23 @@ public static class ProductionExecutionPolicy
     public static ProductionFailureAssessment Classify(
         string? errorCode,
         string? error = null,
-        bool safeReplay = false)
+        bool safeReplay = false,
+        string? buildOwnerType = null)
     {
         string code = string.IsNullOrWhiteSpace(errorCode)
             ? "RIMLIAISON_UNCLASSIFIED_FAILURE"
             : errorCode.Trim();
+        string ownerType = buildOwnerType?.Trim().ToUpperInvariant() ?? string.Empty;
+
+        if (IsToolchainBuildOwner(ownerType) && IsBuildFailureCode(code))
+        {
+            return new(
+                ProductionFailureClassification.SelfHealable,
+                code,
+                "RimLiaison",
+                safeReplay,
+                error ?? "RimLiaison-owned build state may be reconciled once.");
+        }
 
         if (ObsoleteCodes.Contains(code))
         {
@@ -156,7 +168,8 @@ public static class ProductionExecutionPolicy
                 error ?? "Identity, freshness, or protocol evidence is not trustworthy.");
         }
 
-        if (ProjectCodes.Contains(code) ||
+        if (ownerType == "PROJECT_BUILD" ||
+            ProjectCodes.Contains(code) ||
             code.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
             code.StartsWith("COMPILER_", StringComparison.OrdinalIgnoreCase) ||
             code.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase))
@@ -190,6 +203,21 @@ public static class ProductionExecutionPolicy
             error ?? "The failure was not proven safe to repair or replay.");
     }
 
+    private static bool IsToolchainBuildOwner(string ownerType) =>
+        ownerType is "TOOLCHAIN_BUILD" or "RUNTIME_MATERIALIZATION" or "TEST_HARNESS_BUILD";
+
+    private static bool IsBuildFailureCode(string code) =>
+        code.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
+        code.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
+        code.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
+        code.StartsWith("COMPILER_", StringComparison.OrdinalIgnoreCase);
+
+    public static ProductionFailureAssessment Classify(
+        string? errorCode,
+        string? error,
+        string? buildOwnerType) =>
+        Classify(errorCode, error, false, buildOwnerType);
+
     public static string AgentOutcomeFor(
         ProductionFailureAssessment assessment,
         bool workflowPassed = false)
@@ -208,16 +236,26 @@ public static class ProductionExecutionPolicy
     public static bool IsProjectOwned(string? errorCode) =>
         Classify(errorCode).IsProjectFailure;
 
+    public static bool IsProjectOwned(string? errorCode, string? buildOwnerType) =>
+        Classify(errorCode, null, buildOwnerType).IsProjectFailure;
+
     public static bool IsRecoverable(string? errorCode) =>
         Classify(errorCode).Classification == ProductionFailureClassification.SelfHealable;
 
-    public static bool RequiresPreMutationEscalation(string? errorCode) =>
-        errorCode is "DEVBRIDGE_NO_STRUCTURED_RESPONSE" or
-            "DEVBRIDGE_COORDINATOR_UNAVAILABLE" or
-            "DEVBRIDGE_COORDINATOR_NOT_READY" or
-            "DEVBRIDGE_COORDINATOR_UNRESPONSIVE" or
-            "DEVBRIDGE_CLIENT_TIMEOUT" or
-            "DEVBRIDGE_MOD_TRANSACTION_TIMEOUT";
+    public static bool RequiresPreMutationEscalation(
+        string? errorCode,
+        string? buildOwnerType = null)
+    {
+        string code = errorCode?.Trim() ?? string.Empty;
+        string ownerType = buildOwnerType?.Trim().ToUpperInvariant() ?? string.Empty;
+        return (IsToolchainBuildOwner(ownerType) && IsBuildFailureCode(code)) ||
+            code is "DEVBRIDGE_NO_STRUCTURED_RESPONSE" or
+                "DEVBRIDGE_COORDINATOR_UNAVAILABLE" or
+                "DEVBRIDGE_COORDINATOR_NOT_READY" or
+                "DEVBRIDGE_COORDINATOR_UNRESPONSIVE" or
+                "DEVBRIDGE_CLIENT_TIMEOUT" or
+                "DEVBRIDGE_MOD_TRANSACTION_TIMEOUT";
+    }
 
     public static string CheckpointName(ProductionCheckpoint checkpoint) =>
         checkpoint switch

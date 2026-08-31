@@ -136,13 +136,47 @@ public sealed record RimTestArtifactFreshness
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OwnershipBasis { get; init; }
 
-    [JsonPropertyName("causalDiagnostic")]
+    [JsonPropertyName("buildOwnerType")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? CausalDiagnostic { get; init; }
+    public string? BuildOwnerType { get; init; }
+
+    [JsonPropertyName("buildOwnerProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildOwnerProject { get; init; }
+
+    [JsonPropertyName("buildTarget")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildTarget { get; init; }
+
+    [JsonPropertyName("buildSourceRoot")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildSourceRoot { get; init; }
+
+    [JsonPropertyName("buildCommandIdentity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildCommandIdentity { get; init; }
+
+    [JsonPropertyName("buildEvidenceId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildEvidenceId { get; init; }
 
     [JsonPropertyName("failureMessage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FailureMessage { get; init; }
+
+    [JsonPropertyName("buildCommand")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildCommand { get; init; }
+
+    [JsonPropertyName("buildExitCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? BuildExitCode { get; init; }
+    [JsonPropertyName("causalDiagnostic")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CausalDiagnostic { get; init; }
+    [JsonPropertyName("buildDurationMilliseconds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? BuildDurationMilliseconds { get; init; }
     public static RimTestArtifactFreshness From(
         DevBridgeModDevelopmentResult result,
         string? fallbackWorkflowId = null) => new()
@@ -196,7 +230,17 @@ public sealed record RimTestArtifactFreshness
             LikelyOwner = result.Build?.LikelyOwner,
             OwnershipConfidence = result.Build?.OwnershipConfidence,
             OwnershipBasis = result.Build?.OwnershipBasis,
+            BuildOwnerType = result.Build?.BuildOwnerType,
+            BuildOwnerProject = result.Build?.BuildOwnerProject,
+            BuildTarget = result.Build?.BuildTarget,
+            BuildSourceRoot = result.Build?.BuildSourceRoot,
+            BuildCommandIdentity = result.Build?.BuildCommandIdentity,
+            BuildEvidenceId = result.Build?.BuildEvidenceId,
+            BuildDurationMilliseconds = result.Build?.BuildDurationMilliseconds,
+            BuildCommand = result.Build?.Command,
+            BuildExitCode = result.Build?.ExitCode,
             CausalDiagnostic = result.Build?.CausalDiagnostic,
+            FailureMessage = result.Build?.FailureMessage,
             UnderlyingErrorCode = result.Build?.ErrorCode,
             ErrorCode = result.Freshness?.ErrorCode ?? result.Build?.ErrorCode ?? result.Status.ErrorCode
         };

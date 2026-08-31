@@ -169,6 +169,40 @@ public sealed class RimTestOrchestrationFailure
     [JsonPropertyName("evidenceId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? EvidenceId { get; init; }
+    [JsonPropertyName("buildOwnerType")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildOwnerType { get; init; }
+
+    [JsonPropertyName("buildOwnerProject")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildOwnerProject { get; init; }
+
+    [JsonPropertyName("buildTarget")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildTarget { get; init; }
+
+    [JsonPropertyName("buildSourceRoot")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildSourceRoot { get; init; }
+
+    [JsonPropertyName("buildCommandIdentity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildCommandIdentity { get; init; }
+
+    [JsonPropertyName("buildEvidenceId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildEvidenceId { get; init; }
+
+    [JsonPropertyName("buildCommand")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildCommand { get; init; }
+
+    [JsonPropertyName("buildExitCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? BuildExitCode { get; init; }
+    [JsonPropertyName("buildDurationMilliseconds")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? BuildDurationMilliseconds { get; init; }
 }
 
 public sealed class RimTestCleanupSummary
@@ -227,12 +261,23 @@ internal static class RimTestOrchestrationProjector
             .FirstOrDefault(static code => !string.IsNullOrWhiteSpace(code));
         string? primaryErrorCode = selectionErrorCode ?? freshnessErrorCode ?? testErrorCode;
         ProductionFailureAssessment assessment =
-            ProductionExecutionPolicy.Classify(primaryErrorCode);
+            ProductionExecutionPolicy.Classify(
+                primaryErrorCode,
+                null,
+                freshness?.BuildOwnerType);
         bool projectOwnedFailure = execution.Tests.Any(IsProjectTestFailure) ||
-            ProductionExecutionPolicy.IsProjectOwned(selectionErrorCode) ||
-            ProductionExecutionPolicy.IsProjectOwned(freshnessStatus?.ErrorCode) ||
-            ProductionExecutionPolicy.IsProjectOwned(freshness?.ErrorCode) ||
-            ProductionExecutionPolicy.IsProjectOwned(testErrorCode) ||
+            ProductionExecutionPolicy.IsProjectOwned(
+                selectionErrorCode,
+                freshness?.BuildOwnerType) ||
+            ProductionExecutionPolicy.IsProjectOwned(
+                freshnessStatus?.ErrorCode,
+                freshness?.BuildOwnerType) ||
+            ProductionExecutionPolicy.IsProjectOwned(
+                freshness?.ErrorCode,
+                freshness?.BuildOwnerType) ||
+            ProductionExecutionPolicy.IsProjectOwned(
+                testErrorCode,
+                freshness?.BuildOwnerType) ||
             assessment.IsProjectFailure;
         bool recoveryFailed = HasRecoveryState(
             execution.PrerequisiteRecovery,
@@ -257,7 +302,9 @@ internal static class RimTestOrchestrationProjector
             freshnessStatus?.RecoveryState == PrerequisiteRecoveryState.TransitionRecoveryExhausted;
         bool contended = HasRecoveryState(execution.PrerequisiteRecovery, "contended") ||
             freshnessStatus?.RecoveryState == PrerequisiteRecoveryState.Contended;
-        bool sourceBuildFailure = IsSourceBuildFailure(freshnessErrorCode);
+        bool sourceBuildFailure = IsSourceBuildFailure(
+            freshnessErrorCode,
+            freshness?.BuildOwnerType);
         bool unresolvedInfrastructure = hasSelectionFailure ||
             hasInfrastructureFailure ||
             cleanupFailed ||
@@ -379,6 +426,7 @@ internal static class RimTestOrchestrationProjector
         bool sourceBuildFailure,
         bool cleanupFailed)
     {
+        string? project = freshness?.Project;
         string? freshnessErrorCode = freshness?.ErrorCode ?? freshnessStatus?.ErrorCode;
         string? testErrorCode = execution.Tests
             .Select(static test => test.ErrorCode)
@@ -403,7 +451,10 @@ internal static class RimTestOrchestrationProjector
 
         RimTestResult? child = execution.Tests.FirstOrDefault(test =>
             string.Equals(test.ErrorCode, errorCode, StringComparison.Ordinal));
-        string owner = freshness?.LikelyOwner ?? child?.ComponentOwner ?? OwnerFor(errorCode);
+        string owner = freshness?.LikelyOwner ??
+            freshness?.BuildOwnerProject ??
+            child?.ComponentOwner ??
+            OwnerFor(errorCode);
         string stage = StageFor(errorCode, hasSelectionFailure, freshnessStatus is not null);
         bool recoveryAttempted =
             freshnessStatus?.RecoveryAttempts > 0 ||
@@ -413,7 +464,6 @@ internal static class RimTestOrchestrationProjector
             execution.PrerequisiteRecovery,
             recoveryAttempted);
         bool retrySafe = RetrySafeFor(errorCode, recoveryResult);
-        string? project = freshness?.Project;
         string summary = FailureSummary(
             errorCode,
             project,
@@ -441,7 +491,10 @@ internal static class RimTestOrchestrationProjector
             CausalChain = CausalChainFor(execution.SuiteId, owner, failureSurface, project),
             RecoveryAttempted = recoveryAttempted,
             RecoveryResult = recoveryResult,
-            Classification = ProductionExecutionPolicy.Classify(errorCode).Classification.ToString(),
+            Classification = ProductionExecutionPolicy.Classify(
+                errorCode,
+                null,
+                freshness?.BuildOwnerType).Classification.ToString(),
             LastSafeCheckpoint = LastSafeCheckpointFor(
                 execution,
                 freshnessStatus is not null || freshness is not null,
@@ -458,7 +511,16 @@ internal static class RimTestOrchestrationProjector
             RunId = freshness?.RunId ?? child?.RunId,
             Generation = freshness?.Generation ?? child?.Generation,
             IdentityMismatch = identityMismatch,
-            EvidenceId = child?.EvidenceId
+            EvidenceId = child?.EvidenceId,
+            BuildOwnerType = freshness?.BuildOwnerType,
+            BuildOwnerProject = freshness?.BuildOwnerProject,
+            BuildTarget = freshness?.BuildTarget,
+            BuildSourceRoot = freshness?.BuildSourceRoot,
+            BuildCommandIdentity = freshness?.BuildCommandIdentity,
+            BuildEvidenceId = freshness?.BuildEvidenceId,
+            BuildCommand = freshness?.BuildCommand,
+            BuildExitCode = freshness?.BuildExitCode,
+            BuildDurationMilliseconds = freshness?.BuildDurationMilliseconds
         };
     }
 
@@ -541,14 +603,19 @@ internal static class RimTestOrchestrationProjector
             recovery.State,
             StringComparer.Ordinal)) == true;
 
-    private static bool IsSourceBuildFailure(string? errorCode) =>
+    private static bool IsSourceBuildFailure(
+        string? errorCode,
+        string? buildOwnerType = null) =>
+        IsBuildFailureCode(errorCode) &&
+        (buildOwnerType is null ||
+         string.Equals(buildOwnerType, "PROJECT_BUILD", StringComparison.OrdinalIgnoreCase));
+    private static bool IsBuildFailureCode(string? errorCode) =>
         errorCode is not null &&
         (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
          errorCode.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
          errorCode.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
          errorCode.Contains("COMPIL", StringComparison.OrdinalIgnoreCase) ||
          errorCode.Contains("RIMWORLD_EXECUTABLE", StringComparison.OrdinalIgnoreCase));
-
     private static bool IsProjectTestFailure(RimTestResult test) =>
         test.Status == RimTestValidationStates.Fail &&
         (string.IsNullOrWhiteSpace(test.ErrorCode) ||

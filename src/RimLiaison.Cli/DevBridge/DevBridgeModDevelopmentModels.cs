@@ -67,7 +67,14 @@ public sealed record DevBridgeBuildDiagnostics(
     string? LikelyOwner = null,
     string? OwnershipConfidence = null,
     string? OwnershipBasis = null,
-    JsonElement? Discrimination = null);
+    JsonElement? Discrimination = null,
+    string? BuildOwnerType = null,
+    string? BuildOwnerProject = null,
+    string? BuildTarget = null,
+    string? BuildSourceRoot = null,
+    string? BuildCommandIdentity = null,
+    string? BuildEvidenceId = null,
+    long? BuildDurationMilliseconds = null);
 
 public sealed record DevBridgeBuildOutputEvidence(
     string RepositoryPath,
@@ -140,14 +147,22 @@ public sealed record DevBridgeModDevelopmentAdapterOptions
         string? configuredPowerShell =
             Environment.GetEnvironmentVariable("RIMTEST_POWERSHELL") ??
             Environment.GetEnvironmentVariable("POWERSHELL");
+        string? configuredSourceRoot =
+            Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT");
+        if (string.IsNullOrWhiteSpace(configuredSourceRoot))
+        {
+            configuredSourceRoot =
+                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT");
+        }
+        if (string.IsNullOrWhiteSpace(configuredSourceRoot))
+        {
+            configuredSourceRoot = rootPath;
+        }
 
         return new DevBridgeModDevelopmentAdapterOptions
         {
             RootPath = Path.GetFullPath(rootPath),
-            ScriptRootPath = Path.GetFullPath(
-                Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT") ??
-                Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT") ??
-                rootPath),
+            ScriptRootPath = Path.GetFullPath(configuredSourceRoot!),
             DescriptorPath = string.IsNullOrWhiteSpace(descriptorPath)
                 ? null
                 : Path.GetFullPath(descriptorPath),

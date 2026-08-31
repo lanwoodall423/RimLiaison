@@ -33,6 +33,21 @@ The deterministic coverage is in `tests/RimLiaison.Tests/ManagedRuntimeEscalatio
 including coordinator recycle, bounded evidence, and artifact-transaction retry. No additional
 implementation or test is required for this correction.
 
+## Build ownership and transparent recovery
+
+Every development build carries explicit `buildOwnerType`, `buildOwnerProject`,
+`buildTarget`, `buildSourceRoot`, `buildCommandIdentity`, and `buildEvidenceId` metadata.
+`PROJECT_BUILD` failures are project-owned and normalize to `MOD_FAILURE`; toolchain,
+runtime-materialization, and test-harness build failures enter the existing bounded
+`DevBridgeCapabilityRecovery` path and normalize to `TOOLCHAIN_FATAL` only when recovery
+cannot establish readiness. Build command, exit code, bounded diagnostics, and build
+duration remain attached to the failure.
+
+Ordinary agents do not need to run `preflight` manually. `affected --run` owns its
+preflight and recovery path; a failed project build stops before deployment and does not
+trigger toolchain recovery. The only ordinary outcomes are `PASS`, `MOD_FAILURE`, and
+`TOOLCHAIN_FATAL`.
+
 ## Production fault-injection disposition
 
 The production CLI intentionally exposes no command to crash the coordinator, suppress a response,

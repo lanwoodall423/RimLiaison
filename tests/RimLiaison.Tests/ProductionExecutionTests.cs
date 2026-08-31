@@ -68,6 +68,56 @@ internal static class ProductionExecutionTests
         AssertEqual("MOD_FAILURE", result.Orchestration!.AgentOutcome);
         AssertEqual("ProjectConfigurationFailure", result.Orchestration.Failure!.Classification);
     }
+    public static void ExplicitBuildOwnerControlsClassification()
+    {
+        AssertEqual(
+            ProductionFailureClassification.ProjectConfigurationFailure,
+            ProductionExecutionPolicy.Classify(
+                "DEVELOPMENT_BUILD_FAILED",
+                "project compiler failure",
+                "PROJECT_BUILD").Classification);
+        AssertEqual(
+            ProductionFailureClassification.SelfHealable,
+            ProductionExecutionPolicy.Classify(
+                "DEVELOPMENT_BUILD_FAILED",
+                "toolchain compiler failure",
+                "TOOLCHAIN_BUILD").Classification);
+        Assert(
+            ProductionExecutionPolicy.RequiresPreMutationEscalation(
+                "DEVELOPMENT_BUILD_FAILED",
+                "TOOLCHAIN_BUILD"),
+            "toolchain-owned build failures must enter bounded recovery");
+
+        RimTestSuiteResult result = RimTestSuiteResultFactory.FromExecution(
+            new CatalogSuiteExecutionResult("affected", [], 0, Cancelled: false),
+            0,
+            artifactFreshness: new RimTestArtifactFreshness
+            {
+                EvaluationStatus = "FAILED",
+                ErrorCode = "DEVELOPMENT_BUILD_FAILED",
+                BuildOwnerType = "PROJECT_BUILD",
+                BuildOwnerProject = "Deferred Reality Framework",
+                BuildTarget = "Source/DeferredRealityFramework.csproj",
+                BuildCommandIdentity = "dotnet build",
+                BuildEvidenceId = "build:DeferredRealityFramework"
+            },
+            freshnessStatus: new DevBridgeAdapterStatus(
+                DevBridgeOutcomeKind.InfrastructureFailure,
+                "DEVELOPMENT_BUILD_FAILED"),
+            freshnessRequested: true);
+
+        AssertEqual("MOD_FAILURE", result.Orchestration!.AgentOutcome);
+        AssertEqual(
+            "Deferred Reality Framework",
+            result.Orchestration.Failure!.BuildOwnerProject);
+        AssertEqual(
+            "Source/DeferredRealityFramework.csproj",
+            result.Orchestration.Failure.BuildTarget);
+        AssertEqual(
+            "build:DeferredRealityFramework",
+            result.Orchestration.Failure.BuildEvidenceId);
+    }
+
 
 
     public static void UnrecoveredInfrastructureNormalizesToToolchainFatal()

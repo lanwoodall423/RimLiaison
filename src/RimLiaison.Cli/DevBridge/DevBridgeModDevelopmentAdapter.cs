@@ -455,7 +455,18 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             TryGetNullableString(root, "leaseId", out string? leaseId);
             TryGetNullableInt(root, "generation", out int? generation);
             DevBridgeArtifactFreshness? freshness = ParseFreshness(root);
-            DevBridgeBuildDiagnostics? build = ParseBuild(root);
+            DevBridgeBuildDiagnostics? build = EnrichBuildDiagnostics(
+                ParseBuild(root),
+                ReadFailureCode(root),
+                ReadFailureMessage(root),
+                project,
+                fullRepositoryRoot,
+                developmentDescriptor,
+                sourceFingerprint,
+                transactionId,
+                responseWorkflowId ?? workflowId,
+                process,
+                commandText);
             IReadOnlyList<DevBridgeBuildOutputEvidence> buildOutputs =
                 ResolveBuildOutputs(
                     fullRepositoryRoot,
@@ -735,6 +746,102 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         }
     }
 
+    private static DevBridgeBuildDiagnostics? EnrichBuildDiagnostics(
+        DevBridgeBuildDiagnostics? build,
+        string? responseErrorCode,
+        string? responseErrorMessage,
+        string project,
+        string repositoryRoot,
+        DevBridgeDevelopmentDescriptor? descriptor,
+        string sourceFingerprint,
+        string? transactionId,
+        string? workflowId,
+        DevBridgeProcessResult process,
+        string commandText)
+    {
+        string? errorCode = build?.ErrorCode ?? responseErrorCode;
+        if (build is null && !IsBuildFailureCode(errorCode))
+        {
+            return null;
+        }
+
+        string ownerType = build?.BuildOwnerType ?? BuildOwnerTypeFor(errorCode);
+        string owner = build?.LikelyOwner ??
+            (ownerType == "PROJECT_BUILD"
+                ? ProjectOwnerName(repositoryRoot, project)
+                : "RimLiaison");
+        string? target = build?.BuildTarget ?? descriptor?.SourceProject;
+        string commandIdentity = build?.BuildCommandIdentity ??
+            build?.Command ??
+            commandText;
+        return (build ?? new DevBridgeBuildDiagnostics(
+            Command: commandIdentity,
+            ExitCode: process.ExitCode,
+            Output: Bound(process.Stdout),
+            SourceProject: descriptor?.SourceProject,
+            StagingPath: null,
+            TimedOut: process.TimedOut,
+            BuiltSha256: null,
+            DiagnosticOutput: Bound(process.Stderr),
+            ErrorOutput: Bound(process.Stderr),
+            Cancelled: process.Cancelled,
+            FailureMessage: responseErrorMessage ?? "The development build failed.",
+            ErrorCode: errorCode))
+        with
+        {
+            SourceFingerprint = build?.SourceFingerprint ?? sourceFingerprint,
+            TransactionId = build?.TransactionId ?? transactionId,
+            WorkflowId = build?.WorkflowId ?? workflowId,
+            Orchestrator = build?.Orchestrator ?? "DevBridge2",
+            FailureSurface = build?.FailureSurface ??
+                (ownerType == "PROJECT_BUILD" ? "project-build" : "toolchain-build"),
+            LikelyOwner = owner,
+            OwnershipConfidence = build?.OwnershipConfidence ?? "explicit",
+            OwnershipBasis = build?.OwnershipBasis ??
+                (ownerType == "PROJECT_BUILD"
+                    ? "project-owned descriptor source project"
+                    : "tool-owned transaction boundary"),
+            BuildOwnerType = ownerType,
+            BuildOwnerProject = build?.BuildOwnerProject ?? project,
+            BuildTarget = target,
+            BuildSourceRoot = build?.BuildSourceRoot ?? repositoryRoot,
+            BuildCommandIdentity = commandIdentity,
+            BuildDurationMilliseconds = build?.BuildDurationMilliseconds ??
+                process.Evidence?.DurationMilliseconds,
+            BuildEvidenceId = build?.BuildEvidenceId ?? "build:" + project
+        };
+    }
+
+    private static string BuildOwnerTypeFor(string? errorCode) =>
+        errorCode?.StartsWith("TEST_HARNESS_", StringComparison.OrdinalIgnoreCase) == true
+            ? "TEST_HARNESS_BUILD"
+            : errorCode?.StartsWith("RUNTIME_MATERIALIZATION_", StringComparison.OrdinalIgnoreCase) == true
+                ? "RUNTIME_MATERIALIZATION"
+                : errorCode?.StartsWith("TOOLCHAIN_", StringComparison.OrdinalIgnoreCase) == true
+                    ? "TOOLCHAIN_BUILD"
+                    : "PROJECT_BUILD";
+
+    private static bool IsBuildFailureCode(string? errorCode) =>
+        errorCode is not null &&
+        (errorCode.StartsWith("DEVELOPMENT_BUILD", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("BUILD_", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
+         errorCode.StartsWith("COMPILER_", StringComparison.OrdinalIgnoreCase));
+
+    private static string ProjectOwnerName(string repositoryRoot, string project)
+    {
+        try
+        {
+            string? name = ObservabilityProjectIdentityResolver.Resolve(repositoryRoot, project).ModName;
+            return string.IsNullOrWhiteSpace(name) ? project : name;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            UnauthorizedAccessException or NotSupportedException)
+        {
+            return project;
+        }
+    }
+
     private static DevBridgeBuildDiagnostics? ParseBuild(JsonElement root)
     {
         JsonElement? build = GetObject(root, "build");
@@ -752,6 +859,8 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         string? errorOutput = FirstString(build, failure, "errorOutput", "stderr");
         string? sourceProject = FirstString(build, null, "sourceProject");
         string? stagingPath = FirstString(build, null, "stagingPath");
+        long? buildDurationMilliseconds =
+            FirstLong(build, failure, "durationMs", "buildDurationMilliseconds");
         bool? timedOut = FirstBoolean(build, failure, "timedOut");
         bool? cancelled = FirstBoolean(build, failure, "cancelled");
         string? builtSha256 = FirstString(build, null, "builtSha256", "builtArtifactSha256");
@@ -776,6 +885,12 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
         string? likelyOwner = FirstString(build, failure, "likelyOwner");
         string? ownershipConfidence = FirstString(build, failure, "ownershipConfidence");
         string? ownershipBasis = FirstString(build, failure, "ownershipBasis");
+        string? buildOwnerType = FirstString(build, failure, "buildOwnerType");
+        string? buildOwnerProject = FirstString(build, failure, "buildOwnerProject");
+        string? buildTarget = FirstString(build, failure, "buildTarget");
+        string? buildSourceRoot = FirstString(build, failure, "buildSourceRoot");
+        string? buildCommandIdentity = FirstString(build, failure, "buildCommandIdentity");
+        string? buildEvidenceId = FirstString(build, failure, "buildEvidenceId");
         JsonElement? ownership = build is { ValueKind: JsonValueKind.Object } buildObject
             ? GetObject(buildObject, "ownership")
             : failure is { ValueKind: JsonValueKind.Object } failureObject
@@ -793,6 +908,12 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             ownershipBasis ??= FirstString(ownershipObject, null, "basis", "ownershipBasis");
             orchestrator ??= FirstString(ownershipObject, null, "orchestrator");
             failureSurface ??= FirstString(ownershipObject, null, "failureSurface");
+            buildOwnerType ??= FirstString(ownershipObject, null, "buildOwnerType", "ownerType");
+            buildOwnerProject ??= FirstString(ownershipObject, null, "buildOwnerProject", "project");
+            buildTarget ??= FirstString(ownershipObject, null, "buildTarget", "target");
+            buildSourceRoot ??= FirstString(ownershipObject, null, "buildSourceRoot", "sourceRoot");
+            buildCommandIdentity ??= FirstString(ownershipObject, null, "buildCommandIdentity", "commandIdentity");
+            buildEvidenceId ??= FirstString(ownershipObject, null, "buildEvidenceId", "evidenceId");
         }
         if (command is null && exitCode is null && output is null &&
             diagnosticOutput is null && causalDiagnostic is null && errorOutput is null && sourceProject is null &&
@@ -836,9 +957,15 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             likelyOwner,
             ownershipConfidence,
             ownershipBasis,
-            discrimination);
+            discrimination,
+            buildOwnerType,
+            buildOwnerProject,
+            buildTarget,
+            buildSourceRoot,
+            buildCommandIdentity,
+            buildEvidenceId,
+            buildDurationMilliseconds);
     }
-
     private static void RecordBuildDiagnostics(
         string project,
         string sourceFingerprint,
@@ -901,6 +1028,13 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             ["likelyOwner"] = build.LikelyOwner,
             ["ownershipConfidence"] = build.OwnershipConfidence,
             ["ownershipBasis"] = build.OwnershipBasis,
+            ["buildOwnerType"] = build.BuildOwnerType,
+            ["buildOwnerProject"] = build.BuildOwnerProject,
+            ["buildTarget"] = build.BuildTarget,
+            ["buildSourceRoot"] = build.BuildSourceRoot,
+            ["buildDurationMilliseconds"] = build.BuildDurationMilliseconds,
+            ["buildCommandIdentity"] = build.BuildCommandIdentity,
+            ["buildEvidenceId"] = build.BuildEvidenceId,
             ["buildDiscrimination"] = build.Discrimination,
             ["builtSha256"] = build.BuiltSha256,
             ["deployedArtifactSha256"] = freshness?.DeployedArtifactSha256,
@@ -1025,6 +1159,31 @@ public sealed class DevBridgeModDevelopmentAdapter : IDevBridgeModDevelopmentAda
             }
 
             return parsed;
+        }
+
+        return null;
+    }
+    private static long? FirstLong(
+        JsonElement? first,
+        JsonElement? second,
+        params string[] names)
+    {
+        foreach (JsonElement? source in new[] { first, second })
+        {
+            if (source is not { ValueKind: JsonValueKind.Object } element)
+            {
+                continue;
+            }
+
+            foreach (string name in names)
+            {
+                if (element.TryGetProperty(name, out JsonElement value) &&
+                    value.ValueKind == JsonValueKind.Number &&
+                    value.TryGetInt64(out long parsed))
+                {
+                    return parsed;
+                }
+            }
         }
 
         return null;
