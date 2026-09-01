@@ -1198,7 +1198,7 @@ public static class ToolchainPromotionService
             {
                 return HealthFailure(checks, "DevBridge restart did not return structured JSON.");
             }
-            restartDocument.Dispose();
+            restartDocument!.Dispose();
 
 
             (int exitCode, string output) status = await RunJsonCommandAsync(
