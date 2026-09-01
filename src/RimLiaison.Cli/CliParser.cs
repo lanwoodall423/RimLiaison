@@ -317,6 +317,9 @@ internal static class CliParser
                         throw new CliParseException("Option --runs must be a positive integer.");
                     }
                     break;
+                case "--qualification-output":
+                    qualificationOutputPath = ReadOptionValue(args, ref index, argument);
+                    break;
                 case "--promotion-package":
                     promotionPackagePath = ReadOptionValue(args, ref index, argument);
                     break;

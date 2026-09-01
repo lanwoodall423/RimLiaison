@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimLiaison.Git;
+using RimLiaison.RimDev;
 
 namespace RimLiaison.Toolchain;
 
@@ -21,11 +22,185 @@ public sealed record ToolchainCandidate(
     string DevBridgeSourceRoot,
     string DevBridgeSourceCommit,
     string DevBridgeReleaseManifestPath,
-    string DevBridgeReleaseManifestSha256)
+    string DevBridgeReleaseManifestSha256,
+    string? RimWorldRoot = null,
+    string? RimWorldManagedDirectory = null)
 {
     public string RimLiaisonExecutableSha256 => ToolchainFileHash.Sha256(RimLiaisonExecutablePath);
     public string RimLiaisonAssemblySha256 => ToolchainFileHash.Sha256(RimLiaisonAssemblyPath);
     public string TransactionConsumerSha256 => ToolchainFileHash.Sha256(TransactionConsumerPath);
+}
+
+internal sealed record RimWorldManagedAssemblyResolution(
+    bool Succeeded,
+    string? RimWorldRoot,
+    string? ManagedDirectory,
+    string? MissingRequiredFile,
+    string ResolutionSource,
+    string? OldCheckoutRelativePath,
+    string? ErrorCode = null,
+    string? Error = null,
+    string? NextAction = null,
+    bool? ReleaseModBuilt = null)
+{
+    public object ToEvidence() => new
+    {
+        owner = "RimLiaison",
+        status = Succeeded ? "ready" : "blocked",
+        rimWorldRoot = RimWorldRoot,
+        managedDirectory = ManagedDirectory,
+        missingRequiredFile = MissingRequiredFile,
+        resolutionSource = ResolutionSource,
+        oldCheckoutRelativePath = OldCheckoutRelativePath,
+        releaseModBuilt = ReleaseModBuilt,
+        projectImplicated = false,
+        errorCode = ErrorCode,
+        error = Error,
+        nextAction = NextAction
+    };
+}
+
+internal static class RimWorldManagedAssemblyResolver
+{
+    private static readonly string[] RequiredAssemblies =
+    [
+        "Assembly-CSharp.dll",
+        "UnityEngine.CoreModule.dll"
+    ];
+
+    public static RimWorldManagedAssemblyResolution Resolve(
+        string sourceRoot,
+        string devBridgeRoot)
+    {
+        RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, sourceRoot);
+        if (!workspace.Succeeded)
+        {
+            return Failure(
+                null,
+                null,
+                workspace.Error ?? "The managed RimWorld environment configuration could not be resolved.",
+                workspace.ErrorCode ?? "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                "managed workspace discovery",
+                null,
+                "Repair the managed .rimdev/workspace.json, then retry the DevBridge2 candidate build.");
+        }
+
+        string? configuredRoot = workspace.Configuration?.RimWorldRoot;
+        string resolutionSource = "rimdev-workspace";
+        if (string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            configuredRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
+            resolutionSource = "RIMWORLD_ROOT";
+        }
+        if (string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            return Failure(
+                null,
+                null,
+                "The canonical RimWorld installation root is unknown.",
+                "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                resolutionSource,
+                OldCheckoutRelativePath(devBridgeRoot),
+                "Configure rimWorldRoot in the managed .rimdev/workspace.json or set RIMWORLD_ROOT.");
+        }
+
+        string rimWorldRoot;
+        try
+        {
+            rimWorldRoot = Path.GetFullPath(
+                Path.IsPathRooted(configuredRoot)
+                    ? configuredRoot
+                    : Path.Combine(workspace.RootPath, configuredRoot));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return Failure(
+                configuredRoot,
+                null,
+                "The configured RimWorld installation root is invalid.",
+                "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                resolutionSource,
+                OldCheckoutRelativePath(devBridgeRoot),
+                "Repair rimWorldRoot in the managed .rimdev/workspace.json or set RIMWORLD_ROOT.");
+        }
+
+        string managedDirectory = Path.Combine(
+            rimWorldRoot,
+            "RimWorldWin64_Data",
+            "Managed");
+        if (!Directory.Exists(managedDirectory))
+        {
+            return Failure(
+                rimWorldRoot,
+                managedDirectory,
+                "The resolved RimWorld managed directory does not exist.",
+                "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                resolutionSource,
+                OldCheckoutRelativePath(devBridgeRoot),
+                "Install or repair RimWorld, or correct rimWorldRoot in the managed .rimdev/workspace.json.");
+        }
+
+        string? missing = RequiredAssemblies
+            .Select(name => Path.Combine(managedDirectory, name))
+            .FirstOrDefault(path => !File.Exists(path));
+        if (missing is not null)
+        {
+            return Failure(
+                rimWorldRoot,
+                managedDirectory,
+                "A required RimWorld managed assembly is missing: " + Path.GetFileName(missing),
+                "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                resolutionSource,
+                OldCheckoutRelativePath(devBridgeRoot),
+                "Install or repair the RimWorld managed assemblies, then retry the DevBridge2 candidate build.",
+                missing);
+        }
+
+        return new(
+            true,
+            rimWorldRoot,
+            Path.GetFullPath(managedDirectory),
+            null,
+            resolutionSource,
+            OldCheckoutRelativePath(devBridgeRoot));
+    }
+
+    private static RimWorldManagedAssemblyResolution Failure(
+        string? rimWorldRoot,
+        string? managedDirectory,
+        string error,
+        string errorCode,
+        string resolutionSource,
+        string? oldCheckoutRelativePath,
+        string nextAction,
+        string? missingRequiredFile = null) =>
+        new(
+            false,
+            rimWorldRoot,
+            managedDirectory,
+            missingRequiredFile,
+            resolutionSource,
+            oldCheckoutRelativePath,
+            errorCode,
+            error,
+            nextAction);
+
+    private static string? OldCheckoutRelativePath(string devBridgeRoot)
+    {
+        try
+        {
+            return Path.GetFullPath(Path.Combine(
+                devBridgeRoot,
+                "..",
+                "..",
+                "RimWorldWin64_Data",
+                "Managed"));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return null;
+        }
+    }
 }
 
 internal sealed record ToolchainCandidateMaterializationResult(
@@ -34,12 +209,19 @@ internal sealed record ToolchainCandidateMaterializationResult(
     string? Error,
     string? NextAction)
 {
+    public RimWorldManagedAssemblyResolution? RimWorldManagedAssemblies { get; init; }
+
     public bool Succeeded => Candidate is not null;
 
     public static ToolchainCandidateMaterializationResult Failure(
         string code,
         string error,
-        string nextAction) => new(null, code, error, nextAction);
+        string nextAction,
+        RimWorldManagedAssemblyResolution? rimWorldManagedAssemblies = null) =>
+        new(null, code, error, nextAction)
+        {
+            RimWorldManagedAssemblies = rimWorldManagedAssemblies
+        };
 }
 
 internal static class ToolchainCandidateMaterializer
@@ -132,6 +314,22 @@ internal static class ToolchainCandidateMaterializer
                     "Materialize the exact pinned DevBridge2 worktree and retry qualification.");
             }
             string? runtimePackageOverride = Environment.GetEnvironmentVariable(CandidatePackageEnvironment);
+            RimWorldManagedAssemblyResolution? managedAssemblies = null;
+            if (string.IsNullOrWhiteSpace(runtimePackageOverride))
+            {
+                managedAssemblies = RimWorldManagedAssemblyResolver.Resolve(
+                    sourceRoot,
+                    devBridgeRoot);
+                if (!managedAssemblies.Succeeded)
+                {
+                    return ToolchainCandidateMaterializationResult.Failure(
+                        managedAssemblies.ErrorCode ?? "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
+                        managedAssemblies.Error ?? "The RimWorld managed assemblies are unavailable.",
+                        managedAssemblies.NextAction ??
+                        "Repair the RimWorld managed assembly installation, then retry the DevBridge2 candidate build.",
+                        managedAssemblies);
+                }
+            }
             string runtimeBuildRoot = Path.Combine(fullCandidateRoot, "devbridge-build");
             string runtimeSource;
             if (!string.IsNullOrWhiteSpace(runtimePackageOverride))
@@ -160,6 +358,7 @@ internal static class ToolchainCandidateMaterializer
                         releaseScript,
                         devBridgeRoot,
                         runtimeBuildRoot,
+                        managedAssemblies!.ManagedDirectory!,
                         cancellationToken)
                     .ConfigureAwait(false);
                 if (timedOut || exitCode != 0)
@@ -172,7 +371,8 @@ internal static class ToolchainCandidateMaterializer
                         "DEVBRIDGE_CANDIDATE_BUILD_FAILED",
                         "The DevBridge2 owner workflow failed while building the isolated runtime candidate." +
                         (string.IsNullOrWhiteSpace(diagnostics) ? string.Empty : " " + diagnostics),
-                        "Inspect the bounded DevBridge2 release diagnostics and repair that component before retrying.");
+                        "Inspect the bounded DevBridge2 release diagnostics and repair that component before retrying.",
+                        managedAssemblies);
                 }
                 runtimeSource = ResolveReleasePackage(runtimeBuildRoot);
             }
@@ -192,7 +392,32 @@ internal static class ToolchainCandidateMaterializer
                 return ToolchainCandidateMaterializationResult.Failure(
                     "DEVBRIDGE_CANDIDATE_IDENTITY_INVALID",
                     identityError ?? "The DevBridge2 release manifest has no exact component identity.",
-                    "Produce a clean pinned DevBridge2 release package, then retry qualification.");
+                    "Produce a clean pinned DevBridge2 release package, then retry qualification.",
+                    managedAssemblies);
+            }
+            if (managedAssemblies is not null)
+            {
+                managedAssemblies = managedAssemblies with
+                {
+                    ReleaseModBuilt = TryReadReleaseModBuilt(releaseManifest.RootElement)
+                };
+            }
+            if (managedAssemblies is not null && managedAssemblies.ReleaseModBuilt != true)
+            {
+                return ToolchainCandidateMaterializationResult.Failure(
+                    "DEVBRIDGE_CANDIDATE_BUILD_FAILED",
+                    "The DevBridge2 release manifest did not prove modBuilt=true.",
+                    "Inspect the bounded DevBridge2 release diagnostics and repair that component before retrying.",
+                    managedAssemblies);
+            }
+            if (managedAssemblies is not null &&
+                !HasReleaseFile(releaseManifest.RootElement, "1.6/Assemblies/DevBridge2.dll"))
+            {
+                return ToolchainCandidateMaterializationResult.Failure(
+                    "DEVBRIDGE_CANDIDATE_BUILD_FAILED",
+                    "The DevBridge2 release manifest did not contain 1.6/Assemblies/DevBridge2.dll.",
+                    "Inspect the bounded DevBridge2 release diagnostics and repair that component before retrying.",
+                    managedAssemblies);
             }
             if (!string.Equals(componentCommit, devBridgeSource.State.HeadSha, StringComparison.OrdinalIgnoreCase))
             {
@@ -224,6 +449,12 @@ internal static class ToolchainCandidateMaterializer
             string candidateAssembly = Path.Combine(fullCandidateRoot, "rimliaison.dll");
             File.Copy(sourceExecutable, candidateExecutable, overwrite: false);
             File.Copy(sourceAssembly, candidateAssembly, overwrite: false);
+            foreach (string companionName in new[] { "rimliaison.deps.json", "rimliaison.runtimeconfig.json" })
+            {
+                string sourceCompanion = Path.Combine(fullArtifactRoot, companionName);
+                if (File.Exists(sourceCompanion))
+                    File.Copy(sourceCompanion, Path.Combine(fullCandidateRoot, companionName), overwrite: false);
+            }
 
             string sourceConsumer = Path.Combine(devBridgeRoot, "scripts", "mod-test.ps1");
             if (!File.Exists(sourceConsumer))
@@ -260,9 +491,14 @@ internal static class ToolchainCandidateMaterializer
                 Path.GetFullPath(devBridgeRoot),
                 componentCommit!,
                 candidateReleaseManifestPath,
-                releaseManifestHash);
+                releaseManifestHash,
+                managedAssemblies?.RimWorldRoot,
+                managedAssemblies?.ManagedDirectory);
             WriteCandidateDescriptor(candidate);
-            return new(candidate, null, null, null);
+            return new(candidate, null, null, null)
+            {
+                RimWorldManagedAssemblies = managedAssemblies
+            };
         }
         catch (OperationCanceledException)
         {
@@ -293,10 +529,26 @@ internal static class ToolchainCandidateMaterializer
             : trimmed[..maxLength] + " [truncated]";
     }
 
+    internal static string[] BuildReleaseArguments(
+        string releaseScript,
+        string outputRoot,
+        string rimWorldManagedDirectory) =>
+    [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        releaseScript,
+        "-OutputRoot",
+        outputRoot,
+        "-RimWorldManagedDir",
+        rimWorldManagedDirectory
+    ];
     private static async Task<(int ExitCode, string Output, string Error, bool TimedOut)> RunReleaseAsync(
         string releaseScript,
         string workingDirectory,
         string outputRoot,
+        string rimWorldManagedDirectory,
         CancellationToken cancellationToken)
     {
         using var process = new Process
@@ -311,13 +563,13 @@ internal static class ToolchainCandidateMaterializer
                 CreateNoWindow = true
             }
         };
-        process.StartInfo.ArgumentList.Add("-NoProfile");
-        process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
-        process.StartInfo.ArgumentList.Add("Bypass");
-        process.StartInfo.ArgumentList.Add("-File");
-        process.StartInfo.ArgumentList.Add(releaseScript);
-        process.StartInfo.ArgumentList.Add("-OutputRoot");
-        process.StartInfo.ArgumentList.Add(outputRoot);
+        foreach (string argument in BuildReleaseArguments(
+                     releaseScript,
+                     outputRoot,
+                     rimWorldManagedDirectory))
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
         if (!process.Start())
         {
             return (-1, string.Empty, "pwsh could not be started.", false);
@@ -417,6 +669,11 @@ internal static class ToolchainCandidateMaterializer
         }
         return true;
     }
+    private static bool? TryReadReleaseModBuilt(JsonElement root) =>
+        root.TryGetProperty("modBuilt", out JsonElement value) &&
+        value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : null;
 
     private static string WriteRuntimeManifest(
         string runtimeRoot,
@@ -463,6 +720,17 @@ internal static class ToolchainCandidateMaterializer
             WriteIndented = true
         }));
         return manifestPath;
+    }
+    private static bool HasReleaseFile(JsonElement root, string relativePath)
+    {
+        if (!root.TryGetProperty("files", out JsonElement files) ||
+            files.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+        return files.EnumerateArray().Any(file =>
+            file.TryGetProperty("path", out JsonElement path) &&
+            string.Equals(path.GetString(), relativePath, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string ComputeRuntimePackageHash(IEnumerable<(string Path, string Sha256)> entries)

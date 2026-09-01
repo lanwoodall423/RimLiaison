@@ -84,6 +84,10 @@ public sealed record QualificationAggregate(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CandidateFailure { get; init; }
 
+    [JsonPropertyName("candidateBuildEvidence")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public object? CandidateBuildEvidence { get; init; }
+
     [JsonPropertyName("promotionReady")]
     public bool PromotionReady =>
         QualificationPassed && CandidateComplete && PromotionPackageEmitted;

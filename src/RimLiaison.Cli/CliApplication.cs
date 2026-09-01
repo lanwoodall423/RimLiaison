@@ -537,6 +537,41 @@ public static class CliApplication
                             cancellationToken)
                         .ConfigureAwait(false);
                 }
+                if (candidateResult.Succeeded &&
+                    candidateResult.RimWorldManagedAssemblies is
+                    {
+                        Succeeded: true,
+                        OldCheckoutRelativePath: not null,
+                        ManagedDirectory: not null
+                    } managed &&
+                    !string.Equals(
+                        Path.GetFullPath(managed.OldCheckoutRelativePath),
+                        Path.GetFullPath(managed.ManagedDirectory),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    observabilityAgent.Record(
+                        DevelopmentStage.Packaging,
+                        AgentEventTypes.ToolFailed,
+                        "Recovered tooling issue: the isolated DevBridge2 candidate received an explicit RimWorld managed directory.",
+                        new
+                        {
+                            operationKey = "qualification.candidate.devbridge",
+                            issueKind = "TOOLING_FAILURE",
+                            blocking = false,
+                            projectImplicated = false,
+                            recovered = managed.ReleaseModBuilt == true,
+                            componentOwner = "RimLiaison",
+                            errorCode = "DEVBRIDGE_CHECKOUT_RELATIVE_RIMWORLD_DISCOVERY",
+                            candidateWorktreePath = candidateResult.Candidate?.DevBridgeSourceRoot,
+                            actualRimWorldRoot = managed.RimWorldRoot,
+                            oldIncorrectPath = managed.OldCheckoutRelativePath,
+                            correctedExplicitPath = managed.ManagedDirectory,
+                            impact = "DevBridge mod was not built without explicit RimWorld managed assembly propagation.",
+                            finalRecoveryOutcome = managed.ReleaseModBuilt == true
+                                ? "DevBridge2 release completed with modBuilt=true."
+                                : "DevBridge2 release completed without proving modBuilt=true."
+                        });
+                }
 
                 QualificationAggregate aggregate = new QualificationHarness().Run(
                     request.QualificationRuns,
@@ -554,6 +589,7 @@ public static class CliApplication
                     CandidateComplete = candidateResult.Succeeded,
                     CandidateFailureCode = candidateResult.ErrorCode,
                     CandidateFailure = candidateResult.Error,
+                    CandidateBuildEvidence = candidateResult.RimWorldManagedAssemblies?.ToEvidence(),
                     QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
                     QualifiedPromotionPackagePath = Path.GetFullPath(packagePath)
                 };
@@ -4814,8 +4850,9 @@ public static class CliApplication
             CliCommand.RunTest or
             CliCommand.SuiteRun or
             CliCommand.GoldenPath or
-            CliCommand.Doctor or
             CliCommand.Preflight ||
+        (request.Command == CliCommand.Doctor &&
+         string.IsNullOrWhiteSpace(request.DevBridgeRootPath)) ||
         request.Command == CliCommand.Affected && request.RunSelected;
     private static bool RequiresProjectBinding(CliRequest request) =>
         string.Equals(
