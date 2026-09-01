@@ -68,6 +68,57 @@ internal static class PromotionBootstrapHealthTests
             !ToolchainPromotionService.IsCoordinatorQuiesced(responsive.RootElement, stagedRoot, 0),
             "a responsive coordinator probe must not prove staged process quiescence.");
     }
+    public static void IsolatedCandidateUsesNarrowCapabilitiesProbe()
+    {
+        using IsolatedCandidateFixture fixture = new();
+        PromotionCandidateHealthResult result = fixture.Verify();
+        Assert(result.Passed, result.Error ?? "isolated candidate health failed");
+        using JsonDocument summary = JsonDocument.Parse(result.Summary);
+        JsonElement checks = summary.RootElement;
+        Assert(
+            checks.GetProperty("rimLiaisonCapabilities").GetString() == "ready",
+            "candidate health did not pass the narrow capabilities probe");
+        Assert(
+            !checks.TryGetProperty("rimLiaisonDoctor", out _),
+            "candidate health still reports the full workspace doctor");
+        Assert(
+            fixture.LiveVerifier.Calls == 1,
+            "candidate health did not complete the live staged-runtime verification");
+    }
+
+    public static void CandidateCapabilitiesProbeFailureBlocksHealth()
+    {
+        using IsolatedCandidateFixture fixture = new("capability-failure");
+        PromotionCandidateHealthResult result = fixture.Verify();
+        Assert(!result.Passed, "capabilities probe failure was accepted");
+        Assert(
+            result.Error?.Contains("capabilities probe", StringComparison.OrdinalIgnoreCase) == true,
+            "capabilities probe failure was not classified");
+        Assert(
+            fixture.LiveVerifier.Calls == 0,
+            "candidate health continued after capabilities probe failure");
+    }
+
+    public static void CandidateCapabilitiesRejectsWrongRuntimeIdentity()
+    {
+        using IsolatedCandidateFixture fixture = new("wrong-runtime");
+        PromotionCandidateHealthResult result = fixture.Verify();
+        Assert(!result.Passed, "wrong runtime identity was accepted");
+        Assert(
+            result.Error?.Contains("different runtime root", StringComparison.OrdinalIgnoreCase) == true,
+            "wrong runtime identity was not rejected");
+    }
+    public static void CandidateDevBridgeHealthFailuresBlockCandidate()
+    {
+        foreach (string mode in new[] { "status-failure", "doctor-failure" })
+        {
+            using IsolatedCandidateFixture fixture = new(mode);
+            PromotionCandidateHealthResult result = fixture.Verify();
+            Assert(!result.Passed, $"{mode} was accepted");
+            Assert(fixture.LiveVerifier.Calls == 0, $"{mode} continued to live verification");
+        }
+    }
+
 
 
     public static void MissingCandidateDllFailsAccurately()
@@ -231,6 +282,186 @@ internal static class PromotionBootstrapHealthTests
     {
         if (!condition)
             throw new InvalidOperationException(message);
+    }
+
+    private sealed class IsolatedCandidateFixture : IDisposable
+    {
+        private const string CandidateSourceCommit = "isolated-candidate-source";
+        private readonly string mode;
+
+        public string Root { get; } = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-isolated-candidate-" + Guid.NewGuid().ToString("N"));
+        public string CandidateExecutable { get; }
+        public string RuntimeRoot { get; }
+        public PassingLiveVerifier LiveVerifier { get; } = new();
+
+        public IsolatedCandidateFixture(string mode = "healthy")
+        {
+            this.mode = mode;
+            string candidateCliRoot = Path.Combine(Root, "candidate-cli");
+            RuntimeRoot = Path.Combine(Root, "candidate-runtime");
+            Directory.CreateDirectory(candidateCliRoot);
+            Directory.CreateDirectory(RuntimeRoot);
+            CopyDirectory(
+                Path.GetDirectoryName(typeof(ToolchainPromotionService).Assembly.Location)!,
+                candidateCliRoot);
+            CandidateExecutable = Path.Combine(candidateCliRoot, "rimliaison.exe");
+            File.WriteAllText(
+                Path.Combine(RuntimeRoot, "DevBridge.cmd"),
+                """
+                @echo off
+                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %1 %2 %3 %4 %5 %6
+                exit /b %ERRORLEVEL%
+                """);
+            File.WriteAllText(
+                Path.Combine(RuntimeRoot, "fake-devbridge.ps1"),
+                """
+                param([string[]] $Arguments)
+                $root = [IO.Path]::GetFullPath($PSScriptRoot)
+                $identityRoot = if ("__MODE__" -eq "wrong-runtime") {
+                    Join-Path $root "wrong-runtime"
+                } else {
+                    $root
+                }
+                if ("__MODE__" -eq "capability-failure" -and $Arguments -contains "bridge") {
+                    @{ success = $false; errorCode = "RIMBRIDGE_NOT_READY"; error = "capability probe failed" } |
+                        ConvertTo-Json -Compress -Depth 5
+                    exit 3
+                }
+                if ($Arguments -contains "bridge") {
+                    @{
+                        success = $true
+                        rimBridgeRoute = @{
+                            success = $true
+                            result = @{ tools = @() }
+                        }
+                    } | ConvertTo-Json -Compress -Depth 5
+                    exit 0
+                }
+                if ($Arguments -contains "restart") {
+                    @{ status = "ready" } | ConvertTo-Json -Compress -Depth 5
+                    exit 0
+                }
+                if ("__MODE__" -eq "status-failure" -and $Arguments -contains "status") {
+                    @{
+                        status = "failed"
+                        runtimeIdentity = @{ devBridgeRuntimeRoot = $identityRoot }
+                        activeTests = 0
+                        generation = 7
+                    } | ConvertTo-Json -Compress -Depth 5
+                    exit 3
+                }
+                if ($Arguments -contains "status") {
+                    @{
+                        status = "ready"
+                        runtimeIdentity = @{ devBridgeRuntimeRoot = $identityRoot }
+                        activeTests = 0
+                        generation = 7
+                    } | ConvertTo-Json -Compress -Depth 5
+                    exit 0
+                }
+                if ("__MODE__" -eq "doctor-failure" -and $Arguments -contains "doctor") {
+                    @{
+                        status = "ready"
+                        healthy = $false
+                        runtimeIdentity = @{ devBridgeRuntimeRoot = $identityRoot }
+                        findings = @(
+                            @{ code = "LEASES_VALIDATED"; details = @{ leaseCount = "0" } }
+                        )
+                    } | ConvertTo-Json -Compress -Depth 5
+                    exit 3
+                }
+                if ($Arguments -contains "doctor") {
+                    @{
+                        status = "ready"
+                        healthy = $true
+                        runtimeIdentity = @{ devBridgeRuntimeRoot = $identityRoot }
+                        findings = @(
+                            @{ code = "LEASES_VALIDATED"; details = @{ leaseCount = "0" } }
+                        )
+                    } | ConvertTo-Json -Compress -Depth 5
+                    exit 0
+                }
+                if ($Arguments -contains "coordinator") {
+                    $marker = Join-Path $root "coordinator-shutdown.marker"
+                    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+                        New-Item -ItemType File -Path $marker | Out-Null
+                        @{ success = $true } | ConvertTo-Json -Compress -Depth 5
+                        exit 0
+                    }
+                    @{ state = "Absent"; runtimeRoot = $identityRoot } | ConvertTo-Json -Compress -Depth 5
+                    exit 1
+                }
+                @{ success = $false; errorCode = "FAKE_COMMAND_UNSUPPORTED"; error = "unsupported" } |
+                    ConvertTo-Json -Compress -Depth 5
+                exit 3
+                """.Replace("__MODE__", mode, StringComparison.Ordinal));
+        }
+
+        public PromotionCandidateHealthResult Verify()
+        {
+            var binding = new PromotionCandidateHealthBinding(
+                CandidateExecutable,
+                RuntimeRoot,
+                "candidate-fingerprint",
+                CandidateSourceCommit,
+                "candidate-package",
+                "candidate-coordinator",
+                "candidate-consumer",
+                ToolchainPromotionSchemas.RuntimeProtocolContract,
+                Environment.ProcessPath!);
+            return ToolchainPromotionService.RunCandidateHealthAsync(
+                    binding,
+                    "isolated-candidate-workflow",
+                    CancellationToken.None,
+                    LiveVerifier)
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Root))
+                Directory.Delete(Root, recursive: true);
+        }
+
+        private static void CopyDirectory(string source, string destination)
+        {
+            foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+            {
+                Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+            }
+
+            foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                string target = Path.Combine(destination, Path.GetRelativePath(source, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(file, target);
+            }
+        }
+    }
+
+    private sealed class PassingLiveVerifier : IPromotionLeaseOrchestrator
+    {
+        public int Calls { get; private set; }
+
+        public Task<PromotionLiveVerificationResult> VerifyCapabilitiesAsync(
+            string workflowId,
+            int? expectedGeneration,
+            CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(new PromotionLiveVerificationResult(
+                true,
+                null,
+                null,
+                "candidate-lease",
+                expectedGeneration,
+                true,
+                1,
+                "capabilities-check"));
+        }
     }
 
     private sealed class Fixture : IDisposable

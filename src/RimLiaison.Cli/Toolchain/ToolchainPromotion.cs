@@ -1448,7 +1448,7 @@ public static class ToolchainPromotionService
         return "tc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
 
-    private static async Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
+    internal static async Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
         PromotionCandidateHealthBinding binding,
         string workflowId,
         CancellationToken cancellationToken,
@@ -1466,7 +1466,7 @@ public static class ToolchainPromotionService
             ["transactionConsumerSha256"] = binding.TransactionConsumerSha256,
             ["runtimeProtocolContract"] = binding.RuntimeProtocolContract,
             ["rimWorldExecutable"] = binding.RimWorldExecutable,
-            ["rimLiaisonDoctor"] = "not-run",
+            ["rimLiaisonCapabilities"] = "not-run",
             ["devBridgeRestart"] = "not-run",
             ["devBridgeStatus"] = "not-run",
             ["capabilities"] = "not-run",
@@ -1484,20 +1484,11 @@ public static class ToolchainPromotionService
                 return CandidateHealthFailure(checks, binding, "The candidate DevBridge command is missing.");
 
             IReadOnlyDictionary<string, string> environment = CandidateHealthEnvironment(binding);
-            (int exitCode, string output) liaisonDoctor = await RunJsonCommandAsync(
-                binding.CandidateExecutable,
-                ["doctor", "--devbridge-root", binding.CandidateRuntimeRoot, "--json"],
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            checks["rimLiaisonDoctor"] = IsReady(liaisonDoctor.exitCode, liaisonDoctor.output)
-                ? "ready"
-                : "failed";
-            if (!IsReady(liaisonDoctor.exitCode, liaisonDoctor.output))
-                return CandidateHealthFailure(checks, binding, "Candidate RimLiaison doctor did not report READY.", liaisonDoctor.output);
+
 
             (int exitCode, string output) restart = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "restart", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "restart", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             checks["devBridgeRestart"] = IsReady(restart.exitCode, restart.output)
@@ -1509,7 +1500,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) status = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "status", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "status", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             checks["devBridgeStatus"] = IsReady(status.exitCode, status.output) ? "ready" : "failed";
@@ -1542,7 +1533,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) doctor = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "doctor", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "doctor", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             checks["devBridgeDoctor"] = IsHealthy(doctor.exitCode, doctor.output) ? "healthy" : "failed";
@@ -1559,6 +1550,24 @@ public static class ToolchainPromotionService
                 {
                     return CandidateHealthFailure(checks, binding, "Candidate DevBridge doctor did not prove healthy zero-lease state.", doctor.output);
                 }
+            }
+            (int exitCode, string output) liaisonCapabilities = await RunJsonCommandAsync(
+                binding.CandidateExecutable,
+                ["capabilities", "--devbridge-root", binding.CandidateRuntimeRoot, "--json"],
+                cancellationToken,
+                environment).ConfigureAwait(false);
+            checks["rimLiaisonCapabilities"] = IsCapabilitiesReady(
+                liaisonCapabilities.exitCode,
+                liaisonCapabilities.output)
+                ? "ready"
+                : "failed";
+            if (!IsCapabilitiesReady(liaisonCapabilities.exitCode, liaisonCapabilities.output))
+            {
+                return CandidateHealthFailure(
+                    checks,
+                    binding,
+                    "Candidate RimLiaison capabilities probe did not report a valid ready response.",
+                    liaisonCapabilities.output);
             }
 
             DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
@@ -1586,7 +1595,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) finalStatus = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "status", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "status", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             if (!TryParse(finalStatus.output, out JsonDocument? finalStatusDocument))
@@ -1609,7 +1618,7 @@ public static class ToolchainPromotionService
 
             (int exitCode, string output) finalDoctor = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "doctor", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "doctor", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             if (!TryParse(finalDoctor.output, out JsonDocument? finalDoctorDocument))
@@ -1630,7 +1639,7 @@ public static class ToolchainPromotionService
             }
             (int exitCode, string output) shutdown = await RunJsonCommandAsync(
                 "cmd.exe",
-                ["/d", "/c", devBridgeCommand, "coordinator", "shutdown", "--json"],
+                DevBridgeCommandArguments(devBridgeCommand, "coordinator", "shutdown", "--json"),
                 cancellationToken,
                 environment).ConfigureAwait(false);
             bool shutdownAccepted = false;
@@ -1657,7 +1666,7 @@ public static class ToolchainPromotionService
             {
                 (int probeExitCode, string probeOutputValue) probe = await RunJsonCommandAsync(
                     "cmd.exe",
-                    ["/d", "/c", devBridgeCommand, "coordinator", "probe", "--json"],
+                    DevBridgeCommandArguments(devBridgeCommand, "coordinator", "probe", "--json"),
                     cancellationToken,
                     environment).ConfigureAwait(false);
                 probeOutput = probe.probeOutputValue;
@@ -1757,6 +1766,21 @@ public static class ToolchainPromotionService
             return false;
         }
         return true;
+    }
+
+    private static IReadOnlyList<string> DevBridgeCommandArguments(
+        string commandPath,
+        params string[] arguments)
+    {
+        var commandArguments = new List<string>(arguments.Length + 4)
+        {
+            "/d",
+            "/c",
+            "call",
+            commandPath
+        };
+        commandArguments.AddRange(arguments);
+        return commandArguments;
     }
 
     private static IReadOnlyDictionary<string, string> CandidateHealthEnvironment(
@@ -1976,6 +2000,26 @@ public static class ToolchainPromotionService
         {
             document = null;
             return false;
+        }
+    }
+
+    private static bool IsCapabilitiesReady(int exitCode, string output)
+    {
+        if (exitCode != 0 ||
+            !TryParse(output, out JsonDocument? document))
+        {
+            return false;
+        }
+
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            return root.TryGetProperty("schemaVersion", out JsonElement schema) &&
+                string.Equals(schema.GetString(), DevBridgeCapabilitySchemas.Output, StringComparison.Ordinal) &&
+                root.TryGetProperty("status", out JsonElement status) &&
+                string.Equals(status.GetString(), "ok", StringComparison.OrdinalIgnoreCase) &&
+                root.TryGetProperty("capabilities", out JsonElement capabilities) &&
+                capabilities.ValueKind == JsonValueKind.Array;
         }
     }
 
