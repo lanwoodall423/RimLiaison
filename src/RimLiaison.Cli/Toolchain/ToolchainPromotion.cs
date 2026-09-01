@@ -1166,8 +1166,8 @@ public static class ToolchainPromotionService
         var checks = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["rimLiaisonDoctor"] = "not-run",
+            ["devBridgeRestart"] = "not-run",
             ["devBridgeStatus"] = "not-run",
-            ["devBridgeDoctor"] = "not-run",
             ["capabilities"] = "not-run",
             ["activeLeases"] = "unknown",
             ["coordinatorCount"] = "status-bound"
@@ -1187,6 +1187,19 @@ public static class ToolchainPromotionService
             {
                 return HealthFailure(checks, "The installed DevBridge command is missing.");
             }
+            (int exitCode, string output) restart = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "restart", "--json"],
+                cancellationToken).ConfigureAwait(false);
+            checks["devBridgeRestart"] = IsReady(restart.exitCode, restart.output)
+                ? "ready"
+                : "failed";
+            if (!TryParse(restart.output, out JsonDocument? restartDocument))
+            {
+                return HealthFailure(checks, "DevBridge restart did not return structured JSON.");
+            }
+            restartDocument.Dispose();
+
 
             (int exitCode, string output) status = await RunJsonCommandAsync(
                 "cmd.exe",
