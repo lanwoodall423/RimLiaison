@@ -84,6 +84,7 @@ internal static class Program
         ("static promotion path does not acquire lease", ToolchainPromotionTests.StaticPromotionPathDoesNotAcquireLease),
         ("qualification hash mismatch fails closed", ToolchainPromotionTests.QualificationHashMismatchFailsClosed),
         ("incomplete qualification fails closed", ToolchainPromotionTests.IncompleteQualificationFailsClosed),
+        ("different candidate hashes use different payload identity", ToolchainPromotionTests.DifferentCandidateHashesUseDifferentPayloadIdentity),
         ("candidate package is immutable without installed runtime", ToolchainPromotionTests.CandidatePackageIsImmutableExactWithoutInstalledRuntime),
         ("bootstrap healthy production candidate succeeds", PromotionBootstrapHealthTests.HealthyProductionHealthyCandidateSuccess),
         ("bootstrap replaces missing legacy runtime", PromotionBootstrapHealthTests.MissingLegacyRuntimeReplacement),

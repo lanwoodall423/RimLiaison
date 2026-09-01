@@ -251,119 +251,172 @@ public static class ToolchainPromotionService
         string fullPackagePath = Path.GetFullPath(packagePath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPackagePath)!);
         if (File.Exists(fullPackagePath))
+        {
             throw new IOException("The qualified promotion package already exists and is immutable.");
-
-        string payloadRoot = Path.Combine(
-            Path.GetDirectoryName(fullPackagePath)!,
-            "qualified-toolchain-payload-" + candidate.SourceCommit);
-        Directory.CreateDirectory(payloadRoot);
-        string payloadExecutable = Path.Combine(payloadRoot, "rimliaison.exe");
-        string payloadAssembly = Path.Combine(payloadRoot, "rimliaison.dll");
-        string payloadQualification = Path.Combine(payloadRoot, "qualification.json");
-        string payloadConsumer = Path.Combine(payloadRoot, "transaction-components", "mod-test.ps1");
-        CopyImmutableFile(candidate.RimLiaisonExecutablePath, payloadExecutable);
-        CopyImmutableFile(candidate.RimLiaisonAssemblyPath, payloadAssembly);
-        CopyImmutableFile(qualificationArtifactPath, payloadQualification);
-        CopyImmutableFile(candidate.TransactionConsumerPath, payloadConsumer);
-        foreach (string companionName in new[] { "rimliaison.deps.json", "rimliaison.runtimeconfig.json" })
-        {
-            string sourceCompanion = Path.Combine(candidate.CandidateRoot, companionName);
-            if (File.Exists(sourceCompanion))
-                CopyImmutableFile(sourceCompanion, Path.Combine(payloadRoot, companionName));
         }
 
-        string runtimeArtifactRoot = Path.Combine(payloadRoot, "runtime");
-        CopyImmutableDirectory(candidate.DevBridgeRuntimeArtifactRoot, runtimeArtifactRoot);
-        if (!RuntimeSnapshotIsVerified(
-                runtimeArtifactRoot,
-                candidate.DevBridgePackageSha256,
-                candidate.DevBridgeCoordinatorSha256))
-        {
-            throw new InvalidDataException("The immutable candidate runtime snapshot does not match its bound hashes.");
-        }
-
-        string unifiedManifestPath = Path.Combine(payloadRoot, "unified-package.json");
-        string promotedFingerprint = ComputePromotedFingerprint(
+        string qualificationHash = ToolchainFileHash.Sha256(qualificationArtifactPath);
+        string payloadIdentity = ComputeQualifiedPayloadIdentity(
+            qualificationHash,
             candidate.SourceCommit,
             executableHash,
             assemblyHash,
-            candidate.DevBridgeCoordinatorSha256,
             candidate.DevBridgePackageSha256,
+            candidate.DevBridgeCoordinatorSha256,
             candidate.TransactionConsumerSha256,
-            candidate.RuntimeProtocolContract,
-            ToolchainPromotionSchemas.OwnerProduct,
-            ToolchainPromotionSchemas.RuntimeSubsystem);
-        var unifiedManifest = new
-        {
-            schemaVersion = "rimliaison-unified-production-package/v2",
-            productFingerprint = promotedFingerprint,
-            ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
-            runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
-            rimBridgeServer = new
-            {
-                boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
-                ownership = "RimBridgeServer"
-            },
-            sourceCommit = candidate.SourceCommit,
-            rimLiaison = new
-            {
-                executablePath = "rimliaison.exe",
-                executableSha256 = executableHash,
-                assemblyPath = "rimliaison.dll",
-                assemblySha256 = assemblyHash
-            },
-            runtime = new
-            {
-                packageSha256 = candidate.DevBridgePackageSha256,
-                coordinatorSha256 = candidate.DevBridgeCoordinatorSha256
-            },
-            transactionConsumer = new
-            {
-                path = "transaction-components/mod-test.ps1",
-                sha256 = candidate.TransactionConsumerSha256
-            }
-        };
-        string unifiedJson = JsonSerializer.Serialize(unifiedManifest, WriteOptions);
-        if (File.Exists(unifiedManifestPath))
-        {
-            if (!string.Equals(File.ReadAllText(unifiedManifestPath), unifiedJson, StringComparison.Ordinal))
-                throw new InvalidDataException("The immutable candidate unified manifest was substituted.");
-        }
-        else
-        {
-            File.WriteAllText(unifiedManifestPath, unifiedJson);
-        }
+            candidate.RuntimeProtocolContract);
+        string payloadRoot = Path.Combine(
+            Path.GetDirectoryName(fullPackagePath)!,
+            "qualified-toolchain-payload-" + candidate.SourceCommit + "-" + payloadIdentity);
+        string payloadStageRoot = payloadRoot + ".tmp-" + Guid.NewGuid().ToString("N");
+        string packageTemporaryPath = fullPackagePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        bool payloadPublishedByThisCall = false;
 
-        ToolchainPromotionPackage package = new()
+        try
         {
-            SchemaVersion = ToolchainPromotionSchemas.Package,
-            OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
-            RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
-            SourceCommit = candidate.SourceCommit,
-            QualificationArtifactPath = payloadQualification,
-            QualificationArtifactSha256 = ToolchainFileHash.Sha256(payloadQualification),
-            ArtifactRoot = payloadRoot,
-            RimLiaisonExecutableRelativePath = "rimliaison.exe",
-            RimLiaisonAssemblyRelativePath = "rimliaison.dll",
-            RimLiaisonExecutableSha256 = executableHash,
-            RimLiaisonAssemblySha256 = assemblyHash,
-            DevBridgeRuntimeRoot = candidate.DevBridgeRuntimeRoot,
-            DevBridgeRuntimeArtifactRoot = runtimeArtifactRoot,
-            DevBridgePackageSha256 = candidate.DevBridgePackageSha256,
-            DevBridgeCoordinatorSha256 = candidate.DevBridgeCoordinatorSha256,
-            TransactionConsumerPath = payloadConsumer,
-            TransactionConsumerRelativePath = "transaction-components/mod-test.ps1",
-            TransactionConsumerSha256 = candidate.TransactionConsumerSha256,
-            UnifiedManifestRelativePath = "unified-package.json",
-            RuntimeProtocolContract = candidate.RuntimeProtocolContract
-        };
-        using FileStream stream = new(
-            fullPackagePath,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.Read);
-        JsonSerializer.Serialize(stream, package, WriteOptions);
-        return fullPackagePath;
+            Directory.CreateDirectory(payloadStageRoot);
+            string payloadExecutable = Path.Combine(payloadStageRoot, "rimliaison.exe");
+            string payloadAssembly = Path.Combine(payloadStageRoot, "rimliaison.dll");
+            string payloadQualification = Path.Combine(payloadStageRoot, "qualification.json");
+            string payloadConsumer = Path.Combine(payloadStageRoot, "transaction-components", "mod-test.ps1");
+            CopyImmutableFile(candidate.RimLiaisonExecutablePath, payloadExecutable);
+            CopyImmutableFile(candidate.RimLiaisonAssemblyPath, payloadAssembly);
+            CopyImmutableFile(qualificationArtifactPath, payloadQualification);
+            CopyImmutableFile(candidate.TransactionConsumerPath, payloadConsumer);
+            foreach (string companionName in new[] { "rimliaison.deps.json", "rimliaison.runtimeconfig.json" })
+            {
+                string sourceCompanion = Path.Combine(candidate.CandidateRoot, companionName);
+                if (File.Exists(sourceCompanion))
+                {
+                    CopyImmutableFile(sourceCompanion, Path.Combine(payloadStageRoot, companionName));
+                }
+            }
+
+            string runtimeArtifactRoot = Path.Combine(payloadStageRoot, "runtime");
+            CopyImmutableDirectory(candidate.DevBridgeRuntimeArtifactRoot, runtimeArtifactRoot);
+            if (!RuntimeSnapshotIsVerified(
+                    runtimeArtifactRoot,
+                    candidate.DevBridgePackageSha256,
+                    candidate.DevBridgeCoordinatorSha256))
+            {
+                throw new InvalidDataException("The immutable candidate runtime snapshot does not match its bound hashes.");
+            }
+
+            string unifiedManifestPath = Path.Combine(payloadStageRoot, "unified-package.json");
+            string promotedFingerprint = ComputePromotedFingerprint(
+                candidate.SourceCommit,
+                executableHash,
+                assemblyHash,
+                candidate.DevBridgeCoordinatorSha256,
+                candidate.DevBridgePackageSha256,
+                candidate.TransactionConsumerSha256,
+                candidate.RuntimeProtocolContract,
+                ToolchainPromotionSchemas.OwnerProduct,
+                ToolchainPromotionSchemas.RuntimeSubsystem);
+            var unifiedManifest = new
+            {
+                schemaVersion = "rimliaison-unified-production-package/v2",
+                productFingerprint = promotedFingerprint,
+                ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                rimBridgeServer = new
+                {
+                    boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
+                    ownership = "RimBridgeServer"
+                },
+                sourceCommit = candidate.SourceCommit,
+                rimLiaison = new
+                {
+                    executablePath = "rimliaison.exe",
+                    executableSha256 = executableHash,
+                    assemblyPath = "rimliaison.dll",
+                    assemblySha256 = assemblyHash
+                },
+                runtime = new
+                {
+                    packageSha256 = candidate.DevBridgePackageSha256,
+                    coordinatorSha256 = candidate.DevBridgeCoordinatorSha256
+                },
+                transactionConsumer = new
+                {
+                    path = "transaction-components/mod-test.ps1",
+                    sha256 = candidate.TransactionConsumerSha256
+                }
+            };
+            string unifiedJson = JsonSerializer.Serialize(unifiedManifest, WriteOptions);
+            File.WriteAllText(unifiedManifestPath, unifiedJson);
+
+            ToolchainPromotionPackage package = new()
+            {
+                SchemaVersion = ToolchainPromotionSchemas.Package,
+                OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                SourceCommit = candidate.SourceCommit,
+                QualificationArtifactPath = Path.Combine(payloadRoot, "qualification.json"),
+                QualificationArtifactSha256 = qualificationHash,
+                ArtifactRoot = payloadRoot,
+                RimLiaisonExecutableRelativePath = "rimliaison.exe",
+                RimLiaisonAssemblyRelativePath = "rimliaison.dll",
+                DevBridgeRuntimeRoot = candidate.DevBridgeRuntimeRoot,
+                DevBridgeRuntimeArtifactRoot = Path.Combine(payloadRoot, "runtime"),
+                DevBridgePackageSha256 = candidate.DevBridgePackageSha256,
+                DevBridgeCoordinatorSha256 = candidate.DevBridgeCoordinatorSha256,
+                TransactionConsumerPath = Path.Combine(payloadRoot, "transaction-components", "mod-test.ps1"),
+                TransactionConsumerRelativePath = "transaction-components/mod-test.ps1",
+                TransactionConsumerSha256 = candidate.TransactionConsumerSha256,
+                UnifiedManifestRelativePath = "unified-package.json",
+                RuntimeProtocolContract = candidate.RuntimeProtocolContract,
+                RimLiaisonExecutableSha256 = executableHash,
+                RimLiaisonAssemblySha256 = assemblyHash
+            };
+            using (FileStream stream = new(
+                       packageTemporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, package, WriteOptions);
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (Directory.Exists(payloadRoot))
+            {
+                if (!PayloadDirectoriesMatch(payloadStageRoot, payloadRoot))
+                {
+                    throw new InvalidDataException("The immutable qualified recovery payload contains a substituted artifact.");
+                }
+                TryDelete(payloadStageRoot);
+            }
+            else
+            {
+                try
+                {
+                    Directory.Move(payloadStageRoot, payloadRoot);
+                    payloadPublishedByThisCall = true;
+                }
+                catch (IOException) when (Directory.Exists(payloadRoot))
+                {
+                    if (!PayloadDirectoriesMatch(payloadStageRoot, payloadRoot))
+                    {
+                        throw new InvalidDataException("The immutable qualified recovery payload contains a substituted artifact.");
+                    }
+                    TryDelete(payloadStageRoot);
+                }
+            }
+
+            File.Move(packageTemporaryPath, fullPackagePath, overwrite: false);
+            return fullPackagePath;
+        }
+        catch
+        {
+            TryDelete(packageTemporaryPath);
+            TryDelete(payloadStageRoot);
+            if (payloadPublishedByThisCall && !File.Exists(fullPackagePath))
+            {
+                TryDelete(payloadRoot);
+            }
+            throw;
+        }
     }
 
 
@@ -1331,6 +1384,44 @@ public static class ToolchainPromotionService
             : string.Empty;
     }
 
+    internal static string ComputeQualifiedPayloadIdentity(
+        string qualificationArtifactSha256,
+        string sourceCommit,
+        string executableHash,
+        string assemblyHash,
+        string devBridgeHash,
+        string coordinatorHash,
+        string consumerHash,
+        string compatibility)
+    {
+        var canonical = new StringBuilder();
+        AppendPayloadIdentityField(canonical, "qualification", qualificationArtifactSha256);
+        AppendPayloadIdentityField(canonical, "source", sourceCommit);
+        AppendPayloadIdentityField(canonical, "executable", executableHash);
+        AppendPayloadIdentityField(canonical, "assembly", assemblyHash);
+        AppendPayloadIdentityField(canonical, "devbridge", devBridgeHash);
+        AppendPayloadIdentityField(canonical, "coordinator", coordinatorHash);
+        AppendPayloadIdentityField(canonical, "consumer", consumerHash);
+        AppendPayloadIdentityField(canonical, "compatibility", compatibility);
+        return Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+    }
+
+    private static void AppendPayloadIdentityField(
+        StringBuilder canonical,
+        string name,
+        string value)
+    {
+        canonical.Append(name.Length)
+            .Append(':')
+            .Append(name)
+            .Append(value.Length)
+            .Append(':')
+            .Append(value)
+            .Append('\n');
+    }
+
     internal static string ComputePromotedFingerprint(
         string sourceCommit,
         string executableHash,
@@ -1988,6 +2079,36 @@ public static class ToolchainPromotionService
                 Path.Combine(destination, Path.GetRelativePath(source, file)));
         }
     }
+    private static bool PayloadDirectoriesMatch(string expected, string actual)
+    {
+        string[] expectedFiles = Directory.EnumerateFiles(expected, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(expected, path))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        string[] actualFiles = Directory.EnumerateFiles(actual, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(actual, path))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (!expectedFiles.SequenceEqual(actualFiles, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        foreach (string relativePath in expectedFiles)
+        {
+            string expectedPath = Path.Combine(expected, relativePath);
+            string actualPath = Path.Combine(actual, relativePath);
+            if (!string.Equals(
+                    ToolchainFileHash.Sha256(expectedPath),
+                    ToolchainFileHash.Sha256(actualPath),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void CopyImmutableFile(string source, string destination)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);

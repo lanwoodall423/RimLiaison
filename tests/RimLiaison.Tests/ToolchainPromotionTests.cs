@@ -103,6 +103,29 @@ internal static class ToolchainPromotionTests
             Delete(root);
         }
     }
+    public static void DifferentCandidateHashesUseDifferentPayloadIdentity()
+    {
+        string first = ToolchainPromotionService.ComputeQualifiedPayloadIdentity(
+            "qualification-hash",
+            "source-commit",
+            "executable-hash",
+            "assembly-hash",
+            "devbridge-hash",
+            "coordinator-hash",
+            "consumer-hash",
+            ToolchainPromotionSchemas.RuntimeProtocolContract);
+        string second = ToolchainPromotionService.ComputeQualifiedPayloadIdentity(
+            "qualification-hash",
+            "source-commit",
+            "executable-hash",
+            "assembly-hash",
+            "different-devbridge-hash",
+            "coordinator-hash",
+            "consumer-hash",
+            ToolchainPromotionSchemas.RuntimeProtocolContract);
+        Assert(!string.Equals(first, second, StringComparison.Ordinal),
+            "different candidate component hashes must produce different payload identities");
+    }
 
     public static void CandidatePackageIsImmutableExactWithoutInstalledRuntime()
     {
@@ -234,6 +257,82 @@ internal static class ToolchainPromotionTests
                 "component-commit",
                 Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
                 Hash(Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json")));
+            string conflictQualificationPath = Path.Combine(root, "conflicting-qualification.json");
+            File.WriteAllText(conflictQualificationPath, "{\"proof\":\"conflict\"}");
+            string conflictPayloadRoot = Path.Combine(
+                root,
+                "qualified-toolchain-payload-source-commit-" +
+                ToolchainPromotionService.ComputeQualifiedPayloadIdentity(
+                    Hash(conflictQualificationPath),
+                    candidate.SourceCommit,
+                    candidate.RimLiaisonExecutableSha256,
+                    candidate.RimLiaisonAssemblySha256,
+                    candidate.DevBridgePackageSha256,
+                    candidate.DevBridgeCoordinatorSha256,
+                    candidate.TransactionConsumerSha256,
+                    candidate.RuntimeProtocolContract));
+            Directory.CreateDirectory(conflictPayloadRoot);
+            File.WriteAllText(Path.Combine(conflictPayloadRoot, "rimliaison.exe"), "conflicting");
+            bool payloadSubstitutionRejected = false;
+            try
+            {
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    qualification,
+                    conflictQualificationPath,
+                    Path.Combine(root, "conflicting-package.json"),
+                    candidate);
+            }
+            catch (InvalidDataException)
+            {
+                payloadSubstitutionRejected = true;
+            }
+            Assert(payloadSubstitutionRejected, "a prepopulated conflicting payload was accepted");
+            Assert(!File.Exists(Path.Combine(root, "conflicting-package.json")),
+                "conflicting payload rejection published a package");
+            Assert(File.ReadAllText(Path.Combine(conflictPayloadRoot, "rimliaison.exe")) == "conflicting",
+                "conflicting historical payload content was overwritten");
+
+            string failedPayloadRoot = Path.Combine(
+                root,
+                "failed-runtime");
+            Directory.CreateDirectory(failedPayloadRoot);
+            ToolchainCandidate incompleteCandidate = candidate with
+            {
+                DevBridgeRuntimeArtifactRoot = failedPayloadRoot
+            };
+            string failedQualificationPath = Path.Combine(root, "failed-qualification.json");
+            File.WriteAllText(failedQualificationPath, "{\"proof\":\"failed-emission\"}");
+            string failedPackagePath = Path.Combine(root, "failed-package.json");
+            string failedPayloadIdentity = ToolchainPromotionService.ComputeQualifiedPayloadIdentity(
+                Hash(failedQualificationPath),
+                incompleteCandidate.SourceCommit,
+                incompleteCandidate.RimLiaisonExecutableSha256,
+                incompleteCandidate.RimLiaisonAssemblySha256,
+                incompleteCandidate.DevBridgePackageSha256,
+                incompleteCandidate.DevBridgeCoordinatorSha256,
+                incompleteCandidate.TransactionConsumerSha256,
+                incompleteCandidate.RuntimeProtocolContract);
+            string failedPayloadDestination = Path.Combine(
+                root,
+                "qualified-toolchain-payload-source-commit-" + failedPayloadIdentity);
+            bool failedEmissionRejected = false;
+            try
+            {
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    qualification,
+                    failedQualificationPath,
+                    failedPackagePath,
+                    incompleteCandidate);
+            }
+            catch (InvalidDataException)
+            {
+                failedEmissionRejected = true;
+            }
+            Assert(failedEmissionRejected, "incomplete runtime emission unexpectedly succeeded");
+            Assert(!File.Exists(failedPackagePath), "failed emission published a package");
+            Assert(!Directory.Exists(failedPayloadDestination),
+                "failed emission left a newly-owned incomplete payload");
+
             string generated = ToolchainPromotionService.WriteQualifiedPromotionPackage(
                 qualification,
                 qualificationPath,
@@ -266,6 +365,27 @@ internal static class ToolchainPromotionTests
                 "recovery payload must not point at the mutable local Release directory");
             Assert(File.ReadAllText(Path.Combine(immutablePayloadRoot, "rimliaison.exe")) == "qualified-executable",
                 "recovery payload must preserve the qualified executable");
+            string burnInQualificationPath = Path.Combine(root, "burn-in-qualification.json");
+            File.WriteAllText(burnInQualificationPath, "{\"proof\":\"burn-in-25\"}");
+            string burnInPackagePath = Path.Combine(root, "burn-in-package.json");
+            string burnInGenerated = ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                qualification,
+                burnInQualificationPath,
+                burnInPackagePath,
+                candidate);
+            using JsonDocument burnInPackage = JsonDocument.Parse(File.ReadAllText(burnInGenerated));
+            JsonElement burnInPackageRoot = burnInPackage.RootElement;
+            string burnInPayloadRoot = burnInPackageRoot.GetProperty("artifactRoot").GetString()!;
+            Assert(!string.Equals(immutablePayloadRoot, burnInPayloadRoot, StringComparison.Ordinal),
+                "burn-in payload root must be distinct from the single proof payload");
+            Assert(
+                File.ReadAllText(Path.Combine(immutablePayloadRoot, "qualification.json")) ==
+                File.ReadAllText(qualificationPath),
+                "single qualification proof was mutated");
+            Assert(
+                File.ReadAllText(Path.Combine(burnInPayloadRoot, "qualification.json")) ==
+                File.ReadAllText(burnInQualificationPath),
+                "burn-in qualification proof was not retained");
             bool immutable = false;
             try
             {
