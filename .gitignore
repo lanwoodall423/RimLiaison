@@ -6,6 +6,13 @@
 .rimdev/profiles/
 .rimdev/observability/
 .rimdev/validation-proofs/
+.rimdev/qualification/
+.rimdev/failure-handoffs/
+.rimdev/format-stage-report.txt
+RimDevStagingRimLiaison-*/
+plan.json
+prompt2-desktop-window.png
+UsersLanAppDataLocalTempprompt3r2-doctor-current.json
 .rimerror/
 TestResults/
 *.user

@@ -252,11 +252,11 @@ internal static class ToolchainCandidateMaterializer
                     "The RimLiaison source identity could not be resolved before candidate creation.",
                     "Resolve the source checkout, then retry qualification.");
             }
-            if (source.State.Dirty)
+            if (RepositoryChangeClassificationPolicy.HasMeaningfulChanges(source.State.Changes))
             {
                 return ToolchainCandidateMaterializationResult.Failure(
                     "CANDIDATE_SOURCE_DIRTY",
-                    "Candidate creation refuses a dirty RimLiaison source checkout.",
+                    "Candidate creation refuses meaningful changes in the RimLiaison source checkout.",
                     "Commit or restore the source checkout, then retry qualification.");
             }
 
@@ -299,11 +299,11 @@ internal static class ToolchainCandidateMaterializer
                     "The pinned DevBridge2 source checkout could not be resolved.",
                     "Materialize the pinned DevBridge2 worktree and retry qualification.");
             }
-            if (devBridgeSource.State.Dirty)
+            if (RepositoryChangeClassificationPolicy.HasMeaningfulChanges(devBridgeSource.State.Changes))
             {
                 return ToolchainCandidateMaterializationResult.Failure(
                     "DEVBRIDGE_CANDIDATE_SOURCE_DIRTY",
-                    "The DevBridge2 candidate source checkout is dirty.",
+                    "The DevBridge2 candidate source checkout contains meaningful changes.",
                     "Use the clean pinned DevBridge2 worktree and retry qualification.");
             }
             if (!string.Equals(devBridgeSource.State.HeadSha, pinnedDevBridgeRevision, StringComparison.OrdinalIgnoreCase))

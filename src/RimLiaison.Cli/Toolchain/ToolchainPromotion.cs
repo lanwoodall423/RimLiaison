@@ -105,6 +105,8 @@ public sealed record ToolchainPromotionResult(
 
     [JsonPropertyName("rollbackOccurred")]
     public bool RollbackOccurred { get; init; }
+    [JsonPropertyName("meaningfulDirtyPaths")]
+    public IReadOnlyList<string>? MeaningfulDirtyPaths { get; init; }
 
     public static ToolchainPromotionResult Blocked(
         string code,
@@ -114,7 +116,8 @@ public sealed record ToolchainPromotionResult(
         string? qualificationArtifactSha256 = null,
         string? previousFingerprint = null,
         string? nextAction = null,
-        string? productionDoctor = null) => new(
+        string? productionDoctor = null,
+        IReadOnlyList<string>? meaningfulDirtyPaths = null) => new(
         ToolchainPromotionSchemas.Result,
         "blocked",
         code,
@@ -131,7 +134,10 @@ public sealed record ToolchainPromotionResult(
         productionDoctor ?? "not-run",
         "unchanged",
         null,
-        nextAction);
+        nextAction)
+    {
+        MeaningfulDirtyPaths = meaningfulDirtyPaths
+    };
 }
 
 public sealed record PromotionCandidateHealthBinding(
@@ -561,20 +567,29 @@ public static class ToolchainPromotionService
                 .ReadAsync(sourceRoot, cancellationToken)
                 .ConfigureAwait(false);
             if (!source.Resolved || source.State?.HeadSha is null ||
-                source.State.Dirty ||
                 !string.Equals(source.State.HeadSha, package.SourceCommit, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
-                    source.State?.Dirty == true
-                        ? "PROMOTION_SOURCE_DIRTY"
-                        : "PROMOTION_SOURCE_FINGERPRINT_STALE",
-                    source.State?.Dirty == true
-                        ? "The current source checkout is dirty after qualification."
-                        : "The current source HEAD does not match the qualified source commit.",
+                    "PROMOTION_SOURCE_FINGERPRINT_STALE",
+                    "The current source HEAD does not match the qualified source commit.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
                     nextAction: "Commit or restore the qualified source and rebuild the promotion package.");
+            }
+
+            IReadOnlyList<string> meaningfulDirtyPaths =
+                RepositoryChangeClassificationPolicy.MeaningfulPaths(source.State.Changes);
+            if (meaningfulDirtyPaths.Count > 0)
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_SOURCE_DIRTY",
+                    "Meaningful source or configuration changes remain after qualification.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Commit or restore the meaningful source changes, then rebuild the promotion package.",
+                    meaningfulDirtyPaths: meaningfulDirtyPaths);
             }
 
             previous = ReadProductionManifest(manifestPath, out string? manifestError);
@@ -1522,8 +1537,68 @@ public static class ToolchainPromotionService
                     return CandidateHealthFailure(checks, binding, "Candidate DevBridge final doctor did not prove healthy zero-lease identity.", finalDoctor.output);
                 }
             }
+            (int exitCode, string output) shutdown = await RunJsonCommandAsync(
+                "cmd.exe",
+                ["/d", "/c", devBridgeCommand, "coordinator", "shutdown", "--json"],
+                cancellationToken,
+                environment).ConfigureAwait(false);
+            bool shutdownAccepted = false;
+            if (shutdown.exitCode == 0 &&
+                TryParse(shutdown.output, out JsonDocument? shutdownDocument))
+            {
+                using (shutdownDocument)
+                {
+                    shutdownAccepted = shutdownDocument!.RootElement.TryGetProperty("success", out JsonElement shutdownSuccess) &&
+                        shutdownSuccess.ValueKind == JsonValueKind.True;
+                }
+            }
+            checks["coordinatorShutdown"] = shutdownAccepted ? "accepted" : "failed";
+            if (!shutdownAccepted)
+            {
+                return CandidateHealthFailure(checks, binding,
+                    "Candidate DevBridge coordinator shutdown did not return accepted structured JSON.",
+                    shutdown.output);
+            }
+
+            string? probeOutput = null;
+            bool quiesced = false;
+            for (int attempt = 0; attempt < 50 && !quiesced; attempt++)
+            {
+                (int probeExitCode, string probeOutputValue) probe = await RunJsonCommandAsync(
+                    "cmd.exe",
+                    ["/d", "/c", devBridgeCommand, "coordinator", "probe", "--json"],
+                    cancellationToken,
+                    environment).ConfigureAwait(false);
+                probeOutput = probe.probeOutputValue;
+                if (TryParse(probe.probeOutputValue, out JsonDocument? probeDocument))
+                {
+                    using (probeDocument)
+                    {
+                        JsonElement probeRoot = probeDocument!.RootElement;
+                        quiesced = IsCoordinatorQuiesced(
+                            probeRoot,
+                            binding.CandidateRuntimeRoot,
+                            probe.probeExitCode);
+                    }
+                }
+
+                if (!quiesced && attempt < 49)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            checks["coordinatorQuiesced"] = quiesced ? "true" : "false";
+            if (!quiesced)
+            {
+                return CandidateHealthFailure(checks, binding,
+                    "Candidate DevBridge coordinator remained bound to the staged runtime after shutdown.",
+                    probeOutput);
+            }
 
             return CandidateHealthSuccess(checks, binding);
+
         }
         catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException or OperationCanceledException)
         {
@@ -1610,6 +1685,20 @@ public static class ToolchainPromotionService
         return identity.TryGetProperty("devBridgeRuntimeRoot", out JsonElement runtimeRoot) &&
             runtimeRoot.ValueKind == JsonValueKind.String &&
             SamePath(runtimeRoot.GetString(), expectedRuntimeRoot);
+    }
+    internal static bool IsCoordinatorQuiesced(
+        JsonElement probeRoot,
+        string expectedRuntimeRoot,
+        int probeExitCode)
+    {
+        return probeExitCode != 0 &&
+            probeRoot.TryGetProperty("state", out JsonElement state) &&
+            string.Equals(state.GetString(), "Absent", StringComparison.OrdinalIgnoreCase) &&
+            probeRoot.TryGetProperty("runtimeRoot", out JsonElement runtimeRoot) &&
+            runtimeRoot.ValueKind == JsonValueKind.String &&
+            SamePath(runtimeRoot.GetString(), expectedRuntimeRoot) &&
+            (!probeRoot.TryGetProperty("coordinatorPid", out JsonElement pid) ||
+                pid.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined);
     }
 
     private static string DescribePreviousProductionHealth(ProductionToolchainManifest manifest)

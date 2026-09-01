@@ -7,7 +7,7 @@
     },
     "devBridge2": {
       "repository": "lanwoodall423/DevBridge2",
-      "revision": "3b084973b70c1e03fe9eae0153a81507ea82ba78"
+      "revision": "312bc12123ea86723909586b80253fd1a63253c4"
     }
   },
   "components": {
@@ -122,6 +122,14 @@
     "maxDevBridgeBuildOutputCharacters": 16384
   },
   "update": "Change the external DevBridge2 revision only in a deliberate compatibility update, run the pinned DevBridge2 build-diagnostic fixture plus scripts/cross-stack-contract.tests.ps1, and review the resulting contract report.",
+  "compatibilityUpdate": {
+    "fromRevision": "3b084973b70c1e03fe9eae0153a81507ea82ba78",
+    "toRevision": "312bc12123ea86723909586b80253fd1a63253c4",
+    "reason": "The pinned owner-side bounded build-diagnostic fixture omitted the compact build.stage field; this exact later main revision passes the unchanged diagnostic contract.",
+    "contractDelta": "No schema or required-field changes; the owner-side compact diagnostic projection now satisfies the existing contract.",
+    "schemaChanged": false,
+    "requiredFieldsChanged": false
+  },
   "scope": {
     "offline": "This gate proves the no-RimWorld composition and wire contracts using the pinned DevBridge2 synthetic failing-build transaction plus a deterministic fake host for lifecycle composition.",
     "live": "Real RimWorld/RimBridgeServer compatibility remains covered only by DevBridge2/scripts/live-stack-smoke.ps1 on the configured self-hosted runner."

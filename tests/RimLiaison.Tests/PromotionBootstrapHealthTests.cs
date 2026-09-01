@@ -46,6 +46,29 @@ internal static class PromotionBootstrapHealthTests
         Assert(fixture.CandidateVerifier.Binding?.CandidateRuntimeRoot != fixture.CandidateVerifier.ExpectedRuntimeRoot,
             "candidate binding was silently substituted with an unrelated runtime");
     }
+    public static void StagedCoordinatorQuiescenceRequiresAbsentProcess()
+    {
+        string stagedRoot = Path.Combine(Path.GetTempPath(), "rimliaison-staged-runtime");
+        using JsonDocument absent = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            state = "Absent",
+            runtimeRoot = stagedRoot
+        }));
+        Assert(
+            ToolchainPromotionService.IsCoordinatorQuiesced(absent.RootElement, stagedRoot, 4),
+            "an absent coordinator probe must prove the staged process is quiesced.");
+
+        using JsonDocument responsive = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            state = "Responsive",
+            runtimeRoot = stagedRoot,
+            coordinatorPid = 1234
+        }));
+        Assert(
+            !ToolchainPromotionService.IsCoordinatorQuiesced(responsive.RootElement, stagedRoot, 0),
+            "a responsive coordinator probe must not prove staged process quiescence.");
+    }
+
 
     public static void MissingCandidateDllFailsAccurately()
     {
@@ -137,6 +160,65 @@ internal static class PromotionBootstrapHealthTests
         Assert(!Directory.Exists(fixture.ProductionRuntimeRoot), "cancellation activated candidate runtime");
     }
 
+    public static void GeneratedQualificationOutputDoesNotBlockPromotion()
+    {
+        using Fixture fixture = new("missing")
+        {
+            SourceChanges =
+            [
+                new GitRepositoryChange(".rimdev/qualification/latest.json", "??", false, true)
+            ]
+        };
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "promoted",
+            $"generated qualification output blocked promotion: {result.ErrorCode} {result.Error}");
+        Assert(result.MeaningfulDirtyPaths is null,
+            "generated qualification output produced meaningful dirty-path evidence.");
+    }
+
+    public static void MeaningfulSourceChangeBlocksPromotion()
+    {
+        using Fixture fixture = new("missing")
+        {
+            SourceChanges =
+            [
+                new GitRepositoryChange(".rimdev/stack.json", "M", false, false)
+            ]
+        };
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "blocked" && result.ErrorCode == "PROMOTION_SOURCE_DIRTY",
+            "meaningful source change did not block promotion.");
+        Assert(result.MeaningfulDirtyPaths?.SequenceEqual([".rimdev/stack.json"]) == true,
+            "promotion did not return the bounded meaningful dirty path.");
+    }
+
+    public static void UnknownTrackedArtifactBlocksPromotion()
+    {
+        using Fixture fixture = new("missing")
+        {
+            SourceChanges =
+            [
+                new GitRepositoryChange("random/location/Unknown.dll", "??", false, false)
+            ]
+        };
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "blocked" && result.ErrorCode == "PROMOTION_SOURCE_DIRTY",
+            "unknown tracked artifact was silently ignored by promotion.");
+        Assert(result.MeaningfulDirtyPaths?.SequenceEqual(["random/location/Unknown.dll"]) == true,
+            "promotion did not preserve unknown tracked artifact evidence.");
+    }
+
+    public static void HeadMismatchStillBlocksPromotion()
+    {
+        using Fixture fixture = new("missing")
+        {
+            SourceHeadCommit = "different-source-commit"
+        };
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "blocked" && result.ErrorCode == "PROMOTION_SOURCE_FINGERPRINT_STALE",
+            "HEAD mismatch did not block exact promotion provenance.");
+    }
+
     private static void AssertSuccess(string legacyState)
     {
         using Fixture fixture = new(legacyState);
@@ -162,6 +244,8 @@ internal static class PromotionBootstrapHealthTests
         public string ProductionRuntimeRoot { get; }
         public string ExpectedCandidateRuntimeRoot { get; }
         public string ExpectedFingerprint { get; }
+        public IReadOnlyList<GitRepositoryChange> SourceChanges { get; init; } = [];
+        public string? SourceHeadCommit { get; init; }
         public string ManifestBefore { get; }
         public FakeCandidateVerifier CandidateVerifier { get; } = new();
         public FakeCanonicalVerifier CanonicalVerifier { get; } = new();
@@ -335,7 +419,9 @@ internal static class PromotionBootstrapHealthTests
                     null,
                     promotionHealthVerifier: CandidateVerifier,
                     canonicalHealthVerifier: CanonicalVerifier,
-                    gitRepositoryStateProvider: new FakeGitProvider(SourceCommit))
+                    gitRepositoryStateProvider: new FakeGitProvider(
+                        SourceHeadCommit ?? SourceCommit,
+                        SourceChanges))
                 .GetAwaiter()
                 .GetResult();
         }
@@ -366,11 +452,21 @@ internal static class PromotionBootstrapHealthTests
         }
     }
 
-    private sealed class FakeGitProvider(string commit) : IGitRepositoryStateProvider
+    private sealed class FakeGitProvider(
+        string commit,
+        IReadOnlyList<GitRepositoryChange> changes) : IGitRepositoryStateProvider
     {
         public Task<GitRepositoryStateResult> ReadAsync(string rootPath, CancellationToken cancellationToken = default) =>
             Task.FromResult(new GitRepositoryStateResult(true, new GitRepositoryStateSnapshot(
-                rootPath, "fixture", null, commit, null, 0, 0, false, [])));
+                rootPath,
+                "fixture",
+                null,
+                commit,
+                null,
+                0,
+                0,
+                changes.Count > 0,
+                changes)));
     }
 
     private sealed class FakeCandidateVerifier : IPromotionCandidateHealthVerifier

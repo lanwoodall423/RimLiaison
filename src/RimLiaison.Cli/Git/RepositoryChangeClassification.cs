@@ -124,6 +124,31 @@ public static class RepositoryChangeClassificationPolicy
         return Classify(change.Path, context);
     }
 
+    public static bool HasMeaningfulChanges(IEnumerable<GitRepositoryChange> changes)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        return changes.Any(static change => Classify(change).IsMeaningful);
+    }
+
+    public static IReadOnlyList<string> MeaningfulPaths(
+        IEnumerable<GitRepositoryChange> changes,
+        int maximum = 8)
+    {
+        ArgumentNullException.ThrowIfNull(changes);
+        if (maximum <= 0)
+        {
+            return [];
+        }
+
+        return changes
+            .Where(static change => Classify(change).IsMeaningful)
+            .Select(static change => NormalizePath(change.Path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(maximum)
+            .ToArray();
+    }
+
     public static bool IsGeneratedPath(string path) => Classify(path).IsGenerated;
 
     public static string NormalizePath(string path) =>
@@ -144,7 +169,7 @@ public static class RepositoryChangeClassificationPolicy
 
         if (segments.Length >= 2 &&
             segments[0].Equals(".rimdev", StringComparison.OrdinalIgnoreCase) &&
-            segments[1] is "observability" or "profiles" or "validation-proofs")
+            segments[1] is "failure-handoffs" or "observability" or "profiles" or "qualification" or "validation-proofs")
         {
             return true;
         }

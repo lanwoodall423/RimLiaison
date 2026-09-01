@@ -71,8 +71,11 @@ public static class RimDevTests
         AssertEqual(
             RepositoryChangeClassificationKind.GeneratedTransient,
             RimDevGitReader.ClassifyPath("obj/Release/Repo.pdb").Kind);
+        Assert(RimDevGitReader.IsGeneratedPath(".rimdev/failure-handoffs/promotion.json"), "RimError handoff state must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/observability/events.json"), "RimDev observability state must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/profiles/run.json"), "RimDev profiles must be generated.");
+        Assert(RimDevGitReader.IsGeneratedPath(".rimdev/qualification/latest.json"), "qualification output must be generated.");
+        Assert(RimDevGitReader.IsGeneratedPath(".rimdev/qualification/qualified-toolchain-package.json"), "qualification packages must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimdev/validation-proofs/proof.json"), "Validation proofs must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath(".rimctx/index.sqlite"), "RimContext indexes must be generated.");
         Assert(RimDevGitReader.IsGeneratedPath("TestResults/result.trx"), "Test result output must be generated.");
@@ -81,6 +84,31 @@ public static class RimDevTests
         Assert(!RimDevGitReader.IsGeneratedPath("Source/Repo.cs"), "Source files must remain meaningful inputs.");
         Assert(!RimDevGitReader.IsGeneratedPath("random/location/Unknown.dll"), "An arbitrary tracked assembly must not be hidden by its extension.");
         Assert(!RimDevGitReader.IsGeneratedPath("random/location/Unknown.pdb"), "An arbitrary tracked symbol file must not be hidden by its extension.");
+    }
+
+    public static void MeaningfulChangeSummaryRetainsUnknownPaths()
+    {
+        GitRepositoryChange[] changes =
+        [
+            new(".rimdev/qualification/latest.json", "??", true, true),
+            new(".rimdev/stack.json", "M", false, false),
+            new("random/location/Unknown.dll", "??", false, false)
+        ];
+
+        Assert(RepositoryChangeClassificationPolicy.HasMeaningfulChanges(changes),
+            "meaningful source changes must remain visible beside generated qualification output.");
+        Assert(
+            RepositoryChangeClassificationPolicy.MeaningfulPaths(changes)
+                .SequenceEqual([".rimdev/stack.json", "random/location/Unknown.dll"]),
+            "meaningful path evidence must retain source and unknown tracked paths.");
+        Assert(
+            RepositoryChangeClassificationPolicy.MeaningfulPaths(changes, maximum: 1)
+                .SequenceEqual([".rimdev/stack.json"]),
+            "meaningful path evidence must be bounded deterministically.");
+        Assert(
+            !RepositoryChangeClassificationPolicy.HasMeaningfulChanges(
+                [new GitRepositoryChange(".rimdev/qualification/latest.json", "??", true, true)]),
+            "generated qualification output alone must not be meaningful.");
     }
 
     public static void OwnerAwareClassificationAgreesAcrossConsumers()
