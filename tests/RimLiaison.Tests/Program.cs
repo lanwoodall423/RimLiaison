@@ -84,7 +84,7 @@ internal static class Program
         ("static promotion path does not acquire lease", ToolchainPromotionTests.StaticPromotionPathDoesNotAcquireLease),
         ("qualification hash mismatch fails closed", ToolchainPromotionTests.QualificationHashMismatchFailsClosed),
         ("incomplete qualification fails closed", ToolchainPromotionTests.IncompleteQualificationFailsClosed),
-        ("qualified package is immutable and exact", ToolchainPromotionTests.QualifiedPackageIsImmutableAndExact),
+        ("candidate package is immutable without installed runtime", ToolchainPromotionTests.CandidatePackageIsImmutableExactWithoutInstalledRuntime),
         ("promotion lease acquires canonical ownership", PromotionLeaseOrchestrationTests.AcquiresCanonicalLease),
         ("promotion lease reaches live verification", PromotionLeaseOrchestrationTests.ForwardsLeaseIdToLiveVerification),
         ("promotion lease preserves workflow owner", PromotionLeaseOrchestrationTests.ForwardsWorkflowIdentityToLeaseAndVerification),

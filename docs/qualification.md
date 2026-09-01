@@ -46,13 +46,27 @@ Both commands emit machine-readable aggregate JSON and write:
 
 - `.rimdev/qualification/latest.json` as a convenience projection;
 - an immutable, source-qualified artifact under `.rimdev/qualification/`;
-- an immutable `qualified-toolchain-package-<commit>-<run>.json`;
+- an immutable `qualified-toolchain-package-<commit>-<run>.json` only after candidate packaging succeeds;
 - `.rimdev/qualification/tooling-improvement-backlog.json`.
 
+The production lifecycle is candidate-first:
+
+1. RimLiaison asks the pinned DevBridge2 owner workflow to build an isolated runtime candidate.
+2. Qualification binds the exact candidate CLI, assembly, transaction consumer, runtime manifest,
+   component source revision, and file hashes.
+3. RimLiaison emits one immutable promotion package from those candidate files.
+4. Promotion materializes the package into the configured production destinations.
+5. Recovery restores only from the promoted package.
+
+`qualificationPassed`, `candidateComplete`, `promotionPackageEmitted`, and `promotionReady` are
+separate states. Passing fixture scenarios alone never reports promotion readiness.
+
 The immutable promotion package is the authoritative recovery payload. It contains private copies of
-the qualified CLI, assembly, transaction consumer, qualification proof, and DevBridge runtime
-snapshot, each bound by the package's recorded hashes. The promoted production manifest records the
-absolute package path and SHA-256, plus the promoted source commit and product fingerprint.
+the qualified CLI, assembly, transaction consumer, qualification proof, unified manifest, and
+DevBridge runtime snapshot, each bound by the package's recorded hashes. The active production
+installation is never an input artifact source for candidate creation or package emission. The
+promoted production manifest records the absolute package path and SHA-256, plus the promoted source
+commit and product fingerprint.
 
 Restoration of an existing promotion is identity- and artifact-based: it reads that manifest,
 validates the exact package and hashes, materializes only those immutable files, verifies the
@@ -72,13 +86,12 @@ operator action: intentionally qualify and promote a new production package. It 
 promotes the current checkout.
 
 
-Creation or replacement of a promotion is a separate strict operation. `PromoteAsync` requires the
-current source HEAD to equal the qualified source commit and retains the complete qualification,
-exact artifact/package hashes, exclusive lock, atomic manifest replacement, and installed identity
-verification. `PROMOTION_SOURCE_FINGERPRINT_STALE` remains a valid create/replace blocker. If an
-existing promotion's package or required external runtime is unavailable or fails integrity
-validation, the workflow reports a bounded RimLiaison infrastructure block and never uses current
-source or changes the promoted identity.
+The package must reference the complete burn-in artifact and exact immutable candidate files.
+Promotion verifies the source commit, rejects dirty source, qualification hash, candidate artifact
+hashes, the pinned internal runtime protocol contract, an exclusive lock, isolated runtime health,
+atomic production-manifest replacement, installed hashes, and production doctor. A failed
+verification leaves the previous production manifest and runtime active. DevBridge runtime release
+scripts remain component-build tools only; they cannot publish an independent production identity.
 
 Supported promotion command:
 
@@ -87,12 +100,6 @@ rimliaison qualification promote `
   --promotion-package <qualified-toolchain-package.json> --json
 ```
 
-The package must reference the complete burn-in artifact and exact published RimLiaison files.
-Promotion verifies the source commit, qualification hash, artifact hashes, the pinned internal
-runtime protocol contract, an exclusive lock, atomic production-manifest replacement, installed
-hashes, and production doctor. A failed verification leaves the previous production manifest
-active. DevBridge runtime release scripts are component-build tools only; they cannot publish an
-independent production identity.
 
 ## Promotion criteria
 

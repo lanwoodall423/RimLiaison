@@ -20,7 +20,8 @@ internal static class QualificationTests
                 "restart.recovery", "evidence.structured", "evidence.optional-missing",
                 "optional.validation", "recommendation", "cleanup"
             ];
-            Assert(aggregate.IsPromotionReady, "deterministic qualification should pass");
+            Assert(aggregate.QualificationPassed, "deterministic qualification should pass");
+            Assert(!aggregate.IsPromotionReady, "qualification alone must not claim promotion readiness");
             AssertEqual(1, aggregate.TotalRuns, "qualification run count");
             AssertEqual(1, aggregate.Passes, "qualification passes");
             AssertEqual(0, aggregate.InfrastructureFailures, "qualification infrastructure failures");

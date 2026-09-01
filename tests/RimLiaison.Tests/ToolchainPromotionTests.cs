@@ -104,7 +104,7 @@ internal static class ToolchainPromotionTests
         }
     }
 
-    public static void QualifiedPackageIsImmutableAndExact()
+    public static void CandidatePackageIsImmutableExactWithoutInstalledRuntime()
     {
         string root = CreateRoot();
         string? previousManifest = Environment.GetEnvironmentVariable(
@@ -113,6 +113,7 @@ internal static class ToolchainPromotionTests
         {
             string artifactRoot = Path.Combine(root, "artifacts");
             string runtimeRoot = Path.Combine(root, "runtime");
+            string activeRuntimeRoot = Path.Combine(root, "active-runtime-not-installed");
             string packageRoot = Path.Combine(root, "unified");
             Directory.CreateDirectory(Path.Combine(artifactRoot));
             Directory.CreateDirectory(Path.Combine(runtimeRoot, "Coordinator"));
@@ -155,7 +156,7 @@ internal static class ToolchainPromotionTests
                     rimLiaisonExecutableSha256 = Hash(executablePath),
                     rimLiaisonAssemblyPath = assemblyPath,
                     rimLiaisonAssemblySha256 = Hash(assemblyPath),
-                    devBridgeRuntimeRoot = runtimeRoot,
+                    devBridgeRuntimeRoot = activeRuntimeRoot,
                     devBridgePackageSha256 = "runtime-package",
                     devBridgeCoordinatorSha256 = coordinatorHash,
                     transactionConsumerPath = consumerPath,
@@ -211,19 +212,38 @@ internal static class ToolchainPromotionTests
                 {
                     ["rimLiaisonExecutableSha256"] = executableHash,
                     ["rimLiaisonAssemblySha256"] = assemblyHash
-                });
+                })
+            {
+                CandidateComplete = true,
+                PromotionPackageEmitted = true
+            };
             string packagePath = Path.Combine(root, "package.json");
             string packagePath2 = Path.Combine(root, "package-copy.json");
+            ToolchainCandidate candidate = new(
+                "source-commit",
+                artifactRoot,
+                executablePath,
+                assemblyPath,
+                activeRuntimeRoot,
+                runtimeRoot,
+                "runtime-package",
+                coordinatorHash,
+                consumerPath,
+                ToolchainPromotionSchemas.RuntimeProtocolContract,
+                root,
+                "component-commit",
+                Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
+                Hash(Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json")));
             string generated = ToolchainPromotionService.WriteQualifiedPromotionPackage(
                 qualification,
                 qualificationPath,
                 packagePath,
-                artifactRoot);
+                candidate);
             string generatedCopy = ToolchainPromotionService.WriteQualifiedPromotionPackage(
                 qualification,
                 qualificationPath,
                 packagePath2,
-                artifactRoot);
+                candidate);
             using JsonDocument package = JsonDocument.Parse(File.ReadAllText(generated));
             JsonElement packageRootJson = package.RootElement;
             Assert(generated == Path.GetFullPath(packagePath), "package path must be absolute");
@@ -253,7 +273,7 @@ internal static class ToolchainPromotionTests
                     qualification,
                     qualificationPath,
                     packagePath,
-                    artifactRoot);
+                    candidate);
             }
             catch (IOException)
             {
@@ -268,13 +288,29 @@ internal static class ToolchainPromotionTests
                     qualification,
                     qualificationPath,
                     Path.Combine(root, "substituted.json"),
-                    artifactRoot);
+                    candidate);
             }
             catch (InvalidDataException)
             {
                 substitutionRejected = true;
             }
             Assert(substitutionRejected, "artifact substitution must fail closed");
+            File.WriteAllText(executablePath, "qualified-executable");
+            File.WriteAllText(coordinatorPath, "substituted-coordinator");
+            bool runtimeSubstitutionRejected = false;
+            try
+            {
+                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                    qualification,
+                    qualificationPath,
+                    Path.Combine(root, "substituted-runtime.json"),
+                    candidate);
+            }
+            catch (InvalidDataException)
+            {
+                runtimeSubstitutionRejected = true;
+            }
+            Assert(runtimeSubstitutionRejected, "candidate runtime substitution must fail closed");
         }
         finally
         {

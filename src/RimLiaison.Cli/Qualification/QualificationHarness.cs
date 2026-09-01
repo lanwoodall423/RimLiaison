@@ -63,12 +63,33 @@ public sealed record QualificationAggregate(
     string? QualificationArtifactPath = null,
     string? QualifiedPromotionPackagePath = null)
 {
-    [JsonIgnore]
-    public bool IsPromotionReady =>
+    [JsonPropertyName("qualificationPassed")]
+    public bool QualificationPassed =>
         Passes == TotalRuns &&
         InfrastructureFailures == 0 &&
         FixtureFailures == 0 &&
         Runs.All(run => run.RecoverySuccesses > 0);
+
+    [JsonPropertyName("candidateComplete")]
+    public bool CandidateComplete { get; init; }
+
+    [JsonPropertyName("promotionPackageEmitted")]
+    public bool PromotionPackageEmitted { get; init; }
+
+    [JsonPropertyName("candidateFailureCode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CandidateFailureCode { get; init; }
+
+    [JsonPropertyName("candidateFailure")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CandidateFailure { get; init; }
+
+    [JsonPropertyName("promotionReady")]
+    public bool PromotionReady =>
+        QualificationPassed && CandidateComplete && PromotionPackageEmitted;
+
+    [JsonIgnore]
+    public bool IsPromotionReady => PromotionReady;
 }
 
 public sealed record ToolchainPromotionManifest(

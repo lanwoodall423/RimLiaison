@@ -139,36 +139,26 @@ public static class ToolchainPromotionService
         QualificationAggregate qualification,
         string qualificationArtifactPath,
         string packagePath,
-        string artifactRoot)
+        ToolchainCandidate candidate)
     {
-        if (!qualification.IsPromotionReady ||
+        if (!qualification.QualificationPassed ||
+            !qualification.CandidateComplete ||
             string.IsNullOrWhiteSpace(qualification.SourceCommit) ||
-            qualification.QualifiedArtifactHashes is null)
+            qualification.QualifiedArtifactHashes is null ||
+            !string.Equals(qualification.SourceCommit, candidate.SourceCommit, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException(
-                "A complete qualification PASS with source and artifact hashes is required.");
+                "A complete qualification PASS bound to an immutable candidate is required.");
         }
-
-        string manifestPath = Environment.GetEnvironmentVariable(ProductionManifestEnvironment) ??
-            DefaultProductionManifest;
-        ProductionToolchainManifest? installed = ReadProductionManifest(
-            manifestPath,
-            out string? manifestError);
-        if (installed is null)
-            throw new InvalidDataException(manifestError ?? "The installed production manifest is invalid.");
-        if (string.IsNullOrWhiteSpace(installed.DevBridgeRuntimeRoot) ||
-            string.IsNullOrWhiteSpace(installed.TransactionConsumerPath) ||
-            string.IsNullOrWhiteSpace(installed.UnifiedManifestPath) ||
-            string.IsNullOrWhiteSpace(installed.RuntimeProtocolContract))
+        if (!File.Exists(qualificationArtifactPath))
         {
-            throw new InvalidDataException("The installed production manifest is incomplete.");
+            throw new FileNotFoundException(
+                "The immutable qualification artifact is missing.",
+                qualificationArtifactPath);
         }
 
-        string fullArtifactRoot = Path.GetFullPath(artifactRoot);
-        string executablePath = Path.Combine(fullArtifactRoot, "rimliaison.exe");
-        string assemblyPath = Path.Combine(fullArtifactRoot, "rimliaison.dll");
-        string executableHash = ToolchainFileHash.Sha256(executablePath);
-        string assemblyHash = ToolchainFileHash.Sha256(assemblyPath);
+        string executableHash = candidate.RimLiaisonExecutableSha256;
+        string assemblyHash = candidate.RimLiaisonAssemblySha256;
         if (!qualification.QualifiedArtifactHashes.TryGetValue(
                 "rimLiaisonExecutableSha256",
                 out string? qualifiedExecutableHash) ||
@@ -179,35 +169,23 @@ public static class ToolchainPromotionService
             !string.Equals(assemblyHash, qualifiedAssemblyHash, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException(
-                "The current Release artifacts do not equal the artifacts captured by qualification.");
+                "The immutable candidate artifacts do not equal the artifacts captured by qualification.");
         }
-
-        string runtimeManifestPath = Path.Combine(
-            installed.DevBridgeRuntimeRoot,
-            ".devbridge-runtime-manifest.json");
-        string packageHash = ReadRuntimePackageHash(runtimeManifestPath);
-        string coordinatorHash = ReadRuntimeFileHash(
-            runtimeManifestPath,
-            "Coordinator/DevBridge.Coordinator.exe");
-        string coordinatorPath = Path.Combine(
-            installed.DevBridgeRuntimeRoot,
-            "Coordinator",
-            "DevBridge.Coordinator.exe");
-        if (!File.Exists(Path.Combine(installed.DevBridgeRuntimeRoot, "DevBridge.cmd")) ||
-            !string.Equals(packageHash, installed.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(coordinatorHash, installed.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(coordinatorPath))
+        if (!HashMatches(candidate.RimLiaisonExecutablePath, executableHash) ||
+            !HashMatches(candidate.RimLiaisonAssemblyPath, assemblyHash) ||
+            !HashMatches(candidate.TransactionConsumerPath, candidate.TransactionConsumerSha256))
         {
             throw new InvalidDataException(
-                "The installed DevBridge runtime does not match its production manifest.");
+                "The immutable candidate file contents do not match their bound hashes.");
+        }
+        if (!File.Exists(candidate.RimLiaisonExecutablePath) ||
+            !File.Exists(candidate.RimLiaisonAssemblyPath) ||
+            !File.Exists(candidate.TransactionConsumerPath) ||
+            !Directory.Exists(candidate.DevBridgeRuntimeArtifactRoot))
+        {
+            throw new InvalidDataException("The immutable candidate is incomplete.");
         }
 
-        string consumerPath = Path.GetFullPath(installed.TransactionConsumerPath);
-        if (!File.Exists(consumerPath))
-        {
-            throw new InvalidDataException(
-                "The installed transaction consumer is missing.");
-        }
         string fullPackagePath = Path.GetFullPath(packagePath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPackagePath)!);
         if (File.Exists(fullPackagePath))
@@ -215,38 +193,77 @@ public static class ToolchainPromotionService
 
         string payloadRoot = Path.Combine(
             Path.GetDirectoryName(fullPackagePath)!,
-            "qualified-toolchain-payload-" + qualification.SourceCommit);
+            "qualified-toolchain-payload-" + candidate.SourceCommit);
         Directory.CreateDirectory(payloadRoot);
         string payloadExecutable = Path.Combine(payloadRoot, "rimliaison.exe");
         string payloadAssembly = Path.Combine(payloadRoot, "rimliaison.dll");
         string payloadQualification = Path.Combine(payloadRoot, "qualification.json");
-        string recoveryConsumerRelativePath = "transaction-components/" + Path.GetFileName(consumerPath);
-        string payloadConsumer = Path.Combine(
-            payloadRoot,
-            recoveryConsumerRelativePath.Replace('/', Path.DirectorySeparatorChar));
-        CopyImmutableFile(executablePath, payloadExecutable);
-        CopyImmutableFile(assemblyPath, payloadAssembly);
+        string payloadConsumer = Path.Combine(payloadRoot, "transaction-components", "mod-test.ps1");
+        CopyImmutableFile(candidate.RimLiaisonExecutablePath, payloadExecutable);
+        CopyImmutableFile(candidate.RimLiaisonAssemblyPath, payloadAssembly);
         CopyImmutableFile(qualificationArtifactPath, payloadQualification);
-        CopyImmutableFile(consumerPath, payloadConsumer);
+        CopyImmutableFile(candidate.TransactionConsumerPath, payloadConsumer);
 
         string runtimeArtifactRoot = Path.Combine(payloadRoot, "runtime");
-        if (!Directory.Exists(runtimeArtifactRoot))
+        CopyImmutableDirectory(candidate.DevBridgeRuntimeArtifactRoot, runtimeArtifactRoot);
+        if (!RuntimeSnapshotIsVerified(
+                runtimeArtifactRoot,
+                candidate.DevBridgePackageSha256,
+                candidate.DevBridgeCoordinatorSha256))
         {
-            CopyDirectory(installed.DevBridgeRuntimeRoot, runtimeArtifactRoot);
+            throw new InvalidDataException("The immutable candidate runtime snapshot does not match its bound hashes.");
         }
-        else if (!string.Equals(
-                     ReadRuntimePackageHash(Path.Combine(runtimeArtifactRoot, ".devbridge-runtime-manifest.json")),
-                     packageHash,
-                     StringComparison.OrdinalIgnoreCase) ||
-                 !string.Equals(
-                     ToolchainFileHash.Sha256(Path.Combine(
-                         runtimeArtifactRoot,
-                         "Coordinator",
-                         "DevBridge.Coordinator.exe")),
-                     coordinatorHash,
-                     StringComparison.OrdinalIgnoreCase))
+
+        string unifiedManifestPath = Path.Combine(payloadRoot, "unified-package.json");
+        string promotedFingerprint = ComputePromotedFingerprint(
+            candidate.SourceCommit,
+            executableHash,
+            assemblyHash,
+            candidate.DevBridgeCoordinatorSha256,
+            candidate.DevBridgePackageSha256,
+            candidate.TransactionConsumerSha256,
+            candidate.RuntimeProtocolContract,
+            ToolchainPromotionSchemas.OwnerProduct,
+            ToolchainPromotionSchemas.RuntimeSubsystem);
+        var unifiedManifest = new
         {
-            throw new InvalidDataException("The immutable runtime snapshot does not match the qualified runtime.");
+            schemaVersion = "rimliaison-unified-production-package/v2",
+            productFingerprint = promotedFingerprint,
+            ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+            runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+            rimBridgeServer = new
+            {
+                boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
+                ownership = "RimBridgeServer"
+            },
+            sourceCommit = candidate.SourceCommit,
+            rimLiaison = new
+            {
+                executablePath = "rimliaison.exe",
+                executableSha256 = executableHash,
+                assemblyPath = "rimliaison.dll",
+                assemblySha256 = assemblyHash
+            },
+            runtime = new
+            {
+                packageSha256 = candidate.DevBridgePackageSha256,
+                coordinatorSha256 = candidate.DevBridgeCoordinatorSha256
+            },
+            transactionConsumer = new
+            {
+                path = "transaction-components/mod-test.ps1",
+                sha256 = candidate.TransactionConsumerSha256
+            }
+        };
+        string unifiedJson = JsonSerializer.Serialize(unifiedManifest, WriteOptions);
+        if (File.Exists(unifiedManifestPath))
+        {
+            if (!string.Equals(File.ReadAllText(unifiedManifestPath), unifiedJson, StringComparison.Ordinal))
+                throw new InvalidDataException("The immutable candidate unified manifest was substituted.");
+        }
+        else
+        {
+            File.WriteAllText(unifiedManifestPath, unifiedJson);
         }
 
         ToolchainPromotionPackage package = new()
@@ -254,25 +271,23 @@ public static class ToolchainPromotionService
             SchemaVersion = ToolchainPromotionSchemas.Package,
             OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
             RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
-            SourceCommit = qualification.SourceCommit,
+            SourceCommit = candidate.SourceCommit,
             QualificationArtifactPath = payloadQualification,
             QualificationArtifactSha256 = ToolchainFileHash.Sha256(payloadQualification),
             ArtifactRoot = payloadRoot,
-            RimLiaisonExecutableRelativePath = NormalizeRelativePath(
-                Path.GetRelativePath(payloadRoot, payloadExecutable)),
-            RimLiaisonAssemblyRelativePath = NormalizeRelativePath(
-                Path.GetRelativePath(payloadRoot, payloadAssembly)),
+            RimLiaisonExecutableRelativePath = "rimliaison.exe",
+            RimLiaisonAssemblyRelativePath = "rimliaison.dll",
             RimLiaisonExecutableSha256 = executableHash,
             RimLiaisonAssemblySha256 = assemblyHash,
-            DevBridgeRuntimeRoot = Path.GetFullPath(installed.DevBridgeRuntimeRoot),
+            DevBridgeRuntimeRoot = candidate.DevBridgeRuntimeRoot,
             DevBridgeRuntimeArtifactRoot = runtimeArtifactRoot,
-            DevBridgePackageSha256 = packageHash,
-            DevBridgeCoordinatorSha256 = coordinatorHash,
+            DevBridgePackageSha256 = candidate.DevBridgePackageSha256,
+            DevBridgeCoordinatorSha256 = candidate.DevBridgeCoordinatorSha256,
             TransactionConsumerPath = payloadConsumer,
-            TransactionConsumerRelativePath = NormalizeRelativePath(recoveryConsumerRelativePath),
-            TransactionConsumerSha256 = ToolchainFileHash.Sha256(payloadConsumer),
+            TransactionConsumerRelativePath = "transaction-components/mod-test.ps1",
+            TransactionConsumerSha256 = candidate.TransactionConsumerSha256,
             UnifiedManifestRelativePath = "unified-package.json",
-            RuntimeProtocolContract = installed.RuntimeProtocolContract
+            RuntimeProtocolContract = candidate.RuntimeProtocolContract
         };
         using FileStream stream = new(
             fullPackagePath,
@@ -283,9 +298,6 @@ public static class ToolchainPromotionService
         return fullPackagePath;
     }
 
-    private static string NormalizeRelativePath(string path) =>
-        path.Replace(Path.DirectorySeparatorChar, '/')
-            .Replace(Path.AltDirectorySeparatorChar, '/');
 
     private static bool DurableRecoveryPayloadIsVerified(
         ToolchainPromotionPackage package,
@@ -325,25 +337,10 @@ public static class ToolchainPromotionService
             return false;
         }
 
-        string runtimeManifest = Path.Combine(
-            package.DevBridgeRuntimeArtifactRoot,
-            ".devbridge-runtime-manifest.json");
-        string coordinator = Path.Combine(
-            package.DevBridgeRuntimeArtifactRoot,
-            "Coordinator",
-            "DevBridge.Coordinator.exe");
-        if (!File.Exists(Path.Combine(package.DevBridgeRuntimeArtifactRoot, "DevBridge.cmd")) ||
-            !File.Exists(runtimeManifest) ||
-            !File.Exists(coordinator) ||
-            !string.Equals(
-                ReadRuntimePackageHash(runtimeManifest),
+        if (!RuntimeSnapshotIsVerified(
+                package.DevBridgeRuntimeArtifactRoot,
                 package.DevBridgePackageSha256,
-                StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(
-                ReadRuntimeFileHash(runtimeManifest, "Coordinator/DevBridge.Coordinator.exe"),
-                package.DevBridgeCoordinatorSha256,
-                StringComparison.OrdinalIgnoreCase) ||
-            !HashMatches(coordinator, package.DevBridgeCoordinatorSha256))
+                package.DevBridgeCoordinatorSha256))
         {
             error = "The promotion package durable DevBridge runtime payload is missing or has mismatching hashes.";
             return false;
@@ -351,6 +348,51 @@ public static class ToolchainPromotionService
         return true;
     }
 
+    private static bool RuntimeSnapshotIsVerified(
+        string runtimeRoot,
+        string? expectedPackageHash,
+        string? expectedCoordinatorHash)
+    {
+        string manifestPath = Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json");
+        if (!Directory.Exists(runtimeRoot) ||
+            !File.Exists(manifestPath) ||
+            !File.Exists(Path.Combine(runtimeRoot, "DevBridge.cmd")))
+        {
+            return false;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
+                files.ValueKind != JsonValueKind.Array)
+                return false;
+            var entries = new List<(string Path, string Sha256)>();
+            foreach (JsonElement entry in files.EnumerateArray())
+            {
+                if (!TryString(entry, "path", out string? relative) ||
+                    !TryString(entry, "sha256", out string? expected))
+                    return false;
+                string? path = SafeArtifactPath(runtimeRoot, relative);
+                if (path is null || !File.Exists(path) ||
+                    !string.Equals(ToolchainFileHash.Sha256(path), expected, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                entries.Add((relative!.Replace('\\', '/'), expected!));
+            }
+            return string.Equals(
+                    ReadRuntimePackageHash(manifestPath),
+                    expectedPackageHash,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    entries.FirstOrDefault(entry =>
+                        string.Equals(entry.Path, "Coordinator/DevBridge.Coordinator.exe", StringComparison.OrdinalIgnoreCase)).Sha256,
+                    expectedCoordinatorHash,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
     private static bool HashMatches(string path, string? expected) =>
         File.Exists(path) &&
         !string.IsNullOrWhiteSpace(expected) &&
@@ -376,8 +418,11 @@ public static class ToolchainPromotionService
         string lockPath = manifestPath + ".promotion.lock";
         FileStream? promotionLock = null;
         string? stagedRoot = null;
+        string? stagedRuntimeRoot = null;
+        string? runtimeBackupRoot = null;
         ProductionToolchainManifest? previous = null;
         ToolchainPromotionPackage? package = null;
+        bool runtimeCommitted = false;
         bool promotionCommitted = false;
         try
         {
@@ -440,11 +485,16 @@ public static class ToolchainPromotionService
                 .ReadAsync(sourceRoot, cancellationToken)
                 .ConfigureAwait(false);
             if (!source.Resolved || source.State?.HeadSha is null ||
+                source.State.Dirty ||
                 !string.Equals(source.State.HeadSha, package.SourceCommit, StringComparison.OrdinalIgnoreCase))
             {
                 return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_SOURCE_FINGERPRINT_STALE",
-                    "The current source HEAD does not match the qualified source commit.",
+                    source.State?.Dirty == true
+                        ? "PROMOTION_SOURCE_DIRTY"
+                        : "PROMOTION_SOURCE_FINGERPRINT_STALE",
+                    source.State?.Dirty == true
+                        ? "The current source checkout is dirty after qualification."
+                        : "The current source HEAD does not match the qualified source commit.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
@@ -479,17 +529,6 @@ public static class ToolchainPromotionService
                     qualificationHash,
                     previous.PromotedFingerprint,
                     "Run the pinned cross-stack compatibility gate and rebuild the unified promotion package.");
-            }
-            if (!DurableRecoveryPayloadIsVerified(package, out string? payloadError))
-            {
-                return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_RECOVERY_PAYLOAD_INVALID",
-                    payloadError ?? "The promotion package has no verified durable recovery payload.",
-                    package.SourceCommit,
-                    artifactPath,
-                    qualificationHash,
-                    previous.PromotedFingerprint,
-                    "Persist and verify the immutable recovery payload before retrying promotion.");
             }
 
             string artifactRoot = Path.GetFullPath(package.ArtifactRoot ?? string.Empty);
@@ -530,39 +569,17 @@ public static class ToolchainPromotionService
                     "Rebuild the unified promotion package from the qualified artifacts.");
             }
 
-            string runtimeManifestPath = Path.Combine(previous.DevBridgeRuntimeRoot!, ".devbridge-runtime-manifest.json");
-            string installedPackageHash = ReadRuntimePackageHash(runtimeManifestPath);
-            if (!string.Equals(installedPackageHash, package.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
-            {
-                return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_RUNTIME_IDENTITY_MISMATCH",
-                    "The installed DevBridge runtime package differs from the qualified package declaration.",
-                    package.SourceCommit,
-                    artifactPath,
-                    qualificationHash,
-                    previous.PromotedFingerprint,
-                    "Publish the exact qualified DevBridge runtime, then rebuild the unified promotion package.");
-            }
-            string coordinatorHash = ReadRuntimeFileHash(
-                runtimeManifestPath,
-                "Coordinator/DevBridge.Coordinator.exe");
-            if (!string.Equals(coordinatorHash, package.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase))
-            {
-                return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_COORDINATOR_IDENTITY_MISMATCH",
-                    "The installed DevBridge Coordinator is not the qualified unified runtime component.",
-                    package.SourceCommit,
-                    artifactPath,
-                    qualificationHash,
-                    previous.PromotedFingerprint,
-                    "Publish the qualified DevBridge runtime, then rebuild the unified promotion package.");
-            }
+            string coordinatorHash = package.DevBridgeCoordinatorSha256!;
 
             string productionCliDirectory = Path.GetDirectoryName(Path.GetFullPath(previous.RimLiaisonExecutablePath!))!;
             string productionParent = Directory.GetParent(productionCliDirectory)!.FullName;
             string promotedRootName = "cli-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];
             stagedRoot = Path.Combine(productionParent, promotedRootName);
-            if (Directory.Exists(stagedRoot))
+            string runtimeParent = Directory.GetParent(previous.DevBridgeRuntimeRoot!)?.FullName ??
+                throw new InvalidDataException("The production runtime destination has no parent directory.");
+            string runtimePromotedRootName = "runtime-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];
+            stagedRuntimeRoot = Path.Combine(runtimeParent, runtimePromotedRootName);
+            if (Directory.Exists(stagedRoot) || Directory.Exists(stagedRuntimeRoot))
             {
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_DESTINATION_EXISTS",
@@ -572,6 +589,8 @@ public static class ToolchainPromotionService
                     qualificationHash,
                     previous.PromotedFingerprint);
             }
+            CopyDirectory(package.DevBridgeRuntimeArtifactRoot!, stagedRuntimeRoot);
+
 
             CopyDirectory(artifactRoot, stagedRoot);
             string installedExecutable = Path.Combine(
@@ -679,7 +698,7 @@ public static class ToolchainPromotionService
 
             ProductionHealthResult health = await RunProductionHealthAsync(
                 installedExecutable,
-                previous.DevBridgeRuntimeRoot!,
+                stagedRuntimeRoot!,
                 workflowId ?? "rimliaison-promotion-" + sourceCommit[..Math.Min(12, sourceCommit.Length)],
                 cancellationToken,
                 promotionLeaseOrchestrator).ConfigureAwait(false);
@@ -702,6 +721,12 @@ public static class ToolchainPromotionService
                     "Repair the production control plane, then retry the supported promotion command.",
                     health.Summary);
             }
+
+            CommitRuntimeDirectory(
+                stagedRuntimeRoot!,
+                previous.DevBridgeRuntimeRoot!,
+                out runtimeBackupRoot);
+            runtimeCommitted = true;
 
             var updated = new ProductionToolchainManifest
             {
@@ -753,6 +778,9 @@ public static class ToolchainPromotionService
 
             string doctor = health.Summary;
 
+            if (runtimeBackupRoot is not null) TryDelete(runtimeBackupRoot);
+            runtimeBackupRoot = null;
+            runtimeCommitted = false;
             promotionCommitted = true;
             return new(
                 ToolchainPromotionSchemas.Result,
@@ -811,6 +839,14 @@ public static class ToolchainPromotionService
         finally
         {
             promotionLock?.Dispose();
+            if (!promotionCommitted && runtimeCommitted && previous?.DevBridgeRuntimeRoot is not null)
+            {
+                RestoreRuntimeDirectory(previous.DevBridgeRuntimeRoot, runtimeBackupRoot);
+            }
+            else if (!promotionCommitted && stagedRuntimeRoot is not null)
+            {
+                TryDelete(stagedRuntimeRoot);
+            }
             if (!promotionCommitted && stagedRoot is not null)
             {
                 TryDelete(stagedRoot);
@@ -818,6 +854,39 @@ public static class ToolchainPromotionService
             TryDelete(lockPath);
         }
 
+    }
+    private static void CommitRuntimeDirectory(
+        string stagedRoot,
+        string targetRoot,
+        out string? backupRoot)
+    {
+        backupRoot = null;
+        string target = Path.GetFullPath(targetRoot);
+        string stage = Path.GetFullPath(stagedRoot);
+        if (Directory.Exists(target))
+        {
+            backupRoot = target + ".backup-" + Guid.NewGuid().ToString("N");
+            Directory.Move(target, backupRoot);
+        }
+        try
+        {
+            Directory.Move(stage, target);
+        }
+        catch
+        {
+            if (backupRoot is not null && Directory.Exists(backupRoot) && !Directory.Exists(target))
+                Directory.Move(backupRoot, target);
+            backupRoot = null;
+            throw;
+        }
+    }
+
+    private static void RestoreRuntimeDirectory(string targetRoot, string? backupRoot)
+    {
+        string target = Path.GetFullPath(targetRoot);
+        TryDelete(target);
+        if (!string.IsNullOrWhiteSpace(backupRoot) && Directory.Exists(backupRoot))
+            Directory.Move(backupRoot, target);
     }
     private static void TryRestoreProductionManifest(
         string manifestPath,
@@ -834,6 +903,26 @@ public static class ToolchainPromotionService
         catch (Exception) when (File.Exists(manifestPath))
         {
         }
+    }
+    internal static bool TryReadPromotionDestination(
+        string manifestPath,
+        out string? runtimeRoot,
+        out string runtimeProtocolContract,
+        out string? error)
+    {
+        runtimeRoot = null;
+        runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract;
+        ProductionToolchainManifest? manifest = ReadProductionManifest(manifestPath, out error);
+        if (manifest is null || string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot))
+        {
+            error ??= "The production manifest has no runtime destination.";
+            return false;
+        }
+        runtimeRoot = Path.GetFullPath(manifest.DevBridgeRuntimeRoot);
+        runtimeProtocolContract = manifest.RuntimeProtocolContract ??
+            manifest.LegacyCompatibilityContract ??
+            ToolchainPromotionSchemas.RuntimeProtocolContract;
+        return true;
     }
     internal static ToolchainPromotionPackage? ReadPackage(string path, out string? error)
     {
@@ -950,6 +1039,16 @@ public static class ToolchainPromotionService
             !string.Equals(assemblyHash, package.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase))
         {
             error = "The promotion package artifact hashes do not match the qualification artifact.";
+            return false;
+        }
+        if ((TryString(hashes, "devBridgePackageSha256", out string? packageHash) &&
+             !string.Equals(packageHash, package.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase)) ||
+            (TryString(hashes, "devBridgeCoordinatorSha256", out string? coordinatorHash) &&
+             !string.Equals(coordinatorHash, package.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase)) ||
+            (TryString(hashes, "transactionConsumerSha256", out string? consumerHash) &&
+             !string.Equals(consumerHash, package.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            error = "The promotion package runtime or transaction-consumer hashes do not match the qualification artifact.";
             return false;
         }
         return true;
@@ -1439,6 +1538,16 @@ public static class ToolchainPromotionService
         }
     }
 
+    private static void CopyImmutableDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            CopyImmutableFile(
+                file,
+                Path.Combine(destination, Path.GetRelativePath(source, file)));
+        }
+    }
     private static void CopyImmutableFile(string source, string destination)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);

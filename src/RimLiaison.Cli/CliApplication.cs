@@ -489,22 +489,15 @@ public static class CliApplication
                 string profile = string.Equals(request.Id, "burn-in", StringComparison.OrdinalIgnoreCase)
                     ? "burn-in-25"
                     : "single";
-                QualificationAggregate aggregate = new QualificationHarness().Run(
-                    request.QualificationRuns,
-                    profile,
-                    eventStore,
-                    toolchainState: "experimental");
-                aggregate = await AttachQualificationProvenanceAsync(
-                        aggregate,
-                        request.StackManifest.RepositoryRoot,
-                        cancellationToken)
-                    .ConfigureAwait(false);
                 string outputPath = request.QualificationOutputPath ??
                     Path.Combine(".rimdev", "qualification", "latest.json");
                 string qualificationDirectory = Path.GetDirectoryName(
                     Path.GetFullPath(outputPath))!;
                 Directory.CreateDirectory(qualificationDirectory);
-                string sourceCommit = aggregate.SourceCommit ??
+                GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
+                    .ReadAsync(request.StackManifest.RepositoryRoot, cancellationToken)
+                    .ConfigureAwait(false);
+                string sourceCommit = source.State?.HeadSha ??
                     throw new InvalidDataException(
                         "Qualification did not resolve the current source commit.");
                 string qualificationId = DateTimeOffset.UtcNow.ToString(
@@ -515,12 +508,56 @@ public static class CliApplication
                 string packagePath = Path.Combine(
                     qualificationDirectory,
                     "qualified-toolchain-package-" + sourceCommit + "-" + qualificationId + ".json");
+                string candidateRoot = Path.Combine(
+                    qualificationDirectory,
+                    "candidate-" + sourceCommit + "-" + qualificationId);
+                ToolchainCandidateMaterializationResult candidateResult;
+                string manifestPath = Environment.GetEnvironmentVariable(
+                        "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST") ??
+                    "C:/RimDev/.rimdev/production-toolchain.json";
+                if (!ToolchainPromotionService.TryReadPromotionDestination(
+                        manifestPath,
+                        out string? runtimeRoot,
+                        out string runtimeProtocolContract,
+                        out string? destinationError))
+                {
+                    candidateResult = ToolchainCandidateMaterializationResult.Failure(
+                        "PROMOTION_PRODUCTION_MANIFEST_INVALID",
+                        destinationError ?? "The production runtime destination is unavailable.",
+                        "Repair the project-owned production manifest, then retry qualification.");
+                }
+                else
+                {
+                    candidateResult = await ToolchainCandidateMaterializer.MaterializeAsync(
+                            request.StackManifest.RepositoryRoot,
+                            candidateRoot,
+                            Path.GetDirectoryName(typeof(CliApplication).Assembly.Location)!,
+                            runtimeRoot!,
+                            runtimeProtocolContract,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                QualificationAggregate aggregate = new QualificationHarness().Run(
+                    request.QualificationRuns,
+                    profile,
+                    eventStore,
+                    toolchainState: "experimental");
+                aggregate = await AttachQualificationProvenanceAsync(
+                        aggregate,
+                        request.StackManifest.RepositoryRoot,
+                        candidateResult.Candidate,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 aggregate = aggregate with
                 {
+                    CandidateComplete = candidateResult.Succeeded,
+                    CandidateFailureCode = candidateResult.ErrorCode,
+                    CandidateFailure = candidateResult.Error,
                     QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
                     QualifiedPromotionPackagePath = Path.GetFullPath(packagePath)
                 };
-                string json = JsonSerializer.Serialize(
+                string qualificationJson = JsonSerializer.Serialize(
                     aggregate,
                     new JsonSerializerOptions { WriteIndented = true });
                 using (StreamWriter writer = new(
@@ -530,14 +567,33 @@ public static class CliApplication
                                FileAccess.Write,
                                FileShare.Read)))
                 {
-                    writer.Write(json);
+                    writer.Write(qualificationJson);
                 }
-                File.WriteAllText(outputPath, json);
-                ToolchainPromotionService.WriteQualifiedPromotionPackage(
+
+                if (candidateResult.Candidate is not null && aggregate.QualificationPassed)
+                {
+                    try
+                    {
+                        ToolchainPromotionService.WriteQualifiedPromotionPackage(
+                            aggregate,
+                            qualificationArtifactPath,
+                            packagePath,
+                            candidateResult.Candidate);
+                        aggregate = aggregate with { PromotionPackageEmitted = true };
+                    }
+                    catch (Exception exception) when (exception is IOException or InvalidDataException)
+                    {
+                        aggregate = aggregate with
+                        {
+                            CandidateFailureCode = "PROMOTION_PACKAGE_EMISSION_FAILED",
+                            CandidateFailure = exception.Message
+                        };
+                    }
+                }
+                string json = JsonSerializer.Serialize(
                     aggregate,
-                    qualificationArtifactPath,
-                    packagePath,
-                    Path.GetDirectoryName(typeof(CliApplication).Assembly.Location)!);
+                    new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(outputPath, json);
                 string backlogPath = Path.Combine(
                     Path.GetDirectoryName(outputPath) ?? ".",
                     "tooling-improvement-backlog.json");
@@ -546,7 +602,7 @@ public static class CliApplication
                     new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(backlogPath, backlogJson);
                 WriteJson(stdout, aggregate);
-                exitCode = aggregate.IsPromotionReady
+                exitCode = aggregate.PromotionReady
                     ? CliExitCodes.Success
                     : CliExitCodes.TestFailure;
                 return exitCode;
@@ -4805,21 +4861,22 @@ public static class CliApplication
     private static async Task<QualificationAggregate> AttachQualificationProvenanceAsync(
         QualificationAggregate aggregate,
         string sourceRoot,
+        ToolchainCandidate? candidate,
         CancellationToken cancellationToken)
     {
         GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
             .ReadAsync(sourceRoot, cancellationToken)
             .ConfigureAwait(false);
         var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        string assemblyPath = typeof(CliApplication).Assembly.Location;
-        string executablePath = Path.ChangeExtension(assemblyPath, ".exe");
-        if (File.Exists(executablePath))
+        if (candidate is not null)
         {
-            hashes["rimLiaisonExecutableSha256"] = ToolchainFileHash.Sha256(executablePath);
-        }
-        if (File.Exists(assemblyPath))
-        {
-            hashes["rimLiaisonAssemblySha256"] = ToolchainFileHash.Sha256(assemblyPath);
+            hashes["rimLiaisonExecutableSha256"] = candidate.RimLiaisonExecutableSha256;
+            hashes["rimLiaisonAssemblySha256"] = candidate.RimLiaisonAssemblySha256;
+            hashes["devBridgePackageSha256"] = candidate.DevBridgePackageSha256;
+            hashes["devBridgeCoordinatorSha256"] = candidate.DevBridgeCoordinatorSha256;
+            hashes["transactionConsumerSha256"] = candidate.TransactionConsumerSha256;
+            hashes["devBridgeReleaseManifestSha256"] = candidate.DevBridgeReleaseManifestSha256;
+            hashes["devBridgeSourceCommit"] = candidate.DevBridgeSourceCommit;
         }
         return aggregate with
         {
