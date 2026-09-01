@@ -2524,90 +2524,90 @@ internal static class DesktopObservabilityTests
         try
         {
             using var store = new AgentObservabilityStore();
-        using var run = new AgentObservabilityRun(
-            "desktop-content-administration",
-            store,
-            new NoopAgentObservabilityTelemetry());
-        using AgentObservabilitySession agent = run.CreateAgent(
-            "mod.content-admin",
-            "Content Admin");
-        agent.Start();
-        agent.Record(
-            DevelopmentStage.Implementation,
-            ContentObservabilityEventTypes.BlueprintCreated,
-            "Blueprint created.",
-            new ContentObservabilityEventData(
-                ContentObservabilitySchemas.EventData,
-                "created",
-                ProjectId: "project.content-admin",
-                BlueprintId: "blueprint-content-admin",
-                ContentKind: "ThingDef",
-                GameplayRole: "early-game ranged weapon"));
-        agent.Record(
-            DevelopmentStage.Implementation,
-            ContentObservabilityEventTypes.PromotionCompleted,
-            "Archetype promoted.",
-            new ContentObservabilityEventData(
-                ContentObservabilitySchemas.EventData,
-                "promoted",
-                ProjectId: "project.content-admin",
-                BlueprintId: "blueprint-content-admin",
-                ArchetypeId: "archetype-content-admin",
-                ArchetypeVersion: 1,
-                ContentKind: "ThingDef",
-                GameplayRole: "early-game ranged weapon"));
+            using var run = new AgentObservabilityRun(
+                "desktop-content-administration",
+                store,
+                new NoopAgentObservabilityTelemetry());
+            using AgentObservabilitySession agent = run.CreateAgent(
+                "mod.content-admin",
+                "Content Admin");
+            agent.Start();
+            agent.Record(
+                DevelopmentStage.Implementation,
+                ContentObservabilityEventTypes.BlueprintCreated,
+                "Blueprint created.",
+                new ContentObservabilityEventData(
+                    ContentObservabilitySchemas.EventData,
+                    "created",
+                    ProjectId: "project.content-admin",
+                    BlueprintId: "blueprint-content-admin",
+                    ContentKind: "ThingDef",
+                    GameplayRole: "early-game ranged weapon"));
+            agent.Record(
+                DevelopmentStage.Implementation,
+                ContentObservabilityEventTypes.PromotionCompleted,
+                "Archetype promoted.",
+                new ContentObservabilityEventData(
+                    ContentObservabilitySchemas.EventData,
+                    "promoted",
+                    ProjectId: "project.content-admin",
+                    BlueprintId: "blueprint-content-admin",
+                    ArchetypeId: "archetype-content-admin",
+                    ArchetypeVersion: 1,
+                    ContentKind: "ThingDef",
+                    GameplayRole: "early-game ranged weapon"));
 
-        var contentStore = new ContentIntelligenceStore(contentPath);
-        contentStore.SaveArchetype(new ContentArchetype(
-            ContentPhase2Schemas.Archetype,
-            "archetype-content-admin",
-            1,
-            "active",
-            new ContentStructuralFingerprint(
-                "fingerprint/v1",
-                "fingerprint-content-admin",
-                "shape-content-admin",
+            var contentStore = new ContentIntelligenceStore(contentPath);
+            contentStore.SaveArchetype(new ContentArchetype(
+                ContentPhase2Schemas.Archetype,
+                "archetype-content-admin",
+                1,
+                "active",
+                new ContentStructuralFingerprint(
+                    "fingerprint/v1",
+                    "fingerprint-content-admin",
+                    "shape-content-admin",
+                    "ThingDef",
+                    "early-game ranged weapon"),
                 "ThingDef",
-                "early-game ranged weapon"),
-            "ThingDef",
-            "early-game ranged weapon"));
-        var administration = new ContentIntelligenceObservabilityAdministration(
-            new ContentIntelligenceAdministration(contentStore),
-            store);
+                "early-game ranged weapon"));
+            var administration = new ContentIntelligenceObservabilityAdministration(
+                new ContentIntelligenceAdministration(contentStore),
+                store);
 
-        using var form = new ObservabilityMainForm(store, administration);
-        form.Show();
-        Application.DoEvents();
-        SelectNavigation(form, "content", "Content Intelligence");
-        ListView contentList = GetPrivateField<ListView>(form, "contentList");
-        Assert(contentList.Items.Count > 0, "content administration requires a content row");
-        contentList.Items[0].Selected = true;
-        Application.DoEvents();
+            using var form = new ObservabilityMainForm(store, administration);
+            form.Show();
+            Application.DoEvents();
+            SelectNavigation(form, "content", "Content Intelligence");
+            ListView contentList = GetPrivateField<ListView>(form, "contentList");
+            Assert(contentList.Items.Count > 0, "content administration requires a content row");
+            contentList.Items[0].Selected = true;
+            Application.DoEvents();
 
-        Button quarantine = GetPrivateField<Button>(form, "contentQuarantineButton");
-        Assert(quarantine.Enabled, "supplied administration must enable quarantine");
-        quarantine.PerformClick();
-        Application.DoEvents();
+            Button quarantine = GetPrivateField<Button>(form, "contentQuarantineButton");
+            Assert(quarantine.Enabled, "supplied administration must enable quarantine");
+            quarantine.PerformClick();
+            Application.DoEvents();
 
-        AssertEqual(
-            "quarantined",
-            contentStore.Snapshot().Archetypes.Single().Status);
-        Assert(
-            store.GetEvents().Any(value =>
-                value.Type == ContentObservabilityEventTypes.ArchetypeQuarantined),
-            "quarantine must be audited through the supplied observability adapter");
+            AssertEqual(
+                "quarantined",
+                contentStore.Snapshot().Archetypes.Single().Status);
+            Assert(
+                store.GetEvents().Any(value =>
+                    value.Type == ContentObservabilityEventTypes.ArchetypeQuarantined),
+                "quarantine must be audited through the supplied observability adapter");
 
-        using var unavailableForm = new ObservabilityMainForm(store);
-        Button[] unavailableActions =
-        [
-            GetPrivateField<Button>(unavailableForm, "contentQuarantineButton"),
+            using var unavailableForm = new ObservabilityMainForm(store);
+            Button[] unavailableActions =
+            [
+                GetPrivateField<Button>(unavailableForm, "contentQuarantineButton"),
             GetPrivateField<Button>(unavailableForm, "contentRollbackButton"),
             GetPrivateField<Button>(unavailableForm, "contentExcludeButton"),
             GetPrivateField<Button>(unavailableForm, "contentIneligibleButton")
-        ];
-        Assert(
-            unavailableActions.All(button => !button.Enabled),
-            "administrative actions must be disabled when service is unavailable");
+            ];
+            Assert(
+                unavailableActions.All(button => !button.Enabled),
+                "administrative actions must be disabled when service is unavailable");
         }
         finally
         {

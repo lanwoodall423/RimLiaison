@@ -1892,28 +1892,28 @@ public sealed class AgentObservabilityUi : IDisposable
         ProjectObservabilityState[] visibleProjects = projectProjection.Projects
             .Where(ProjectMatchesFilterLocked)
             .ToArray();
-            cachedAllView = new AgentObservabilityAllView(
-                visibleAgents,
-                rows,
-                hasMore,
-                rows.Length == 0 ? null : rows.Max(static row => row.Sequence),
-                visibleAgents.Length == 0
-                    ? "No mod agents have reported activity yet."
-                    : rows.Length == 0
-                        ? "Agents are registered; activity has not arrived yet."
-                        : null)
-            {
-                Projects = visibleProjects,
-                ToolingFindings = projectProjection.ToolingFindings
-                    .Where(finding => visibleProjects.Any(project =>
-                        finding.AffectedProjects.Contains(ProjectKey(project), StringComparer.Ordinal)))
-                    .ToArray(),
-                FilterApplied = IsFilterAppliedLocked(),
-                FilterDescription = IsFilterAppliedLocked()
-                    ? "Project state is canonical; filters only hide projects."
-                    : null,
-                Production = BuildProductionEntriesLocked(visibleProjects)
-            };
+        cachedAllView = new AgentObservabilityAllView(
+            visibleAgents,
+            rows,
+            hasMore,
+            rows.Length == 0 ? null : rows.Max(static row => row.Sequence),
+            visibleAgents.Length == 0
+                ? "No mod agents have reported activity yet."
+                : rows.Length == 0
+                    ? "Agents are registered; activity has not arrived yet."
+                    : null)
+        {
+            Projects = visibleProjects,
+            ToolingFindings = projectProjection.ToolingFindings
+                .Where(finding => visibleProjects.Any(project =>
+                    finding.AffectedProjects.Contains(ProjectKey(project), StringComparer.Ordinal)))
+                .ToArray(),
+            FilterApplied = IsFilterAppliedLocked(),
+            FilterDescription = IsFilterAppliedLocked()
+                ? "Project state is canonical; filters only hide projects."
+                : null,
+            Production = BuildProductionEntriesLocked(visibleProjects)
+        };
         cachedAllRevision = revision;
         cachedAllProjectionSignature = projectionSignature;
 

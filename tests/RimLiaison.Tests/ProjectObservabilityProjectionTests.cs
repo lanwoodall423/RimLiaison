@@ -62,7 +62,8 @@ internal static class ProjectObservabilityProjectionTests
     public static void AbandonedSessionNeedsAttention()
     {
         AgentSnapshot agent = Agent("alpha", "run-abandoned", AgentStatus.Running, AgentCompletionState.None)
-            with { CompletionResult = "ABANDONED" };
+            with
+        { CompletionResult = "ABANDONED" };
         ProjectObservabilityState state = Build(agent, []).Projects.Single();
         Equal(ProjectObservabilityStateKind.NeedsAttention, state.State);
         True(state.StaleSessionDetected);
@@ -552,7 +553,8 @@ internal static class ProjectObservabilityProjectionTests
             StartTime = start,
             LastActivityAt = lastActivity,
             CompletedAt = completion is AgentCompletionState.Succeeded or AgentCompletionState.Failed ? start + 10 : null
-        } with { LogicalAgentId = logicalAgent };
+        } with
+        { LogicalAgentId = logicalAgent };
 
     private static AgentEvent Event(
         AgentSnapshot agent,
