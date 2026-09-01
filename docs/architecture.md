@@ -256,6 +256,50 @@ agent and ordinary caller do not carry the lease between commands. Other typed D
 operations retain low-level lease enforcement and structured recovery states
 `ready`, `recovered`, `recoveryRequired`, `contended`, `unavailable`, or `recoveryFailed`.
 
+For promoted production-toolchain integrity faults, restoration of an existing promotion is a
+separate artifact/identity operation from promotion creation. The restoration owner reads the
+promoted manifest, acquires one cross-process repair lock, reinstalls only from the immutable
+qualified package recorded by that manifest, verifies the promoted fingerprint and artifact hashes,
+performs the existing runtime readiness recovery, and retries the interrupted workflow once.
+Concurrent callers revalidate after the lock instead of reinstalling. Restoration never qualifies,
+builds from, or promotes the current checkout; it ignores current executable/source-checkout
+overrides and does not mutate the promoted manifest identity. Recovery evidence records the
+promoted source commit and, when a Git worktree snapshot is available, whether the current source
+diverged from it. A current checkout at a later commit or with dirty changes is diagnostic context
+only.
+
+The root cause of the release-gate blockage was that recovery used the ordinary production binding
+resolver for its pre-lock and post-install checks. That resolver intentionally validates the
+caller executable and source-checkout environment, so a later development checkout could be
+treated as a source fallback while restoring an older valid promotion. Recovery now uses the
+dedicated promoted-identity resolver, which validates only the manifest-bound installed product.
+The immutable package contains the qualified binaries, qualification proof, transaction consumer,
+and runtime snapshot; the active manifest reference protects this payload from normal retention.
+Missing or invalid package material remains a RimLiaison-owned infrastructure blocker. Promotion
+creation/replacement still performs strict current-source, qualification, hash, lock, atomic
+manifest, and installed-identity verification; `PROMOTION_SOURCE_FINGERPRINT_STALE` remains
+valid there.
+
+`DEVBRIDGE_RUNTIME_MISSING` originates in DevBridge2's `RuntimeIdentityResolver` when the
+canonical RimWorld `Mods\DevBridge2` layout is absent; `DEVBRIDGE_RUNTIME_INCOMPLETE` is its
+corresponding present-but-invalid case. These are external runtime-layout signals, not project
+failures. The production policy routes them into the existing promoted-toolchain recovery
+boundary. Recovery then revalidates the manifest-bound runtime root and restores the qualified
+runtime snapshot from the same immutable package as the CLI and transaction consumer. If that
+package lacks the runtime snapshot or cannot be written, recovery stops as a bounded
+RimLiaison-owned infrastructure failure rather than using an unrelated DevBridge installation.
+
+Legacy promotions created before durable payload references are handled as migration, not
+re-promotion. At the same bounded maintenance boundary, RimLiaison discovers retained historical
+packages and accepts only an exact cryptographic/structural match for the active source commit,
+product fingerprint, component hashes, and qualification proof. It writes a durable recovery
+payload, atomically enriches the existing manifest with its package reference, and leaves the
+promoted identity unchanged. Migration is locked and idempotent; absence of exact historical
+material produces a RimLiaison-owned maintenance block requiring one intentional new promotion.
+Every new promotion verifies durable recovery material before activating its manifest, so
+`ACTIVE PROMOTION => SELF-RESTORABLE`. Active referenced payloads are retention-pinned.
+
+
 ## Canonical affected-run orchestration contract
 
 `rimliaison affected --run --json` is the autonomous validation boundary. An agent invoking it

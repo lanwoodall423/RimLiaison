@@ -125,6 +125,7 @@ internal static class ToolchainPromotionTests
             File.WriteAllText(executablePath, "qualified-executable");
             File.WriteAllText(assemblyPath, "qualified-assembly");
             File.WriteAllText(coordinatorPath, "qualified-coordinator");
+            File.WriteAllText(Path.Combine(runtimeRoot, "DevBridge.cmd"), "qualified-runtime-command");
             Directory.CreateDirectory(Path.GetDirectoryName(consumerPath)!);
             File.WriteAllText(consumerPath, "qualified-consumer");
             File.WriteAllText(unifiedManifestPath, "{}");
@@ -240,6 +241,11 @@ internal static class ToolchainPromotionTests
                 "package must capture the transaction consumer hash");
             Assert(File.ReadAllText(generated) == File.ReadAllText(generatedCopy),
                 "package serialization must be deterministic");
+            string immutablePayloadRoot = packageRootJson.GetProperty("artifactRoot").GetString()!;
+            Assert(immutablePayloadRoot != Path.GetFullPath(artifactRoot),
+                "recovery payload must not point at the mutable local Release directory");
+            Assert(File.ReadAllText(Path.Combine(immutablePayloadRoot, "rimliaison.exe")) == "qualified-executable",
+                "recovery payload must preserve the qualified executable");
             bool immutable = false;
             try
             {

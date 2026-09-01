@@ -19,7 +19,8 @@ public enum AgentObservabilityUiView
     Agent,
     Issue,
     Content,
-    Reliability
+    Reliability,
+    System
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -150,7 +151,16 @@ public sealed record AgentObservabilityProductionEntry(
     long? LatestTimestamp,
     string? LatestEvent,
     string? CompletionResult,
-    bool IsHistorical);
+    bool IsHistorical)
+{
+    public ProjectObservabilityStateKind CanonicalState { get; init; } =
+        ProjectObservabilityStateKind.Unknown;
+    public bool ActionRequired { get; init; }
+    public ProjectObservabilityAttempt? LatestAttempt { get; init; }
+    public ProjectObservabilityAttempt? LastSuccessfulValidation { get; init; }
+    public ProjectObservabilityCompleteness Completeness { get; init; } =
+        ProjectObservabilityCompleteness.Unknown;
+}
 
 public sealed record AgentObservabilityIssueOccurrence(
     AgentIssue Issue,
@@ -166,6 +176,10 @@ public sealed record AgentObservabilityAllView(
     string? EmptyState = null)
 {
     public IReadOnlyList<AgentObservabilityProductionEntry> Production { get; init; } = [];
+    public IReadOnlyList<ProjectObservabilityState> Projects { get; init; } = [];
+    public IReadOnlyList<ToolingFinding> ToolingFindings { get; init; } = [];
+    public bool FilterApplied { get; init; }
+    public string? FilterDescription { get; init; }
 }
 
 public sealed record AgentObservabilityIssueRow(
@@ -378,6 +392,11 @@ public sealed record AgentObservabilityAgentView(
         .Select(row => row.Event)
         .Where(eventRecord => eventRecord.Type == AgentEventTypes.EvidenceReused)
         .ToArray();
+    public ProjectObservabilityState? Project { get; init; }
+
+    public IReadOnlyList<ProjectObservabilityTimelineEntry> CanonicalTimeline { get; init; } = [];
+
+    public IReadOnlyList<ToolingFinding> ToolingFindings { get; init; } = [];
 }
 
 public sealed record AgentObservabilityIssueDetail(
@@ -415,6 +434,18 @@ public sealed record AgentObservabilityUiSelection(
     AgentObservabilityAgentDetailTab AgentDetailTab,
     IReadOnlyList<string> SelectedIssueIds,
     AgentDiagnosticBundle? Assessment);
+public sealed record AgentObservabilitySystemView(
+    int AgentCount,
+    int EventCount,
+    int IssueCount,
+    int ToolingFindingCount,
+    ProjectObservabilityCompleteness Completeness,
+    bool HistoryComplete,
+    bool HistoryDegraded,
+    string StorageLocation,
+    IReadOnlyList<ToolingFinding> ToolingFindings,
+    string? EmptyState = null);
+
 
 public sealed record AgentObservabilityUiSnapshot
 {
@@ -480,6 +511,9 @@ public sealed record AgentObservabilityUiSnapshot
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public AgentObservabilityAgentView? Agent { get; init; }
 
+    [JsonPropertyName("system")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AgentObservabilitySystemView? System { get; init; }
     [JsonPropertyName("issue")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public AgentObservabilityIssueDetail? Issue { get; init; }
@@ -600,7 +634,9 @@ public sealed class AgentObservabilityUi : IDisposable
     private AgentObservabilityRecommendationsView? cachedRecommendationsView;
     private AgentObservabilityUiNavigationModel? cachedNavigation;
     private long cachedNavigationRevision = -1;
+    private string? cachedNavigationProjectionSignature;
     private AgentObservabilityAllView? cachedAllView;
+    private string? cachedAllProjectionSignature;
     private long cachedAllRevision = -1;
     private long cachedRecommendationProjectionRevision = -1;
     private int visibleIssueLimit;
@@ -627,6 +663,10 @@ public sealed class AgentObservabilityUi : IDisposable
     private long cachedContentProjectionRevision = -1;
     private ContentIntelligenceObservabilityView? cachedContentView;
     private string? selectedContentBlueprintId;
+    private ProjectObservabilityProjectionResult? cachedProjectProjection;
+    private long projectionNowMilliseconds;
+    private long cachedProjectProjectionRevision = -1;
+    private long cachedProjectProjectionNow = long.MinValue;
     private bool cachedIncludeRecovered;
     private int cachedVisibleIssueLimit;
     private int disposed;
@@ -711,10 +751,56 @@ public sealed class AgentObservabilityUi : IDisposable
             RefreshLiveStore();
             lock (gate)
             {
+                projectionNowMilliseconds = nowMilliseconds();
                 return BuildSnapshotLocked();
             }
         }
     }
+    public ToolingAssessment GetToolingAssessment()
+    {
+        RefreshLiveStore();
+        lock (gate)
+        {
+            ThrowIfDisposedLocked();
+            projectionNowMilliseconds = nowMilliseconds();
+            ProjectObservabilityProjectionResult projection = BuildProjectProjectionLocked();
+            return ProjectObservabilityProjection.BuildAssessment(
+                projection.ToolingFindings,
+                projection.Completeness,
+                projection.MissingEvidence);
+        }
+    }
+    public ToolingAssessmentHandoffPacket PrepareToolingAssessment()
+    {
+        return ToolingAssessmentHandoff.Prepare(GetToolingAssessment());
+    }
+    public ToolingAssessmentHandoffPacket PrepareToolingAssessment(ToolingFinding finding)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        lock (gate)
+        {
+            ThrowIfDisposedLocked();
+            projectionNowMilliseconds = nowMilliseconds();
+            ProjectObservabilityProjectionResult projection = BuildProjectProjectionLocked();
+            ToolingAssessment assessment = ProjectObservabilityProjection.BuildAssessment(
+                [finding],
+                projection.Completeness,
+                projection.MissingEvidence);
+            return ToolingAssessmentHandoff.Prepare(assessment);
+        }
+    }
+
+    public ToolingAssessmentHandoffPacket PrepareToolingAssessment(
+        ToolingFindingOccurrence occurrence)
+    {
+        ArgumentNullException.ThrowIfNull(occurrence);
+        return ToolingAssessmentHandoff.Prepare(
+            ProjectObservabilityProjection.BuildAssessment(
+                occurrence,
+                ProjectObservabilityCompleteness.Complete));
+    }
+
+
 
     public AgentObservabilityUiSnapshot ShowAll()
     {
@@ -794,6 +880,18 @@ public sealed class AgentObservabilityUi : IDisposable
 
         return Navigate(new AgentObservabilityUiRoute(AgentObservabilityUiView.Reliability));
     }
+    public AgentObservabilityUiSnapshot ShowSystem()
+    {
+        lock (gate)
+        {
+            selectedEventId = null;
+            assessment = null;
+            issueMode = AgentObservabilityIssueMode.Details;
+        }
+
+        return Navigate(new AgentObservabilityUiRoute(AgentObservabilityUiView.System));
+    }
+
 
     public AgentObservabilityUiSnapshot StartReliabilityCampaign(DateTimeOffset? nowUtc = null)
     {
@@ -1436,6 +1534,12 @@ public sealed class AgentObservabilityUi : IDisposable
                     Recommendations = BuildRecommendationsViewLocked()
                 };
                 break;
+            case AgentObservabilityUiView.System:
+                snapshot = snapshot with
+                {
+                    System = BuildSystemViewLocked()
+                };
+                break;
             case AgentObservabilityUiView.Agent:
                 snapshot = snapshot with
                 {
@@ -1468,6 +1572,7 @@ public sealed class AgentObservabilityUi : IDisposable
             SelectedIssueId = selectedIssueId,
             SelectedEventId = selectedEventId,
             IssueMode = issueMode,
+
             AgentDetailTab = agentDetailTab,
             Assessment = assessment,
             Selection = new AgentObservabilityUiSelection(
@@ -1486,6 +1591,7 @@ public sealed class AgentObservabilityUi : IDisposable
                 snapshot.Agent?.EmptyState ??
                 snapshot.Content?.EmptyState ??
                 snapshot.Reliability?.EmptyState ??
+                snapshot.System?.EmptyState ??
                 (snapshot.Issue is null && route.View == AgentObservabilityUiView.Issue
                     ? "Issue not found."
                     : null) ??
@@ -1519,6 +1625,32 @@ public sealed class AgentObservabilityUi : IDisposable
                 options.ReliabilityToolchainVersion);
         cachedReliabilityProjectionRevision = revision;
         return cachedReliabilityView;
+    }
+
+    private AgentObservabilitySystemView BuildSystemViewLocked()
+    {
+        ProjectObservabilityProjectionResult projection = BuildProjectProjectionLocked();
+        string storageLocation = store is AgentObservabilityStore persisted &&
+            !string.IsNullOrWhiteSpace(persisted.StorageDirectory)
+            ? persisted.StorageDirectory!
+            : "in-memory observability store";
+        bool historyComplete = store is not IAgentObservabilityHistoryStatus history ||
+            history.HistoryComplete;
+        bool historyDegraded = store is IAgentObservabilityHistoryStatus degraded &&
+            degraded.HistoryDegraded;
+        return new AgentObservabilitySystemView(
+            agents.Count,
+            events.Count,
+            issues.Count,
+            projection.ToolingFindings.Count,
+            projection.Completeness,
+            historyComplete,
+            historyDegraded,
+            storageLocation,
+            projection.ToolingFindings,
+            agents.Count == 0 && events.Count == 0
+                ? "No observability records are currently available."
+                : null);
     }
 
     private AgentReliabilityObservabilityView ReliabilityView()
@@ -1561,8 +1693,14 @@ public sealed class AgentObservabilityUi : IDisposable
 
     private AgentObservabilityUiNavigationModel BuildNavigationLocked()
     {
+        ProjectObservabilityProjectionResult projectProjection = BuildProjectProjectionLocked();
+        string projectionSignature = ProjectProjectionSignature(projectProjection);
         if (cachedNavigation is not null &&
-            cachedNavigationRevision == revision)
+            cachedNavigationRevision == revision &&
+            string.Equals(
+                cachedNavigationProjectionSignature,
+                projectionSignature,
+                StringComparison.Ordinal))
         {
             return cachedNavigation;
         }
@@ -1572,14 +1710,14 @@ public sealed class AgentObservabilityUi : IDisposable
             new(
                 "all",
                 "all",
-                "All",
-                "All",
+                "Overview",
+                "Overview",
                 route.View == AgentObservabilityUiView.All),
             new(
                 "issues",
                 "issues",
-                "Issues",
-                "Issues",
+                "Problems",
+                "Problems",
                 route.View is AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue),
             new(
                 "recommendations",
@@ -1587,6 +1725,12 @@ public sealed class AgentObservabilityUi : IDisposable
                 "Recommendations",
                 "Recommendations",
                 route.View == AgentObservabilityUiView.Recommendations),
+            new(
+                "system",
+                "system",
+                "System / Diagnostics",
+                "System / Diagnostics",
+                route.View == AgentObservabilityUiView.System),
             new(
                 "content",
                 "content",
@@ -1616,22 +1760,25 @@ public sealed class AgentObservabilityUi : IDisposable
             .Select(group =>
             {
                 AgentSnapshot[] groupAgents = group.ToArray();
-                bool hasUnresolvedError = issues.Values.Any(issue =>
-                    !issue.Recovered &&
-                    issue.Severity == AgentIssueSeverity.Error &&
-                    string.Equals(
-                        EntityGroupKey(issue),
+                ProjectObservabilityState? project = projectProjection.Projects
+                    .FirstOrDefault(value => string.Equals(
+                        ProjectKey(value),
                         group.Key,
                         StringComparison.OrdinalIgnoreCase));
+                bool hasUnresolvedError = project?.ActionRequired == true;
                 AgentSnapshot representative = PreferredAgent(groupAgents);
                 AgentObservabilityAgentNavigationStatus navigationStatus =
-                    representative.Status == AgentStatus.Failed
-                        ? AgentObservabilityAgentNavigationStatus.Failed
-                        : hasUnresolvedError
-                            ? AgentObservabilityAgentNavigationStatus.NeedsAttention
-                            : representative.Status is AgentStatus.Created or AgentStatus.Running or AgentStatus.Waiting
-                                ? AgentObservabilityAgentNavigationStatus.Working
-                                : AgentObservabilityAgentNavigationStatus.Completed;
+                    project?.State switch
+                    {
+                        ProjectObservabilityStateKind.Blocked =>
+                            AgentObservabilityAgentNavigationStatus.Failed,
+                        ProjectObservabilityStateKind.NeedsAttention or
+                            ProjectObservabilityStateKind.Unknown =>
+                            AgentObservabilityAgentNavigationStatus.NeedsAttention,
+                        ProjectObservabilityStateKind.Working =>
+                            AgentObservabilityAgentNavigationStatus.Working,
+                        _ => AgentObservabilityAgentNavigationStatus.Completed
+                    };
                 return new NavigationAgentGroup(
                     group.Key,
                     representative,
@@ -1674,13 +1821,47 @@ public sealed class AgentObservabilityUi : IDisposable
 
         cachedNavigation = new AgentObservabilityUiNavigationModel(route.View, items);
         cachedNavigationRevision = revision;
+        cachedNavigationProjectionSignature = projectionSignature;
         return cachedNavigation;
     }
 
+    private ProjectObservabilityProjectionResult BuildProjectProjectionLocked()
+    {
+        long projectionNow = projectionNowMilliseconds != 0
+            ? projectionNowMilliseconds
+            : nowMilliseconds();
+        if (cachedProjectProjection is not null &&
+            cachedProjectProjectionRevision == revision &&
+            cachedProjectProjectionNow == projectionNow)
+        {
+            return cachedProjectProjection;
+        }
+
+        bool historyComplete = store is not IAgentObservabilityHistoryStatus history ||
+            history.HistoryComplete;
+        bool historyDegraded = store is IAgentObservabilityHistoryStatus degraded &&
+            degraded.HistoryDegraded;
+        cachedProjectProjection = ProjectObservabilityProjection.Build(
+            new AgentObservabilityView(
+                agents.Values.Where(agent => MatchesRun(agent.RunId)).ToArray(),
+                events.Where(eventRecord => MatchesRun(eventRecord.RunId)).ToArray(),
+                issues.Values.Where(issue => MatchesRun(issue.RunId)).ToArray()),
+            new ProjectObservabilityProjectionOptions(
+                projectionNow,
+                TimeSpan.FromMinutes(5),
+                HistoryComplete: historyComplete,
+                HistoryDegraded: historyDegraded));
+        cachedProjectProjectionRevision = revision;
+        cachedProjectProjectionNow = projectionNow;
+        return cachedProjectProjection;
+    }
     private AgentObservabilityAllView BuildAllViewLocked()
     {
+        ProjectObservabilityProjectionResult projectProjection = BuildProjectProjectionLocked();
+        string projectionSignature = ProjectProjectionSignature(projectProjection);
         if (cachedAllView is not null &&
-            cachedAllRevision == revision)
+            cachedAllRevision == revision &&
+            string.Equals(cachedAllProjectionSignature, projectionSignature, StringComparison.Ordinal))
         {
             return cachedAllView;
         }
@@ -1708,87 +1889,99 @@ public sealed class AgentObservabilityUi : IDisposable
         AgentObservabilityActivityRow[] rows = boundedEvents
             .Select(eventRecord => ToActivityRowLocked(eventRecord, issueIdsByEvent))
             .ToArray();
-        cachedAllView = new AgentObservabilityAllView(
-            visibleAgents,
-            rows,
-            hasMore,
-            rows.Length == 0 ? null : rows.Max(static row => row.Sequence),
-            visibleAgents.Length == 0
-                ? "No mod agents have reported activity yet."
-                : rows.Length == 0
-                    ? "Agents are registered; activity has not arrived yet."
-                    : null)
-        {
-            Production = BuildProductionEntriesLocked(visibleAgents, visibleEvents)
-        };
+        ProjectObservabilityState[] visibleProjects = projectProjection.Projects
+            .Where(ProjectMatchesFilterLocked)
+            .ToArray();
+            cachedAllView = new AgentObservabilityAllView(
+                visibleAgents,
+                rows,
+                hasMore,
+                rows.Length == 0 ? null : rows.Max(static row => row.Sequence),
+                visibleAgents.Length == 0
+                    ? "No mod agents have reported activity yet."
+                    : rows.Length == 0
+                        ? "Agents are registered; activity has not arrived yet."
+                        : null)
+            {
+                Projects = visibleProjects,
+                ToolingFindings = projectProjection.ToolingFindings
+                    .Where(finding => visibleProjects.Any(project =>
+                        finding.AffectedProjects.Contains(ProjectKey(project), StringComparer.Ordinal)))
+                    .ToArray(),
+                FilterApplied = IsFilterAppliedLocked(),
+                FilterDescription = IsFilterAppliedLocked()
+                    ? "Project state is canonical; filters only hide projects."
+                    : null,
+                Production = BuildProductionEntriesLocked(visibleProjects)
+            };
         cachedAllRevision = revision;
+        cachedAllProjectionSignature = projectionSignature;
+
         return cachedAllView;
 
     }
     private IReadOnlyList<AgentObservabilityProductionEntry> BuildProductionEntriesLocked(
-        IReadOnlyList<AgentSnapshot> visibleAgents,
-        IReadOnlyList<AgentEvent> visibleEvents)
+        IReadOnlyList<ProjectObservabilityState> projects)
     {
-        AgentSnapshot[] productionAgents = visibleAgents
-            .Where(CanAppearInTopLevelNavigation)
-            .ToArray();
-        HashSet<string> productionGroups = productionAgents
-            .Select(EntityGroupKey)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        AgentEvent[] productionEvents = visibleEvents
-            .Where(eventRecord => productionGroups.Contains(EntityGroupKey(eventRecord)))
-            .ToArray();
-        Dictionary<string, AgentEvent> latestByGroup = productionEvents
-            .GroupBy(eventRecord => EntityGroupKey(eventRecord), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                group => group.Key,
-                group => group
-                    .OrderByDescending(static value => AgentObservabilityTime.SortValue(value.Timestamp))
-                    .ThenByDescending(static value => value.Sequence)
-                    .ThenBy(static value => value.Id, StringComparer.Ordinal)
-                    .First(),
-                StringComparer.OrdinalIgnoreCase);
-        return productionAgents
-            .GroupBy(EntityGroupKey, StringComparer.OrdinalIgnoreCase)
-            .Select(group =>
+        return projects.Select(project =>
+        {
+            AgentSnapshot[] candidates = agents.Values
+                .Where(agent =>
+                    MatchesRun(agent.RunId) &&
+                    string.Equals(EntityGroupKey(agent), ProjectKey(project), StringComparison.Ordinal))
+                .ToArray();
+            AgentSnapshot? activeRepresentative = project.ActiveSessions
+                .Select(session => candidates.FirstOrDefault(agent =>
+                    string.Equals(agent.RunId, session.RunId, StringComparison.Ordinal) &&
+                    string.Equals(agent.AgentId, session.AgentId, StringComparison.Ordinal)))
+                .FirstOrDefault(agent => agent is not null);
+            AgentSnapshot representative = activeRepresentative ?? candidates
+                .OrderByDescending(agent => agent.StartTime)
+                .ThenBy(agent => agent.AgentId, StringComparer.Ordinal)
+                .First();
+            AgentEvent? latestEvent = project.LastMeaningfulActivityAt is long timestamp
+                ? events
+                    .Where(eventRecord =>
+                        MatchesRun(eventRecord.RunId) &&
+                        string.Equals(
+                            EntityGroupKey(eventRecord),
+                            ProjectKey(project),
+                            StringComparison.Ordinal) &&
+                        eventRecord.Timestamp == timestamp)
+                    .OrderByDescending(eventRecord => eventRecord.Sequence)
+                    .ThenByDescending(eventRecord => eventRecord.Id, StringComparer.Ordinal)
+                    .FirstOrDefault()
+                : null;
+            return new AgentObservabilityProductionEntry(
+                ProjectKey(project),
+                representative.ModId,
+                project.DisplayName,
+                representative.AgentId,
+                representative.LogicalAgentId,
+                representative.RunId,
+                representative.SessionId,
+                representative.WorkloadKind,
+                representative.ToolchainState,
+                representative.QualificationProfile,
+                representative.CurrentStage,
+                project.CurrentOperation ?? project.LastMeaningfulOperation,
+                representative.Status,
+                representative.BlockingState,
+                ElapsedMilliseconds(representative),
+                project.LastMeaningfulActivityAt,
+                latestEvent?.Summary,
+                project.LatestAttempt?.Result ?? project.State.ToString(),
+                representative.Status == AgentStatus.Completed)
             {
-                AgentSnapshot representative = PreferredAgent(group.ToArray());
-                latestByGroup.TryGetValue(group.Key, out AgentEvent? latest);
-                long? latestTimestamp = MaxTimestamp(
-                    latest?.Timestamp,
-                    representative.StartTime,
-                    representative.CompletedAt);
-                foreach (AgentSnapshot candidate in group)
-                {
-                    latestTimestamp = MaxTimestamp(latestTimestamp, candidate.StartTime, candidate.CompletedAt);
-                }
-
-                return new AgentObservabilityProductionEntry(
-                    group.Key,
-                    representative.ModId,
-                    representative.ModName,
-                    representative.AgentId,
-                    representative.LogicalAgentId,
-                    representative.RunId,
-                    representative.SessionId,
-                    representative.WorkloadKind,
-                    representative.ToolchainState,
-                    representative.QualificationProfile,
-                    representative.CurrentStage,
-                    representative.CurrentOperation ?? representative.CurrentActivity,
-                    representative.Status,
-                    representative.BlockingState,
-                    ElapsedMilliseconds(representative),
-                    latestTimestamp,
-                    latest?.Summary,
-                    representative.CompletionResult,
-                    representative.Status == AgentStatus.Completed);
-            })
-            .OrderByDescending(static entry => AgentObservabilityTime.SortValue(entry.LatestTimestamp))
-            .ThenBy(static entry => entry.ModName, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(static entry => entry.Key, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+                CanonicalState = project.State,
+                ActionRequired = project.ActionRequired,
+                LatestAttempt = project.LatestAttempt,
+                LastSuccessfulValidation = project.LastSuccessfulValidation,
+                Completeness = project.Completeness
+            };
+        }).ToArray();
     }
+
 
     private AgentObservabilityIssuesView BuildIssuesViewLocked()
     {
@@ -1930,6 +2123,12 @@ public sealed class AgentObservabilityUi : IDisposable
             return null;
         }
 
+        ProjectObservabilityProjectionResult projectProjection = BuildProjectProjectionLocked();
+        ProjectObservabilityState? project = projectProjection.Projects
+            .FirstOrDefault(value => string.Equals(
+                ProjectKey(value),
+                EntityGroupKey(agent),
+                StringComparison.Ordinal));
         AgentEvent[] agentEvents = events
             .Where(eventRecord =>
                 MatchesRun(eventRecord.RunId) &&
@@ -1938,9 +2137,14 @@ public sealed class AgentObservabilityUi : IDisposable
                     EntityGroupKey(agent),
                     StringComparison.OrdinalIgnoreCase))
             .ToArray();
-        AgentEvent[] recentEvents = agentEvents
-            .TakeLast(options.MaximumRecentActivityRows)
-            .ToArray();
+        AgentEvent[] recentEvents = project is null
+            ? agentEvents.TakeLast(options.MaximumRecentActivityRows).ToArray()
+            : project.Timeline
+                .Select(entry => eventsById.TryGetValue(entry.EventId, out AgentEvent? value) ? value : null)
+                .Where(static value => value is not null)
+                .Select(static value => value!)
+                .TakeLast(options.MaximumRecentActivityRows)
+                .ToArray();
         AgentEvent? selectedForAgent = selectedEventId is null
             ? null
             : FindEventLocked(selectedEventId);
@@ -2056,7 +2260,12 @@ public sealed class AgentObservabilityUi : IDisposable
             agentEvents.Length == 0 ? "No activity has been reported for this agent yet." : null,
             selectedEvent?.Event.Id,
             selectedEvent,
-            executionImpact);
+            executionImpact)
+        {
+            Project = project,
+            CanonicalTimeline = project?.Timeline ?? [],
+            ToolingFindings = project?.ToolingFindings ?? []
+        };
     }
 
     private AgentObservabilityExecutionImpact? BuildExecutionImpactLocked(
@@ -2782,6 +2991,7 @@ public sealed class AgentObservabilityUi : IDisposable
             AgentObservabilityUiView.Recommendations => new(AgentObservabilityUiView.Recommendations),
             AgentObservabilityUiView.Content => new(AgentObservabilityUiView.Content),
             AgentObservabilityUiView.Reliability => new(AgentObservabilityUiView.Reliability),
+            AgentObservabilityUiView.System => new(AgentObservabilityUiView.System),
             AgentObservabilityUiView.Agent => new(
                 AgentObservabilityUiView.Agent,
                 requested.AgentId,
@@ -2980,6 +3190,30 @@ public sealed class AgentObservabilityUi : IDisposable
         return filter.Blocking is null ||
             (agent.BlockingState == "required") == filter.Blocking.Value;
     }
+    private bool ProjectMatchesFilterLocked(ProjectObservabilityState project)
+    {
+        if (filter.Blocking is not null &&
+            project.State == ProjectObservabilityStateKind.Blocked != filter.Blocking.Value)
+        {
+            return false;
+        }
+
+        return MatchesFilterText(
+            filter.Query,
+            project.Identity.EntityType,
+            project.Identity.CanonicalEntityId,
+            project.DisplayName,
+            project.State.ToString(),
+            project.CurrentOperation,
+            project.LastMeaningfulOperation,
+            project.ProblemOwner,
+            project.ProblemClassification);
+    }
+
+    private bool IsFilterAppliedLocked() =>
+        !string.IsNullOrWhiteSpace(filter.Query) ||
+        filter.IssueCategory is not null ||
+        filter.Blocking is not null;
 
     private bool MatchesFilterLocked(AgentEvent eventRecord) =>
         MatchesFilterText(
@@ -3015,6 +3249,20 @@ public sealed class AgentObservabilityUi : IDisposable
             issue.ComponentOwner,
             issue.Recommendation);
     }
+    private static string ProjectProjectionSignature(ProjectObservabilityProjectionResult projection) =>
+        string.Join(
+            '\u001E',
+            projection.Projects.Select(project =>
+                string.Join(
+                    '\u001F',
+                    ProjectKey(project),
+                    project.State,
+                    project.ActionRequired,
+                    project.StaleSessionDetected,
+                    project.LastMeaningfulActivityAt)));
+
+    private static string ProjectKey(ProjectObservabilityState project) =>
+        project.Identity.EntityType + "\u001f" + project.Identity.CanonicalEntityId;
 
     private static bool MatchesFilterText(string? query, params string?[] values) =>
         string.IsNullOrWhiteSpace(query) ||

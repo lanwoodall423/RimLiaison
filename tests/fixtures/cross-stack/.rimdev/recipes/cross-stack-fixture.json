@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "devbridge-test-recipe/v1",
+  "id": "cross-stack-fixture",
+  "description": "Cross-stack fixture recipe",
+  "projects": ["frontier"],
+  "inputs": { "quicktest": true },
+  "requiresReady": true,
+  "success": { "quicktestReady": true }
+}

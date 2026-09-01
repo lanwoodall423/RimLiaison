@@ -1,6 +1,6 @@
 [
   {
-    "Id": "issue-issue-06c8499161194e00926521198876d028",
+    "Id": "issue-issue-0717b2296c0e41d89643520853227307",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -9,22 +9,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:14:01.215+00:00"
+    "CreatedAt": "2026-08-28T01:38:24.449+00:00"
   },
   {
-    "Id": "issue-issue-077baa50625343bebb1858309f26702d",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:20:38.11+00:00"
-  },
-  {
-    "Id": "issue-issue-084dd8b54db94a9b9d30322ed3b6c8f4",
+    "Id": "issue-issue-1cbf126851494a18b515af0b6b45e878",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -33,10 +21,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:11.289+00:00"
+    "CreatedAt": "2026-08-28T01:39:19.162+00:00"
   },
   {
-    "Id": "issue-issue-118f7a4a7a4340fdb258ccd816dcdfe7",
+    "Id": "issue-issue-1fd8c12d2a20483aa239345fd80ace13",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -45,10 +33,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:17:33.249+00:00"
+    "CreatedAt": "2026-08-28T01:38:42.559+00:00"
   },
   {
-    "Id": "issue-issue-16143fcb92ce4bad9886afb05db15a06",
+    "Id": "issue-issue-21030f06b47544bdb59af552629c3aa8",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -57,10 +45,58 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:13:59.924+00:00"
+    "CreatedAt": "2026-08-28T01:32:19.017+00:00"
   },
   {
-    "Id": "issue-issue-19db43a1a11e44acb47aa63a9dbef0e8",
+    "Id": "issue-issue-2361859d0cde419e8fc578fd06ef6775",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:34.06+00:00"
+  },
+  {
+    "Id": "issue-issue-27952658015d432c9078ec9a3d60124f",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:38.436+00:00"
+  },
+  {
+    "Id": "issue-issue-2b198fff5fc3475a8ee0ea659279bc9c",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:09.91+00:00"
+  },
+  {
+    "Id": "issue-issue-2f44c57e683a4254a51e185813ab18d6",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:45.658+00:00"
+  },
+  {
+    "Id": "issue-issue-2f8832aefb1244bd87e23aa3bb487e51",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -69,22 +105,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:21:50.065+00:00"
+    "CreatedAt": "2026-08-28T01:39:10.572+00:00"
   },
   {
-    "Id": "issue-issue-1bc95ab09f5347e195e2ce75428bb645",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:13:51.352+00:00"
-  },
-  {
-    "Id": "issue-issue-1cac23cb12884d4d88f6b2540ef03df1",
+    "Id": "issue-issue-33655046eef84ae7bc446ba902b995fe",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -93,10 +117,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:26.2+00:00"
+    "CreatedAt": "2026-08-28T01:38:29.504+00:00"
   },
   {
-    "Id": "issue-issue-1e6724215bef4df2a33277fa670869b5",
+    "Id": "issue-issue-361d48459ebe44d5bd0a1d8d18c05e23",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -105,10 +129,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:23:51.429+00:00"
+    "CreatedAt": "2026-08-28T01:39:49.512+00:00"
   },
   {
-    "Id": "issue-issue-263acc12d5c4454eac591cc9b82a1891",
+    "Id": "issue-issue-378b800bbb124b3382c3836f18df5f7a",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -117,10 +141,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:19:56.643+00:00"
+    "CreatedAt": "2026-08-28T01:38:19.251+00:00"
   },
   {
-    "Id": "issue-issue-27b0217852554c408f6000cb6a64a36f",
+    "Id": "issue-issue-3ad894e51e0b456eada468a0dde8e478",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -129,10 +153,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:34.081+00:00"
+    "CreatedAt": "2026-08-28T01:38:38.282+00:00"
   },
   {
-    "Id": "issue-issue-2c0e07e8c4bb45b690f2c83b55b5f002",
+    "Id": "issue-issue-3f00c3ba04234fe0b4df4ce2ee29e84e",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -141,22 +165,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:23:52.322+00:00"
+    "CreatedAt": "2026-08-28T01:39:01.878+00:00"
   },
   {
-    "Id": "issue-issue-2f580cb7984948869c1581f1b86a16d9",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:13:37.011+00:00"
-  },
-  {
-    "Id": "issue-issue-34027b3a1461461e91d87a235875bcf1",
+    "Id": "issue-issue-3f823a9739cf4773827b06dda3d76bf8",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -165,10 +177,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:11:47.886+00:00"
+    "CreatedAt": "2026-08-28T01:38:20.023+00:00"
   },
   {
-    "Id": "issue-issue-3431afbf85b34657ae2d05a42d0f9f78",
+    "Id": "issue-issue-4adbe5df0dc7411ebf35537bc692a523",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -177,22 +189,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:11:47.135+00:00"
+    "CreatedAt": "2026-08-28T01:39:42.193+00:00"
   },
   {
-    "Id": "issue-issue-35467f6a7b9149d38b58fa030cce2d23",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:44.977+00:00"
-  },
-  {
-    "Id": "issue-issue-3a2db368b7094e04912f96213070434e",
+    "Id": "issue-issue-4befaf14e38b4465bdaacdfff3705726",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -201,46 +201,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:17:51.456+00:00"
+    "CreatedAt": "2026-08-28T01:39:01.862+00:00"
   },
   {
-    "Id": "issue-issue-3b9e955e4d134870a9babe6efed86def",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:13:52.106+00:00"
-  },
-  {
-    "Id": "issue-issue-3f2b68cb3bad489e972003bb1ad3374e",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:23:15.406+00:00"
-  },
-  {
-    "Id": "issue-issue-413fe51ea58742d8a23a46b0aaf3a2b1",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:21:15.443+00:00"
-  },
-  {
-    "Id": "issue-issue-41a850ccfa0f469985f159bf4af048d5",
+    "Id": "issue-issue-55364669fde44d428b9db298cd92f3b9",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -249,10 +213,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:13:07.034+00:00"
+    "CreatedAt": "2026-08-28T01:39:27.047+00:00"
   },
   {
-    "Id": "issue-issue-4225e21f265a4ac6a9caf5ad4d732967",
+    "Id": "issue-issue-556651df76d347c7a0e195ac507a13a2",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -261,10 +225,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:19:57.402+00:00"
+    "CreatedAt": "2026-08-28T01:39:30.517+00:00"
   },
   {
-    "Id": "issue-issue-476be65973c94422935cc0df56a80cc8",
+    "Id": "issue-issue-57d45967ea3c488b8541d31ab0560ddd",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -273,10 +237,46 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:20:22.666+00:00"
+    "CreatedAt": "2026-08-28T01:39:23.504+00:00"
   },
   {
-    "Id": "issue-issue-486f6bed99324322af195342f3fde914",
+    "Id": "issue-issue-5f6e6392101c4ee0865f662ced56f1a6",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:58.311+00:00"
+  },
+  {
+    "Id": "issue-issue-608acafeebb942c5a5766b84025758e3",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:51.294+00:00"
+  },
+  {
+    "Id": "issue-issue-63034f07808d4460a787076b30f22fbb",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:09.799+00:00"
+  },
+  {
+    "Id": "issue-issue-71ada2cd375449838f6a0c5647ea4453",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -285,10 +285,34 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:19:30.534+00:00"
+    "CreatedAt": "2026-08-28T01:38:47.656+00:00"
   },
   {
-    "Id": "issue-issue-51c241830fdc4303a049f9592db38d3f",
+    "Id": "issue-issue-723aaea0ed654c5eb73d80c18dae9292",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:19.143+00:00"
+  },
+  {
+    "Id": "issue-issue-7ded1b92ac4e4ab4a5c74034b07efd4f",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:23.488+00:00"
+  },
+  {
+    "Id": "issue-issue-7df7958e5ee34cba9a54ea45ab4999cf",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -297,10 +321,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:21:30.367+00:00"
+    "CreatedAt": "2026-08-28T01:38:58.33+00:00"
   },
   {
-    "Id": "issue-issue-5386263262e74181909724c81379e3f4",
+    "Id": "issue-issue-86bdcb90cac7435aa2fe9e1f5d9bc448",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -309,22 +333,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:59.224+00:00"
+    "CreatedAt": "2026-08-28T01:39:38.46+00:00"
   },
   {
-    "Id": "issue-issue-55657288e952447e9dc36f3541220c32",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:19:29.603+00:00"
-  },
-  {
-    "Id": "issue-issue-55a0a7756e9f447483d869ec235079d0",
+    "Id": "issue-issue-8868c09946054f33a2a56fb075c9d244",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -333,10 +345,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:22:18.131+00:00"
+    "CreatedAt": "2026-08-28T01:38:15.004+00:00"
   },
   {
-    "Id": "issue-issue-573f92d625f645b7bb72480314932f6d",
+    "Id": "issue-issue-8de650c01cc548d283889c720f70e66a",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -345,10 +357,22 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:22:17.322+00:00"
+    "CreatedAt": "2026-08-28T01:38:42.536+00:00"
   },
   {
-    "Id": "issue-issue-585e3154723949e9b9437be6732f2931",
+    "Id": "issue-issue-92856ee690c642168e303fef891c8d42",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:23.644+00:00"
+  },
+  {
+    "Id": "issue-issue-a0af9c0937394610b93265d55cd4c5d8",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -357,22 +381,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:18:11.815+00:00"
+    "CreatedAt": "2026-08-28T01:39:05.382+00:00"
   },
   {
-    "Id": "issue-issue-60bcc19e75854cadab0539855e210776",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:44.158+00:00"
-  },
-  {
-    "Id": "issue-issue-61006354f2e548c0a586ee25de375d8a",
+    "Id": "issue-issue-a7145e6df29a4480aca15a73eb51b8c0",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -381,34 +393,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:17:52.316+00:00"
+    "CreatedAt": "2026-08-28T01:39:42.217+00:00"
   },
   {
-    "Id": "issue-issue-640ece79f40047e7b41c2c4778f6be73",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:09:56.466+00:00"
-  },
-  {
-    "Id": "issue-issue-66466a2dd7464c9dbebddcf48da72ae7",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:18:11.082+00:00"
-  },
-  {
-    "Id": "issue-issue-6972e0c6fc2a48f9862cf610503ef2bf",
+    "Id": "issue-issue-a7e78890cff6425bb8cb208a349ea073",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -417,10 +405,22 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:22:55.988+00:00"
+    "CreatedAt": "2026-08-28T01:39:27.064+00:00"
   },
   {
-    "Id": "issue-issue-699a3422d3764dfd8887156ac28ae5e7",
+    "Id": "issue-issue-ba033a34aa0f4c1faa17c6f26d077235",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:33.824+00:00"
+  },
+  {
+    "Id": "issue-issue-bbfdfa4afb194e25be5da15cc5ad6c1c",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -429,34 +429,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:20:38.832+00:00"
+    "CreatedAt": "2026-08-28T01:38:54.839+00:00"
   },
   {
-    "Id": "issue-issue-6cd8a9b3216a42b2940277522eb4803d",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:06:03.217+00:00"
-  },
-  {
-    "Id": "issue-issue-6ee4b676499e4cbcba87f5a861e76997",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:18:30.181+00:00"
-  },
-  {
-    "Id": "issue-issue-6fad1b6c3a7c4ce581a941e87947e109",
+    "Id": "issue-issue-c04cbaa7a5c34f10a15bd3580d66a5c5",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -465,22 +441,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:22:00.066+00:00"
+    "CreatedAt": "2026-08-28T01:39:34.078+00:00"
   },
   {
-    "Id": "issue-issue-70a063b9be06458bb26a17cc73101538",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:21:14.649+00:00"
-  },
-  {
-    "Id": "issue-issue-76b57d08aa50476db23021f78d29108a",
+    "Id": "issue-issue-c2e15567ba604ccb8279d3897b35be8d",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -489,10 +453,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:21:37.231+00:00"
+    "CreatedAt": "2026-08-28T01:38:39.083+00:00"
   },
   {
-    "Id": "issue-issue-774bdaada15a43b1a2b61c0f7930a7fe",
+    "Id": "issue-issue-c4b769e9b03c458cb0b10583e6ee9d53",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -501,22 +465,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:03.863+00:00"
+    "CreatedAt": "2026-08-28T01:38:33.84+00:00"
   },
   {
-    "Id": "issue-issue-77a1f6ff136f4bf5accae1e87fe7a88c",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:20:09.419+00:00"
-  },
-  {
-    "Id": "issue-issue-7bdf3ab5b247416780ccf4b4bbf274c6",
+    "Id": "issue-issue-c4fcd0caf6ae4180b473c27a2f8b2344",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -525,10 +477,34 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:09:43.311+00:00"
+    "CreatedAt": "2026-08-28T01:39:14.873+00:00"
   },
   {
-    "Id": "issue-issue-7c285ea06d6a4861b53e1356ad3db0a6",
+    "Id": "issue-issue-c74990b8ca064cdbafb0f5c17bed975d",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:14.856+00:00"
+  },
+  {
+    "Id": "issue-issue-c9241b431eda44d29937529a7d0a6b78",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:39:05.363+00:00"
+  },
+  {
+    "Id": "issue-issue-cb5613986108442289e56b5987d2e3dd",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -537,10 +513,22 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:12:32.808+00:00"
+    "CreatedAt": "2026-08-28T01:39:45.677+00:00"
   },
   {
-    "Id": "issue-issue-816ad78bfb1f4ad48108a186736b3c54",
+    "Id": "issue-issue-da513b17adae49b488a2a23839261479",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:46.862+00:00"
+  },
+  {
+    "Id": "issue-issue-db7051adc4534255bb513fa5114ab028",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -549,10 +537,22 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:11:26.524+00:00"
+    "CreatedAt": "2026-08-28T01:32:19.04+00:00"
   },
   {
-    "Id": "issue-issue-846279447bfe40ca8b09ffc33b1afbaa",
+    "Id": "issue-issue-e40a62f4439c4895b9ba5a28f628091c",
+    "Source": "observability",
+    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
+    "Owner": "DevBridge2",
+    "Priority": "normal",
+    "Blocking": false,
+    "Status": "open",
+    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
+    "EvidenceReference": "qualification://optional-validation",
+    "CreatedAt": "2026-08-28T01:38:29.484+00:00"
+  },
+  {
+    "Id": "issue-issue-e890454fcd1447feaff0739eba857abf",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -561,70 +561,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:12:10.122+00:00"
+    "CreatedAt": "2026-08-28T01:39:49.533+00:00"
   },
   {
-    "Id": "issue-issue-84c1f244a6db4fecb1c107592b1733ea",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:10:45.067+00:00"
-  },
-  {
-    "Id": "issue-issue-862f1d73dd6f4afc9d97e5f373574aea",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:21:29.65+00:00"
-  },
-  {
-    "Id": "issue-issue-88111872ce3d4e918d916ab8e045df23",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:18:47.362+00:00"
-  },
-  {
-    "Id": "issue-issue-8960543534d04ec6b7327e10ec73bac2",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:12:48.861+00:00"
-  },
-  {
-    "Id": "issue-issue-89709c91697c41adae4d66dc80e5454a",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:14:31.402+00:00"
-  },
-  {
-    "Id": "issue-issue-8b520ebc0a9d4ab3868cdee3bc4b1483",
+    "Id": "issue-issue-e8e107164e5e40fb98bdda91c8da9f0e",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -633,70 +573,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:18:30.919+00:00"
+    "CreatedAt": "2026-08-28T01:38:09.929+00:00"
   },
   {
-    "Id": "issue-issue-8f7ae93eb2a44e9cab11f883adcc79d5",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:14:13.956+00:00"
-  },
-  {
-    "Id": "issue-issue-9368eedd4b5e4ba899baf9bf8845df9d",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:11:25.697+00:00"
-  },
-  {
-    "Id": "issue-issue-938881acb2ae40b3adf03778a2654717",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:22:00.045+00:00"
-  },
-  {
-    "Id": "issue-issue-93f01e3a7abf45c4a9da70c0090fd769",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:20:54.492+00:00"
-  },
-  {
-    "Id": "issue-issue-94770879691645d7b78abd436630a6d8",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:17.141+00:00"
-  },
-  {
-    "Id": "issue-issue-951f9d706d4a484fbfee7364bebdbe71",
+    "Id": "issue-issue-ea6a850b934d43d18d6f08ae9556e2f8",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
     "Owner": "RimLiaison",
@@ -705,22 +585,10 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:11:06.421+00:00"
+    "CreatedAt": "2026-08-28T01:38:51.314+00:00"
   },
   {
-    "Id": "issue-issue-95cd334ac1aa4076afefbbc89325d00a",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:18:48.13+00:00"
-  },
-  {
-    "Id": "issue-issue-96f56a9f7c984d55840d3b8d70baef9a",
+    "Id": "issue-issue-f0f4eac33c3544dd97b93d86cf4d97c0",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -729,22 +597,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:12:09.336+00:00"
+    "CreatedAt": "2026-08-28T01:38:54.82+00:00"
   },
   {
-    "Id": "issue-issue-9ee0d9da68644932957db34c9e1c0e4e",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:20:09.431+00:00"
-  },
-  {
-    "Id": "issue-issue-a005c44bdccc43b9aba82bc031cc726f",
+    "Id": "issue-issue-f98df076847946ed94ae26dda79c9069",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -753,22 +609,10 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:03.139+00:00"
+    "CreatedAt": "2026-08-28T01:39:30.497+00:00"
   },
   {
-    "Id": "issue-issue-a505297d5fc94a8db0dea65a805ee963",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:17.193+00:00"
-  },
-  {
-    "Id": "issue-issue-a86627e878d84947924717c8117e7db1",
+    "Id": "issue-issue-fd029319c04845feb2919561f40aad6c",
     "Source": "observability",
     "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
     "Owner": "DevBridge2",
@@ -777,451 +621,7 @@
     "Status": "open",
     "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
     "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:22:36.146+00:00"
-  },
-  {
-    "Id": "issue-issue-aa84f901ada147479454b6a12db79fa5",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:12:49.628+00:00"
-  },
-  {
-    "Id": "issue-issue-aae0ce26f3e849a093d04618e66c3baf",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:15:34.102+00:00"
-  },
-  {
-    "Id": "issue-issue-aaeba909e7e64dfd915318dfa51b2e9a",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:19:01.434+00:00"
-  },
-  {
-    "Id": "issue-issue-ac89d22466eb415d97c614e06fe0ead9",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:21:50.016+00:00"
-  },
-  {
-    "Id": "issue-issue-ad44d26818bf4d47a9e2abf671d9dfa1",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:20:55.216+00:00"
-  },
-  {
-    "Id": "issue-issue-ad78c19c46dc4455af914653f7ca47ee",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:21:36.478+00:00"
-  },
-  {
-    "Id": "issue-issue-af0ce4daefbf49f6b56899f6452e5a86",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:22:37.169+00:00"
-  },
-  {
-    "Id": "issue-issue-b0339a97ad00453180ea80f9cd9b5777",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:19:13.819+00:00"
-  },
-  {
-    "Id": "issue-issue-b0e5c3a0e9c744f68dbe133c3dc7dfb0",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:58.627+00:00"
-  },
-  {
-    "Id": "issue-issue-b9ffd8f73926428daa097883a9fb68c5",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:17:32.095+00:00"
-  },
-  {
-    "Id": "issue-issue-ba13f7c4457641d798bdd56c46b1cf32",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:20:21.953+00:00"
-  },
-  {
-    "Id": "issue-issue-ba2ced4c519b48ca8f0275f08e5c56b5",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:14:47.782+00:00"
-  },
-  {
-    "Id": "issue-issue-bc73bf8617fa46d783a947492200289f",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:13:37.731+00:00"
-  },
-  {
-    "Id": "issue-issue-beeeedba6bfb4abfb19ab8878266bbc6",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:09:57.232+00:00"
-  },
-  {
-    "Id": "issue-issue-c29a95626c584ba0a1af8b081090eb4f",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:24:12.108+00:00"
-  },
-  {
-    "Id": "issue-issue-c456465469a4401dbd881e939c256c04",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:19:14.542+00:00"
-  },
-  {
-    "Id": "issue-issue-c5759bfe941e4c52a05c9b971d66eb90",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:25.383+00:00"
-  },
-  {
-    "Id": "issue-issue-cbfbd3aed9414907891435afb31d9bb9",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:15:10.764+00:00"
-  },
-  {
-    "Id": "issue-issue-d0267b5e7b404332af9da8393d012bcb",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:23:33.169+00:00"
-  },
-  {
-    "Id": "issue-issue-d3d45502c38d451ab360cb2acd16d5d0",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:13:22.654+00:00"
-  },
-  {
-    "Id": "issue-issue-d4b6e2c1b4b1467fae4874bb49316821",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:24:11.112+00:00"
-  },
-  {
-    "Id": "issue-issue-d6e20ae049cc41918235839ec63be1f9",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:23:14.611+00:00"
-  },
-  {
-    "Id": "issue-issue-dad685a8184249f5b707d3a1c7714e3d",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:13:23.374+00:00"
-  },
-  {
-    "Id": "issue-issue-dec0d15655ac4a3d9b79f2147ebdd3e7",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:19:00.608+00:00"
-  },
-  {
-    "Id": "issue-issue-e24088a3b1d44e0496b7d11c4eac007b",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:23:33.932+00:00"
-  },
-  {
-    "Id": "issue-issue-e9a3334d0fe34b87b033f3fef92addeb",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:10:13.693+00:00"
-  },
-  {
-    "Id": "issue-issue-eafde818288a4284895e1009fc3b153e",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:14:48.511+00:00"
-  },
-  {
-    "Id": "issue-issue-ef8ff581cae141cdaa33c8fa3d0bac88",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:12:31.926+00:00"
-  },
-  {
-    "Id": "issue-issue-f08905b87886473aa50f546cc78d1bf9",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:06:03.989+00:00"
-  },
-  {
-    "Id": "issue-issue-f0fb87fa7fd14b798917a2282d01a810",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:14:32.152+00:00"
-  },
-  {
-    "Id": "issue-issue-f4b8b6b2a1cd477b8073ddcef4fdba3a",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:10:12.755+00:00"
-  },
-  {
-    "Id": "issue-issue-f60ce33747924c508ea08817ac0fe1fe",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:09:42.337+00:00"
-  },
-  {
-    "Id": "issue-issue-f826b7249a4a472eb628b7d2b1f0f971",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:14:14.643+00:00"
-  },
-  {
-    "Id": "issue-issue-f89169077f854c59be6d03108743d3eb",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:22:55.189+00:00"
-  },
-  {
-    "Id": "issue-issue-f9a005f4971c4551aa48e5ea644a34fd",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:13:07.77+00:00"
-  },
-  {
-    "Id": "issue-issue-fa6cfbc4680b419e9af79a05549c28c1",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Optional validation capability is unavailable in the qualification environment.",
-    "Owner": "DevBridge2",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Keep optional validation visible as a recommendation; do not block the supported path.",
-    "EvidenceReference": "qualification://optional-validation",
-    "CreatedAt": "2026-08-25T21:11:04.198+00:00"
-  },
-  {
-    "Id": "issue-issue-fed77cf6d1444d66b525a93fe288a566",
-    "Source": "observability",
-    "Summary": "TOOLING RECOMMENDATION: Experimental qualification evidence recommends broader parallel lifecycle coverage.",
-    "Owner": "RimLiaison",
-    "Priority": "normal",
-    "Blocking": false,
-    "Status": "open",
-    "Recommendation": "Add deterministic parallel lifecycle coverage before promotion; production remains unaffected.",
-    "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:10:48.515+00:00"
+    "CreatedAt": "2026-08-28T01:38:14.979+00:00"
   },
   {
     "Id": "qualification-parallel-coverage",
@@ -1233,6 +633,6 @@
     "Status": "open",
     "Recommendation": "Add deterministic parallel lifecycle coverage before promotion.",
     "EvidenceReference": "qualification://parallel-recommendation",
-    "CreatedAt": "2026-08-25T21:24:15.1561631+00:00"
+    "CreatedAt": "2026-08-31T01:27:26.1600621+00:00"
   }
 ]

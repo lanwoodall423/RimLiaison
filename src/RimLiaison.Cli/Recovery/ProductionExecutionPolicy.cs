@@ -5,6 +5,7 @@ namespace RimLiaison.Recovery;
 public enum ProductionFailureClassification
 {
     SelfHealable,
+    RepairableToolchainIntegrity,
     ProjectConfigurationFailure,
     TrulyFatal,
     ObsoleteAfterConsolidation
@@ -29,7 +30,11 @@ public sealed record ProductionFailureAssessment(
 {
     public bool IsProjectFailure =>
         Classification == ProductionFailureClassification.ProjectConfigurationFailure;
+
+    public bool IsRepairableToolchainIntegrity =>
+        Classification == ProductionFailureClassification.RepairableToolchainIntegrity;
 }
+
 
 /// <summary>
 /// The single allow-list for the ordinary production execution boundary.
@@ -81,6 +86,22 @@ public static class ProductionExecutionPolicy
         "RIMWORLD_RESTART_REQUIRED",
         "DEVBRIDGE_RESTART_REQUIRED"
     };
+    private static readonly HashSet<string> PromotedToolchainIntegrityCodes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "PRODUCTION_TOOLCHAIN_ARTIFACT_MISSING",
+        "PRODUCTION_TOOLCHAIN_ARTIFACT_UNREADABLE",
+        "PRODUCTION_TOOLCHAIN_RUNTIME_MANIFEST_MISSING",
+        "PRODUCTION_TOOLCHAIN_RUNTIME_IDENTITY_MISMATCH",
+        "PRODUCTION_TOOLCHAIN_COORDINATOR_IDENTITY_MISMATCH",
+        "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
+        "PRODUCTION_TOOLCHAIN_INCOMPLETE_INSTALLATION",
+        // DevBridge emits these when the promoted runtime root is absent or incomplete.
+        // They remain repairable only when the active immutable promotion payload exists.
+        "DEVBRIDGE_RUNTIME_MISSING",
+        "DEVBRIDGE_RUNTIME_INCOMPLETE",
+        "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE"
+    };
+
 
     private static readonly HashSet<string> ProjectCodes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -127,6 +148,17 @@ public static class ProductionExecutionPolicy
         string code = string.IsNullOrWhiteSpace(errorCode)
             ? "RIMLIAISON_UNCLASSIFIED_FAILURE"
             : errorCode.Trim();
+        if (PromotedToolchainIntegrityCodes.Contains(code) &&
+            !string.Equals(buildOwnerType, "PROJECT_BUILD", StringComparison.OrdinalIgnoreCase))
+        {
+            return new(
+                ProductionFailureClassification.RepairableToolchainIntegrity,
+                code,
+                "RimLiaison",
+                safeReplay,
+                error ?? "The promoted production toolchain has a repairable integrity fault.");
+        }
+
         string ownerType = buildOwnerType?.Trim().ToUpperInvariant() ?? string.Empty;
 
         if (IsToolchainBuildOwner(ownerType) && IsBuildFailureCode(code))
@@ -212,6 +244,15 @@ public static class ProductionExecutionPolicy
         code.StartsWith("MSBUILD_", StringComparison.OrdinalIgnoreCase) ||
         code.StartsWith("COMPILER_", StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsPromotedToolchainIntegrityCode(string? errorCode)
+    {
+        string code = errorCode?.Trim() ?? string.Empty;
+        return PromotedToolchainIntegrityCodes.Contains(code) ||
+            code.StartsWith("PRODUCTION_TOOLCHAIN_ARTIFACT_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("PRODUCTION_TOOLCHAIN_RUNTIME_", StringComparison.OrdinalIgnoreCase) ||
+            code.StartsWith("PRODUCTION_TOOLCHAIN_COORDINATOR_", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static ProductionFailureAssessment Classify(
         string? errorCode,
         string? error,
@@ -240,7 +281,9 @@ public static class ProductionExecutionPolicy
         Classify(errorCode, null, buildOwnerType).IsProjectFailure;
 
     public static bool IsRecoverable(string? errorCode) =>
-        Classify(errorCode).Classification == ProductionFailureClassification.SelfHealable;
+        Classify(errorCode).Classification is
+            ProductionFailureClassification.SelfHealable or
+            ProductionFailureClassification.RepairableToolchainIntegrity;
 
     public static bool RequiresPreMutationEscalation(
         string? errorCode,
@@ -248,7 +291,12 @@ public static class ProductionExecutionPolicy
     {
         string code = errorCode?.Trim() ?? string.Empty;
         string ownerType = buildOwnerType?.Trim().ToUpperInvariant() ?? string.Empty;
-        return (IsToolchainBuildOwner(ownerType) && IsBuildFailureCode(code)) ||
+        if (ownerType == "PROJECT_BUILD")
+        {
+            return false;
+        }
+        return IsPromotedToolchainIntegrityCode(code) ||
+            (IsToolchainBuildOwner(ownerType) && IsBuildFailureCode(code)) ||
             code is "DEVBRIDGE_NO_STRUCTURED_RESPONSE" or
                 "DEVBRIDGE_COORDINATOR_UNAVAILABLE" or
                 "DEVBRIDGE_COORDINATOR_NOT_READY" or

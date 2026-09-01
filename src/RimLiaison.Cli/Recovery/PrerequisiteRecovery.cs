@@ -61,7 +61,25 @@ public sealed record RimTestPrerequisiteRecovery(
     [property: JsonPropertyName("checkpoint")]
     string? Checkpoint = null,
     [property: JsonPropertyName("elapsedRecoveryMs")]
-    long? ElapsedRecoveryMilliseconds = null);
+    long? ElapsedRecoveryMilliseconds = null,
+    [property: JsonPropertyName("originalFault")]
+    string? OriginalFault = null,
+    [property: JsonPropertyName("expectedPromotedFingerprint")]
+    string? ExpectedPromotedFingerprint = null,
+    [property: JsonPropertyName("affectedArtifacts")]
+    IReadOnlyList<string>? AffectedArtifacts = null,
+    [property: JsonPropertyName("repairResult")]
+    string? RepairResult = null,
+    [property: JsonPropertyName("verificationResult")]
+    string? VerificationResult = null,
+    [property: JsonPropertyName("retryResult")]
+    string? RetryResult = null,
+    [property: JsonPropertyName("recoveryPayloadPath")]
+    string? RecoveryPayloadPath = null,
+    [property: JsonPropertyName("promotedSourceCommit")]
+    string? PromotedSourceCommit = null,
+    [property: JsonPropertyName("currentSourceDiverged")]
+    bool? CurrentSourceDiverged = null);
 
 public static class PrerequisiteRecoveryProjection
 {
@@ -104,7 +122,7 @@ public sealed record DevBridgeCapabilityRecoveryResult(
     public bool Succeeded => State == PrerequisiteRecoveryState.Recovered;
 }
 
-public static class DevBridgeCapabilityRecovery
+public static partial class DevBridgeCapabilityRecovery
 {
     private static readonly TimeSpan ReconcileTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan CoordinatorRecycleTimeout = TimeSpan.FromSeconds(20);

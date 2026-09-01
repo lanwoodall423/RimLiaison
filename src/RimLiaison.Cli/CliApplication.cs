@@ -140,6 +140,9 @@ public static class CliApplication
                 ? "qualification"
                 : "production";
             ProductionToolchainBinding? productionBinding = null;
+            PromotedToolchainRecoveryResult? productionToolchainRecovery = null;
+            ProductionToolchainBindingFailure? productionToolchainFailure = null;
+            LegacyPromotionMigrationResult? legacyPromotionMigration = null;
             ProjectRuntimeBindingResult? projectBinding = null;
             if (!experimentalToolchain &&
                 RequiresProjectBinding(request))
@@ -175,11 +178,53 @@ public static class CliApplication
                     StringComparison.OrdinalIgnoreCase) &&
                 RequiresProductionToolchainBinding(request))
             {
+                legacyPromotionMigration = LegacyPromotionMigrationService.Ensure(
+                    request.StackManifest.RepositoryRoot,
+                    cancellationToken);
                 ProductionToolchainBindingResolution resolution =
-                    ProductionToolchainBindingResolver.Resolve(
+                    legacyPromotionMigration.State == LegacyPromotionMigrationState.Blocked
+                        ? new(
+                            null,
+                            new ProductionToolchainBindingFailure(
+                                legacyPromotionMigration.ErrorCode ??
+                                    "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE",
+                                legacyPromotionMigration.Error ??
+                                    "The active legacy promotion could not be made self-restorable.",
+                                legacyPromotionMigration.NextAction ??
+                                    "Create and intentionally promote a new qualified RimLiaison production package.",
+                                [],
+                                legacyPromotionMigration.PromotedFingerprint,
+                                ManifestPath: Environment.GetEnvironmentVariable(
+                                    "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST")))
+                        : ProductionToolchainBindingResolver.Resolve(
+                            request.StackManifest.RepositoryRoot,
+                            requestedDevBridgePath: request.DevBridgePath,
+                            requestedDevBridgeRoot: request.DevBridgeRootPath);
+                if (!resolution.Succeeded &&
+                    ProductionExecutionPolicy.IsPromotedToolchainIntegrityCode(
+                        resolution.Failure?.ErrorCode))
+                {
+                    ProductionToolchainBindingFailure failure = resolution.Failure!;
+                    productionToolchainFailure = failure;
+                    DevBridgeAdapterOptions? recoveryOptions =
+                        string.IsNullOrWhiteSpace(failure.DevBridgeRuntimeRoot)
+                            ? null
+                            : DevBridgeAdapterOptions.Discover(
+                                rootPath: failure.DevBridgeRuntimeRoot);
+                    productionToolchainRecovery =
+                        await DevBridgeCapabilityRecovery.RecoverPromotedToolchainAsync(
+                                failure,
+                                request.StackManifest.RepositoryRoot,
+                                processTransport ?? new SystemDevBridgeProcessTransport(),
+                                recoveryOptions,
+                                cancellationToken: cancellationToken)
+                            .ConfigureAwait(false);
+                    resolution = ProductionToolchainBindingResolver.Resolve(
                         request.StackManifest.RepositoryRoot,
                         requestedDevBridgePath: request.DevBridgePath,
                         requestedDevBridgeRoot: request.DevBridgeRootPath);
+                }
+
                 if (!resolution.Succeeded)
                 {
                     ProductionToolchainBindingFailure failure = resolution.Failure!;
@@ -198,19 +243,56 @@ public static class CliApplication
                         "toolchain.binding.failed",
                         failure.Error,
                         failure.ToEvidence());
+                    if (productionToolchainRecovery is not null)
+                    {
+                        observabilityAgent.Record(
+                            DevelopmentStage.Analysis,
+                            AgentEventTypes.ToolFailed,
+                            "Promoted production-toolchain recovery could not restore the required identity.",
+                            new
+                            {
+                                operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                                issueKind = "TOOLING_FAILURE",
+                                blocking = true,
+                                projectImplicated = false,
+                                recovered = false,
+                                componentOwner = "RimLiaison",
+                                errorCode = productionToolchainRecovery.ErrorCode,
+                                underlyingErrorCode = failure.ErrorCode,
+                                originalFault = failure.ErrorCode,
+                                expectedPromotedFingerprint = failure.ExpectedFingerprint,
+                                affectedArtifacts = failure.MismatchingArtifacts ?? failure.ExpectedArtifacts,
+                                repairAttempted = true,
+                                repairResult = "failed",
+                                recoveryAction = productionToolchainRecovery.Action,
+                                recoveryState = productionToolchainRecovery.State.ToWireName(),
+                                recoveryVerification = productionToolchainRecovery.Verification,
+                                verificationResult = productionToolchainRecovery.Verification,
+                                elapsedRecoveryMs = productionToolchainRecovery.ElapsedRecoveryMilliseconds,
+                                retryCount = 0,
+                                retryResult = "not-attempted",
+                                nextAction = failure.NextAction
+                            });
+                    }
                     WriteJson(
                         stdout,
                         new
                         {
                             schemaVersion = "rimliaison-toolchain-binding/v1",
                             status = "blocked",
-                            code = failure.ErrorCode,
-                            error = failure.Error,
+                            owner = "RimLiaison",
+                            code = productionToolchainRecovery?.ErrorCode ?? failure.ErrorCode,
+                            error = productionToolchainRecovery?.Error ?? failure.Error,
                             nextAction = failure.NextAction,
-                            rejectedCandidates = failure.RejectedCandidates,
+                            projectImplicated = false,
                             expectedFingerprint = failure.ExpectedFingerprint,
                             currentExecutablePath = failure.CurrentExecutablePath,
-                            devBridgeRuntimeRoot = failure.DevBridgeRuntimeRoot
+                            devBridgeRuntimeRoot = failure.DevBridgeRuntimeRoot,
+                            manifestPath = failure.ManifestPath,
+                            expectedArtifacts = failure.ExpectedArtifacts,
+                            mismatchingArtifacts = failure.MismatchingArtifacts,
+                            recoveryAttempted = productionToolchainRecovery is not null,
+                            recovery = productionToolchainRecovery
                         });
                     exitCode = CliExitCodes.ConservativeSelection;
                     return exitCode;
@@ -267,6 +349,82 @@ public static class CliApplication
                     toolName = "RimLiaison",
                     componentOwner = "RimLiaison"
                 });
+            if (legacyPromotionMigration?.Migrated == true)
+            {
+                observabilityAgent.Record(
+                    commandStage,
+                    AgentEventTypes.ToolFailed,
+                    "Recovered tooling issue: the active legacy promotion was migrated to durable recovery material.",
+                    new
+                    {
+                        operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                        issueKind = "TOOLING_FAILURE",
+                        blocking = false,
+                        projectImplicated = false,
+                        recovered = true,
+                        componentOwner = "RimLiaison",
+                        errorCode = "PRODUCTION_TOOLCHAIN_LEGACY_MIGRATED",
+                        promotedSourceCommit = legacyPromotionMigration.PromotedSourceCommit,
+                        promotedFingerprint = legacyPromotionMigration.PromotedFingerprint,
+                        recoveryPackagePath = legacyPromotionMigration.RecoveryPackagePath,
+                        migrationElapsedMs = legacyPromotionMigration.ElapsedMilliseconds,
+                        repairAttempted = true,
+                        repairResult = "migrated",
+                        nextAction = "continue with the normal production workflow"
+                    });
+            }
+            if (productionToolchainRecovery is not null)
+            {
+                observabilityAgent.Record(
+                    commandStage,
+                    AgentEventTypes.ToolFailed,
+                    "Recovered tooling issue: the promoted production package was repaired.",
+                    new
+                    {
+                        operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                        issueKind = "TOOLING_FAILURE",
+                        blocking = false,
+                        projectImplicated = false,
+                        recovered = true,
+                        componentOwner = "RimLiaison",
+                        errorCode = "PRODUCTION_TOOLCHAIN_INTEGRITY_FAULT",
+                        underlyingErrorCode = productionToolchainRecovery.ErrorCode,
+                        originalFault = productionToolchainFailure?.ErrorCode,
+                        expectedPromotedFingerprint = productionToolchainFailure?.ExpectedFingerprint,
+                        affectedArtifacts = productionToolchainFailure?.MismatchingArtifacts ??
+                            productionToolchainFailure?.ExpectedArtifacts,
+                        repairAttempted = true,
+                        repairResult = "repaired",
+                        originalFailure = productionToolchainFailure?.ToEvidence(),
+                        recoveryAction = productionToolchainRecovery.Action,
+                        recoveryState = productionToolchainRecovery.State.ToWireName(),
+                        recoveryVerification = productionToolchainRecovery.Verification,
+                        alreadyRepaired = productionToolchainRecovery.AlreadyRepaired,
+                        recoveryAttempts = productionToolchainRecovery.Attempts,
+                        promotedSourceCommit = productionToolchainRecovery.PromotedSourceCommit,
+                        recoveryPayloadPath = productionToolchainRecovery.RecoveryPackagePath,
+                        retryCount = 1,
+                        retryResult = "normal-operation-continued",
+                        elapsedRecoveryMs = productionToolchainRecovery.ElapsedRecoveryMilliseconds,
+                        productionImpact = "toolchain-repaired-before-project-operation"
+                    });
+                observabilityAgent.Record(
+                    commandStage,
+                    AgentEventTypes.RecoveryCompleted,
+                    "Promoted production-toolchain recovery completed.",
+                    new
+                    {
+                        operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
+                        recovered = true,
+                        componentOwner = "RimLiaison",
+                        errorCode = productionToolchainRecovery.ErrorCode,
+                        originalFailure = productionToolchainFailure?.ToEvidence(),
+                        recoveryVerification = productionToolchainRecovery.Verification,
+                        retryCount = 1,
+                        retryResult = "normal-operation-continued",
+                        durationMs = productionToolchainRecovery.ElapsedRecoveryMilliseconds
+                    });
+            }
             if (projectBinding is not null)
             {
                 observabilityAgent.Record(
@@ -3511,6 +3669,67 @@ public static class CliApplication
                     phase: "freshness",
                     scope: freshnessRequest.Project)
                 .ConfigureAwait(false);
+            RimTestPrerequisiteRecovery? promotedRecovery =
+                freshnessTransaction.RecoveryEvents?.LastOrDefault(eventRecord =>
+                    eventRecord.Component == "promoted-production-toolchain");
+            if (promotedRecovery is not null)
+            {
+                bool recovered = promotedRecovery.State == "recovered";
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Analysis,
+                    AgentEventTypes.ToolFailed,
+                    recovered
+                        ? "Recovered tooling issue: promoted production package repaired."
+                        : "Promoted production-toolchain recovery failed.",
+                    new
+                    {
+                        operationKey = "suite:" + suiteId,
+                        issueKind = "TOOLING_FAILURE",
+                        blocking = !recovered,
+                        projectImplicated = false,
+                        recovered,
+                        componentOwner = "RimLiaison",
+                        errorCode = promotedRecovery.OriginalFault ?? promotedRecovery.ErrorCode,
+                        originalFault = promotedRecovery.OriginalFault,
+                        affectedArtifacts = promotedRecovery.AffectedArtifacts,
+                        repairAttempted = true,
+                        repairResult = promotedRecovery.RepairResult,
+                        verificationResult = promotedRecovery.VerificationResult,
+                        recoveryAction = promotedRecovery.Action,
+                        recoveryAttempts = promotedRecovery.Attempts,
+                        promotedSourceCommit = promotedRecovery.PromotedSourceCommit,
+                        currentSourceDiverged = promotedRecovery.CurrentSourceDiverged,
+                        recoveryPayloadPath = promotedRecovery.RecoveryPayloadPath,
+                        recoveryDurationMs = promotedRecovery.ElapsedRecoveryMilliseconds,
+                        retryResult = promotedRecovery.RetryResult,
+                        productionImpact = "production-toolchain-integrity"
+                    });
+                AgentObservabilityRuntime.Record(
+                    DevelopmentStage.Analysis,
+                    AgentEventTypes.RecoveryCompleted,
+                    recovered
+                        ? "Promoted production-toolchain recovery completed."
+                        : "Promoted production-toolchain recovery exhausted.",
+                    new
+                    {
+                        operationKey = "suite:" + suiteId,
+                        recovered,
+                        projectImplicated = false,
+                        componentOwner = "RimLiaison",
+                        errorCode = promotedRecovery.OriginalFault ?? promotedRecovery.ErrorCode,
+                        originalFault = promotedRecovery.OriginalFault,
+                        expectedPromotedFingerprint = promotedRecovery.ExpectedPromotedFingerprint,
+                        affectedArtifacts = promotedRecovery.AffectedArtifacts,
+                        promotedSourceCommit = promotedRecovery.PromotedSourceCommit,
+                        currentSourceDiverged = promotedRecovery.CurrentSourceDiverged,
+                        recoveryPayloadPath = promotedRecovery.RecoveryPayloadPath,
+                        repairResult = promotedRecovery.RepairResult,
+                        verificationResult = promotedRecovery.VerificationResult,
+                        retryCount = promotedRecovery.RetryResult == "not-attempted" ? 0 : 1,
+                        retryResult = promotedRecovery.RetryResult,
+                        durationMs = promotedRecovery.ElapsedRecoveryMilliseconds
+                    });
+            }
             execution = freshnessTransaction.Success
                 ? await ProfilerActivity.ObserveAsync(
                         "test-suite",

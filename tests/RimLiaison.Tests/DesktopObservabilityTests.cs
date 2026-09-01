@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
-using RimLiaison;
+using RimContext.Core.Content;
 using RimLiaison.Observability;
 using RimLiaison.Desktop;
 using System.Runtime.InteropServices;
@@ -812,8 +812,9 @@ internal static class DesktopObservabilityTests
             .Single(item => item.ModId == "mod.current");
         AssertEqual("ui-current-run", currentTab.RunId);
         Assert(currentTab.HasUnresolvedError);
+        // A blocking project problem is presented as Failed in top-level navigation.
         AssertEqual(
-            AgentObservabilityAgentNavigationStatus.NeedsAttention,
+            AgentObservabilityAgentNavigationStatus.Failed,
             currentTab.NavigationStatus);
         AssertEqual(2, ui.Snapshot.All!.Agents.Count);
 
@@ -821,7 +822,7 @@ internal static class DesktopObservabilityTests
         Assert(ui.Snapshot.Navigation.Items.Any(item =>
             item.ModId == "mod.current" &&
             item.RunId == current.RunId &&
-            item.NavigationStatus == AgentObservabilityAgentNavigationStatus.NeedsAttention));
+            item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Failed));
         Assert(ui.Snapshot.All!.Agents.Any(agent => agent.AgentId == current.AgentId),
             "completion must not remove authoritative agent history");
         Assert(store.GetEvents(runId: current.RunId, agentId: current.AgentId).Count > 0,
@@ -1424,7 +1425,7 @@ internal static class DesktopObservabilityTests
         using var form = new ObservabilityMainForm(store);
         form.Show();
         Application.DoEvents();
-        SelectNavigation(form, "issues", "Issues");
+        SelectNavigation(form, "issues", "Problems");
         ListView issueList = GetPrivateField<ListView>(form, "issueList");
         issueList.Items[0].Selected = true;
         Application.DoEvents();
@@ -1439,7 +1440,7 @@ internal static class DesktopObservabilityTests
             clipboardWriter: _ => throw new ExternalException("clipboard unavailable"));
         failingForm.Show();
         Application.DoEvents();
-        SelectNavigation(failingForm, "issues", "Issues");
+        SelectNavigation(failingForm, "issues", "Problems");
         ListView failingIssueList = GetPrivateField<ListView>(failingForm, "issueList");
         failingIssueList.Items[0].Selected = true;
         Application.DoEvents();
@@ -2110,6 +2111,37 @@ internal static class DesktopObservabilityTests
             snapshot.Navigation.Items.Count(item =>
                 item.NavigationStatus == AgentObservabilityAgentNavigationStatus.Working));
     }
+    public static void StaleNavigationAndOverviewReevaluateWithoutNewEvents()
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "stale-live-projection",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.stale-live", "Stale Live");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Analysis,
+            AgentEventTypes.FileInspected,
+            "Observed live work.");
+        now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using var ui = new AgentObservabilityUi(
+            store,
+            nowMilliseconds: () => now);
+
+        AssertEqual(
+            AgentObservabilityAgentNavigationStatus.Working,
+            ui.Snapshot.Navigation.Items.Single(item => item.Kind == "agent").NavigationStatus);
+        now += 5 * 60 * 1_000 + 1;
+
+        AgentObservabilityUiSnapshot stale = ui.Snapshot;
+
+        AssertEqual(
+            AgentObservabilityAgentNavigationStatus.NeedsAttention,
+            stale.Navigation.Items.Single(item => item.Kind == "agent").NavigationStatus);
+        AssertEqual(ProjectObservabilityStateKind.NeedsAttention, stale.All!.Projects.Single().State);
+    }
 
     public static void LiveActivityInsertionInvalidatesAllProjection()
     {
@@ -2464,7 +2496,8 @@ internal static class DesktopObservabilityTests
             .Controls
             .OfType<Panel>()
             .SelectMany(panel => panel.Controls.OfType<Button>())
-            .Single(value => value.Text == "! Frontier");
+            .Single(value => value.Tag is AgentObservabilityUiNavigationItem item &&
+                item.FullLabel == "Frontier");
         button.PerformClick();
 
         Control agentPanel = (Control)typeof(ObservabilityMainForm)
@@ -2474,13 +2507,115 @@ internal static class DesktopObservabilityTests
         ListView activity = Descendants(agentPanel)
             .OfType<ListView>()
             .Single(value => value.Columns.Count == 4 &&
-                value.Columns[2].Text == "Activity");
+                value.Columns[2].Text == "Meaningful event");
         TextBox details = tabs.TabPages[0].Controls.OfType<TextBox>().Single();
 
         Assert(agentPanel.Parent is not null, "agent detail panel must be attached");
         Assert(agentPanel.Visible, "agent detail panel must be visible");
         Assert(activity.Items.Count > 0, "Frontier detail must render activity rows");
         Assert(!string.IsNullOrWhiteSpace(details.Text), "Frontier detail must render content");
+    }
+
+    public static void ContentAdministrationUsesSuppliedServiceAndDisablesSafely()
+    {
+        string contentPath = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-content-admin-" + Guid.NewGuid().ToString("N") + ".jsonl");
+        try
+        {
+            using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "desktop-content-administration",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent(
+            "mod.content-admin",
+            "Content Admin");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Implementation,
+            ContentObservabilityEventTypes.BlueprintCreated,
+            "Blueprint created.",
+            new ContentObservabilityEventData(
+                ContentObservabilitySchemas.EventData,
+                "created",
+                ProjectId: "project.content-admin",
+                BlueprintId: "blueprint-content-admin",
+                ContentKind: "ThingDef",
+                GameplayRole: "early-game ranged weapon"));
+        agent.Record(
+            DevelopmentStage.Implementation,
+            ContentObservabilityEventTypes.PromotionCompleted,
+            "Archetype promoted.",
+            new ContentObservabilityEventData(
+                ContentObservabilitySchemas.EventData,
+                "promoted",
+                ProjectId: "project.content-admin",
+                BlueprintId: "blueprint-content-admin",
+                ArchetypeId: "archetype-content-admin",
+                ArchetypeVersion: 1,
+                ContentKind: "ThingDef",
+                GameplayRole: "early-game ranged weapon"));
+
+        var contentStore = new ContentIntelligenceStore(contentPath);
+        contentStore.SaveArchetype(new ContentArchetype(
+            ContentPhase2Schemas.Archetype,
+            "archetype-content-admin",
+            1,
+            "active",
+            new ContentStructuralFingerprint(
+                "fingerprint/v1",
+                "fingerprint-content-admin",
+                "shape-content-admin",
+                "ThingDef",
+                "early-game ranged weapon"),
+            "ThingDef",
+            "early-game ranged weapon"));
+        var administration = new ContentIntelligenceObservabilityAdministration(
+            new ContentIntelligenceAdministration(contentStore),
+            store);
+
+        using var form = new ObservabilityMainForm(store, administration);
+        form.Show();
+        Application.DoEvents();
+        SelectNavigation(form, "content", "Content Intelligence");
+        ListView contentList = GetPrivateField<ListView>(form, "contentList");
+        Assert(contentList.Items.Count > 0, "content administration requires a content row");
+        contentList.Items[0].Selected = true;
+        Application.DoEvents();
+
+        Button quarantine = GetPrivateField<Button>(form, "contentQuarantineButton");
+        Assert(quarantine.Enabled, "supplied administration must enable quarantine");
+        quarantine.PerformClick();
+        Application.DoEvents();
+
+        AssertEqual(
+            "quarantined",
+            contentStore.Snapshot().Archetypes.Single().Status);
+        Assert(
+            store.GetEvents().Any(value =>
+                value.Type == ContentObservabilityEventTypes.ArchetypeQuarantined),
+            "quarantine must be audited through the supplied observability adapter");
+
+        using var unavailableForm = new ObservabilityMainForm(store);
+        Button[] unavailableActions =
+        [
+            GetPrivateField<Button>(unavailableForm, "contentQuarantineButton"),
+            GetPrivateField<Button>(unavailableForm, "contentRollbackButton"),
+            GetPrivateField<Button>(unavailableForm, "contentExcludeButton"),
+            GetPrivateField<Button>(unavailableForm, "contentIneligibleButton")
+        ];
+        Assert(
+            unavailableActions.All(button => !button.Enabled),
+            "administrative actions must be disabled when service is unavailable");
+        }
+        finally
+        {
+            if (File.Exists(contentPath))
+            {
+                File.Delete(contentPath);
+            }
+        }
     }
 
     public static void DesktopContentHostMountsEveryPrimaryView()
@@ -2535,6 +2670,7 @@ internal static class DesktopObservabilityTests
             GetPrivateField<Panel>(form, "contentIntelligencePanel");
         Panel agentPanel = GetPrivateField<Panel>(form, "agentPanel");
         Panel reliabilityPanel = GetPrivateField<Panel>(form, "reliabilityPanel");
+        Panel systemPanel = GetPrivateField<Panel>(form, "systemPanel");
         ListView allActivity = GetPrivateField<ListView>(form, "allActivity");
         ListView issueList = GetPrivateField<ListView>(form, "issueList");
         ListView contentList = GetPrivateField<ListView>(form, "contentList");
@@ -2555,16 +2691,23 @@ internal static class DesktopObservabilityTests
             "agent panel must descend from the mounted content host");
         Assert(Descendants(contentPanel).Contains(reliabilityPanel),
             "Reliability / Burn-in panel must descend from the mounted content host");
+        Assert(Descendants(contentPanel).Contains(systemPanel),
+            "System / Diagnostics panel must descend from the mounted content host");
 
         form.Show();
         Application.DoEvents();
 
-        SelectNavigation(form, "all", "All");
+        SelectNavigation(form, "all", "Overview");
         Assert(allPanel.Visible);
         Assert(allActivity.Items.Count > 0, "All must render activity rows");
         Assert(HasDisplayRectangle(allActivity), "All activity must have a display rectangle");
+        SelectNavigation(form, "system", "System / Diagnostics");
+        Assert(systemPanel.Visible, "System / Diagnostics must expose the system panel");
+        Assert(HasDisplayRectangle(systemPanel),
+            "System / Diagnostics must have a display rectangle");
 
-        SelectNavigation(form, "issues", "Issues");
+
+        SelectNavigation(form, "issues", "Problems");
         Assert(issuesPanel.Visible);
         Assert(issueList.Items.Count > 0, "Issues must render issue rows");
         Assert(HasDisplayRectangle(issueList), "Issues must have a display rectangle");
@@ -3029,6 +3172,40 @@ internal static class DesktopObservabilityTests
 
         AgentObservabilityIssueRow row = ui.Snapshot.Issues!.Issues.Single();
         AssertEqual(2, row.Occurrences.Count);
+    }
+
+    public static void SystemDestinationUsesCanonicalToolingProjection()
+    {
+        using var store = new AgentObservabilityStore();
+        using var run = new AgentObservabilityRun(
+            "system-destination",
+            store,
+            new NoopAgentObservabilityTelemetry());
+        using AgentObservabilitySession agent = run.CreateAgent("mod.system", "System");
+        agent.Start();
+        agent.Record(
+            DevelopmentStage.Testing,
+            AgentEventTypes.ToolLimitation,
+            "Tool limitation observed.",
+            new { fingerprint = "SYSTEM_LIMITATION" });
+
+        using var ui = new AgentObservabilityUi(store);
+        AgentObservabilityUiSnapshot snapshot = ui.ShowSystem();
+
+        AssertEqual(AgentObservabilityUiView.System, snapshot.View);
+        AgentObservabilitySystemView system = snapshot.System ??
+            throw new InvalidOperationException("System destination must expose a system view");
+        Assert(system.ToolingFindings.Count > 0,
+            "System destination must expose canonical tooling findings");
+        Assert(snapshot.Navigation.Items.Any(item =>
+                item.Label == "Overview" && item.Kind == "all"),
+            "navigation must expose Overview");
+        Assert(snapshot.Navigation.Items.Any(item =>
+                item.Label == "Problems" && item.Kind == "issues"),
+            "navigation must expose Problems");
+        Assert(snapshot.Navigation.Items.Any(item =>
+                item.Label == "System / Diagnostics" && item.Kind == "system" && item.Selected),
+            "navigation must select System / Diagnostics");
     }
 
     private static void RecordSharedFailure(

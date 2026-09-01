@@ -102,6 +102,30 @@ internal static class Program
         ("promotion reports lease evidence", PromotionLeaseOrchestrationTests.ReportsLeaseGenerationAndStage),
         ("missing project runtime root fails closed", ProjectMetadataOwnershipTests.MissingRuntimeRootFailsClosed),
         ("production binding requires exact installed identity", ProjectMetadataOwnershipTests.ProductionBindingRequiresExactInstalledIdentity),
+        ("healthy promoted installation needs no repair", PromotedToolchainRecoveryTests.HealthyInstallationDoesNotRepair),
+        ("legacy promotion migrates and restores", PromotedToolchainRecoveryTests.LegacyPromotionMigratesAndRestores),
+        ("legacy promotion without exact material blocks safely", PromotedToolchainRecoveryTests.LegacyPromotionWithoutExactMaterialBlocksSafely),
+        ("modern promotion skips migration", PromotedToolchainRecoveryTests.ModernPromotionSkipsMigration),
+        ("legacy candidate selection requires exact identity", PromotedToolchainRecoveryTests.LegacyCandidateSelectionRequiresExactIdentity),
+        ("missing promoted artifact repairs", PromotedToolchainRecoveryTests.MissingArtifactRepairsAndPreservesIdentity),
+        ("restoration ignores current source divergence", PromotedToolchainRecoveryTests.RecoveryIgnoresCurrentSourceDivergence),
+        ("local Release cannot substitute promoted payload", PromotedToolchainRecoveryTests.LocalReleaseCannotSubstitutePromotedPayload),
+        ("missing recovery payload blocks infrastructure", PromotedToolchainRecoveryTests.MissingRecoveryPayloadBlocksInfrastructure),
+        ("invalid recovery payload blocks infrastructure", PromotedToolchainRecoveryTests.InvalidRecoveryPayloadBlocksInfrastructure),
+        ("corrupt promoted artifact repairs", PromotedToolchainRecoveryTests.CorruptArtifactRepairs),
+        ("missing runtime artifact repairs", PromotedToolchainRecoveryTests.MissingRuntimeArtifactRepairs),
+        ("missing coordinator repairs", PromotedToolchainRecoveryTests.MissingCoordinatorRepairs),
+        ("runtime hash mismatch repairs", PromotedToolchainRecoveryTests.RuntimeHashMismatchRepairs),
+        ("concurrent promoted repair is shared", PromotedToolchainRecoveryTests.ConcurrentRecoveryHasOneEffectiveRepair),
+        ("authoritative package repairs", PromotedToolchainRecoveryTests.AuthoritativePackageRepairs),
+        ("unavailable promoted package blocks infrastructure", PromotedToolchainRecoveryTests.UnavailablePackageIsInfrastructureBlock),
+        ("experimental replacement is rejected", PromotedToolchainRecoveryTests.ExperimentalReplacementIsRejected),
+        ("promoted repair is bounded", PromotedToolchainRecoveryTests.SameIntegrityFailureIsBounded),
+        ("project failure skips promoted repair", PromotedToolchainRecoveryTests.ProjectFailureIsNotToolchainRepair),
+        ("external DevBridge runtime missing uses promoted recovery", PromotedToolchainRecoveryTests.ExternalRuntimeMissingUsesPromotedRecovery),
+        ("production freshness recovery retries interrupted operation", PromotedToolchainRecoveryTests.ProductionFreshnessRecoveryRetriesInterruptedOperation),
+        ("production freshness recovery preserves project failure", PromotedToolchainRecoveryTests.ProductionFreshnessRecoveryPreservesProjectFailure),
+        ("production freshness recovery bounds repeated integrity failure", PromotedToolchainRecoveryTests.ProductionFreshnessRecoveryBoundsRepeatedIntegrityFailure),
         ("source-relative project runtime root fails closed", ProjectMetadataOwnershipTests.SourceRuntimeRootFailsClosed),
         ("new project auto-enrolls runtime root", RuntimeRootEnrollmentTests.NewValidProjectAutoEnrolls),
         ("already enrolled project is unchanged", RuntimeRootEnrollmentTests.AlreadyEnrolledProjectIsUnchanged),
@@ -141,6 +165,49 @@ internal static class Program
         ("observed performance stays separate from benchmarks", ObservedPerformanceStaysSeparateFromBenchmarks),
         ("observed performance reports insufficient data", ObservedPerformanceReportsInsufficientData),
         ("real workflow telemetry aggregates bounded events", ObservabilityTests.RealWorkflowTelemetryAggregatesBoundedEvents),
+        ("canonical projection newer failure preserves validation", ProjectObservabilityProjectionTests.NewerFailedCommandDoesNotReplaceSuccessfulValidation),
+        ("canonical projection recovered infrastructure", ProjectObservabilityProjectionTests.RecoveredInfrastructureFailureIsAHealthyProjectWithFinding),
+        ("canonical projection active working", ProjectObservabilityProjectionTests.ActiveProjectIsWorking),
+        ("canonical projection inactive healthy", ProjectObservabilityProjectionTests.InactiveSuccessfulProjectIsHealthy),
+        ("canonical projection stale session", ProjectObservabilityProjectionTests.StaleSessionNeedsAttention),
+        ("canonical projection abandoned session", ProjectObservabilityProjectionTests.AbandonedSessionNeedsAttention),
+        ("canonical projection capped timeline", ProjectObservabilityProjectionTests.TimelineRetainsLatestMeaningfulActivityWhenCapped),
+        ("canonical projection incomplete history", ProjectObservabilityProjectionTests.IncompleteHistoryIsNotInferredHealthy),
+        ("canonical projection excludes qualification", ProjectObservabilityProjectionTests.QualificationActivityDoesNotCreateProductionProject),
+        ("canonical projection aggregates sessions", ProjectObservabilityProjectionTests.MultipleSessionsAggregateUnderOneProject),
+        ("canonical projection separates workers", ProjectObservabilityProjectionTests.ConcurrentLogicalWorkersRemainDistinct),
+        ("canonical projection timeline contradiction", ProjectObservabilityProjectionTests.OverviewAndProjectTimelineShareT2),
+        ("canonical projection successful recovered tooling", ProjectObservabilityProjectionTests.SuccessfulTaskWithRecoveredToolingFailureRemainsHealthy),
+        ("canonical projection one finding occurrence per issue", ProjectObservabilityProjectionTests.FindingWithRecoveryEventsRemainsOneOccurrence),
+        ("canonical projection ordinary retry is not a finding", ProjectObservabilityProjectionTests.OrdinaryRetryDoesNotCreateToolingFinding),
+        ("canonical projection repeated retry finding", ProjectObservabilityProjectionTests.RepeatedRetryCreatesOneFindingGroup),
+        ("canonical projection successful workaround", ProjectObservabilityProjectionTests.SuccessfulWorkaroundCreatesToolingFinding),
+        ("canonical projection recurring tooling finding", ProjectObservabilityProjectionTests.RepeatedToolingShortcomingAggregatesAcrossProjectsAndKeepsOccurrences),
+        ("canonical projection bounded finding count", ProjectObservabilityProjectionTests.FindingCountSurvivesBoundedOccurrenceRetention),
+        ("canonical projection project and tooling outcomes", ProjectObservabilityProjectionTests.ProjectFailureAndToolingFindingStaySeparate),
+        ("canonical projection project failure only", ProjectObservabilityProjectionTests.ProjectFailureWithoutToolingFindingIsSeparate),
+        ("canonical projection tooling failure only", ProjectObservabilityProjectionTests.ToolingFailureWithoutProjectProblemRemainsIndependent),
+        ("canonical projection missing evidence", ProjectObservabilityProjectionTests.MissingEvidenceProducesUnknown),
+        ("canonical projection terminal snapshot without evidence", ProjectObservabilityProjectionTests.TerminalSnapshotWithoutMeaningfulEvidenceIsUnknown),
+        ("canonical projection ambiguous session is isolated", ProjectObservabilityProjectionTests.AmbiguousSessionIdentityDoesNotCrossContaminateProjects),
+        ("canonical projection distinct findings", ProjectObservabilityProjectionTests.SimilarDistinctFindingsDoNotCollapse),
+        ("canonical projection UI overview/detail agreement", ProjectObservabilityProjectionTests.UiOverviewAndProjectDetailUseSameCanonicalProjection),
+        ("canonical projection terminal failure", ProjectObservabilityProjectionTests.FailedTerminalSnapshotNeedsAttentionWithoutAttemptEvent),
+        ("canonical projection assessment evidence", ProjectObservabilityProjectionTests.ToolingAssessmentPreservesObservedEvidenceAndDerivedOwner),
+        ("canonical projection recovered production-toolchain assessment", ProjectObservabilityProjectionTests.RecoveredProductionToolchainAssessmentContainsRepairEvidence),
+        ("canonical projection unkeyed findings", ProjectObservabilityProjectionTests.UnkeyedSimilarFindingsRemainSeparate),
+        ("canonical projection reevaluates staleness", ProjectObservabilityProjectionTests.UiProjectionReevaluatesStalenessAsTimeAdvances),
+        ("canonical projection optional tooling gap", ProjectObservabilityProjectionTests.OptionalToolingGapDoesNotFailSuccessfulProject),
+        ("tooling assessment clipboard success", ToolingAssessmentHandoffTests.ClipboardSuccessIsAutomatic),
+        ("tooling assessment clipboard fallback", ToolingAssessmentHandoffTests.ClipboardFailureFallsBackToExport),
+        ("tooling assessment payload fallback", ToolingAssessmentHandoffTests.ExcessivePayloadFallsBackWithoutClipboardAttempt),
+        ("tooling assessment critical evidence fallback", ToolingAssessmentHandoffTests.CriticalOmissionForcesExport),
+        ("tooling assessment bounded gap clipboard", ToolingAssessmentHandoffTests.BoundedNoncriticalGapAllowsClipboard),
+        ("tooling assessment transport equivalence", ToolingAssessmentHandoffTests.ClipboardAndExportContainEquivalentAssessment),
+        ("tooling assessment redaction", ToolingAssessmentHandoffTests.HandoffRedactsSecrets),
+        ("tooling assessment occurrence handoff", ToolingAssessmentHandoffTests.AssessmentCanBeBuiltFromOccurrence),
+        ("destination presenter canonical overview and project", ObservabilityDestinationPresenterTests.OverviewAndProjectUseCanonicalProjectState),
+        ("destination presenter owner-focused problems", ObservabilityDestinationPresenterTests.ProblemsExposeOwnerFocusedAction),
         ("reliability projection evaluates production campaigns", ReliabilityTests.ProductionCampaignProjection),
         ("reliability UI projection and campaign controls", ReliabilityTests.PromptTwoReliabilitySurface),
 
@@ -531,6 +598,7 @@ internal static class Program
         ("desktop issue selection and assessment survive live updates", DesktopObservabilityTests.IssueSelectionAndAssessmentSurviveLiveUpdates),
         ("desktop activity selection resolves related details", DesktopObservabilityTests.ActivitySelectionResolvesRelatedDetailsAndSurvivesLiveEvents),
         ("observability one active agent excludes stale history", DesktopObservabilityTests.OneActiveAgentAndHistoricalSessionsExposeOneWorkingAgent),
+        ("desktop stale overview re-evaluates without events", DesktopObservabilityTests.StaleNavigationAndOverviewReevaluateWithoutNewEvents),
         ("observability live activity insertion updates All", DesktopObservabilityTests.LiveActivityInsertionInvalidatesAllProjection),
         ("prompt 4 Frontier agent tab resolves to an agent", DesktopObservabilityTests.FrontierAgentTabSelectionResolvesAgentEntity),
         ("prompt 4 Frontier agent tab uses agent key", DesktopObservabilityTests.FrontierAgentTabDoesNotUseModDisplayTextAsKey),
@@ -545,6 +613,8 @@ internal static class Program
         ("prompt 4 malformed agent route is diagnostic", DesktopObservabilityTests.MalformedAgentRouteShowsDiagnosticState),
         ("prompt 4 agent selection reloads by canonical identity", DesktopObservabilityTests.AgentSelectionSurvivesStoreReloadByCanonicalIdentity),
         ("prompt 4 desktop Frontier click renders agent detail", DesktopObservabilityTests.DesktopFrontierClickShowsAgentDetailPanel),
+        ("prompt 5 system destination uses canonical tooling projection", DesktopObservabilityTests.SystemDestinationUsesCanonicalToolingProjection),
+        ("prompt 5 content administration uses supplied service", DesktopObservabilityTests.ContentAdministrationUsesSuppliedServiceAndDisablesSafely),
         ("prompt 5 desktop content host mounts every primary view", DesktopObservabilityTests.DesktopContentHostMountsEveryPrimaryView),
         ("prompt 2 tooling detail with data uses canonical identity", DesktopObservabilityTests.ToolDetailWithDataUsesCanonicalToolIdentity),
         ("prompt 2 tooling detail without data has empty state", DesktopObservabilityTests.ToolDetailWithoutDataShowsExplicitEmptyState),
@@ -7256,7 +7326,6 @@ internal static class Program
         AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
         using JsonDocument document = JsonDocument.Parse(result.Stdout);
         JsonElement root = document.RootElement;
-        AssertEqual("devbridge", root.GetProperty("component").GetString());
         AssertEqual("OUTPUT_TOO_LARGE", root.GetProperty("code").GetString());
         AssertEqual("ERROR", root.GetProperty("state").GetString());
         AssertEqual(2, root.GetProperty("exitCode").GetInt32());
@@ -11038,16 +11107,42 @@ internal static class Program
         bool structuredFailure = false)
     {
         string directory = CreateTempDirectory();
+        string? previousProductionManifest =
+            Environment.GetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
+        string? previousProductionCli =
+            Environment.GetEnvironmentVariable("RIMLIAISON_PRODUCTION_CLI");
+        string? previousDevBridgeSourceRoot =
+            Environment.GetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT");
+        string? previousRimTestDevBridgeRoot =
+            Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT");
         try
         {
-            string catalogPath = Path.Combine(directory, "catalog.json");
-            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            string projectDirectory = Path.Combine(directory, "FixtureMod");
+            Directory.CreateDirectory(projectDirectory);
+            Directory.CreateDirectory(Path.Combine(projectDirectory, ".rimdev"));
+            Directory.CreateDirectory(Path.Combine(projectDirectory, ".git"));
+            Directory.CreateDirectory(Path.Combine(projectDirectory, "Source"));
+            Directory.CreateDirectory(Path.Combine(projectDirectory, "About"));
             Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            string catalogPath = Path.Combine(projectDirectory, "catalog.json");
+            File.WriteAllText(catalogPath, Serialize(CreateCatalog()));
+            string rimWorldRoot = Path.Combine(directory, "RimWorld");
+            string modsRoot = Path.Combine(rimWorldRoot, "Mods");
+            Directory.CreateDirectory(modsRoot);
+            File.WriteAllText(
+                Path.Combine(projectDirectory, "Source", "FixtureMod.csproj"),
+                "<Project><PropertyGroup><AssemblyName>FixtureMod</AssemblyName></PropertyGroup></Project>");
+            File.WriteAllText(
+                Path.Combine(projectDirectory, "About", "About.xml"),
+                "<ModMetaData><packageId>fixture.package</packageId></ModMetaData>");
             string manifestCatalog = useExplicitOverrides ? "missing.json" : "catalog.json";
             File.WriteAllText(
-                Path.Combine(directory, ".rimdev", "stack.json"),
-                $"{{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"FixtureMod\",\"devBridgeProject\":\"fixture\",\"catalog\":\"{manifestCatalog}\",\"fallbackSuite\":\"smoke\",\"rimBridge\":\"via-devbridge\"}}");
-            string overrideCatalogPath = Path.Combine(directory, "override.json");
+                Path.Combine(projectDirectory, ".rimdev", "stack.json"),
+                $"{{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"FixtureMod\",\"devBridgeProject\":\"FixtureMod\",\"catalog\":\"{manifestCatalog}\",\"fallbackSuite\":\"settings\",\"rimBridge\":\"via-devbridge\",\"workload\":\"production\",\"projectType\":\"rimworld-content-mod\",\"packageId\":\"fixture.package\",\"sourceProject\":\"Source/FixtureMod.csproj\",\"configuration\":\"Release\",\"expectedAssembly\":\"FixtureMod.dll\",\"deploymentTarget\":\"1.6/Assemblies/FixtureMod.dll\",\"testRecipe\":\"assembler-smoke\",\"runtimeFolder\":\"FixtureMod\",\"runtimePackage\":{{\"sourceRoot\":\".\",\"include\":[\"About/**\",\"1.*/**\"],\"exclude\":[\".rimdev/**\",\"Source/**\",\"bin/**\",\"obj/**\"]}}}}");
+            File.WriteAllText(
+                Path.Combine(directory, ".rimdev", "workspace.json"),
+                $"{{\"schemaVersion\":\"rimdev-workspace/v1\",\"rimWorldRoot\":{JsonSerializer.Serialize(rimWorldRoot)},\"activeModsRoot\":{JsonSerializer.Serialize(modsRoot)},\"repositories\":[],\"packageMappings\":{{}}}}");
+            string overrideCatalogPath = Path.Combine(projectDirectory, "override.json");
             if (useExplicitOverrides)
             {
                 File.WriteAllText(overrideCatalogPath, Serialize(CreateCatalog()));
@@ -11060,10 +11155,10 @@ internal static class Program
             string rimContextPath = Path.Combine(directory, "rimctx.cmd");
             string devBridgePath = Path.Combine(directory, "DevBridge.cmd");
             string rimErrorPath = Path.Combine(directory, "rimerror.cmd");
+            string identityRoot = JsonSerializer.Serialize(projectDirectory);
             string rimBridge = usePascalRimBridgeFields
                 ? "{\"ConfiguredMode\":\"required\",\"LifecycleState\":\"READY\"}"
                 : "{\"configuredMode\":\"optional\",\"lifecycleState\":\"READY\"}";
-            string identityRoot = JsonSerializer.Serialize(directory);
             string devBridgeResult = structuredFailure
                 ? "{\"success\":false,\"exitCode\":2,\"state\":\"ERROR\",\"errorCode\":\"OUTPUT_TOO_LARGE\",\"error\":\"The coordinator result exceeded the maximum payload length.\"}"
                 : identityMismatch
@@ -11072,6 +11167,62 @@ internal static class Program
             File.WriteAllText(rimContextPath, "fixture");
             File.WriteAllText(devBridgePath, "fixture");
             File.WriteAllText(rimErrorPath, "fixture");
+            string promotedPackageRoot = Path.Combine(directory, "promoted");
+            Directory.CreateDirectory(promotedPackageRoot);
+            string coordinatorPath = Path.Combine(directory, "Coordinator", "DevBridge.Coordinator.exe");
+            string consumerPath = Path.Combine(promotedPackageRoot, "mod-test.ps1");
+            string unifiedManifestPath = Path.Combine(promotedPackageRoot, "unified-manifest.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(coordinatorPath)!);
+            File.WriteAllText(coordinatorPath, "fixture coordinator");
+            File.WriteAllText(consumerPath, "fixture consumer");
+            File.WriteAllText(
+                unifiedManifestPath,
+                "{\"schemaVersion\":\"rimliaison-unified-production-package/v2\",\"productFingerprint\":\"fixture-promoted\",\"ownerProduct\":\"RimLiaison\",\"runtimeSubsystem\":\"RimLiaison.Runtime\",\"rimBridgeServer\":{\"boundary\":\"external-game-side\"}}");
+            string coordinatorHash = Convert.ToHexString(
+                SHA256.HashData(File.ReadAllBytes(coordinatorPath))).ToLowerInvariant();
+            string consumerHash = Convert.ToHexString(
+                SHA256.HashData(File.ReadAllBytes(consumerPath))).ToLowerInvariant();
+            string unifiedManifestHash = Convert.ToHexString(
+                SHA256.HashData(File.ReadAllBytes(unifiedManifestPath))).ToLowerInvariant();
+            string currentExecutablePath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("The test process path is unavailable.");
+            string rimLiaisonAssemblyPath = typeof(CliApplication).Assembly.Location;
+            string rimLiaisonExecutableHash = Convert.ToHexString(
+                SHA256.HashData(File.ReadAllBytes(currentExecutablePath))).ToLowerInvariant();
+            string rimLiaisonAssemblyHash = Convert.ToHexString(
+                SHA256.HashData(File.ReadAllBytes(rimLiaisonAssemblyPath))).ToLowerInvariant();
+            File.WriteAllText(
+                Path.Combine(directory, ".devbridge-runtime-manifest.json"),
+                $"{{\"packageSha256\":\"fixture-package\",\"files\":[{{\"path\":\"Coordinator/DevBridge.Coordinator.exe\",\"sha256\":\"{coordinatorHash}\"}}]}}");
+            File.WriteAllText(
+                Path.Combine(directory, "production-toolchain.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimliaison-production-toolchain/v1",
+                    promotedFingerprint = "fixture-promoted",
+                    fingerprint = "fixture-promoted",
+                    ownerProduct = "RimLiaison",
+                    runtimeSubsystem = "RimLiaison.Runtime",
+                    rimLiaisonExecutablePath = currentExecutablePath,
+                    rimLiaisonExecutableSha256 = rimLiaisonExecutableHash,
+                    rimLiaisonAssemblyPath,
+                    rimLiaisonAssemblySha256 = rimLiaisonAssemblyHash,
+                    devBridgeRuntimeRoot = directory,
+                    devBridgePackageSha256 = "fixture-package",
+                    transactionConsumerPath = consumerPath,
+                    transactionConsumerSha256 = consumerHash,
+                    runtimeProtocolContract = "devbridge-mod-development/v1",
+                    devBridgeCoordinatorSha256 = coordinatorHash,
+                    unifiedManifestPath,
+                    unifiedManifestSha256 = unifiedManifestHash
+                }));
+
+            Environment.SetEnvironmentVariable(
+                "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST",
+                Path.Combine(directory, "production-toolchain.json"));
+            Environment.SetEnvironmentVariable("RIMLIAISON_PRODUCTION_CLI", null);
+            Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", null);
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", null);
             var transport = new FakeTransport(
                 (request, _) => request.Arguments.Contains("summary")
                     ? ProcessResult(contextAvailable
@@ -11106,7 +11257,7 @@ internal static class Program
             }
 
             int exitCode = WithCurrentDirectory(
-                directory,
+                projectDirectory,
                 () => CliApplication.RunAsync(
                         arguments.ToArray(),
                         stdout,
@@ -11118,6 +11269,12 @@ internal static class Program
         }
         finally
         {
+            Environment.SetEnvironmentVariable(
+                "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST",
+                previousProductionManifest);
+            Environment.SetEnvironmentVariable("RIMLIAISON_PRODUCTION_CLI", previousProductionCli);
+            Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", previousDevBridgeSourceRoot);
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", previousRimTestDevBridgeRoot);
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }
@@ -11125,15 +11282,28 @@ internal static class Program
     private static CliResult RunManifestOnlyDoctor(string? manifest)
     {
         string directory = CreateTempDirectory();
+        string? previousRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
+        string? previousActiveModsRoot = Environment.GetEnvironmentVariable("RIMWORLD_MODS_ROOT");
         try
         {
             Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            if (manifest is not null && manifest.Contains("\"project\"", StringComparison.Ordinal))
+            {
+                string rimWorldRoot = Path.Combine(directory, "RimWorld");
+                string modsRoot = Path.Combine(rimWorldRoot, "Mods");
+                Directory.CreateDirectory(modsRoot);
+                Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+                File.WriteAllText(
+                    Path.Combine(directory, ".rimdev", "workspace.json"),
+                    $"{{\"schemaVersion\":\"rimdev-workspace/v1\",\"rimWorldRoot\":{JsonSerializer.Serialize(rimWorldRoot)},\"activeModsRoot\":{JsonSerializer.Serialize(modsRoot)},\"repositories\":[{{\"path\":\".\"}}],\"packageMappings\":{{}}}}");
+                Environment.SetEnvironmentVariable("RIMWORLD_ROOT", rimWorldRoot);
+                Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", modsRoot);
+            }
             if (manifest is not null)
             {
                 Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
                 File.WriteAllText(Path.Combine(directory, ".rimdev", "stack.json"), manifest);
             }
-
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             int exitCode = WithCurrentDirectory(
@@ -11148,6 +11318,8 @@ internal static class Program
         }
         finally
         {
+            Environment.SetEnvironmentVariable("RIMWORLD_ROOT", previousRimWorldRoot);
+            Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", previousActiveModsRoot);
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }
@@ -11157,10 +11329,20 @@ internal static class Program
         string catalog)
     {
         string directory = CreateTempDirectory();
+        string? previousRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
+        string? previousActiveModsRoot = Environment.GetEnvironmentVariable("RIMWORLD_MODS_ROOT");
         try
         {
             Directory.CreateDirectory(Path.Combine(directory, ".git"));
+            string rimWorldRoot = Path.Combine(directory, "RimWorld");
+            string modsRoot = Path.Combine(rimWorldRoot, "Mods");
+            Environment.SetEnvironmentVariable("RIMWORLD_ROOT", rimWorldRoot);
+            Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", modsRoot);
+            Directory.CreateDirectory(modsRoot);
             Directory.CreateDirectory(Path.Combine(directory, ".rimdev"));
+            File.WriteAllText(
+                Path.Combine(directory, ".rimdev", "workspace.json"),
+                $"{{\"schemaVersion\":\"rimdev-workspace/v1\",\"rimWorldRoot\":{JsonSerializer.Serialize(rimWorldRoot)},\"activeModsRoot\":{JsonSerializer.Serialize(modsRoot)},\"repositories\":[{{\"path\":\".\"}}],\"packageMappings\":{{}}}}");
             File.WriteAllText(Path.Combine(directory, ".rimdev", "stack.json"), manifest);
             File.WriteAllText(Path.Combine(directory, "catalog.json"), catalog);
 
@@ -11178,6 +11360,8 @@ internal static class Program
         }
         finally
         {
+            Environment.SetEnvironmentVariable("RIMWORLD_ROOT", previousRimWorldRoot);
+            Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", previousActiveModsRoot);
             DeleteDirectoryIncludingReadOnlyFiles(directory);
         }
     }

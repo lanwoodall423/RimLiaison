@@ -77,7 +77,10 @@ internal sealed record ProductionToolchainBindingFailure(
     IReadOnlyList<string> RejectedCandidates,
     string? ExpectedFingerprint = null,
     string? CurrentExecutablePath = null,
-    string? DevBridgeRuntimeRoot = null)
+    string? DevBridgeRuntimeRoot = null,
+    string? ManifestPath = null,
+    IReadOnlyList<string>? ExpectedArtifacts = null,
+    IReadOnlyList<string>? MismatchingArtifacts = null)
 {
     public object ToEvidence() => new
     {
@@ -88,7 +91,10 @@ internal sealed record ProductionToolchainBindingFailure(
         rejectedCandidates = RejectedCandidates,
         expectedFingerprint = ExpectedFingerprint,
         currentExecutablePath = CurrentExecutablePath,
-        devBridgeRuntimeRoot = DevBridgeRuntimeRoot
+        devBridgeRuntimeRoot = DevBridgeRuntimeRoot,
+        manifestPath = ManifestPath,
+        expectedArtifacts = ExpectedArtifacts,
+        mismatchingArtifacts = MismatchingArtifacts
     };
 }
 
@@ -144,6 +150,10 @@ internal sealed class ProductionToolchainManifest
     public string? UnifiedManifestPath { get; init; }
     [JsonPropertyName("unifiedManifestSha256")]
     public string? UnifiedManifestSha256 { get; init; }
+    [JsonPropertyName("promotionPackagePath")]
+    public string? PromotionPackagePath { get; init; }
+    [JsonPropertyName("promotionPackageSha256")]
+    public string? PromotionPackageSha256 { get; init; }
 }
 
 internal static class ProductionToolchainBindingResolver
@@ -154,11 +164,41 @@ internal static class ProductionToolchainBindingResolver
     private const string CliEnvironment = "RIMLIAISON_PRODUCTION_CLI";
 
     public static ProductionToolchainBindingResolution Resolve(
-        string _repositoryRoot,
+        string repositoryRoot,
         string? requestedCliPath = null,
         string? requestedDevBridgePath = null,
         string? requestedDevBridgeRoot = null,
-        string? currentExecutablePath = null)
+        string? currentExecutablePath = null) =>
+        ResolveCore(
+            repositoryRoot,
+            requestedCliPath,
+            requestedDevBridgePath,
+            requestedDevBridgeRoot,
+            currentExecutablePath,
+            requireCurrentExecutable: true);
+
+    /// <summary>
+    /// Verifies the already-promoted production identity without consulting the
+    /// caller's executable, source checkout, or source-checkout environment.
+    /// This is the only binding operation allowed during restoration.
+    /// </summary>
+    internal static ProductionToolchainBindingResolution ResolvePromotedIdentity(
+        string repositoryRoot) =>
+        ResolveCore(
+            repositoryRoot,
+            requestedCliPath: null,
+            requestedDevBridgePath: null,
+            requestedDevBridgeRoot: null,
+            currentExecutablePath: null,
+            requireCurrentExecutable: false);
+
+    private static ProductionToolchainBindingResolution ResolveCore(
+        string _repositoryRoot,
+        string? requestedCliPath,
+        string? requestedDevBridgePath,
+        string? requestedDevBridgeRoot,
+        string? currentExecutablePath,
+        bool requireCurrentExecutable)
     {
         var rejected = new List<string>();
         string? manifestPath = Environment.GetEnvironmentVariable(ManifestEnvironment);
@@ -207,33 +247,38 @@ internal static class ProductionToolchainBindingResolver
 
         string cliPath = FullPath(manifest.RimLiaisonExecutablePath!);
         string assemblyPath = FullPath(manifest.RimLiaisonAssemblyPath!);
-        string? configuredCli = Environment.GetEnvironmentVariable(CliEnvironment);
-        if (!string.IsNullOrWhiteSpace(configuredCli) && !SamePath(configuredCli, cliPath))
+        string currentCli = cliPath;
+        if (requireCurrentExecutable)
         {
-            rejected.Add(FullPath(configuredCli));
-            return Fail(
-                "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
-                "A production CLI override does not match the unified promoted CLI.",
-                "Use the promoted CLI recorded by the production manifest.",
-                rejected,
-                manifestPath,
-                manifest.PromotedFingerprint,
-                configuredCli);
+            string? configuredCli = Environment.GetEnvironmentVariable(CliEnvironment);
+            if (!string.IsNullOrWhiteSpace(configuredCli) && !SamePath(configuredCli, cliPath))
+            {
+                rejected.Add(FullPath(configuredCli));
+                return Fail(
+                    "PRODUCTION_TOOLCHAIN_OVERRIDE_REJECTED",
+                    "A production CLI override does not match the unified promoted CLI.",
+                    "Use the promoted CLI recorded by the production manifest.",
+                    rejected,
+                    manifestPath,
+                    manifest.PromotedFingerprint,
+                    configuredCli);
+            }
+
+            currentCli = FullPath(currentExecutablePath ?? Environment.ProcessPath ?? string.Empty);
+            if (!SamePath(currentCli, cliPath))
+            {
+                rejected.Add(currentCli);
+                return Fail(
+                    "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
+                    "Production execution was requested from a non-promoted RimLiaison executable.",
+                    "Invoke the immutable promoted RimLiaison executable; use --experimental only for qualification or tooling work.",
+                    rejected,
+                    manifestPath,
+                    manifest.PromotedFingerprint,
+                    currentCli);
+            }
         }
 
-        string currentCli = FullPath(currentExecutablePath ?? Environment.ProcessPath ?? string.Empty);
-        if (!SamePath(currentCli, cliPath))
-        {
-            rejected.Add(currentCli);
-            return Fail(
-                "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
-                "Production execution was requested from a non-promoted RimLiaison executable.",
-                "Invoke the immutable promoted RimLiaison executable; use --experimental only for qualification or tooling work.",
-                rejected,
-                manifestPath,
-                manifest.PromotedFingerprint,
-                currentCli);
-        }
 
         string runtimeRoot = FullPath(manifest.DevBridgeRuntimeRoot!);
         if (!string.IsNullOrWhiteSpace(requestedDevBridgeRoot) &&
@@ -270,9 +315,18 @@ internal static class ProductionToolchainBindingResolver
         string consumerPath = FullPath(manifest.TransactionConsumerPath!);
         string unifiedManifestPath = FullPath(manifest.UnifiedManifestPath!);
         string packageRoot = FullPath(Path.GetDirectoryName(unifiedManifestPath) ?? string.Empty);
-        if (!File.Exists(cliPath) || !File.Exists(assemblyPath) ||
-            !File.Exists(commandPath) || !File.Exists(consumerPath) ||
-            !File.Exists(unifiedManifestPath))
+        string[] expectedArtifacts =
+        [
+            cliPath,
+            assemblyPath,
+            commandPath,
+            consumerPath,
+            unifiedManifestPath
+        ];
+        string[] missingArtifacts = expectedArtifacts
+            .Where(static path => !File.Exists(path))
+            .ToArray();
+        if (missingArtifacts.Length > 0)
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_ARTIFACT_MISSING",
@@ -282,7 +336,9 @@ internal static class ProductionToolchainBindingResolver
                 manifestPath,
                 manifest.PromotedFingerprint,
                 currentCli,
-                runtimeRoot);
+                runtimeRoot,
+                expectedArtifacts,
+                missingArtifacts);
         }
 
         if (!IsWithin(packageRoot, consumerPath) || !IsWithin(packageRoot, unifiedManifestPath))
@@ -298,20 +354,23 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
-        foreach (string variable in new[] { "DEVBRIDGE_SOURCE_ROOT", "RIMTEST_DEVBRIDGE_ROOT" })
+        if (requireCurrentExecutable)
         {
-            string? value = Environment.GetEnvironmentVariable(variable);
-            if (!string.IsNullOrWhiteSpace(value) && !SamePath(value, runtimeRoot))
+            foreach (string variable in new[] { "DEVBRIDGE_SOURCE_ROOT", "RIMTEST_DEVBRIDGE_ROOT" })
             {
-                return Fail(
-                    "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
-                    $"Production environment variable {variable} points at a source checkout instead of the installed runtime.",
-                    "Clear the source-checkout override; production binds the staged transaction consumer directly.",
-                    rejected,
-                    manifestPath,
-                    manifest.PromotedFingerprint,
-                    currentCli,
-                    runtimeRoot);
+                string? value = Environment.GetEnvironmentVariable(variable);
+                if (!string.IsNullOrWhiteSpace(value) && !SamePath(value, runtimeRoot))
+                {
+                    return Fail(
+                        "PRODUCTION_TOOLCHAIN_SOURCE_FALLBACK",
+                        $"Production environment variable {variable} points at a source checkout instead of the installed runtime.",
+                        "Clear the source-checkout override; production binds the staged transaction consumer directly.",
+                        rejected,
+                        manifestPath,
+                        manifest.PromotedFingerprint,
+                        currentCli,
+                        runtimeRoot);
+                }
             }
         }
 
@@ -342,28 +401,75 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
-        string cliHash = Sha256(cliPath);
-        string assemblyHash = Sha256(assemblyPath);
-        string consumerHash = Sha256(consumerPath);
-        string unifiedManifestHash = Sha256(unifiedManifestPath);
-        string packageHash = ReadRuntimePackageHash(runtimeManifestPath);
-        string coordinatorHash = ReadRuntimeFileHash(runtimeManifestPath, "Coordinator/DevBridge.Coordinator.exe");
-        if (!string.Equals(cliHash, manifest.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(assemblyHash, manifest.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(packageHash, manifest.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(coordinatorHash, manifest.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(consumerHash, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(unifiedManifestHash, manifest.UnifiedManifestSha256, StringComparison.OrdinalIgnoreCase))
+        string cliHash;
+        string assemblyHash;
+        string consumerHash;
+        string unifiedManifestHash;
+        string packageHash;
+        string coordinatorHash;
+        string recordedCoordinatorHash;
+        string coordinatorPath = Path.Combine(
+            runtimeRoot,
+            "Coordinator",
+            "DevBridge.Coordinator.exe");
+        try
+        {
+            cliHash = Sha256(cliPath);
+            assemblyHash = Sha256(assemblyPath);
+            consumerHash = Sha256(consumerPath);
+            unifiedManifestHash = Sha256(unifiedManifestPath);
+            packageHash = ReadRuntimePackageHash(runtimeManifestPath);
+            recordedCoordinatorHash = ReadRuntimeFileHash(
+                runtimeManifestPath,
+                "Coordinator/DevBridge.Coordinator.exe");
+            coordinatorHash = Sha256(coordinatorPath);
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or JsonException or CryptographicException)
         {
             return Fail(
-                "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
-                "Unified production artifact hashes do not match the production manifest.",
-                "Re-promote the complete unified toolchain atomically and retry.",
+                "PRODUCTION_TOOLCHAIN_ARTIFACT_UNREADABLE",
+                $"A promoted production artifact could not be read: {exception.Message}",
+                "Repair or reinstall the unified promoted production package.",
                 rejected,
                 manifestPath,
                 manifest.PromotedFingerprint,
                 currentCli,
                 runtimeRoot);
+        }
+        var mismatching = new List<string>();
+        if (!string.Equals(cliHash, manifest.RimLiaisonExecutableSha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(cliPath);
+        if (!string.Equals(assemblyHash, manifest.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(assemblyPath);
+        if (!string.Equals(packageHash, manifest.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(runtimeManifestPath);
+        if (!string.Equals(recordedCoordinatorHash, manifest.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(coordinatorHash, manifest.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(coordinatorPath);
+        if (!string.Equals(consumerHash, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(consumerPath);
+        if (!string.Equals(unifiedManifestHash, manifest.UnifiedManifestSha256, StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(unifiedManifestPath);
+        if (mismatching.Count > 0)
+        {
+            return Fail(
+                "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
+                "Unified production artifact hashes do not match the production manifest.",
+                "Repair or reinstall the unified promoted production package.",
+                rejected,
+                manifestPath,
+                manifest.PromotedFingerprint,
+                currentCli,
+                runtimeRoot,
+                [
+                    cliPath,
+                    assemblyPath,
+                    Path.Combine(runtimeRoot, "DevBridge.cmd"),
+                    consumerPath,
+                    unifiedManifestPath
+                ],
+                mismatching);
         }
         if (!UnifiedManifestOwnsProductionRuntime(
                 unifiedManifestPath,
@@ -425,7 +531,9 @@ internal static class ProductionToolchainBindingResolver
         string? manifestPath,
         string? expectedFingerprint = null,
         string? currentCli = null,
-        string? runtimeRoot = null)
+        string? runtimeRoot = null,
+        IReadOnlyList<string>? expectedArtifacts = null,
+        IReadOnlyList<string>? mismatchingArtifacts = null)
     {
         if (!string.IsNullOrWhiteSpace(manifestPath))
         {
@@ -440,7 +548,10 @@ internal static class ProductionToolchainBindingResolver
                 rejected.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                 expectedFingerprint,
                 currentCli,
-                runtimeRoot));
+                runtimeRoot,
+                ManifestPath: manifestPath,
+                ExpectedArtifacts: expectedArtifacts,
+                MismatchingArtifacts: mismatchingArtifacts));
     }
 
     private static bool TryReadManifest(

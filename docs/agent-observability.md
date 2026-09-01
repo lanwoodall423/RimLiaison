@@ -1,5 +1,11 @@
 # RimLiaison agent observability
 
+The architecture-stage redesign is specified in
+[`observability-redesign-architecture.md`](observability-redesign-architecture.md).
+That document is authoritative for the canonical owner-facing projection and
+the migration away from independent presentation projections; this document
+remains the compatibility and persistence contract.
+
 RimLiaison now keeps product observability state locally and independently of
 OpenTelemetry. One `AgentObservabilityRun` represents a RimLiaison invocation,
 and each mod session belongs to a durable logical development agent when the
@@ -181,35 +187,41 @@ Each `AgentObservabilitySession` represents one runtime activity within a run.
 Sessions may have distinct logical worker, process, and correlation identities,
 but those values are never navigation/workspace identities.
 
+The desktop keeps the primary owner-facing surfaces intentionally small:
+
 - `All` is the default production overview. It groups top-level workspaces by
-  stable entity identity, shows workload (`production` or `qualification`),
-  toolchain state (`promoted` or `experimental`), current stage/operation,
-  blocking state, elapsed time, latest event, and completion outcome, while
-  retaining the chronological activity stream below.
-- `Issues` shows unresolved and recovered structured issues, supports bounded checkbox selection, opens supporting activity, and exposes `Copy to ChatGPT` plus full-bundle actions. Standard human triage is: select/check the current issue(s), click `Copy to ChatGPT`, paste the clipboard contents into ChatGPT. No export or LLM/browser step is required. Categories are rendered as mod defects, required-validation blockers, tooling/infrastructure incidents, recovered incidents, or optional validation gaps.
-- `Recommendations` is a separate non-blocking surface for tooling and validation
-  improvements. It shows owner, originating identity, recommendation text,
-  evidence, status, and whether production was affected; recommendations never
-  inherit failed-run styling.
-- Each `(entityType, canonicalEntityId)` gets one navigation item and an
-  end-to-end entity view with stage progress, current activity, files, tools,
-  commands, build/test results, issue state, and selectable current/past
-  sessions. Aggregated activity remains selectable by stable event ID.
-- The Issues and Recommendations surfaces accept a bounded text filter for mod,
-  tool, agent, stage, category, operation, owner, and evidence terms.
+  stable entity identity and shows state, action required, current/last meaningful
+  operation, last attempt result, last meaningful activity time, current problem,
+  completeness, and tooling-finding count. The activity list is secondary context.
+- `Issues` shows unresolved and recovered structured problems, supports bounded checkbox
+  selection, opens supporting activity, and exposes `Copy to ChatGPT` plus full-bundle
+  actions. Standard human triage is: select/check the current issue(s), click `Copy to
+  ChatGPT`, paste the clipboard contents into ChatGPT. No export or LLM/browser step is
+  required. Categories are rendered as project defects, validation blockers,
+  tooling/infrastructure incidents, recovered incidents, or optional validation gaps.
+- `Recommendations` remains a compatibility surface for non-blocking improvement
+  records. New owner-facing tooling assessment is sourced from canonical Tooling Findings.
+- Each `(entityType, canonicalEntityId)` gets one navigation item and an end-to-end
+  entity view with stage progress, current activity, files, tools, commands,
+  build/test results, problem state, and selectable current/past sessions.
+- The Issues and Recommendations surfaces accept a bounded text filter for mod, tool,
+  agent, stage, category, operation, owner, and evidence terms. A filter hides rows;
+  it never changes canonical project state.
 
 The desktop presentation uses persisted Unix-millisecond timestamps from events,
-issues, and agent snapshots. Production and activity rows sort by the numeric
-timestamp descending; invalid or missing values sort last, with stable identity
-tie-breakers. Local date/time formatting is applied only after sorting.
+issues, and agent snapshots. Production and activity rows sort by numeric timestamp
+descending; invalid or missing values sort last, with stable identity tie-breakers.
+Local date/time formatting is applied only after sorting. Owner-facing column labels
+use explicit meanings such as `Last meaningful activity`, `Last attempt`,
+`Event time`, `Meaningful event`, `Current problem`, and `Tooling findings`.
 
 Issues and recommendations are projected as groups, not repeated display rows.
 Grouping uses a centralized identity: normalized persisted fingerprint first,
 then capability or operation identity; records without a trustworthy stable key
 remain separate. Each parent retains the newest record and exposes occurrence
 records in newest-first order. Agent-sharing counts use only distinct supplied
-logical-agent identities. Generated session/agent IDs and unknown identities do
-not become agents; those records use occurrence wording instead.
+logical-agent identities. Generated session/agent IDs and unknown identities
+do not become agents; those records use occurrence wording instead.
 
 The store subscription is coalesced through a bounded WinForms refresh timer,
 so new authoritative runtime events update the window without forcing the
@@ -219,7 +231,7 @@ navigation uses stable event IDs; no view switch, filter, ChatGPT handoff, or bu
 invokes an LLM. OpenTelemetry remains optional instrumentation for correlation
 and export only.
 
-The ChatGPT handoff is compact, bounded to 8,000 characters, redacted, and causal:
+The ChatGPT handoff is compact, bounded to 64,000 characters, redacted, and causal:
 it labels primary/root failure, propagation, and top-level workflow separately, then
 includes the selected issue identity, date/state/blocking fields, operation/stage,
 owner/reason, process paths, exit/timeout/cancel state, bounded stdout/stderr/
@@ -280,7 +292,9 @@ Clear failures are detected deterministically from tool exceptions, nonzero
 commands, timeouts, build/test failures, and failed-agent state. Conservative
 heuristics identify repeated failed actions, repeated searches/file inspection,
 explicit long waits, workarounds, tool limitations, context issues, and
-integration failures. Low-confidence repeated work is reported as
+integration failures. A single ordinary retry is retained as lifecycle evidence
+but does not become a Tooling Finding; retry findings require explicit repeated/
+excessive evidence. Low-confidence repeated work is reported as
 “Potential repeated work” rather than as a definitive inefficiency claim.
 
 Issues retain the original failure event IDs, retry/rework evidence, related

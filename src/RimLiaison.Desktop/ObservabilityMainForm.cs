@@ -28,6 +28,7 @@ public sealed class ObservabilityMainForm : Form
     private readonly AgentObservabilityUi observabilityUi;
     private readonly ContentIntelligenceObservabilityAdministration? contentAdministration;
     private readonly Action<string> clipboardWriter;
+    private readonly Func<string, bool> toolingAssessmentExporter;
     private readonly IDisposable uiSubscription;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly FlowLayoutPanel navigationPanel;
@@ -69,31 +70,43 @@ public sealed class ObservabilityMainForm : Form
     private readonly ListView pastSessions;
     private readonly Button viewActivityButton;
     private readonly Button issueDetailsButton;
-    private readonly TextBox filterBox;
     private readonly Button loadMoreIssuesButton;
     private readonly Button prepareAssessmentButton;
+    private readonly Button projectPrepareAssessmentButton;
+    private readonly Button overviewPrepareAssessmentButton;
+    private readonly Button systemPrepareAssessmentButton;
     private readonly Button copyChatButton;
     private readonly Button copyBundleButton;
     private readonly Button exportBundleButton;
+    private readonly Panel systemPanel;
+    private readonly ListView systemFindings;
+    private readonly TextBox systemDetails;
+    private readonly Label systemSummary;
     private TabControl agentDetailTabs = null!;
-    private readonly Dictionary<DevelopmentStage, Label> stageControls = [];
-    private readonly Dictionary<string, ListViewItem> issueItems =
-        new(StringComparer.Ordinal);
     private string? renderedIssueDetailSignature;
     private AgentObservabilityIssuesView? renderedIssuesView;
-    private string? renderedIssueSelectionId;
-    private AgentObservabilityAllView? renderedAllView;
-    private long renderedAgentDataRevision = -1;
-    private string? renderedAgentEventId;
-    private long renderedAgentDetailRevision = -1;
+    private AgentObservabilitySystemView? renderedSystemView;
+    private AgentObservabilityAgentView? renderedAgentView;
+    private ToolingFinding? selectedToolingFinding;
+    private readonly TextBox filterBox;
+    private readonly Dictionary<string, ListViewItem> issueItems = new(StringComparer.Ordinal);
+    private readonly Dictionary<DevelopmentStage, Label> stageControls = [];
     private string? bundleJson;
     private string? bundleStatusMessage;
+    private long renderedAgentDataRevision = -1;
+    private long renderedAgentDetailRevision = -1;
+    private string? renderedAgentEventId;
+    private bool suppressProjectSelection;
+    private string? renderedIssueSelectionId;
+    private AgentObservabilityAllView? renderedAllView;
     private string? renderedNavigationSignature;
+    private string? renderedProductionSignature;
     private string? renderedContentSignature;
     private ContentIntelligenceObservabilityView? renderedContentView;
     private string? renderedPastSessionsSignature;
     private bool suppressIssueSelection;
     private bool suppressActivitySelection;
+    private bool suppressContentSelection;
     private bool suppressDetailTabSelection;
     private long stageControlCreations;
     private long stageControlRemovals;
@@ -104,13 +117,15 @@ public sealed class ObservabilityMainForm : Form
     private long issueItemUpdates;
     private long issueItemClears;
     private int disposed;
-
     public ObservabilityMainForm(
         IAgentObservabilityStore? store = null,
         ContentIntelligenceObservabilityAdministration? contentAdministration = null,
-        Action<string>? clipboardWriter = null)
+        Action<string>? clipboardWriter = null,
+        Func<string, bool>? toolingAssessmentExporter = null)
     {
+        this.contentAdministration = contentAdministration;
         this.clipboardWriter = clipboardWriter ?? Clipboard.SetText;
+        this.toolingAssessmentExporter = toolingAssessmentExporter ?? ExportToolingAssessmentFile;
         bool useDefaultStore = store is null;
         AgentObservabilityStore? defaultStore = useDefaultStore
             ? AgentObservabilityStore.CreateDefault(loadPersistedRecords: false)
@@ -172,26 +187,21 @@ public sealed class ObservabilityMainForm : Form
             ForeColor = Color.DimGray,
             TextAlign = ContentAlignment.MiddleLeft
         };
-        contentPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 0, 8, 4) };
-
         productionList = CreateListView(
-            ("Mod / project", 180),
-            ("Agent", 150),
-            ("Workload", 112),
-            ("Toolchain", 112),
-            ("Stage", 112),
-            ("Operation", 180),
-            ("Status", 100),
-            ("Block", 100),
-            ("Latest Date/Time", 150),
-            ("Latest event", 270),
-            ("Outcome", 120));
+            ("Project", 190),
+            ("State", 110),
+            ("Action required", 110),
+            ("Last meaningful activity", 190),
+            ("Last attempt", 100),
+            ("Meaningful activity time", 150),
+            ("Current problem", 300),
+            ("Tooling findings", 120));
         allActivity = CreateListView(
-            ("Date/Time", 150),
-            ("Mod", 180),
+            ("Event time", 150),
+            ("Project", 180),
             ("Stage", 112),
-            ("Activity", 430),
-            ("Status", 100));
+            ("Meaningful event", 430),
+            ("Event result", 100));
         allActivity.SelectedIndexChanged += OnAllActivitySelected;
         allDetails = CreateDetailsBox();
         allAgentSummary = new Label
@@ -204,14 +214,13 @@ public sealed class ObservabilityMainForm : Form
         };
         allPanel = BuildAllPanel();
         issueList = CreateListView(
-            ("State", 92),
-            ("Severity", 92),
-            ("Shared", 160),
-            ("Date/Time", 150),
-            ("Mod", 180),
-            ("Category", 150),
-            ("Summary", 450),
-            ("Issue", 220));
+            ("State", 110),
+            ("Severity", 90),
+            ("Project", 180),
+            ("Owner", 150),
+            ("Problem summary", 430),
+            ("Occurred", 150),
+            ("Next action", 300));
         issueList.CheckBoxes = true;
         issueList.MultiSelect = true;
         issueList.ItemChecked += OnIssueChecked;
@@ -223,10 +232,13 @@ public sealed class ObservabilityMainForm : Form
             PlaceholderText = "Filter mod / agent / issue"
         };
         filterBox.TextChanged += OnFilterChanged;
+        issueDetailsButton = CreateButton("View problem", OnIssueSelected);
         viewActivityButton = CreateButton("View activity", OnViewIssueActivity);
-        issueDetailsButton = CreateButton("Details", OnViewIssueDetails);
+        prepareAssessmentButton = CreateButton("Prepare tooling assessment", OnPrepareAssessment);
+        overviewPrepareAssessmentButton = CreateButton("Prepare tooling assessment", OnPrepareAssessment);
+        projectPrepareAssessmentButton = CreateButton("Prepare tooling assessment", OnPrepareAssessment);
+        systemPrepareAssessmentButton = CreateButton("Prepare tooling assessment", OnPrepareAssessment);
         loadMoreIssuesButton = CreateButton("Load older issues", OnLoadMoreIssues);
-        prepareAssessmentButton = CreateButton("Preview full assessment", OnPrepareAssessment);
         copyChatButton = CreateButton("Copy to ChatGPT", OnCopyForChatGPT);
         copyBundleButton = CreateButton("Copy full diagnostic", OnCopyBundle);
         exportBundleButton = CreateButton("Export full diagnostic", OnExportBundle);
@@ -234,14 +246,33 @@ public sealed class ObservabilityMainForm : Form
         copyBundleButton.Enabled = false;
         exportBundleButton.Enabled = false;
         issuesPanel = BuildIssuesPanel();
+        systemFindings = CreateListView(
+            ("Finding", 260),
+            ("Kind", 150),
+            ("Occurrences", 90),
+            ("Projects", 90),
+            ("Last observed finding", 160),
+            ("Impact", 120));
+        systemFindings.SelectedIndexChanged += OnSystemFindingSelected;
+        systemDetails = CreateDetailsBox();
+        systemSummary = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 76,
+            Padding = new Padding(4),
+            AutoEllipsis = true,
+            ForeColor = Color.DimGray
+        };
+        systemPanel = BuildSystemPanel();
         contentList = CreateListView(
-            ("Time", 84),
+            ("Event time", 84),
             ("State", 110),
             ("Project", 150),
             ("Blueprint", 190),
             ("Reuse", 130),
             ("Archetype", 170),
-            ("Activity", 520));
+            ("Content activity", 520));
+        productionList.SelectedIndexChanged += OnProductionSelected;
         contentList.SelectedIndexChanged += OnContentSelected;
         contentDetails = CreateDetailsBox();
         contentSummary = new Label
@@ -335,28 +366,30 @@ public sealed class ObservabilityMainForm : Form
             FlowDirection = FlowDirection.LeftToRight
         };
         agentActivity = CreateListView(
-            ("Time", 84),
+            ("Event time", 84),
             ("Stage", 112),
-            ("Activity", 560),
-            ("Issues", 90));
+            ("Meaningful event", 560),
+            ("Problems", 90));
         agentActivity.SelectedIndexChanged += OnAgentActivitySelected;
         agentDetails = CreateDetailsBox();
         agentEvidence = CreateDetailsBox();
         agentResults = CreateDetailsBox();
         pastSessions = CreateListView(
-            ("Start", 150),
-            ("Completed", 150),
+            ("Session started", 150),
+            ("Session completed", 150),
             ("Duration", 100),
-            ("Status", 110),
+            ("Session outcome", 110),
             ("Run / session", 300));
         pastSessions.SelectedIndexChanged += OnPastSessionSelected;
         agentPanel = BuildAgentPanel();
 
+        contentPanel = new Panel { Dock = DockStyle.Fill };
         contentPanel.Controls.Add(contentIntelligencePanel);
         contentPanel.Controls.Add(issuesPanel);
         contentPanel.Controls.Add(reliabilityPanel);
-        contentPanel.Controls.Add(allPanel);
+        contentPanel.Controls.Add(systemPanel);
         contentPanel.Controls.Add(agentPanel);
+        contentPanel.Controls.Add(allPanel);
         Controls.Add(contentPanel);
         Controls.Add(streamStatus);
         Controls.Add(viewTitle);
@@ -455,20 +488,60 @@ public sealed class ObservabilityMainForm : Form
     private Panel BuildAllPanel()
     {
         var panel = new Panel { Dock = DockStyle.Fill };
-        productionList.Dock = DockStyle.Top;
-        productionList.Height = 150;
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 38,
+            Padding = new Padding(4, 2, 4, 2),
+            WrapContents = false
+        };
+        actions.Controls.Add(overviewPrepareAssessmentButton);
+        var activitySplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Vertical,
+            SplitterDistance = 680,
+            FixedPanel = FixedPanel.None
+        };
+        activitySplit.Panel1.Controls.Add(allActivity);
+        activitySplit.Panel2.Controls.Add(allDetails);
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
-            SplitterDistance = 410,
+            SplitterDistance = 260,
             FixedPanel = FixedPanel.None
         };
-        split.Panel1.Controls.Add(allActivity);
-        split.Panel2.Controls.Add(allDetails);
+        split.Panel1.Controls.Add(productionList);
+        split.Panel2.Controls.Add(activitySplit);
         panel.Controls.Add(split);
-        panel.Controls.Add(productionList);
+        panel.Controls.Add(actions);
         panel.Controls.Add(allAgentSummary);
+        return panel;
+    }
+
+    private Panel BuildSystemPanel()
+    {
+        var panel = new Panel { Dock = DockStyle.Fill };
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 38,
+            Padding = new Padding(4, 2, 4, 2),
+            WrapContents = false
+        };
+        actions.Controls.Add(systemPrepareAssessmentButton);
+        var split = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            SplitterDistance = 300
+        };
+        split.Panel1.Controls.Add(systemFindings);
+        split.Panel2.Controls.Add(systemDetails);
+        panel.Controls.Add(split);
+        panel.Controls.Add(actions);
+        panel.Controls.Add(systemSummary);
         return panel;
     }
 
@@ -513,6 +586,14 @@ public sealed class ObservabilityMainForm : Form
     private Panel BuildAgentPanel()
     {
         var panel = new Panel { Dock = DockStyle.Fill };
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 38,
+            Padding = new Padding(4, 2, 4, 2),
+            WrapContents = false
+        };
+        actions.Controls.Add(projectPrepareAssessmentButton);
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -529,6 +610,7 @@ public sealed class ObservabilityMainForm : Form
         agentDetailTabs.SelectedIndexChanged += OnAgentDetailTabChanged;
         split.Panel2.Controls.Add(agentDetailTabs);
         panel.Controls.Add(split);
+        panel.Controls.Add(actions);
         panel.Controls.Add(agentProgress);
         panel.Controls.Add(agentHeader);
         return panel;
@@ -720,15 +802,17 @@ public sealed class ObservabilityMainForm : Form
         SetVisible(contentIntelligencePanel, snapshot.View == AgentObservabilityUiView.Content);
         SetVisible(reliabilityPanel, snapshot.View == AgentObservabilityUiView.Reliability);
         SetVisible(agentPanel, snapshot.View == AgentObservabilityUiView.Agent);
+        SetVisible(systemPanel, snapshot.View == AgentObservabilityUiView.System);
         SetText(
             viewTitle,
             snapshot.View switch
             {
-                AgentObservabilityUiView.All => "Production overview",
-                AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Issues",
+                AgentObservabilityUiView.All => "Overview",
+                AgentObservabilityUiView.Issues or AgentObservabilityUiView.Issue => "Problems",
+                AgentObservabilityUiView.System => "System / Diagnostics",
                 AgentObservabilityUiView.Content => "Content Intelligence",
                 AgentObservabilityUiView.Reliability => "Reliability / Burn-in",
-                AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Agent",
+                AgentObservabilityUiView.Agent => snapshot.Agent?.Agent.ModName ?? "Project",
                 _ => "RimLiaison"
             });
 
@@ -756,6 +840,11 @@ public sealed class ObservabilityMainForm : Form
         {
             RefreshReliability(snapshot.Reliability);
         }
+        if (snapshot.System is not null)
+        {
+            RefreshSystem(snapshot.System);
+        }
+
 
         if (snapshot.Agent is not null)
         {
@@ -763,6 +852,7 @@ public sealed class ObservabilityMainForm : Form
         }
         else if (snapshot.View == AgentObservabilityUiView.Agent)
         {
+
             RefreshUnavailableAgent(
                 snapshot.EmptyState ?? "The selected agent could not be resolved.");
         }
@@ -976,6 +1066,9 @@ public sealed class ObservabilityMainForm : Form
             case "issues":
                 observabilityUi.ShowIssues();
                 break;
+            case "system":
+                observabilityUi.ShowSystem();
+                break;
             case "recommendations":
                 observabilityUi.ShowRecommendations();
                 break;
@@ -996,69 +1089,70 @@ public sealed class ObservabilityMainForm : Form
         RefreshFromSnapshot(observabilityUi.Snapshot);
     }
     private void RefreshProductionOverview(
-        IReadOnlyList<AgentObservabilityProductionEntry> entries)
+        IReadOnlyList<ProjectObservabilityState> projects,
+        bool filterApplied = false)
     {
+        ObservabilityOverviewRow[] rows = ObservabilityDestinationPresenters
+            .Overview(projects, filterApplied)
+            .ToArray();
+        string renderSignature = string.Join(
+            '\u001E',
+            rows.Select(row =>
+                string.Join(
+                    '\u001F',
+                    row.ProjectId,
+                    row.State,
+                    row.Action,
+                    row.Activity,
+                    row.Result,
+                    row.Time,
+                    row.Problem,
+                    row.Tooling)));
+        if (string.Equals(renderedProductionSignature, renderSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        renderedProductionSignature = renderSignature;
         string? selectedKey = productionList.SelectedItems.Count == 0
             ? null
             : productionList.SelectedItems[0].Tag as string;
         int topIndex = TopIndex(productionList);
+        suppressProjectSelection = true;
         productionList.BeginUpdate();
         try
         {
-            Dictionary<string, ListViewItem> current = productionList.Items
-                .Cast<ListViewItem>()
-                .Where(item => item.Tag is string)
-                .ToDictionary(item => (string)item.Tag!, StringComparer.Ordinal);
-            for (int index = productionList.Items.Count - 1; index >= 0; index--)
+            productionList.Items.Clear();
+            foreach (ObservabilityOverviewRow row in rows)
             {
-                if (productionList.Items[index].Tag is string key &&
-                    !entries.Any(entry => string.Equals(entry.Key, key, StringComparison.Ordinal)))
+                ListViewItem item = new(
+                [
+                    row.Project,
+                    row.State,
+                    row.Action,
+                    row.Activity,
+                    row.Result,
+                    row.Time,
+                    row.Problem,
+                    row.Tooling
+                ])
                 {
-                    productionList.Items.RemoveAt(index);
-                }
-            }
-
-            for (int index = 0; index < entries.Count; index++)
-            {
-                AgentObservabilityProductionEntry entry = entries[index];
-                if (!current.TryGetValue(entry.Key, out ListViewItem? item))
-                {
-                    item = new ListViewItem(new string[11]);
-                    item.Tag = entry.Key;
-                    productionList.Items.Insert(Math.Min(index, productionList.Items.Count), item);
-                }
-                int currentIndex = productionList.Items.IndexOf(item);
-                if (currentIndex != index)
-                {
-                    productionList.Items.RemoveAt(currentIndex);
-                    productionList.Items.Insert(Math.Min(index, productionList.Items.Count), item);
-                }
-
-                SetSubItem(item, 0, entry.ModName);
-                SetSubItem(item, 1, entry.AgentId);
-                SetSubItem(item, 2, entry.WorkloadKind);
-                SetSubItem(item, 3, entry.ToolchainState);
-                SetSubItem(item, 4, entry.CurrentStage.ToString());
-                SetSubItem(item, 5, entry.CurrentOperation ?? "—");
-                SetSubItem(item, 6, StatusText(entry.Status));
-                SetSubItem(item, 7, entry.BlockingState);
-                SetSubItem(item, 8, AgentObservabilityTime.FormatLocal(entry.LatestTimestamp));
-                SetSubItem(item, 9, entry.LatestEvent ?? "—");
-                SetSubItem(item, 10, entry.CompletionResult ?? "—");
-                Color color = entry.BlockingState == "required"
-                    ? Color.DarkRed
-                    : entry.Status == AgentStatus.Completed
-                        ? Color.DarkGreen
-                        : Color.DarkBlue;
-                if (item.ForeColor != color)
-                {
-                    item.ForeColor = color;
-                }
+                    Tag = row.ProjectId,
+                    ForeColor = row.State switch
+                    {
+                        "Healthy" => Color.DarkGreen,
+                        "Working" => Color.DarkBlue,
+                        "Blocked" or "Needs attention" => Color.DarkRed,
+                        _ => SystemColors.WindowText
+                    }
+                };
+                productionList.Items.Add(item);
             }
         }
         finally
         {
             productionList.EndUpdate();
+            suppressProjectSelection = false;
         }
 
         RestoreTopIndex(productionList, topIndex);
@@ -1161,6 +1255,72 @@ public sealed class ObservabilityMainForm : Form
     private static string FormatReliabilityMilliseconds(long? milliseconds) =>
         milliseconds is null ? "unavailable" : milliseconds.Value.ToString("N0", CultureInfo.InvariantCulture) + " ms";
 
+    private void RefreshSystem(AgentObservabilitySystemView view)
+    {
+        if (ReferenceEquals(renderedSystemView, view))
+        {
+            return;
+        }
+
+        ObservabilitySystemSummary summary = ObservabilityDestinationPresenters.System(view);
+        SetText(
+            systemSummary,
+            $"Health: {summary.Health}{Environment.NewLine}" +
+            $"Storage: {summary.Storage}{Environment.NewLine}" +
+            $"History: {summary.History}{Environment.NewLine}" +
+            $"Records: {summary.Counts}{Environment.NewLine}" +
+            $"Tooling findings: {summary.Tooling}");
+
+        systemFindings.BeginUpdate();
+        try
+        {
+            systemFindings.Items.Clear();
+            foreach (ToolingFinding finding in view.ToolingFindings)
+            {
+                ListViewItem item = new(
+                [
+                    finding.Summary,
+                    finding.Kind.ToString(),
+                    finding.OccurrenceCount.ToString(CultureInfo.InvariantCulture),
+                    finding.AffectedProjects.Count.ToString(CultureInfo.InvariantCulture),
+                    AgentObservabilityTime.FormatLocal(finding.LastObservedAt),
+                    finding.ProductionWorkFailed
+                        ? "Production failure"
+                        : finding.RecoverySucceeded
+                            ? "Recovered"
+                            : "Observed"
+                ])
+                {
+                    Tag = finding.FindingIdentity
+                };
+                systemFindings.Items.Add(item);
+            }
+        }
+        finally
+        {
+            systemFindings.EndUpdate();
+        }
+
+        ToolingFinding? selected = view.ToolingFindings.FirstOrDefault(finding =>
+            string.Equals(
+                finding.FindingIdentity,
+                selectedToolingFinding?.FindingIdentity,
+                StringComparison.Ordinal));
+        selectedToolingFinding = selected;
+        SetEnabled(systemPrepareAssessmentButton, view.ToolingFindings.Count > 0);
+        SetText(
+            systemDetails,
+            selected is null
+                ? view.EmptyState ??
+                    "Select a Tooling Finding to inspect recurrence, provenance, and bounded evidence."
+                : $"Finding: {selected.Summary}{Environment.NewLine}" +
+                    $"Kind: {selected.Kind} · Confidence: {selected.Confidence}{Environment.NewLine}" +
+                    $"Occurrences: {selected.OccurrenceCount} · Projects: {selected.AffectedProjects.Count}{Environment.NewLine}" +
+                    $"Production work failed: {YesNo(selected.ProductionWorkFailed)} · Recovery succeeded: {YesNo(selected.RecoverySucceeded)}{Environment.NewLine}" +
+                    $"Missing evidence: {(selected.MissingEvidence.Count == 0 ? "none" : string.Join(", ", selected.MissingEvidence))}");
+        renderedSystemView = view;
+    }
+
     private void RefreshAll(AgentObservabilityAllView view)
     {
         if (ReferenceEquals(renderedAllView, view))
@@ -1168,7 +1328,8 @@ public sealed class ObservabilityMainForm : Form
             return;
         }
 
-        RefreshProductionOverview(view.Production);
+        RefreshProductionOverview(view.Projects, view.FilterApplied);
+        SetEnabled(overviewPrepareAssessmentButton, view.ToolingFindings.Count > 0);
         renderedAllView = view;
         SetText(
             allAgentSummary,
@@ -1186,7 +1347,6 @@ public sealed class ObservabilityMainForm : Form
                 view.EmptyState ?? "Select an activity row to inspect bounded details.");
         }
     }
-
     private void RefreshContent(ContentIntelligenceObservabilityView view)
     {
         string signature = string.Join(
@@ -1254,7 +1414,15 @@ public sealed class ObservabilityMainForm : Form
                             StringComparison.Ordinal));
                     if (selected is not null)
                     {
-                        selected.Selected = true;
+                        suppressContentSelection = true;
+                        try
+                        {
+                            selected.Selected = true;
+                        }
+                        finally
+                        {
+                            suppressContentSelection = false;
+                        }
                     }
                 }
             }
@@ -1546,7 +1714,7 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityIssueListItem state)
     {
         var item = new ListViewItem(state.Row.StateLabel);
-        for (int index = 1; index < 8; index++)
+        for (int index = 1; index < 7; index++)
         {
             item.SubItems.Add(string.Empty);
         }
@@ -1566,21 +1734,16 @@ public sealed class ObservabilityMainForm : Form
             return;
         }
 
-        SetSubItem(item, 0, IsRecommendation(state.Row.Issue) ? "Recommendation" : state.Row.StateLabel);
-        SetSubItem(item, 1, state.Row.Issue.Severity.ToString());
-        SetSubItem(item, 2, SharedText(state.Row));
-        SetSubItem(item, 3, AgentObservabilityTime.FormatLocal(state.Row.Issue.Timestamp));
-        SetSubItem(item, 4, state.Row.ModName);
-        SetSubItem(item, 5, state.Row.CategoryLabel);
-        string summary = state.Row.Issue.Summary;
-        SetSubItem(
-            item,
-            6,
-            state.Row.OccurrenceCount > 1
-                ? $"{summary} ({state.Row.OccurrenceCount} occurrences)"
-                : summary);
-        SetSubItem(item, 7, state.Row.Issue.Id);
         bool recommendation = IsRecommendation(state.Row.Issue);
+        ObservabilityProblemRow row = ObservabilityDestinationPresenters
+            .Problems(new[] { state.Row })[0];
+        SetSubItem(item, 0, row.State);
+        SetSubItem(item, 1, row.Severity);
+        SetSubItem(item, 2, row.Project);
+        SetSubItem(item, 3, row.Owner);
+        SetSubItem(item, 4, row.Problem);
+        SetSubItem(item, 5, row.Occurred);
+        SetSubItem(item, 6, row.NextAction);
         Color foreColor = recommendation
             ? Color.DarkBlue
             : state.Row.Issue.Recovered
@@ -1674,13 +1837,35 @@ public sealed class ObservabilityMainForm : Form
         AgentObservabilityUiSnapshot snapshot)
     {
         AgentSnapshot agent = view.Agent;
-        SetText(
-            agentHeader,
-            $"{agent.ModName}   ·   {StatusText(agent.Status)}   ·   {agent.CurrentStage}   ·   " +
-            $"{view.ElapsedMilliseconds / 1000.0:0.0}s   ·   session {agent.SessionId}   ·   " +
-            $"{agent.CurrentOperation ?? agent.CurrentActivity ?? "—"}   ·   block {agent.BlockingState}" +
-            $"{(agent.CompletionResult is null ? string.Empty : "   ·   result " + agent.CompletionResult)}");
+        if (view.Project is ProjectObservabilityState project)
+        {
+            ObservabilityProjectHeader header = ObservabilityDestinationPresenters.Project(project);
+            SetText(
+                agentHeader,
+                $"Project: {header.Project} · State: {header.State} · Action required: {header.Action}" +
+                Environment.NewLine +
+                $"Activity: {header.Activity} · Latest attempt: {header.LastAttempt}" +
+                Environment.NewLine +
+                $"Last successful validation: {header.LastSuccessfulValidation} · Tooling: {header.Tooling}" +
+                (header.Problem == "—" ? string.Empty : Environment.NewLine + "Problem: " + header.Problem));
+        }
+        else
+        {
+            SetText(agentHeader, $"{agent.ModName} · Project state unavailable");
+        }
         RefreshStageProgress(view.StageProgress);
+
+        renderedAgentView = view;
+        SetEnabled(projectPrepareAssessmentButton, view.ToolingFindings.Count > 0);
+        if (selectedToolingFinding is not null &&
+            !view.ToolingFindings.Any(finding =>
+                string.Equals(
+                    finding.FindingIdentity,
+                    selectedToolingFinding.FindingIdentity,
+                    StringComparison.Ordinal)))
+        {
+            selectedToolingFinding = null;
+        }
 
         bool dataChanged =
             renderedAgentDataRevision != snapshot.Stream.Revision ||
@@ -1693,11 +1878,9 @@ public sealed class ObservabilityMainForm : Form
             suppressActivitySelection = true;
             try
             {
-                RefreshActivityList(
-                    agentActivity,
-                    view.RecentActivity,
-                    includeMod: false,
-                    selectedEventId: view.SelectedEventId);
+                RefreshCanonicalTimeline(
+                    view.CanonicalTimeline,
+                    view.SelectedEventId);
             }
             finally
             {
@@ -1756,6 +1939,83 @@ public sealed class ObservabilityMainForm : Form
                 }
             }
         }
+    }
+
+    private void RefreshCanonicalTimeline(
+        IReadOnlyList<ProjectObservabilityTimelineEntry> entries,
+        string? selectedEventId)
+    {
+        string? selected = selectedEventId ?? SelectedEventId(agentActivity);
+        int topIndex = TopIndex(agentActivity);
+        agentActivity.BeginUpdate();
+        try
+        {
+            Dictionary<string, ListViewItem> current = agentActivity.Items
+                .Cast<ListViewItem>()
+                .Where(item => EventIdFromTag(item) is not null)
+                .ToDictionary(item => EventIdFromTag(item)!, StringComparer.Ordinal);
+            HashSet<string> desiredIds = entries
+                .Select(entry => entry.EventId)
+                .ToHashSet(StringComparer.Ordinal);
+            for (int index = agentActivity.Items.Count - 1; index >= 0; index--)
+            {
+                if (EventIdFromTag(agentActivity.Items[index]) is string eventId &&
+                    !desiredIds.Contains(eventId))
+                {
+                    agentActivity.Items.RemoveAt(index);
+                }
+            }
+
+            for (int index = 0; index < entries.Count; index++)
+            {
+                ProjectObservabilityTimelineEntry entry = entries[index];
+                if (!current.TryGetValue(entry.EventId, out ListViewItem? item))
+                {
+                    item = new ListViewItem(new string[4])
+                    {
+                        Tag = entry.EventId
+                    };
+                    agentActivity.Items.Insert(Math.Min(index, agentActivity.Items.Count), item);
+                }
+
+                int currentIndex = agentActivity.Items.IndexOf(item);
+                if (currentIndex != index)
+                {
+                    agentActivity.Items.RemoveAt(currentIndex);
+                    agentActivity.Items.Insert(Math.Min(index, agentActivity.Items.Count), item);
+                }
+
+                SetSubItem(item, 0, AgentObservabilityTime.FormatLocal(entry.Timestamp));
+                SetSubItem(item, 1, entry.Type);
+                SetSubItem(item, 2, entry.Summary);
+                SetSubItem(item, 3, entry.Result ?? "—");
+                item.ForeColor = entry.Result is "failed" or "error"
+                    ? Color.DarkRed
+                    : entry.IsMeaningful
+                        ? SystemColors.WindowText
+                        : Color.DimGray;
+            }
+
+            if (selected is not null)
+            {
+                ListViewItem? selectedItem = agentActivity.Items
+                    .Cast<ListViewItem>()
+                    .FirstOrDefault(item => string.Equals(
+                        EventIdFromTag(item),
+                        selected,
+                        StringComparison.Ordinal));
+                if (selectedItem is not null)
+                {
+                    selectedItem.Selected = true;
+                }
+            }
+        }
+        finally
+        {
+            agentActivity.EndUpdate();
+        }
+
+        RestoreTopIndex(agentActivity, topIndex);
     }
 
     private void RefreshStageProgress(
@@ -2212,17 +2472,81 @@ public sealed class ObservabilityMainForm : Form
     {
         try
         {
-            PrepareFreshBundle();
-            RefreshFromSnapshot(observabilityUi.Snapshot);
+            ToolingAssessmentHandoffPacket packet = selectedToolingFinding is null
+                ? observabilityUi.PrepareToolingAssessment()
+                : observabilityUi.PrepareToolingAssessment(selectedToolingFinding);
+
+            ToolingAssessmentDeliveryResult delivery = ToolingAssessmentHandoff.Deliver(
+                packet,
+                clipboardWriter,
+                toolingAssessmentExporter);
+            streamStatus.Text = delivery.Transport switch
+            {
+                ToolingAssessmentDeliveryTransport.Clipboard =>
+                    "Tooling assessment copied to the clipboard. Evidence: " +
+                    packet.Assessment.EvidenceCompleteness + ".",
+                ToolingAssessmentDeliveryTransport.Export =>
+                    "Tooling assessment exported. Evidence: " +
+                    packet.Assessment.EvidenceCompleteness + ".",
+                _ => delivery.FailureReason ?? "Tooling assessment delivery was not completed."
+            };
         }
-        catch (Exception exception) when (exception is InvalidOperationException or KeyNotFoundException)
+        catch (Exception exception) when (
+            exception is InvalidOperationException or KeyNotFoundException)
         {
-            issueDetails.Text = exception.Message;
-            bundleStatusMessage = exception.Message;
-            copyBundleButton.Enabled = false;
-            exportBundleButton.Enabled = false;
+            streamStatus.Text = exception.Message;
         }
     }
+
+    private void OnProductionSelected(object? sender, EventArgs e)
+    {
+        if (suppressProjectSelection ||
+            productionList.SelectedItems.Count == 0 ||
+            productionList.SelectedItems[0].Tag is not string projectId)
+        {
+            return;
+        }
+
+        try
+        {
+            selectedToolingFinding = null;
+            observabilityUi.ShowAgent(projectId);
+            RefreshFromSnapshot(observabilityUi.Snapshot);
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or KeyNotFoundException)
+        {
+            streamStatus.Text = exception.Message;
+        }
+    }
+
+    private void OnSystemFindingSelected(object? sender, EventArgs e)
+    {
+        if (systemFindings.SelectedItems.Count == 0 ||
+            systemFindings.SelectedItems[0].Tag is not string findingIdentity ||
+            renderedSystemView is null)
+        {
+            return;
+        }
+
+        selectedToolingFinding = renderedSystemView.ToolingFindings.FirstOrDefault(finding =>
+            string.Equals(finding.FindingIdentity, findingIdentity, StringComparison.Ordinal));
+        if (selectedToolingFinding is null)
+        {
+            return;
+        }
+
+        ToolingFinding finding = selectedToolingFinding;
+        SetText(
+            systemDetails,
+            $"Finding: {finding.Summary}{Environment.NewLine}" +
+            $"Kind: {finding.Kind} · Confidence: {finding.Confidence}{Environment.NewLine}" +
+            $"Occurrences: {finding.OccurrenceCount} · Projects: {finding.AffectedProjects.Count}{Environment.NewLine}" +
+            $"Production work failed: {YesNo(finding.ProductionWorkFailed)} · Recovery succeeded: {YesNo(finding.RecoverySucceeded)}{Environment.NewLine}" +
+            $"Missing evidence: {(finding.MissingEvidence.Count == 0 ? "none" : string.Join(", ", finding.MissingEvidence))}");
+        systemPrepareAssessmentButton.Enabled = true;
+    }
+
 
     private void OnAllActivitySelected(object? sender, EventArgs e)
     {
@@ -2243,6 +2567,9 @@ public sealed class ObservabilityMainForm : Form
         {
             return;
         }
+        selectedToolingFinding = renderedAgentView?.ToolingFindings.FirstOrDefault(finding =>
+            finding.Occurrences.Any(occurrence =>
+                occurrence.SupportingEventIds.Contains(eventId, StringComparer.Ordinal)));
 
         try
         {
@@ -2257,6 +2584,10 @@ public sealed class ObservabilityMainForm : Form
 
     private void OnContentSelected(object? sender, EventArgs e)
     {
+        if (suppressContentSelection)
+        {
+            return;
+        }
         if (contentList.SelectedItems.Count == 0 ||
             contentList.SelectedItems[0].Tag is not string eventId)
         {
@@ -2537,7 +2868,6 @@ public sealed class ObservabilityMainForm : Form
         {
             return;
         }
-
         try
         {
             File.WriteAllText(dialog.FileName, json, Encoding.UTF8);
@@ -2546,6 +2876,37 @@ public sealed class ObservabilityMainForm : Form
         catch (IOException exception)
         {
             streamStatus.Text = "Export failed: " + exception.Message;
+        }
+    }
+
+    private bool ExportToolingAssessmentFile(string text)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            FileName = "rimliaison-tooling-assessment.json",
+            AddExtension = true,
+            DefaultExt = "json"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return false;
+        }
+
+        try
+        {
+            File.WriteAllText(dialog.FileName, text, Encoding.UTF8);
+            return true;
+        }
+        catch (IOException exception)
+        {
+            streamStatus.Text = "Tooling assessment export failed: " + exception.Message;
+            return false;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            streamStatus.Text = "Tooling assessment export failed: " + exception.Message;
+            return false;
         }
     }
 

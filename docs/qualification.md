@@ -49,8 +49,36 @@ Both commands emit machine-readable aggregate JSON and write:
 - an immutable `qualified-toolchain-package-<commit>-<run>.json`;
 - `.rimdev/qualification/tooling-improvement-backlog.json`.
 
-The promotion package references the immutable qualification artifact, not `latest.json`.
-It records the exact qualified CLI hashes, installed runtime hashes, and transaction consumer hash.
+The immutable promotion package is the authoritative recovery payload. It contains private copies of
+the qualified CLI, assembly, transaction consumer, qualification proof, and DevBridge runtime
+snapshot, each bound by the package's recorded hashes. The promoted production manifest records the
+absolute package path and SHA-256, plus the promoted source commit and product fingerprint.
+
+Restoration of an existing promotion is identity- and artifact-based: it reads that manifest,
+validates the exact package and hashes, materializes only those immutable files, verifies the
+promoted identity/readiness, and retries the interrupted operation once. It does not inspect or
+qualify the current checkout, use current local Release binaries, mutate the promoted identity, or
+fall back to experimental tooling. A current checkout at a later commit, or with dirty changes,
+does not invalidate restoration. The active manifest-referenced package and payload are retained;
+only unreferenced qualification artifacts are eligible for bounded cleanup.
+
+Legacy active promotions are upgraded at the production binding and recovery maintenance
+boundary. RimLiaison searches the canonical retained qualification locations, but accepts a
+candidate only when its source commit, product fingerprint, CLI/assembly/runtime/consumer hashes,
+qualification proof, and unified manifest reproduce the active identity. Migration copies that
+exact material into the durable promotion-recovery payload, atomically adds the package reference,
+and records a non-blocking tooling finding. If no exact material remains, migration blocks with one
+operator action: intentionally qualify and promote a new production package. It never rebuilds or
+promotes the current checkout.
+
+
+Creation or replacement of a promotion is a separate strict operation. `PromoteAsync` requires the
+current source HEAD to equal the qualified source commit and retains the complete qualification,
+exact artifact/package hashes, exclusive lock, atomic manifest replacement, and installed identity
+verification. `PROMOTION_SOURCE_FINGERPRINT_STALE` remains a valid create/replace blocker. If an
+existing promotion's package or required external runtime is unavailable or fails integrity
+validation, the workflow reports a bounded RimLiaison infrastructure block and never uses current
+source or changes the promoted identity.
 
 Supported promotion command:
 

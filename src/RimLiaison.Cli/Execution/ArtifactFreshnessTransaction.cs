@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using RimLiaison.Toolchain;
 using RimLiaison.DevBridge;
 using RimLiaison.Git;
 using RimLiaison.Observability;
@@ -32,14 +33,16 @@ public sealed class ArtifactFreshnessTransaction
     private readonly IGitRepositoryStateProvider? repositoryStateProvider;
     private readonly IDevBridgeProcessTransport? recoveryTransport;
     private readonly DevBridgeAdapterOptions? recoveryOptions;
+    private readonly IPromotedToolchainInstaller? promotedToolchainInstaller;
 
-    public ArtifactFreshnessTransaction(
+    internal ArtifactFreshnessTransaction(
         IDevBridgeModDevelopmentAdapter developmentAdapter,
         IDevBridgeLeaseAdapter? leaseAdapter = null,
         IDevBridgeFreshGenerationAdapter? readinessAdapter = null,
         IGitRepositoryStateProvider? repositoryStateProvider = null,
         IDevBridgeProcessTransport? recoveryTransport = null,
-        DevBridgeAdapterOptions? recoveryOptions = null)
+        DevBridgeAdapterOptions? recoveryOptions = null,
+        IPromotedToolchainInstaller? promotedToolchainInstaller = null)
     {
         this.developmentAdapter = developmentAdapter ??
             throw new ArgumentNullException(nameof(developmentAdapter));
@@ -48,6 +51,7 @@ public sealed class ArtifactFreshnessTransaction
         this.repositoryStateProvider = repositoryStateProvider;
         this.recoveryTransport = recoveryTransport;
         this.recoveryOptions = recoveryOptions;
+        this.promotedToolchainInstaller = promotedToolchainInstaller;
     }
 
     public async Task<ArtifactFreshnessTransactionResult> PrepareAsync(
@@ -143,14 +147,184 @@ public sealed class ArtifactFreshnessTransaction
                 new DevBridgeAdapterStatus(
                     DevBridgeOutcomeKind.InfrastructureFailure,
                     "DEVBRIDGE_MOD_TRANSACTION_FAILED",
-                Bound(exception.Message)));
+                    Bound(exception.Message)));
         }
-
         List<RimTestPrerequisiteRecovery>? recoveryEvents = null;
         bool managedRecoveryUsed = false;
+        bool promotedToolchainRecoveryUsed = false;
+        ProductionToolchainBindingFailure? promotedToolchainFailure = null;
+        if (string.IsNullOrWhiteSpace(request.LeaseId) &&
+            IsPromotedToolchainFailure(result) &&
+            recoveryTransport is not null)
+        {
+            ProductionToolchainBindingResolution binding =
+                ProductionToolchainBindingResolver.ResolvePromotedIdentity(request.RepositoryRoot);
+            if (!binding.Succeeded && binding.Failure is not null)
+            {
+                promotedToolchainFailure = binding.Failure;
+                promotedToolchainRecoveryUsed = true;
+                PromotedToolchainRecoveryResult recovery =
+                    await DevBridgeCapabilityRecovery.RecoverPromotedToolchainAsync(
+                            binding.Failure,
+                            request.RepositoryRoot,
+                            recoveryTransport,
+                            recoveryOptions,
+                            promotedToolchainInstaller,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                recoveryEvents =
+                [
+                    new RimTestPrerequisiteRecovery(
+                        "promoted-production-toolchain",
+                        recovery.Succeeded ? "recovered" : "recoveryFailed",
+                        Math.Max(1, recovery.Attempts),
+                        binding.Failure.ErrorCode,
+                        recovery.Action,
+                        request.WorkflowId,
+                        Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                            ProductionCheckpoint.PreMutation),
+                        ElapsedRecoveryMilliseconds: recovery.ElapsedRecoveryMilliseconds,
+                        OriginalFault: binding.Failure.ErrorCode,
+                        ExpectedPromotedFingerprint: binding.Failure.ExpectedFingerprint,
+                        AffectedArtifacts: binding.Failure.MismatchingArtifacts ??
+                            binding.Failure.ExpectedArtifacts,
+                        RepairResult: recovery.Succeeded ? "repaired" : "failed",
+                        VerificationResult: recovery.Verification,
+                        RetryResult: recovery.Succeeded ? "pending" : "not-attempted",
+                        RecoveryPayloadPath: recovery.RecoveryPackagePath,
+                        PromotedSourceCommit: recovery.PromotedSourceCommit,
+                        CurrentSourceDiverged: CurrentSourceDiverged(
+                            initialSnapshot.Snapshot.HeadSha,
+                            initialSnapshot.Snapshot.Dirty,
+                            recovery.PromotedSourceCommit))
+                ];
+                if (!recovery.Succeeded)
+                {
+                    return Failure(
+                        request,
+                        result.Status with
+                        {
+                            ErrorCode = recovery.ErrorCode ?? result.Status.ErrorCode,
+                            Error = recovery.Error ?? result.Status.Error,
+                            RecoveryState = PrerequisiteRecoveryState.RecoveryFailed,
+                            RecoveryAttempts = recovery.Attempts,
+                            RecoveryAction = recovery.Action
+                        },
+                        freshness: RimTestArtifactFreshness.From(result, request.WorkflowId),
+                        recoveryEvents: recoveryEvents);
+                }
+            }
+            else if (binding.Succeeded)
+            {
+                promotedToolchainRecoveryUsed = true;
+                recoveryEvents =
+                [
+                    new RimTestPrerequisiteRecovery(
+                        "promoted-production-toolchain",
+                        "recovered",
+                        0,
+                        result.Status.ErrorCode ?? "PRODUCTION_TOOLCHAIN_ARTIFACT_MISSING",
+                        "revalidate-after-concurrent-repair",
+                        request.WorkflowId,
+                        Checkpoint: ProductionExecutionPolicy.CheckpointName(
+                            ProductionCheckpoint.PreMutation),
+                        OriginalFault: result.Status.ErrorCode,
+                        ExpectedPromotedFingerprint: binding.Binding?.Fingerprint,
+                        RepairResult: "revalidated",
+                        VerificationResult: "promoted-identity-verified",
+                        RetryResult: "pending")
+                ];
+            }
+            if (recoveryEvents is not null)
+            {
+                try
+                {
+                    result = await developmentAdapter.RunAsync(
+                            request.Project,
+                            request.RepositoryRoot,
+                            request.SourceFingerprint,
+                            request.WorkflowId,
+                            executionContext: null,
+                            cancellationToken: cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    recoveryEvents[0] = recoveryEvents[0] with
+                    {
+                        RetryResult = "cancelled"
+                    };
+                    return Failure(
+                        request,
+                        new DevBridgeAdapterStatus(
+                            DevBridgeOutcomeKind.Cancelled,
+                            "RIMTEST_CANCELLED",
+                            RecoveryState: PrerequisiteRecoveryState.Recovered,
+                            RecoveryAttempts: 1,
+                            RecoveryAction: "retry-after-promoted-toolchain-repair"),
+                        freshness: RimTestArtifactFreshness.From(result, request.WorkflowId),
+                        recoveryEvents: recoveryEvents);
+                }
+                catch (Exception exception)
+                {
+                    recoveryEvents[0] = recoveryEvents[0] with
+                    {
+                        RetryResult = "exception",
+                        VerificationResult = "promoted-identity-verified"
+                    };
+                    return Failure(
+                        request,
+                        new DevBridgeAdapterStatus(
+                            DevBridgeOutcomeKind.InfrastructureFailure,
+                            "DEVBRIDGE_MOD_TRANSACTION_FAILED",
+                            Bound(exception.Message),
+                            RecoveryState: PrerequisiteRecoveryState.Recovered,
+                            RecoveryAttempts: 1,
+                            RecoveryAction: "retry-after-promoted-toolchain-repair"),
+                        freshness: RimTestArtifactFreshness.From(result, request.WorkflowId),
+                        recoveryEvents: recoveryEvents);
+                }
+                if (IsPromotedToolchainFailure(result))
+                {
+                    recoveryEvents[0] = recoveryEvents[0] with
+                    {
+                        State = PrerequisiteRecoveryState.TransitionRecoveryExhausted.ToWireName(),
+                        Action = "bounded-toolchain-retry-exhausted",
+                        RetryResult = "same-integrity-fault"
+                    };
+                    result = result with
+                    {
+                        Status = result.Status with
+                        {
+                            RecoveryState = PrerequisiteRecoveryState.TransitionRecoveryExhausted,
+                            RecoveryAttempts = 1,
+                            RecoveryAction = "bounded-toolchain-retry-exhausted"
+                        }
+                    };
+                }
+                else
+                {
+                    recoveryEvents[0] = recoveryEvents[0] with
+                    {
+                        Action = "retry-after-promoted-toolchain-repair",
+                        RetryResult = result.Success == true ? "success" : "project-or-runtime-failure"
+                    };
+                    result = result with
+                    {
+                        Status = result.Status with
+                        {
+                            RecoveryState = PrerequisiteRecoveryState.Recovered,
+                            RecoveryAttempts = 1,
+                            RecoveryAction = "retry-after-promoted-toolchain-repair"
+                        }
+                    };
+                }
+            }
+        }
         if (string.IsNullOrWhiteSpace(request.LeaseId) &&
             recoveryTransport is not null &&
             recoveryOptions is not null &&
+            !promotedToolchainRecoveryUsed &&
             ProductionExecutionPolicy.RequiresPreMutationEscalation(
                 result.Status.ErrorCode,
                 result.Build?.BuildOwnerType))
@@ -1183,6 +1357,27 @@ public sealed class ArtifactFreshnessTransaction
         List<RimTestPrerequisiteRecovery> Events,
         bool CanContinue);
 
+    private static bool IsPromotedToolchainFailure(
+        DevBridgeModDevelopmentResult result) =>
+        ProductionExecutionPolicy.Classify(
+                result.Status.ErrorCode,
+                result.Status.Error,
+                buildOwnerType: result.Build?.BuildOwnerType)
+            .IsRepairableToolchainIntegrity;
+
+    private static bool? CurrentSourceDiverged(
+        string? currentSourceCommit,
+        bool currentSourceDirty,
+        string? promotedSourceCommit) =>
+        string.IsNullOrWhiteSpace(promotedSourceCommit) ||
+            string.IsNullOrWhiteSpace(currentSourceCommit)
+            ? null
+            : currentSourceDirty ||
+                !string.Equals(
+                    currentSourceCommit,
+                    promotedSourceCommit,
+                    StringComparison.OrdinalIgnoreCase);
+
     private static bool IsLeaseRequired(DevBridgeAdapterStatus status) =>
         string.Equals(
             status.ErrorCode,
@@ -1310,12 +1505,7 @@ public sealed class ArtifactFreshnessTransaction
 
     private static string? Bound(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        string trimmed = value.Trim();
+        string trimmed = value?.Trim() ?? string.Empty;
         return trimmed.Length <= 4096 ? trimmed : trimmed[..4096];
     }
 }
@@ -1328,6 +1518,7 @@ internal sealed record WorktreePathState(
 internal sealed record WorktreeIntegritySnapshot(
     string RootPath,
     string? HeadSha,
+    bool Dirty,
     IReadOnlyDictionary<string, WorktreePathState> Paths)
 {
     public static async Task<WorktreeIntegritySnapshotResult> CaptureAsync(
@@ -1404,6 +1595,7 @@ internal sealed record WorktreeIntegritySnapshot(
                 new WorktreeIntegritySnapshot(
                     fullRoot,
                     repository?.HeadSha,
+                    repository?.Dirty ?? false,
                     states));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

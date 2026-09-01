@@ -14,24 +14,34 @@ Fault-injection evidence may be recorded as `SATISFIED_BY_TEST_HARNESS`. It is n
 
 ## Shared recovery coverage
 
-`DevBridgeCapabilityRecovery` is the shared implementation. Its coverage includes:
-
 - no structured response and stale/unavailable coordinator handling;
 - reconnect/reconcile recovery;
 - coordinator recycle;
 - full managed runtime reset and controlled RimWorld restart;
 - generation and readiness verification;
 - lease cleanup and bounded retry behavior;
-- exhausted recovery resulting in `TOOLCHAIN_FATAL`.
+- promoted production-toolchain integrity recovery for missing, unreadable, or hash-mismatched
+  CLI, assembly, runtime, coordinator, consumer, and unified-package artifacts;
+- one recovery lock and revalidation so concurrent workflows perform one effective repair;
+- one workflow retry after a qualified package repair, with the original failure retained as a
+  non-blocking tooling finding;
+- restoration uses only the exact immutable payload referenced by the active promoted manifest.
+  Recovery evidence records the promoted source commit and current-source divergence when a Git
+  snapshot is available. Current source divergence, dirty changes, newer unpromoted qualification,
+  and local Release binaries are irrelevant to restoration and can never be substituted.
+- unavailable or hash-invalid promoted recovery material is a bounded RimLiaison-owned
+  infrastructure block, never a project failure and never an automatic promotion;
 
-The deterministic coverage is in `tests/RimLiaison.Tests/ManagedRuntimeEscalationTests.cs` and
-`tests/RimLiaison.Tests/ProductionExecutionTests.cs`. Doctor invokes the service from
+The deterministic coverage is in `tests/RimLiaison.Tests/ManagedRuntimeEscalationTests.cs`,
+`tests/RimLiaison.Tests/ProductionExecutionTests.cs`, and
+`tests/RimLiaison.Tests/PromotedToolchainRecoveryTests.cs`. Doctor invokes the service from
 `RimTestDoctorRunner`; affected and release artifact workflows invoke it through
 `ArtifactFreshnessTransaction`.
 
-`DEVBRIDGE_NO_STRUCTURED_RESPONSE` is already covered by the process-transport recovery tests,
-including coordinator recycle, bounded evidence, and artifact-transaction retry. No additional
-implementation or test is required for this correction.
+`DEVBRIDGE_NO_STRUCTURED_RESPONSE` is covered by the process-transport recovery tests. Promoted
+package repair is covered separately because production binding occurs before doctor and must not
+escape the shared recovery owner.
+
 
 ## Build ownership and transparent recovery
 

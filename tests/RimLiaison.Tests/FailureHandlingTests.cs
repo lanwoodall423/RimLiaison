@@ -145,11 +145,22 @@ internal static class FailureHandlingTests
             "TestCatalog",
             "rimtest.catalog.json");
         string oldDirectory = Environment.CurrentDirectory;
+        string rimWorldRoot = Path.Combine(root, "RimWorld");
+        string activeModsRoot = Path.Combine(rimWorldRoot, "Mods");
+        string? previousRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
+        string? previousActiveModsRoot = Environment.GetEnvironmentVariable("RIMWORLD_MODS_ROOT");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(catalog)!);
             Directory.CreateDirectory(root);
             Directory.CreateDirectory(Path.Combine(root, ".git"));
+            Directory.CreateDirectory(activeModsRoot);
+            Directory.CreateDirectory(Path.Combine(root, ".rimdev"));
+            File.WriteAllText(
+                Path.Combine(root, ".rimdev", "workspace.json"),
+                $"{{\"schemaVersion\":\"rimdev-workspace/v1\",\"rimWorldRoot\":{JsonSerializer.Serialize(rimWorldRoot)},\"activeModsRoot\":{JsonSerializer.Serialize(activeModsRoot)},\"repositories\":[{{\"path\":\".\"}}],\"packageMappings\":{{}}}}");
+            Environment.SetEnvironmentVariable("RIMWORLD_ROOT", rimWorldRoot);
+            Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", activeModsRoot);
             File.Copy(repositoryCatalog, catalog);
             Environment.CurrentDirectory = root;
             using var output = new StringWriter();
@@ -189,6 +200,8 @@ internal static class FailureHandlingTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("RIMWORLD_ROOT", previousRimWorldRoot);
+            Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", previousActiveModsRoot);
             Environment.CurrentDirectory = oldDirectory;
             if (Directory.Exists(root))
             {
