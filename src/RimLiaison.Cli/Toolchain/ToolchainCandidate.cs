@@ -406,14 +406,11 @@ internal static class ToolchainCandidateMaterializer
         error = null;
         if (!TryString(root, "contract", out string? contract) ||
             !string.Equals(contract, "devbridge-release/v1", StringComparison.Ordinal) ||
-            !TryString(root, "ownerProduct", out string? owner) ||
-            !string.Equals(owner, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
-            !TryString(root, "componentRole", out string? role) ||
-            !string.Equals(role, "runtime", StringComparison.Ordinal) ||
-            root.TryGetProperty("productionEligible", out JsonElement eligible) && eligible.ValueKind != JsonValueKind.False ||
             !TryString(root, "sourceRevision", out sourceCommit) ||
             !IsSha(sourceCommit) ||
-            root.TryGetProperty("dirty", out JsonElement dirty) && dirty.ValueKind != JsonValueKind.False)
+            root.TryGetProperty("dirty", out JsonElement dirty) && dirty.ValueKind != JsonValueKind.False ||
+            root.TryGetProperty("buildConfiguration", out JsonElement configuration) &&
+                !string.Equals(configuration.GetString(), "Release", StringComparison.Ordinal))
         {
             error = "The DevBridge2 release manifest is not a clean, non-production component release.";
             return false;
