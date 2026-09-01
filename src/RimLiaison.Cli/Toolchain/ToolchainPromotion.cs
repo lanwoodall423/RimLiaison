@@ -590,6 +590,9 @@ public static class ToolchainPromotionService
                     previous.PromotedFingerprint);
             }
             CopyDirectory(package.DevBridgeRuntimeArtifactRoot!, stagedRuntimeRoot);
+            // Runtime state is mutable execution residue from qualification, not release content.
+            // Do not carry its process identity, slot, or generation into the production target.
+            TryDelete(Path.Combine(stagedRuntimeRoot, "Runtime"));
 
 
             CopyDirectory(artifactRoot, stagedRoot);
