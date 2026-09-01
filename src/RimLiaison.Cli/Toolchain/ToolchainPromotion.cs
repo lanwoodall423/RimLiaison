@@ -135,9 +135,9 @@ public sealed record ToolchainPromotionResult(
         "unchanged",
         null,
         nextAction)
-    {
-        MeaningfulDirtyPaths = meaningfulDirtyPaths
-    };
+        {
+            MeaningfulDirtyPaths = meaningfulDirtyPaths
+        };
 }
 
 public sealed record PromotionCandidateHealthBinding(
