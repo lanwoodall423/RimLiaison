@@ -117,6 +117,16 @@ internal sealed class ProductionToolchainManifest
 {
     [JsonPropertyName("schemaVersion")]
     public string? SchemaVersion { get; init; }
+    [JsonPropertyName("productionState")]
+    public string? ProductionState { get; init; }
+    [JsonPropertyName("bootstrapStatus")]
+    public string? BootstrapStatus { get; init; }
+    [JsonPropertyName("bootstrapErrorCode")]
+    public string? BootstrapErrorCode { get; init; }
+    [JsonPropertyName("bootstrapError")]
+    public string? BootstrapError { get; init; }
+    [JsonPropertyName("bootstrapArchivePath")]
+    public string? BootstrapArchivePath { get; init; }
     [JsonPropertyName("promotedFingerprint")]
     public string? PromotedFingerprint { get; init; }
     [JsonPropertyName("fingerprint")]
@@ -147,9 +157,6 @@ internal sealed class ProductionToolchainManifest
     public string? TransactionConsumerSha256 { get; init; }
     [JsonPropertyName("runtimeProtocolContract")]
     public string? RuntimeProtocolContract { get; init; }
-    // Read once for migration from the previous product-manifest field name.
-    [JsonPropertyName("compatibilityContract")]
-    public string? LegacyCompatibilityContract { get; init; }
     [JsonPropertyName("qualifiedSourceCommit")]
     public string? QualifiedSourceCommit { get; init; }
     [JsonPropertyName("qualificationArtifactPath")]
@@ -235,6 +242,18 @@ internal static class ProductionToolchainBindingResolver
                 rejected,
                 manifestPath);
         }
+        if (string.Equals(manifest!.ProductionState, "NO_PRODUCTION", StringComparison.Ordinal))
+        {
+            return Fail(
+                "PRODUCTION_TOOLCHAIN_NO_PRODUCTION",
+                manifest.BootstrapStatus == "BOOTSTRAP_FAILED"
+                    ? manifest.BootstrapError ?? "The production toolchain bootstrap failed."
+                    : "No production toolchain is authoritative.",
+                "Run the explicit qualified bootstrap promotion for the current source.",
+                rejected,
+                manifestPath);
+        }
+
 
         if (!string.Equals(manifest!.SchemaVersion, ManifestSchema, StringComparison.Ordinal) ||
             !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||

@@ -167,7 +167,6 @@ public static class CliApplication
             ProductionToolchainBinding? productionBinding = null;
             PromotedToolchainRecoveryResult? productionToolchainRecovery = null;
             ProductionToolchainBindingFailure? productionToolchainFailure = null;
-            LegacyPromotionMigrationResult? legacyPromotionMigration = null;
             ProjectRuntimeBindingResult? projectBinding = null;
             if (!experimentalToolchain &&
                 RequiresProjectBinding(request))
@@ -203,28 +202,11 @@ public static class CliApplication
                     StringComparison.OrdinalIgnoreCase) &&
                 RequiresProductionToolchainBinding(request))
             {
-                legacyPromotionMigration = LegacyPromotionMigrationService.Ensure(
-                    request.StackManifest.RepositoryRoot,
-                    cancellationToken);
                 ProductionToolchainBindingResolution resolution =
-                    legacyPromotionMigration.State == LegacyPromotionMigrationState.Blocked
-                        ? new(
-                            null,
-                            new ProductionToolchainBindingFailure(
-                                legacyPromotionMigration.ErrorCode ??
-                                    "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE",
-                                legacyPromotionMigration.Error ??
-                                    "The active legacy promotion could not be made self-restorable.",
-                                legacyPromotionMigration.NextAction ??
-                                    "Create and intentionally promote a new qualified RimLiaison production package.",
-                                [],
-                                legacyPromotionMigration.PromotedFingerprint,
-                                ManifestPath: Environment.GetEnvironmentVariable(
-                                    "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST")))
-                        : ProductionToolchainBindingResolver.Resolve(
-                            request.StackManifest.RepositoryRoot,
-                            requestedDevBridgePath: request.DevBridgePath,
-                            requestedDevBridgeRoot: request.DevBridgeRootPath);
+                    ProductionToolchainBindingResolver.Resolve(
+                        request.StackManifest.RepositoryRoot,
+                        requestedDevBridgePath: request.DevBridgePath,
+                        requestedDevBridgeRoot: request.DevBridgeRootPath);
                 if (!resolution.Succeeded &&
                     ProductionExecutionPolicy.IsPromotedToolchainIntegrityCode(
                         resolution.Failure?.ErrorCode))
@@ -375,30 +357,6 @@ public static class CliApplication
                     componentOwner = "RimLiaison"
                 });
 
-            if (legacyPromotionMigration?.Migrated == true)
-            {
-                observabilityAgent.Record(
-                    commandStage,
-                    AgentEventTypes.ToolFailed,
-                    "Recovered tooling issue: the active legacy promotion was migrated to durable recovery material.",
-                    new
-                    {
-                        operationKey = "cli:" + request.Command.ToString().ToLowerInvariant(),
-                        issueKind = "TOOLING_FAILURE",
-                        blocking = false,
-                        projectImplicated = false,
-                        recovered = true,
-                        componentOwner = "RimLiaison",
-                        errorCode = "PRODUCTION_TOOLCHAIN_LEGACY_MIGRATED",
-                        promotedSourceCommit = legacyPromotionMigration.PromotedSourceCommit,
-                        promotedFingerprint = legacyPromotionMigration.PromotedFingerprint,
-                        recoveryPackagePath = legacyPromotionMigration.RecoveryPackagePath,
-                        migrationElapsedMs = legacyPromotionMigration.ElapsedMilliseconds,
-                        repairAttempted = true,
-                        repairResult = "migrated",
-                        nextAction = "continue with the normal production workflow"
-                    });
-            }
             if (productionToolchainRecovery is not null)
             {
                 observabilityAgent.Record(
@@ -470,7 +428,8 @@ public static class CliApplication
                         request.PromotionPackagePath,
                         request.QualificationOutputPath,
                         cancellationToken,
-                        workflowId)
+                        workflowId,
+                        bootstrap: request.Bootstrap)
                     .ConfigureAwait(false);
                 if (promotion.Status == "promoted" &&
                     !string.IsNullOrWhiteSpace(promotion.PromotedFingerprint) &&

@@ -270,6 +270,11 @@ public interface IPromotionRuntimeDirectoryTransaction
     void Commit(string stagedRoot, string targetRoot, out string? backupRoot);
     void Restore(string targetRoot, string? backupRoot);
 }
+public interface IPromotionBootstrapRuntimeDirectoryTransaction
+{
+    void CommitBootstrap(string stagedRoot, string targetRoot, out string? archiveRoot);
+}
+
 
 
 public sealed record PromotionCandidateHealthResult(
@@ -790,6 +795,7 @@ public static class ToolchainPromotionService
         string? qualificationArtifactPath,
         CancellationToken cancellationToken = default,
         string? workflowId = null,
+        bool bootstrap = false,
         IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null,
         IPromotionCandidateHealthVerifier? promotionHealthVerifier = null,
         IPromotionCanonicalHealthVerifier? canonicalHealthVerifier = null,
@@ -816,6 +822,8 @@ public static class ToolchainPromotionService
         ToolchainPromotionPackage? package = null;
         bool runtimeCommitted = false;
         bool promotionCommitted = false;
+        bool bootstrapRetired = false;
+        string? bootstrapArchivePath = null;
         string promotionPhase = "lock";
         string? promotionTransactionId = null;
         PromotionTransactionEvidence? transactionEvidence = null;
@@ -946,14 +954,60 @@ public static class ToolchainPromotionService
             if (previous is null)
             {
                 return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_PRODUCTION_MANIFEST_INVALID",
-                    manifestError ?? "The current production manifest could not be read.");
+                    bootstrap ? "BOOTSTRAP_MANIFEST_MISSING" : "PROMOTION_PRODUCTION_MANIFEST_INVALID",
+                    manifestError ?? "The current production manifest could not be read.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: bootstrap
+                        ? "Restore the bounded legacy production manifest before running the one-time bootstrap."
+                        : null);
             }
-            string previousProductionHealth = DescribePreviousProductionHealth(previous);
+            if (bootstrap &&
+                string.Equals(previous.ProductionState, "NO_PRODUCTION", StringComparison.Ordinal))
+            {
+                if (string.IsNullOrWhiteSpace(previous.BootstrapArchivePath) ||
+                    !File.Exists(previous.BootstrapArchivePath))
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_ARCHIVE_MISSING",
+                        "The NO_PRODUCTION state has no archived legacy baseline for retry.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash,
+                        nextAction: "Restore the archived legacy manifest or repair the bootstrap transaction evidence.");
+                }
+                ProductionToolchainManifest? archived = ReadProductionManifest(
+                    previous.BootstrapArchivePath,
+                    out _);
+                if (archived is null)
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_ARCHIVE_INVALID",
+                        "The archived legacy production manifest is invalid.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash);
+                }
+                previous = archived;
+            }
+            if (bootstrap && HasModernProductionIdentity(previous))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "BOOTSTRAP_MODERN_PRODUCTION_EXISTS",
+                    "Bootstrap is only valid when no modern production identity is authoritative.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Use ordinary qualification promote for an existing modern production identity.");
+            }
+            string previousProductionHealth = bootstrap
+                ? "NO_PRODUCTION (legacy baseline pending bootstrap)"
+                : DescribePreviousProductionHealth(previous);
             string previousOwnerProduct = previous.OwnerProduct ?? ToolchainPromotionSchemas.OwnerProduct;
             string previousRuntimeSubsystem = previous.RuntimeSubsystem ?? ToolchainPromotionSchemas.RuntimeSubsystem;
             string previousRuntimeProtocolContract = previous.RuntimeProtocolContract ??
-                previous.LegacyCompatibilityContract ??
                 ToolchainPromotionSchemas.RuntimeProtocolContract;
 
             if (!string.Equals(package.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
@@ -972,6 +1026,17 @@ public static class ToolchainPromotionService
                     previous.PromotedFingerprint,
                     "Run the unified cross-stack compatibility gate and rebuild the unified promotion package.");
             }
+            if (!bootstrap && !HasModernProductionIdentity(previous))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_LEGACY_BASELINE_REQUIRES_BOOTSTRAP",
+                    "The active production baseline is legacy and cannot be replaced by ordinary promotion.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Run the explicit one-time qualification promote --bootstrap transition.");
+            }
             ProductionMachinePreflightResult machinePreflight =
                 (machinePreflightVerifier ?? new ProductionMachinePreflightVerifier())
                 .Verify(sourceRoot, previous.DevBridgeRuntimeRoot!);
@@ -989,6 +1054,18 @@ public static class ToolchainPromotionService
                 {
                     MachinePreflight = machinePreflight
                 };
+            }
+            if (bootstrap &&
+                !BootstrapRuntimeBaselineIsSafe(previous.DevBridgeRuntimeRoot!, out string? bootstrapRuntimeError))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "BOOTSTRAP_RUNTIME_PRECONDITION_FAILED",
+                    bootstrapRuntimeError ?? "The legacy runtime baseline is not safe to retire.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Stop or remove the incomplete legacy runtime without killing arbitrary processes, then retry the explicit bootstrap.");
             }
 
             string artifactRoot = Path.GetFullPath(package.ArtifactRoot ?? string.Empty);
@@ -1276,59 +1353,125 @@ public static class ToolchainPromotionService
                     RollbackOccurred = false
                 };
             }
-
             promotionPhase = "runtime-quiescence";
-            PromotionRuntimeQuiescenceResult runtimeQuiescence =
-                await runtimeQuiescenceVerifier!.VerifyAsync(
-                        previous.DevBridgeRuntimeRoot!,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            runtimeQuiescenceEvidence = runtimeQuiescence.Evidence;
-            transactionEvidence = new(
-                promotionPhase,
-                null,
-                previous.DevBridgeRuntimeRoot,
-                null,
-                null,
-                runtimeQuiescence.Error,
-                runtimeQuiescenceEvidence);
-            if (!runtimeQuiescence.Passed)
-            {
-                const string errorCode = "PROMOTION_RUNTIME_QUIESCE_FAILED";
-                WriteFailureHandoff(
-                    packagePath,
-                    package,
-                    previous,
-                    errorCode,
-                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
-                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
-                    promotionPhase,
-                    transactionEvidence);
-                return ToolchainPromotionResult.Blocked(
-                    errorCode,
-                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
-                    package.SourceCommit,
-                    artifactPath,
-                    qualificationHash,
-                    previous.PromotedFingerprint,
-                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
-                    runtimeQuiescence.Summary) with
-                {
-                    PromotionTransactionId = promotionTransactionId,
-                    PromotionPhase = promotionPhase,
-                    TransactionEvidence = transactionEvidence,
-                    RuntimeQuiescence = runtimeQuiescenceEvidence,
-                    PreviousProductionHealth = previousProductionHealth
-                };
-            }
 
+            if (bootstrap)
+            {
+                promotionPhase = "bootstrap-retire";
+                try
+                {
+                    bootstrapArchivePath = RetireLegacyManifest(manifestPath, promotionTransactionId!);
+                    bootstrapRetired = true;
+                    WriteNoProductionState(manifestPath, "BOOTSTRAP_IN_PROGRESS", null, null, bootstrapArchivePath);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    WriteFailureHandoff(
+                        packagePath,
+                        package,
+                        previous,
+                        "BOOTSTRAP_RETIRE_FAILED",
+                        exception.Message,
+                        "Repair the legacy manifest ownership and retry the explicit bootstrap.",
+                        promotionPhase,
+                        transactionEvidence);
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_RETIRE_FAILED",
+                        exception.Message,
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash,
+                        previous.PromotedFingerprint,
+                        "Repair the legacy manifest ownership and retry the explicit bootstrap.") with
+                    {
+                        PromotionTransactionId = promotionTransactionId,
+                        PromotionPhase = promotionPhase,
+                        PreviousProductionHealth = previousProductionHealth
+                    };
+                }
+                runtimeQuiescenceEvidence = new(
+                    "legacy-baseline-not-required",
+                    previous.DevBridgeRuntimeRoot!,
+                    Path.Combine(previous.DevBridgeRuntimeRoot!, "DevBridge.cmd"),
+                    null,
+                    null,
+                    null,
+                    null);
+                transactionEvidence = new(
+                    promotionPhase,
+                    null,
+                    previous.DevBridgeRuntimeRoot,
+                    bootstrapArchivePath,
+                    null,
+                    null,
+                    runtimeQuiescenceEvidence);
+            }
+            if (!bootstrap)
+            {
+                PromotionRuntimeQuiescenceResult runtimeQuiescence =
+                    await runtimeQuiescenceVerifier!.VerifyAsync(
+                            previous.DevBridgeRuntimeRoot!,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                runtimeQuiescenceEvidence = runtimeQuiescence.Evidence;
+                transactionEvidence = new(
+                    promotionPhase,
+                    null,
+                    previous.DevBridgeRuntimeRoot,
+                    null,
+                    null,
+                    runtimeQuiescence.Error,
+                    runtimeQuiescenceEvidence);
+                if (!runtimeQuiescence.Passed)
+                {
+                    const string errorCode = "PROMOTION_RUNTIME_QUIESCE_FAILED";
+                    WriteFailureHandoff(
+                        packagePath,
+                        package,
+                        previous,
+                        errorCode,
+                        runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                        "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
+                        promotionPhase,
+                        transactionEvidence);
+                    return ToolchainPromotionResult.Blocked(
+                        errorCode,
+                        runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash,
+                        previous.PromotedFingerprint,
+                        "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
+                        runtimeQuiescence.Summary) with
+                    {
+                        PromotionTransactionId = promotionTransactionId,
+                        PromotionPhase = promotionPhase,
+                        TransactionEvidence = transactionEvidence,
+                        RuntimeQuiescence = runtimeQuiescenceEvidence,
+                        PreviousProductionHealth = previousProductionHealth
+                    };
+                }
+
+            }
             promotionPhase = "runtime-swap";
             try
             {
-                runtimeDirectoryTransaction!.Commit(
-                    stagedRuntimeRoot!,
-                    previous.DevBridgeRuntimeRoot!,
-                    out runtimeBackupRoot);
+                if (bootstrap &&
+                    runtimeDirectoryTransaction is IPromotionBootstrapRuntimeDirectoryTransaction bootstrapTransaction)
+                {
+                    bootstrapTransaction.CommitBootstrap(
+                        stagedRuntimeRoot!,
+                        previous.DevBridgeRuntimeRoot!,
+                        out runtimeBackupRoot);
+                }
+                else
+                {
+                    runtimeDirectoryTransaction!.Commit(
+                        stagedRuntimeRoot!,
+                        previous.DevBridgeRuntimeRoot!,
+                        out runtimeBackupRoot);
+                }
                 runtimeCommitted = true;
                 transactionEvidence = new(
                     promotionPhase,
@@ -1349,14 +1492,23 @@ public static class ToolchainPromotionService
                     exception.HResult,
                     exception.Message,
                     runtimeQuiescenceEvidence);
-                const string errorCode = "PROMOTION_RUNTIME_SWAP_FAILED";
+                string errorCode = bootstrap ? "BOOTSTRAP_RUNTIME_SWAP_FAILED" : "PROMOTION_RUNTIME_SWAP_FAILED";
+                if (bootstrap)
+                    WriteNoProductionState(
+                        manifestPath,
+                        "BOOTSTRAP_FAILED",
+                        errorCode,
+                        exception.Message,
+                        bootstrapArchivePath);
                 WriteFailureHandoff(
                     packagePath,
                     package,
                     previous,
                     errorCode,
                     exception.Message,
-                    "Repair the production runtime directory ownership or sharing violation, then retry the supported promotion command.",
+                    bootstrap
+                        ? "The one-time bootstrap left no authoritative production identity; repair the runtime destination and retry explicitly."
+                        : "Repair the production runtime directory ownership or sharing violation, then retry the supported promotion command.",
                     promotionPhase,
                     transactionEvidence);
                 return ToolchainPromotionResult.Blocked(
@@ -1378,7 +1530,8 @@ public static class ToolchainPromotionService
 
             var updated = new ProductionToolchainManifest
             {
-                SchemaVersion = previous.SchemaVersion,
+                SchemaVersion = "rimliaison-production-toolchain/v1",
+                ProductionState = "MODERN_PRODUCTION",
                 OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
                 RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
                 PromotedFingerprint = promotedFingerprint,
@@ -1413,7 +1566,15 @@ public static class ToolchainPromotionService
                 currentExecutablePath: installedExecutable);
             if (!installed.Succeeded)
             {
-                TryRestoreProductionManifest(manifestPath, previous);
+                if (bootstrap)
+                    WriteNoProductionState(
+                        manifestPath,
+                        "BOOTSTRAP_FAILED",
+                        "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
+                        installed.Failure?.Error,
+                        bootstrapArchivePath);
+                else
+                    TryRestoreProductionManifest(manifestPath, previous);
                 WriteFailureHandoff(
                     packagePath,
                     package,
@@ -1462,7 +1623,15 @@ public static class ToolchainPromotionService
                     .ConfigureAwait(false);
             if (!postCommitHealth.Passed)
             {
-                TryRestoreProductionManifest(manifestPath, previous);
+                if (bootstrap)
+                    WriteNoProductionState(
+                        manifestPath,
+                        "BOOTSTRAP_FAILED",
+                        "PROMOTION_POST_COMMIT_HEALTH_FAILED",
+                        postCommitHealth.Error,
+                        bootstrapArchivePath);
+                else
+                    TryRestoreProductionManifest(manifestPath, previous);
                 WriteFailureHandoff(
                     packagePath,
                     package,
@@ -1567,7 +1736,6 @@ public static class ToolchainPromotionService
                     ActiveManifestChanged = true
                 },
                 PreviousProductionHealth = previousProductionHealth,
-                ActiveManifestChanged = true,
                 RollbackOccurred = false
             };
         }
@@ -1583,7 +1751,15 @@ public static class ToolchainPromotionService
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or OperationCanceledException)
         {
-            TryRestoreProductionManifest(manifestPath, previous);
+            if (bootstrap && bootstrapRetired)
+                WriteNoProductionState(
+                    manifestPath,
+                    "BOOTSTRAP_FAILED",
+                    "BOOTSTRAP_TRANSACTION_FAILED",
+                    exception.Message,
+                    bootstrapArchivePath);
+            else
+                TryRestoreProductionManifest(manifestPath, previous);
             transactionEvidence ??= new(
                 promotionPhase,
                 stagedRuntimeRoot,
@@ -1614,7 +1790,10 @@ public static class ToolchainPromotionService
             promotionLock?.Dispose();
             if (!promotionCommitted && runtimeCommitted && previous?.DevBridgeRuntimeRoot is not null)
             {
-                runtimeDirectoryTransaction!.Restore(previous.DevBridgeRuntimeRoot, runtimeBackupRoot);
+                if (bootstrap)
+                    TryDelete(previous.DevBridgeRuntimeRoot);
+                else
+                    runtimeDirectoryTransaction!.Restore(previous.DevBridgeRuntimeRoot, runtimeBackupRoot);
             }
             else if (!promotionCommitted && stagedRuntimeRoot is not null)
             {
@@ -1651,8 +1830,24 @@ public static class ToolchainPromotionService
             if (backupRoot is not null && Directory.Exists(backupRoot) && !Directory.Exists(target))
                 Directory.Move(backupRoot, target);
             backupRoot = null;
+
             throw;
         }
+    }
+    internal static void CommitRuntimeDirectoryForBootstrap(
+        string stagedRoot,
+        string targetRoot,
+        out string? archiveRoot)
+    {
+        archiveRoot = null;
+        string target = Path.GetFullPath(targetRoot);
+        string stage = Path.GetFullPath(stagedRoot);
+        if (Directory.Exists(target))
+        {
+            archiveRoot = target + ".legacy-archive-" + Guid.NewGuid().ToString("N");
+            Directory.Move(target, archiveRoot);
+        }
+        Directory.Move(stage, target);
     }
 
     internal static void RestoreRuntimeDirectoryForTransaction(string targetRoot, string? backupRoot)
@@ -1662,6 +1857,66 @@ public static class ToolchainPromotionService
         if (!string.IsNullOrWhiteSpace(backupRoot) && Directory.Exists(backupRoot))
             Directory.Move(backupRoot, target);
     }
+    private static bool HasModernProductionIdentity(ProductionToolchainManifest manifest) =>
+        string.Equals(manifest.ProductionState, "MODERN_PRODUCTION", StringComparison.Ordinal) ||
+        (!string.IsNullOrWhiteSpace(manifest.PromotionPackagePath) &&
+         !string.IsNullOrWhiteSpace(manifest.PromotionPackageSha256));
+
+    private static bool BootstrapRuntimeBaselineIsSafe(
+        string runtimeRoot,
+        out string? error)
+    {
+        error = null;
+        if (!Directory.Exists(runtimeRoot))
+            return true;
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(runtimeRoot, "*", SearchOption.AllDirectories))
+            {
+                using FileStream stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.None);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            error = "The legacy runtime contains a locked or inaccessible file: " + exception.Message;
+            return false;
+        }
+
+        if (File.Exists(Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe")) ||
+            File.Exists(Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll")))
+        {
+            error = "The legacy runtime still contains an executable modern runtime payload.";
+            return false;
+        }
+        return true;
+    }
+
+    private static string RetireLegacyManifest(string manifestPath, string transactionId)
+    {
+        string archivePath = manifestPath + ".legacy-" + transactionId + ".json";
+        File.Move(manifestPath, archivePath);
+        return archivePath;
+    }
+
+    private static void WriteNoProductionState(
+        string manifestPath,
+        string status,
+        string? errorCode,
+        string? error,
+        string? archivePath)
+    {
+        var marker = new ProductionToolchainManifest
+        {
+            SchemaVersion = "rimliaison-production-toolchain/v1",
+            ProductionState = "NO_PRODUCTION",
+            BootstrapStatus = status,
+            BootstrapErrorCode = errorCode,
+            BootstrapError = error,
+            BootstrapArchivePath = archivePath
+        };
+        AtomicReplace(manifestPath, JsonSerializer.Serialize(marker, WriteOptions));
+    }
+
     private static void TryRestoreProductionManifest(
         string manifestPath,
         ProductionToolchainManifest? previous)
@@ -1694,7 +1949,6 @@ public static class ToolchainPromotionService
         }
         runtimeRoot = Path.GetFullPath(manifest.DevBridgeRuntimeRoot);
         runtimeProtocolContract = manifest.RuntimeProtocolContract ??
-            manifest.LegacyCompatibilityContract ??
             ToolchainPromotionSchemas.RuntimeProtocolContract;
         return true;
     }
@@ -1746,20 +2000,24 @@ public static class ToolchainPromotionService
         {
             ProductionToolchainManifest? manifest = JsonSerializer.Deserialize<ProductionToolchainManifest>(
                 File.ReadAllText(path), ReadOptions);
+            bool noProductionState = string.Equals(
+                manifest?.ProductionState,
+                "NO_PRODUCTION",
+                StringComparison.Ordinal);
             if (manifest is null ||
                 manifest.SchemaVersion != "rimliaison-production-toolchain/v1" ||
-                string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
-                string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
-                string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
-                (!string.IsNullOrWhiteSpace(manifest.OwnerProduct) &&
+                !noProductionState &&
+                (string.IsNullOrWhiteSpace(manifest.PromotedFingerprint) ||
+                 string.IsNullOrWhiteSpace(manifest.RimLiaisonExecutablePath) ||
+                 string.IsNullOrWhiteSpace(manifest.RimLiaisonAssemblyPath) ||
+                 (!string.IsNullOrWhiteSpace(manifest.OwnerProduct) &&
                     !string.Equals(manifest.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal)) ||
-                (!string.IsNullOrWhiteSpace(manifest.RuntimeSubsystem) &&
+                 (!string.IsNullOrWhiteSpace(manifest.RuntimeSubsystem) &&
                     !string.Equals(manifest.RuntimeSubsystem, ToolchainPromotionSchemas.RuntimeSubsystem, StringComparison.Ordinal)) ||
-                string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
-                string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
-                string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
-                string.IsNullOrWhiteSpace(manifest.RuntimeProtocolContract) &&
-                    !string.Equals(manifest.LegacyCompatibilityContract, ToolchainPromotionSchemas.RuntimeProtocolContract, StringComparison.Ordinal))
+                 string.IsNullOrWhiteSpace(manifest.DevBridgePackageSha256) ||
+                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerPath) ||
+                 string.IsNullOrWhiteSpace(manifest.TransactionConsumerSha256) ||
+                 string.IsNullOrWhiteSpace(manifest.RuntimeProtocolContract)))
             {
                 error = "The production manifest is incomplete or unsupported.";
                 return null;
@@ -2761,7 +3019,10 @@ public static class ToolchainPromotionService
         File.WriteAllText(temporary, content);
         try
         {
-            File.Replace(temporary, path, null);
+            if (File.Exists(path))
+                File.Replace(temporary, path, null);
+            else
+                File.Move(temporary, path);
         }
         finally
         {
@@ -2981,13 +3242,21 @@ internal sealed class ProductionRuntimeQuiescenceVerifier : IPromotionRuntimeQui
                 error));
 }
 
-internal sealed class FileSystemPromotionRuntimeDirectoryTransaction : IPromotionRuntimeDirectoryTransaction
+internal sealed class FileSystemPromotionRuntimeDirectoryTransaction :
+    IPromotionRuntimeDirectoryTransaction,
+    IPromotionBootstrapRuntimeDirectoryTransaction
 {
     public void Commit(string stagedRoot, string targetRoot, out string? backupRoot) =>
         ToolchainPromotionService.CommitRuntimeDirectoryForTransaction(
             stagedRoot,
             targetRoot,
             out backupRoot);
+
+    public void CommitBootstrap(string stagedRoot, string targetRoot, out string? archiveRoot) =>
+        ToolchainPromotionService.CommitRuntimeDirectoryForBootstrap(
+            stagedRoot,
+            targetRoot,
+            out archiveRoot);
 
     public void Restore(string targetRoot, string? backupRoot) =>
         ToolchainPromotionService.RestoreRuntimeDirectoryForTransaction(targetRoot, backupRoot);

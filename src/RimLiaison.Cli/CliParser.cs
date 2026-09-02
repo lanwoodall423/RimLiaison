@@ -85,6 +85,7 @@ internal sealed record CliRequest(
     bool QualificationRunsSpecified,
     string? QualificationOutputPath,
     string? PromotionPackagePath,
+    bool Bootstrap,
     bool HelpRequested,
     bool ExperimentalToolchain,
     string? ContentKind,
@@ -158,6 +159,7 @@ internal static class CliParser
         bool qualificationRunsSpecified = false;
         string? qualificationOutputPath = null;
         string? promotionPackagePath = null;
+        bool bootstrap = false;
         string? contentKind = null;
         string? contentRole = null;
         string? contentReuseSource = null;
@@ -328,6 +330,9 @@ internal static class CliParser
                 case "--promotion-package":
                     promotionPackagePath = ReadOptionValue(args, ref index, argument);
                     break;
+                case "--bootstrap":
+                    bootstrap = true;
+                    break;
                 case "--max-bytes":
                     contentMaxBytes = ReadPositiveBoundedInt(
                         args, ref index, argument, 256, 1_048_576);
@@ -413,6 +418,7 @@ internal static class CliParser
                 qualificationRunsSpecified,
                 qualificationOutputPath,
                 promotionPackagePath,
+                bootstrap,
                 true,
                 experimentalToolchain,
                 contentKind,
@@ -563,6 +569,10 @@ internal static class CliParser
                 throw new CliParseException("The command arguments are invalid.");
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
+        }
+        if (bootstrap && command != CliCommand.ToolchainPromotion)
+        {
+            throw new CliParseException("--bootstrap is only valid for qualification promote.");
         }
         if (command == CliCommand.Qualification &&
             string.Equals(id, "burn-in", StringComparison.OrdinalIgnoreCase))
@@ -829,6 +839,7 @@ internal static class CliParser
             qualificationRunsSpecified,
             qualificationOutputPath,
             promotionPackagePath,
+            bootstrap,
             false,
             experimentalToolchain,
             contentKind,
@@ -910,6 +921,7 @@ internal static class CliParser
                 "--run (with affected)",
                 "--runs <positive integer> (with qualification)",
                 "--qualification-output <path> (with qualification)",
+                "--bootstrap (with qualification promote; one-time legacy transition)",
                 "--fail-fast (with affected --run or suite run)",
                 "--force/--update (with init)",
                 "--manifest-only (with init)",

@@ -187,21 +187,6 @@ public static partial class DevBridgeCapabilityRecovery
                     ElapsedRecoveryMilliseconds: ElapsedMilliseconds(started));
             }
 
-            if (!IsUnifiedProductionManifest(failure.ManifestPath))
-            {
-                LegacyPromotionMigrationResult migration =
-                    LegacyPromotionMigrationService.Ensure(repositoryRoot);
-                if (migration.State == LegacyPromotionMigrationState.Blocked)
-                {
-                    return ToolchainRecoveryFailure(
-                        failure,
-                        migration.ErrorCode ?? "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE",
-                        migration.Error ?? "The active legacy promotion could not be made self-restorable.",
-                        started,
-                        PrerequisiteRecoveryState.RecoveryFailed,
-                        migration.NextAction ?? "Create and intentionally promote a new qualified RimLiaison production package.");
-                }
-            }
 
             PromotedToolchainInstallResult installation = await installer
                 .RepairAsync(failure, CancellationToken.None)
@@ -301,22 +286,6 @@ public static partial class DevBridgeCapabilityRecovery
         }
     }
 
-    private static bool IsUnifiedProductionManifest(string? manifestPath)
-    {
-        if (string.IsNullOrWhiteSpace(manifestPath) || !File.Exists(manifestPath))
-            return false;
-        try
-        {
-            ProductionToolchainManifest? manifest = JsonSerializer.Deserialize<ProductionToolchainManifest>(
-                File.ReadAllText(manifestPath));
-            return !string.IsNullOrWhiteSpace(manifest?.DevBridgeModSha256) &&
-                !string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256);
-        }
-        catch (Exception) when (File.Exists(manifestPath))
-        {
-            return false;
-        }
-    }
     private static PromotedToolchainRecoveryResult ToolchainRecoveryFailure(
         ProductionToolchainBindingFailure failure,
         string code,

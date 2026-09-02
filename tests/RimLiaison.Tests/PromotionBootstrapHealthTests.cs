@@ -178,6 +178,68 @@ internal static class PromotionBootstrapHealthTests
                 Directory.Delete(root, recursive: true);
         }
     }
+    public static void ExplicitBootstrapRetiresLegacyAndInstallsModern()
+    {
+        using Fixture fixture = new("missing", modernState: false);
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "promoted", $"explicit bootstrap did not promote: {result.ErrorCode} {result.Error}");
+        Assert(result.PreviousProductionHealth!.StartsWith("NO_PRODUCTION", StringComparison.Ordinal),
+            "bootstrap did not classify the legacy baseline as NO_PRODUCTION");
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
+        Assert(manifest.RootElement.GetProperty("productionState").GetString() == "MODERN_PRODUCTION",
+            "bootstrap did not publish a modern production state");
+        Assert(Directory.Exists(fixture.ProductionRuntimeRoot) &&
+               File.Exists(Path.Combine(fixture.ProductionRuntimeRoot, "DevBridge.cmd")),
+            "bootstrap did not install the modern runtime");
+        Assert(Directory.EnumerateFiles(fixture.Root, "*.legacy-*.json").Any(),
+            "bootstrap did not archive the legacy manifest");
+    }
+
+    public static void BootstrapRejectsExistingModernIdentity()
+    {
+        using Fixture fixture = new("missing");
+        Assert(fixture.Promote().Status == "promoted", "modern setup promotion failed");
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "BOOTSTRAP_MODERN_PRODUCTION_EXISTS",
+            "bootstrap overwrote an existing modern identity");
+    }
+
+    public static void BootstrapFailureLeavesNoProduction()
+    {
+        using Fixture fixture = new("missing", modernState: false) { CanonicalPass = false };
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "PROMOTION_POST_COMMIT_HEALTH_FAILED",
+            "bootstrap post-commit failure was not classified");
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
+        Assert(manifest.RootElement.GetProperty("productionState").GetString() == "NO_PRODUCTION" &&
+               manifest.RootElement.GetProperty("bootstrapStatus").GetString() == "BOOTSTRAP_FAILED",
+            "bootstrap failure did not leave an explicit NO_PRODUCTION state");
+        Assert(!Directory.Exists(fixture.ProductionRuntimeRoot),
+            "bootstrap failure left a partially installed runtime authoritative");
+        Assert(Directory.EnumerateFiles(fixture.Root, "*.legacy-*.json").Any(),
+            "bootstrap failure lost the retired legacy manifest evidence");
+    }
+    public static void OrdinaryPromotionRejectsLegacyBaseline()
+    {
+        using Fixture fixture = new("missing", modernState: false);
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.ErrorCode == "PROMOTION_LEGACY_BASELINE_REQUIRES_BOOTSTRAP",
+            "ordinary promotion silently accepted the legacy baseline");
+    }
+
+    public static void BootstrapRejectsExecutableLegacyRuntime()
+    {
+        using Fixture fixture = new("missing", modernState: false);
+        Directory.CreateDirectory(Path.Combine(fixture.ProductionRuntimeRoot, "Coordinator"));
+        File.WriteAllText(
+            Path.Combine(fixture.ProductionRuntimeRoot, "Coordinator", "DevBridge.Coordinator.exe"),
+            "legacy-coordinator");
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "BOOTSTRAP_RUNTIME_PRECONDITION_FAILED",
+            "bootstrap accepted an executable legacy runtime baseline");
+        Assert(File.Exists(fixture.ManifestPath),
+            "runtime precondition failure removed the active legacy manifest");
+    }
     public static void IsolatedCandidateUsesNarrowCapabilitiesProbe()
     {
         using IsolatedCandidateFixture fixture = new();
@@ -592,7 +654,7 @@ internal static class PromotionBootstrapHealthTests
         public bool CancelCandidate { get; init; }
         public TimeSpan CandidateDelay { get; init; }
 
-        public Fixture(string legacyState)
+        public Fixture(string legacyState, bool modernState = true)
         {
             Directory.CreateDirectory(Root);
             string artifactRoot = Path.Combine(Root, "qualified-artifacts");
@@ -729,7 +791,6 @@ internal static class PromotionBootstrapHealthTests
                     runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract,
                     qualificationArtifactSha256 = "old-proof"
                 }));
-            ManifestBefore = File.ReadAllText(ManifestPath);
             string qualificationHash = Hash(qualificationPath);
             File.WriteAllText(
                 PackagePath,
@@ -758,12 +819,22 @@ internal static class PromotionBootstrapHealthTests
                     unifiedManifestRelativePath = "unified-package.json",
                     runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract
                 }));
+            if (modernState)
+            {
+                var manifest = System.Text.Json.Nodes.JsonNode.Parse(
+                    File.ReadAllText(ManifestPath))!.AsObject();
+                manifest["productionState"] = "MODERN_PRODUCTION";
+                manifest["promotionPackagePath"] = Path.GetFullPath(PackagePath);
+                manifest["promotionPackageSha256"] = Hash(PackagePath);
+                File.WriteAllText(ManifestPath, manifest.ToJsonString());
+            }
+            ManifestBefore = File.ReadAllText(ManifestPath);
             previousManifestEnvironment = Environment.GetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
             Environment.SetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST", ManifestPath);
             CandidateVerifier.ExpectedRuntimeRoot = null;
         }
 
-        public ToolchainPromotionResult Promote(bool candidatePass = true)
+        public ToolchainPromotionResult Promote(bool candidatePass = true, bool bootstrap = false)
         {
             CandidateVerifier.Pass = candidatePass;
             CandidateVerifier.Delay = CandidateDelay;
@@ -773,6 +844,7 @@ internal static class PromotionBootstrapHealthTests
                     Root,
                     PackagePath,
                     null,
+                    bootstrap: bootstrap,
                     promotionHealthVerifier: CandidateVerifier,
                     canonicalHealthVerifier: CanonicalVerifier,
                     gitRepositoryStateProvider: new FakeGitProvider(
