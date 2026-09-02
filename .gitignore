@@ -17,3 +17,6 @@ UsersLanAppDataLocalTempprompt3r2-doctor-current.json
 TestResults/
 *.user
 *.suo
+src/DevBridgeRuntime/Package/1.6/
+src/DevBridgeRuntime/Package/BridgeTools/
+src/DevBridgeRuntime/Package/Coordinator/

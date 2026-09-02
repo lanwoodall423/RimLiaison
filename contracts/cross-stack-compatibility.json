@@ -7,7 +7,9 @@
     },
     "devBridge2": {
       "repository": "lanwoodall423/DevBridge2",
-      "revision": "312bc12123ea86723909586b80253fd1a63253c4"
+      "revision": "312bc12123ea86723909586b80253fd1a63253c4",
+      "status": "transitional-parity-oracle",
+      "productionOwnership": "RimLiaison"
     }
   },
   "components": {

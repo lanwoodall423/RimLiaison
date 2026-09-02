@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>DevBridge.Coordinator.Tests</AssemblyName>
+    <RootNamespace>DevBridge.Coordinator</RootNamespace>
+    <DevBridgeProductVersion>1.2.4</DevBridgeProductVersion>
+    <DevBridgeAssemblyVersion>$(DevBridgeProductVersion).0</DevBridgeAssemblyVersion>
+    <Version>$(DevBridgeProductVersion)</Version>
+    <AssemblyVersion>$(DevBridgeAssemblyVersion)</AssemblyVersion>
+    <FileVersion>$(DevBridgeAssemblyVersion)</FileVersion>
+    <InformationalVersion>$(DevBridgeProductVersion)</InformationalVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <StartupObject>DevBridge.Coordinator.OfflineTests</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DevBridgeRuntime\Coordinator.Core\DevBridge.Coordinator.Core.csproj" />
+    <ProjectReference Include="..\..\src\DevBridgeRuntime\Coordinator\DevBridge.Coordinator.csproj" />
+
+    <!-- These are deliberately shared BridgeTools contract sources. The tests
+         exercise the same serialization/policy types used by the companion
+         project; they are not Coordinator core implementation. -->
+    <Compile Include="..\..\src\DevBridgeRuntime\BridgeTools\DevBridgeGenerationContext.cs" Link="DevBridgeGenerationContext.cs" />
+    <Compile Include="..\..\src\DevBridgeRuntime\BridgeTools\DevBridgeControlPolicy.cs" Link="DevBridgeControlPolicy.cs" />
+
+    <Compile Include="OfflineTests.cs" />
+    <Compile Include="ReadinessTests.cs" />
+    <Compile Include="MaintenanceTests.cs" />
+    <Compile Include="LeasesAndProcessTests.cs" />
+    <Compile Include="QuicktestTests.cs" />
+    <Compile Include="ProfilesTests.cs" />
+    <Compile Include="RimBridgeTests.cs" />
+    <Compile Include="GamePrimitiveTests.cs" />
+    <Compile Include="RimBridgeProtocolContractTests.cs" />
+    <Compile Include="GenerationAndModsConfigTests.cs" />
+    <Compile Include="RecoveryTests.cs" />
+    <Compile Include="VersionAndSchemaTests.cs" />
+    <Compile Include="DoctorTests.cs" />
+    <Compile Include="GenerationHistoryTests.cs" />
+    <Compile Include="HistoryAnalysisTests.cs" />
+    <Compile Include="ProjectResolutionTests.cs" />
+    <Compile Include="TestGenerationInputTests.cs" />
+    <Compile Include="DevBridgeWrapperTests.cs" />
+    <Compile Include="CoordinatorLifecycleTests.cs" />
+    <Compile Include="CoordinatorTraceTests.cs" />
+    <Compile Include="CoordinatorFaultAndModelTests.cs" />
+    <Compile Include="CoordinatorStateMachineTests.cs" />
+    <Compile Include="ViewportEnvironmentTests.cs" />
+    <Compile Include="BridgeToolsDeploymentTests.cs" />
+    <Compile Include="AgentSurfaceTests.cs" />
+    <Compile Include="IdentityContractTests.cs" />
+    <Compile Include="RuntimeIdentityTests.cs" />
+    <Compile Include="AutonomousRecipesTests.cs" />
+    <Compile Include="FailureEvidenceTests.cs" />
+  </ItemGroup>
+</Project>

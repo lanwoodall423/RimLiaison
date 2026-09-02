@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "dependencies": {
+    ".NETFramework,Version=v4.7.2": {
+      "Microsoft.NETFramework.ReferenceAssemblies": {
+        "type": "Direct",
+        "requested": "[1.0.3, )",
+        "resolved": "1.0.3",
+        "contentHash": "vUc9Npcs14QsyOD01tnv/m8sQUnGTGOw1BCmKcv77LBJY7OxhJ+zJF7UD/sCL3lYNFuqmQEVlkfS4Quif6FyYg==",
+        "dependencies": {
+          "Microsoft.NETFramework.ReferenceAssemblies.net472": "1.0.3"
+        }
+      },
+      "RimBridgeServer.Sdk": {
+        "type": "Direct",
+        "requested": "[2.0.0, )",
+        "resolved": "2.0.0",
+        "contentHash": "6Ru2NQRTkaU0Cr1PRowXz2L4ciEfP3I1Cz4VHF+iyuI5PJyX4CroLWXrS6NDJwAHMv9hGPVWaUTFH/W+UE/F7A=="
+      },
+      "Microsoft.NETFramework.ReferenceAssemblies.net472": {
+        "type": "Transitive",
+        "resolved": "1.0.3",
+        "contentHash": "0E7evZXHXaDYYiLRfpyXvCh+yzM2rNTyuZDI+ZO7UUqSc6GfjePiXTdqJGtgIKUwdI81tzQKmaWprnUiPj9hAw=="
+      }
+    }
+  }
+}

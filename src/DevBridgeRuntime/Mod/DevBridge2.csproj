@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <RootNamespace>DevBridge2</RootNamespace>
+    <AssemblyName>DevBridge2</AssemblyName>
+    <Version>$(DevBridgeProductVersion)</Version>
+    <AssemblyVersion>$(DevBridgeAssemblyVersion)</AssemblyVersion>
+    <FileVersion>$(DevBridgeAssemblyVersion)</FileVersion>
+    <InformationalVersion>$(DevBridgeProductVersion)</InformationalVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == ''">$(RIMWORLD_MANAGED_DIR)</RimWorldManagedDir>
+    <OutputPath Condition="'$(OutputPath)' == ''">$(DevBridgeRuntimePackageRoot)1.6\Assemblies\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Coordinator.Core\State\DevBridgeSchemaVersions.cs" Link="DevBridgeSchemaVersions.cs" />
+    <Compile Include="..\Coordinator.Core\QuicktestActivationCore.cs" Link="QuicktestActivationCore.cs" />
+    <Compile Include="..\Coordinator.Core\QuicktestFailureArtifact.cs" Link="QuicktestFailureArtifact.cs" />
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(RimWorldManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(RimWorldManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

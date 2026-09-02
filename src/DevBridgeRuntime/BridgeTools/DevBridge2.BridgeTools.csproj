@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <RootNamespace>DevBridge2.BridgeTools</RootNamespace>
+    <AssemblyName>DevBridge2.BridgeTools</AssemblyName>
+    <Version>$(DevBridgeProductVersion)</Version>
+    <AssemblyVersion>$(DevBridgeAssemblyVersion)</AssemblyVersion>
+    <FileVersion>$(DevBridgeAssemblyVersion)</FileVersion>
+    <InformationalVersion>$(DevBridgeProductVersion)</InformationalVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RimBridgeSdkPath Condition="'$(RimBridgeSdkPath)' == ''"></RimBridgeSdkPath>
+    <OutputPath>$(DevBridgeRuntimePackageRoot)BridgeTools\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="RimBridgeServer.Sdk" Condition="'$(RimBridgeSdkPath)' != '' and Exists('$(RimBridgeSdkPath)')">
+      <HintPath>$(RimBridgeSdkPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="RimBridgeServer.Sdk" Version="2.0.0" PrivateAssets="all" ExcludeAssets="runtime"
+                      Condition="'$(RimBridgeSdkPath)' == '' or !Exists('$(RimBridgeSdkPath)')" />
+  </ItemGroup>
+</Project>

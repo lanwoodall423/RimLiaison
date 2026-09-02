@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <RootNamespace>DevBridge.Coordinator</RootNamespace>
+    <AssemblyName>DevBridge.Coordinator</AssemblyName>
+    <Version>$(DevBridgeProductVersion)</Version>
+    <AssemblyVersion>$(DevBridgeAssemblyVersion)</AssemblyVersion>
+    <FileVersion>$(DevBridgeAssemblyVersion)</FileVersion>
+    <InformationalVersion>$(DevBridgeProductVersion)</InformationalVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OutputPath>$(DevBridgeRuntimePackageRoot)Coordinator\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="CoordinatorIpcProtocol.cs" />
+    <Compile Include="CoordinatorLegacySlotMigration.cs" />
+    <Compile Include="CoordinatorControlPlane.cs" />
+    <Compile Include="AssemblyInfo.cs" />
+    <ProjectReference Include="..\Coordinator.Core\DevBridge.Coordinator.Core.csproj" />
+  </ItemGroup>
+</Project>

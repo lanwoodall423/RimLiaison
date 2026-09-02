@@ -266,6 +266,7 @@ internal static class Program
         ("DevBridge process evidence is retained", DevBridgeProcessEvidenceIsRetained),
         ("DevBridge batch launcher executes on Windows", DevBridgeBatchLauncherExecutesOnWindows),
         ("DevBridge root selects its batch launcher", DevBridgeRootSelectsBatchLauncher),
+        ("existing RimLiaison client communicates with owned runtime", InternalRuntimeCommunicationTests.ExistingClientCommunicatesWithOwnedCoordinator),
         ("show exposes metadata", ShowExposesMetadata),
         ("missing run uses not-found contract", MissingRunUsesNotFoundContract),
         ("missing show and suite commands use not-found exit code", MissingShowAndSuiteCommandsUseNotFoundExitCode),

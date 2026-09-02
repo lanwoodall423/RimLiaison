@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "rimliaison-import-provenance/v1",
+  "originalRepository": "lanwoodall423/DevBridge2",
+  "importedSourceRevision": "312bc12123ea86723909586b80253fd1a63253c4",
+  "importDate": "2026-09-01",
+  "authoritativeOwner": "RimLiaison",
+  "componentRole": "DevBridge runtime",
+  "preservedCompatibilityIdentities": {
+    "installDirectory": "RimWorld\\Mods\\DevBridge2",
+    "packageId": "lan.devbridge2",
+    "commandEntrypoint": "DevBridge.cmd",
+    "runtimeAssemblies": [
+      "DevBridge2.dll",
+      "DevBridge.Coordinator.exe",
+      "DevBridge.Coordinator.Core.dll",
+      "DevBridge2.BridgeTools.dll"
+    ],
+    "coordinatorProtocolMajor": 2,
+    "modLoadVersion": "1.6",
+    "schemas": ["devbridge-release/v1", "devbridge-runtime/v1"]
+  },
+  "ownershipStatement": "RimLiaison is authoritative for this imported runtime component. The external DevBridge2 repository remains transitional compatibility and parity material only."
+}
