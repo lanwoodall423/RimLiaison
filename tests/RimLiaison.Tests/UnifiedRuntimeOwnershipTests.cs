@@ -171,7 +171,14 @@ internal static class UnifiedRuntimeOwnershipTests
                 Assert(ToolchainCandidateMaterializer.ValidateRuntimePackage(
                         packageRoot,
                         out string? packageError),
-                    packageError ?? "isolated runtime package was incomplete");
+                    packageError ?? ("isolated runtime package was incomplete; files=" +
+                        string.Join(",", Directory.EnumerateFiles(
+                            packageRoot,
+                            "*",
+                            SearchOption.AllDirectories)
+                            .Select(path => Path.GetRelativePath(packageRoot, path))) +
+                        "\nstdout=" + build.Stdout +
+                        "\nstderr=" + build.Stderr));
                 Assert(File.Exists(Path.Combine(packageRoot, "About", "About.xml")) &&
                     File.Exists(Path.Combine(packageRoot, "CHANGELOG.md")) &&
                     File.Exists(Path.Combine(packageRoot, "Coordinator", "DevBridge.Coordinator.exe")) &&
@@ -181,6 +188,11 @@ internal static class UnifiedRuntimeOwnershipTests
                 Assert(packageRoot.StartsWith(Path.Combine(root, "candidate-"),
                         StringComparison.OrdinalIgnoreCase),
                     "runtime output escaped the candidate-owned build root");
+                Assert(!Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories)
+                        .Any(path => Path.GetFileName(path).Contains(
+                            "Microsoft.NETFramework.ReferenceAssemblies",
+                            StringComparison.OrdinalIgnoreCase)),
+                    "compile-only reference assemblies leaked into runtime package output");
             }
         }
         finally
@@ -308,6 +320,22 @@ internal static class UnifiedRuntimeOwnershipTests
         Assert(!result.Passed, "legacy unowned runtime metadata was accepted as a new candidate");
     }
 
+    public static void Net472ReferenceAssembliesDependencyIsPinnedAndPrivate()
+    {
+        string sourceRoot = FindSourceRoot();
+        string project = File.ReadAllText(Path.Combine(
+            sourceRoot,
+            "src",
+            "DevBridgeRuntime",
+            "Mod",
+            "DevBridge2.csproj"));
+        Assert(project.Contains(
+                "<PackageReference Include=\"Microsoft.NETFramework.ReferenceAssemblies.net472\"",
+                StringComparison.Ordinal) &&
+            project.Contains("Version=\"1.0.3\"", StringComparison.Ordinal) &&
+            project.Contains("PrivateAssets=\"All\"", StringComparison.Ordinal),
+            "net472 reference assemblies package must be pinned and private");
+    }
     private static void Assert(bool condition, string message)
     {
         if (!condition)
@@ -331,6 +359,7 @@ internal static class UnifiedRuntimeOwnershipTests
         public string SourceCommit => sourceCommit;
         public string RuntimeManifestPath => runtimeManifest;
         public string RuntimeManifestText => File.ReadAllText(runtimeManifest);
+
         public string RuntimeManifestHash => runtimeManifestHash;
 
         public CandidateFixture(bool legacyMetadata = false)

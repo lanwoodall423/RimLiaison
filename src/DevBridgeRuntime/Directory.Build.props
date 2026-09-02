@@ -8,5 +8,6 @@
     <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RIMWORLD_ROOT)' != ''">$(RIMWORLD_ROOT)\RimWorldWin64_Data\Managed</RimWorldManagedDir>
     <RimWorldRootFromWorkspace Condition="'$(RimWorldManagedDir)' == '' and Exists('$(RimDevWorkspaceFile)')">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(RimDevWorkspaceFile)')), '&quot;rimWorldRoot&quot;\s*:\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</RimWorldRootFromWorkspace>
     <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RimWorldRootFromWorkspace)' != ''">$(RimWorldRootFromWorkspace)\RimWorldWin64_Data\Managed</RimWorldManagedDir>
+    <DefaultItemExcludes Condition="'$(DevBridgeRuntimeIsolatedBuild)' == 'true'">$(DefaultItemExcludes);$(MSBuildProjectDirectory)\obj\**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

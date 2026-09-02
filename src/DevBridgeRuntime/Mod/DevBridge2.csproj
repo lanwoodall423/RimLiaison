@@ -18,6 +18,11 @@
     <OutputPath Condition="'$(OutputPath)' == ''">$(DevBridgeRuntimePackageRoot)1.6\Assemblies\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472"
+                      Version="1.0.3"
+                      PrivateAssets="All" />
+  </ItemGroup>
+  <ItemGroup>
     <Compile Include="..\Coordinator.Core\State\DevBridgeSchemaVersions.cs" Link="DevBridgeSchemaVersions.cs" />
     <Compile Include="..\Coordinator.Core\QuicktestActivationCore.cs" Link="QuicktestActivationCore.cs" />
     <Compile Include="..\Coordinator.Core\QuicktestFailureArtifact.cs" Link="QuicktestFailureArtifact.cs" />

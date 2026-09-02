@@ -125,6 +125,7 @@ internal static class Program
         ("runtime mod hash mutation blocks", UnifiedRuntimeOwnershipTests.RuntimeModHashMutationBlocks),
         ("candidate health runs published CLI self-check", UnifiedRuntimeOwnershipTests.CandidateHealthRunsPublishedCliSelfCheck),
         ("candidate health ignores RimWorld executable", UnifiedRuntimeOwnershipTests.CandidateHealthIgnoresRimWorldExecutable),
+        ("net472 reference assemblies dependency is pinned and private", UnifiedRuntimeOwnershipTests.Net472ReferenceAssembliesDependencyIsPinnedAndPrivate),
         ("isolated runtime build avoids executing CLI output", UnifiedRuntimeOwnershipTests.IsolatedRuntimeBuildAvoidsExecutingCliOutput),
         ("complete CLI closure mutation fails", CliDeploymentTests.CompleteClosurePassesAndMutationFails),
         ("self-check returns structured ready JSON", CliDeploymentTests.SelfCheckReturnsStructuredReadyJson),
