@@ -1,7 +1,7 @@
+using RimLiaison;
 using RimLiaison.Observability;
 using RimLiaison.Qualification;
 using RimLiaison.Validation;
-
 namespace RimLiaison.Tests;
 
 internal static class QualificationTests
@@ -45,6 +45,92 @@ internal static class QualificationTests
             DeleteDirectory(directory);
         }
     }
+    public static void QualificationCliProfilesHaveAuthoritativeRunCounts()
+    {
+        CliRequest single = CliParser.Parse(["qualification"]);
+        AssertEqual("qualification", single.Id!, "default qualification command id");
+        AssertEqual(1, single.QualificationRuns, "default qualification run count");
+        AssertEqual(
+            QualificationProfiles.Single,
+            QualificationProfiles.ResolveProfile(single.Id),
+            "default qualification profile");
+
+        CliRequest explicitRuns = CliParser.Parse(["qualification", "--runs", "3"]);
+        AssertEqual(3, explicitRuns.QualificationRuns, "explicit diagnostic run count");
+        Assert(explicitRuns.QualificationRunsSpecified, "explicit run count should be tracked");
+
+        CliRequest burnIn = CliParser.Parse(["qualification", "burn-in"]);
+        AssertEqual(
+            QualificationProfiles.PromotionBurnIn,
+            QualificationProfiles.ResolveProfile(burnIn.Id),
+            "burn-in profile");
+        AssertEqual(
+            QualificationProfiles.PromotionBurnInRuns,
+            burnIn.QualificationRuns,
+            "intrinsic burn-in run count");
+
+        CliRequest explicitBurnIn = CliParser.Parse(["qualification", "burn-in", "--runs", "25"]);
+        AssertEqual(25, explicitBurnIn.QualificationRuns, "explicit burn-in compatibility count");
+
+        foreach (string conflictingRuns in new[] { "1", "24", "26" })
+        {
+            try
+            {
+                _ = CliParser.Parse(["qualification", "burn-in", "--runs", conflictingRuns]);
+                throw new InvalidOperationException(
+                    $"conflicting burn-in run count {conflictingRuns} was accepted");
+            }
+            catch (CliParseException exception)
+            {
+                Assert(
+                    exception.Message.Contains("qualification burn-in requires exactly 25 runs",
+                        StringComparison.Ordinal),
+                    "conflicting burn-in count must fail with the contract error");
+            }
+        }
+    }
+
+    public static void BurnInAggregateAndExecutionInvariantAreDefensive()
+    {
+        using var store = NewStore(out string directory);
+        try
+        {
+            QualificationAggregate aggregate = new QualificationHarness().Run(
+                QualificationProfiles.PromotionBurnInRuns,
+                QualificationProfiles.PromotionBurnIn,
+                store);
+            AssertEqual(
+                QualificationProfiles.PromotionBurnIn,
+                aggregate.Profile,
+                "burn-in aggregate profile");
+            AssertEqual(
+                QualificationProfiles.PromotionBurnInRuns,
+                aggregate.TotalRuns,
+                "burn-in aggregate total runs");
+            AssertEqual(
+                QualificationProfiles.PromotionBurnInRuns,
+                aggregate.Passes,
+                "burn-in aggregate passes");
+
+            try
+            {
+                _ = new QualificationHarness().Run(1, QualificationProfiles.PromotionBurnIn, store);
+                throw new InvalidOperationException(
+                    "inconsistent burn-in execution request was accepted");
+            }
+            catch (InvalidOperationException exception)
+            {
+                Assert(
+                    exception.Message.Contains("requires exactly 25 runs", StringComparison.Ordinal),
+                    "inconsistent burn-in request must fail closed");
+            }
+        }
+        finally
+        {
+            DeleteDirectory(directory);
+        }
+    }
+
 
     public static void ProductionFirstRecommendationDoesNotFailModWorkflow()
     {

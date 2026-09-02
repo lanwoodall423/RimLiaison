@@ -1,5 +1,6 @@
 using RimLiaison.Stack;
 using RimLiaison.RimDev;
+using RimLiaison.Qualification;
 
 namespace RimLiaison;
 
@@ -80,6 +81,7 @@ internal sealed record CliRequest(
     bool DevBridgeProjectExplicit,
     StackManifestResolution StackManifest,
     int QualificationRuns,
+    bool QualificationRunsSpecified,
     string? QualificationOutputPath,
     string? PromotionPackagePath,
     bool HelpRequested,
@@ -152,6 +154,7 @@ internal static class CliParser
         bool helpRequested = false;
         var dependencyFingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
         int qualificationRuns = 1;
+        bool qualificationRunsSpecified = false;
         string? qualificationOutputPath = null;
         string? promotionPackagePath = null;
         string? contentKind = null;
@@ -312,6 +315,7 @@ internal static class CliParser
                     break;
                 case "--runs":
                     string runsValue = ReadOptionValue(args, ref index, argument);
+                    qualificationRunsSpecified = true;
                     if (!int.TryParse(runsValue, out qualificationRuns) || qualificationRuns < 1)
                     {
                         throw new CliParseException("Option --runs must be a positive integer.");
@@ -405,6 +409,7 @@ internal static class CliParser
                 devBridgeProjectExplicit,
                 stackManifest,
                 qualificationRuns,
+                qualificationRunsSpecified,
                 qualificationOutputPath,
                 promotionPackagePath,
                 true,
@@ -554,6 +559,19 @@ internal static class CliParser
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
         }
+        if (command == CliCommand.Qualification &&
+            string.Equals(id, "burn-in", StringComparison.OrdinalIgnoreCase))
+        {
+            if (qualificationRunsSpecified &&
+                qualificationRuns != QualificationProfiles.PromotionBurnInRuns)
+            {
+                throw new CliParseException(
+                    $"qualification burn-in requires exactly {QualificationProfiles.PromotionBurnInRuns} runs");
+            }
+
+            qualificationRuns = QualificationProfiles.PromotionBurnInRuns;
+        }
+
 
         if (fallbackSuite is null &&
             command is (CliCommand.Affected or CliCommand.GoldenPath or CliCommand.Preflight or
@@ -803,6 +821,7 @@ internal static class CliParser
             devBridgeProjectExplicit,
             stackManifest,
             qualificationRuns,
+            qualificationRunsSpecified,
             qualificationOutputPath,
             promotionPackagePath,
             false,

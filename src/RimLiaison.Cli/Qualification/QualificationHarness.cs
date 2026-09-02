@@ -10,6 +10,28 @@ public static class QualificationSchemas
     public const string Manifest = "rimliaison-toolchain-manifest/v1";
 }
 
+public static class QualificationProfiles
+{
+    public const string Single = "single";
+    public const string PromotionBurnIn = "burn-in-25";
+    public const int PromotionBurnInRuns = 25;
+
+    public static string ResolveProfile(string? commandId) =>
+        string.Equals(commandId, "burn-in", StringComparison.OrdinalIgnoreCase)
+            ? PromotionBurnIn
+            : Single;
+
+    public static void ValidateRunCount(string profile, int runCount)
+    {
+        if (string.Equals(profile, PromotionBurnIn, StringComparison.OrdinalIgnoreCase) &&
+            runCount != PromotionBurnInRuns)
+        {
+            throw new InvalidOperationException(
+                $"Qualification profile '{PromotionBurnIn}' requires exactly {PromotionBurnInRuns} runs.");
+        }
+    }
+}
+
 public enum QualificationOutcome
 {
     Pass,
@@ -145,6 +167,7 @@ public sealed class QualificationHarness
         IAgentObservabilityStore store,
         string toolchainState = "experimental")
     {
+        QualificationProfiles.ValidateRunCount(profile, runCount);
         if (runCount < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(runCount));

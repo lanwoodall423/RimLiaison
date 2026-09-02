@@ -486,9 +486,7 @@ public static class CliApplication
             }
             if (request.Command == CliCommand.Qualification)
             {
-                string profile = string.Equals(request.Id, "burn-in", StringComparison.OrdinalIgnoreCase)
-                    ? "burn-in-25"
-                    : "single";
+                string profile = QualificationProfiles.ResolveProfile(request.Id);
                 string outputPath = request.QualificationOutputPath ??
                     Path.Combine(".rimdev", "qualification", "latest.json");
                 string qualificationDirectory = Path.GetDirectoryName(
@@ -538,6 +536,7 @@ public static class CliApplication
                         .ConfigureAwait(false);
                 }
 
+                QualificationProfiles.ValidateRunCount(profile, request.QualificationRuns);
                 QualificationAggregate aggregate = new QualificationHarness().Run(
                     request.QualificationRuns,
                     profile,

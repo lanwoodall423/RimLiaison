@@ -33,14 +33,21 @@ Expected fixture failures are evidence scenarios, not failures of the qualificat
 Iteration profile:
 
 ```powershell
-rimliaison qualification --runs 1
+rimliaison qualification
 ```
 
-Promotion profile:
+The default qualification uses profile `single` and one run. An explicit
+`--runs N` remains available for diagnostic qualification.
+
+Promotion burn-in:
 
 ```powershell
-rimliaison qualification burn-in --runs 25
+rimliaison qualification burn-in
 ```
+
+Burn-in is intrinsically profile `burn-in-25` and exactly 25 runs.
+`--runs 25` remains accepted for compatibility; every other burn-in run count
+is invalid.
 
 Both commands emit machine-readable aggregate JSON and write:
 

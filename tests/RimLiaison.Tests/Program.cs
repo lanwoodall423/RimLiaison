@@ -259,6 +259,8 @@ internal static class Program
         ("reliability UI projection and campaign controls", ReliabilityTests.PromptTwoReliabilitySurface),
 
         ("qualification harness covers deterministic contract", QualificationTests.HarnessCoversDeterministicContract),
+        ("qualification CLI profiles have authoritative run counts", QualificationTests.QualificationCliProfilesHaveAuthoritativeRunCounts),
+        ("burn-in aggregate and execution invariant are defensive", QualificationTests.BurnInAggregateAndExecutionInvariantAreDefensive),
         ("production recommendation remains non-blocking", QualificationTests.ProductionFirstRecommendationDoesNotFailModWorkflow),
         ("required capability can fail Golden Path", QualificationTests.RequiredCapabilityCanFailGoldenPath),
         ("qualification recommendations project to backlog", QualificationTests.QualificationBacklogProjectsStructuredRecommendations),
