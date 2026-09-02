@@ -263,7 +263,25 @@ public sealed record PromotionTransactionEvidence(
     [property: JsonPropertyName("backupPath")] string? BackupPath,
     [property: JsonPropertyName("hResult")] int? HResult,
     [property: JsonPropertyName("error")] string? Error,
-    [property: JsonPropertyName("runtimeQuiescence")] PromotionRuntimeQuiescenceEvidence? RuntimeQuiescence);
+    [property: JsonPropertyName("runtimeQuiescence")] PromotionRuntimeQuiescenceEvidence? RuntimeQuiescence,
+    [property: JsonPropertyName("operation")] string? Operation = null,
+    [property: JsonPropertyName("lockedPath")] string? LockedPath = null);
+
+internal sealed class PromotionRuntimeSwapException : IOException
+{
+    public PromotionRuntimeSwapException(string operation, string path, Exception innerException)
+        : base(
+            $"Runtime swap operation '{operation}' failed for '{path}': {innerException.Message}",
+            innerException)
+    {
+        Operation = operation;
+        LockedPath = path;
+        HResult = innerException.HResult;
+    }
+
+    public string Operation { get; }
+    public string LockedPath { get; }
+}
 
 public interface IPromotionRuntimeDirectoryTransaction
 {
@@ -1465,69 +1483,60 @@ public static class ToolchainPromotionService
                         PreviousProductionHealth = previousProductionHealth
                     };
                 }
-                runtimeQuiescenceEvidence = new(
-                    "legacy-baseline-not-required",
-                    previous.DevBridgeRuntimeRoot!,
-                    Path.Combine(previous.DevBridgeRuntimeRoot!, "DevBridge.cmd"),
-                    null,
-                    null,
-                    null,
-                    null);
-                transactionEvidence = new(
-                    promotionPhase,
-                    null,
-                    previous.DevBridgeRuntimeRoot,
-                    bootstrapArchivePath,
-                    null,
-                    null,
-                    runtimeQuiescenceEvidence);
             }
-            if (!bootstrap)
+            promotionPhase = "runtime-quiescence";
+            PromotionRuntimeQuiescenceResult runtimeQuiescence =
+                await runtimeQuiescenceVerifier!.VerifyAsync(
+                        previous.DevBridgeRuntimeRoot!,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            runtimeQuiescenceEvidence = runtimeQuiescence.Evidence;
+            transactionEvidence = new(
+                promotionPhase,
+                null,
+                previous.DevBridgeRuntimeRoot,
+                bootstrap ? bootstrapArchivePath : null,
+                null,
+                runtimeQuiescence.Error,
+                runtimeQuiescenceEvidence);
+            if (!runtimeQuiescence.Passed)
             {
-                PromotionRuntimeQuiescenceResult runtimeQuiescence =
-                    await runtimeQuiescenceVerifier!.VerifyAsync(
-                            previous.DevBridgeRuntimeRoot!,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                runtimeQuiescenceEvidence = runtimeQuiescence.Evidence;
-                transactionEvidence = new(
+                string errorCode = bootstrap
+                    ? "BOOTSTRAP_RUNTIME_QUIESCE_FAILED"
+                    : "PROMOTION_RUNTIME_QUIESCE_FAILED";
+                if (bootstrap)
+                    WriteNoProductionState(
+                        manifestPath,
+                        "BOOTSTRAP_FAILED",
+                        errorCode,
+                        runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                        bootstrapArchivePath,
+                        previous);
+                WriteFailureHandoff(
+                    packagePath,
+                    package,
+                    previous,
+                    errorCode,
+                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
                     promotionPhase,
-                    null,
-                    previous.DevBridgeRuntimeRoot,
-                    null,
-                    null,
-                    runtimeQuiescence.Error,
-                    runtimeQuiescenceEvidence);
-                if (!runtimeQuiescence.Passed)
+                    transactionEvidence);
+                return ToolchainPromotionResult.Blocked(
+                    errorCode,
+                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
+                    runtimeQuiescence.Summary) with
                 {
-                    const string errorCode = "PROMOTION_RUNTIME_QUIESCE_FAILED";
-                    WriteFailureHandoff(
-                        packagePath,
-                        package,
-                        previous,
-                        errorCode,
-                        runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
-                        "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
-                        promotionPhase,
-                        transactionEvidence);
-                    return ToolchainPromotionResult.Blocked(
-                        errorCode,
-                        runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
-                        package.SourceCommit,
-                        artifactPath,
-                        qualificationHash,
-                        previous.PromotedFingerprint,
-                        "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
-                        runtimeQuiescence.Summary) with
-                    {
-                        PromotionTransactionId = promotionTransactionId,
-                        PromotionPhase = promotionPhase,
-                        TransactionEvidence = transactionEvidence,
-                        RuntimeQuiescence = runtimeQuiescenceEvidence,
-                        PreviousProductionHealth = previousProductionHealth
-                    };
-                }
-
+                    PromotionTransactionId = promotionTransactionId,
+                    PromotionPhase = promotionPhase,
+                    TransactionEvidence = transactionEvidence,
+                    RuntimeQuiescence = runtimeQuiescenceEvidence,
+                    PreviousProductionHealth = previousProductionHealth
+                };
             }
             promotionPhase = "runtime-swap";
             try
@@ -1566,7 +1575,9 @@ public static class ToolchainPromotionService
                     runtimeBackupRoot,
                     exception.HResult,
                     exception.Message,
-                    runtimeQuiescenceEvidence);
+                    runtimeQuiescenceEvidence,
+                    (exception as PromotionRuntimeSwapException)?.Operation,
+                    (exception as PromotionRuntimeSwapException)?.LockedPath);
                 string errorCode = bootstrap ? "BOOTSTRAP_RUNTIME_SWAP_FAILED" : "PROMOTION_RUNTIME_SWAP_FAILED";
                 if (bootstrap)
                     WriteNoProductionState(
@@ -1901,19 +1912,34 @@ public static class ToolchainPromotionService
         if (Directory.Exists(target))
         {
             backupRoot = target + ".backup-" + Guid.NewGuid().ToString("N");
-            Directory.Move(target, backupRoot);
+            try
+            {
+                Directory.Move(target, backupRoot);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                throw new PromotionRuntimeSwapException(
+                    "move-target-to-backup",
+                    target,
+                    exception);
+            }
         }
         try
         {
             Directory.Move(stage, target);
         }
-        catch
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
         {
             if (backupRoot is not null && Directory.Exists(backupRoot) && !Directory.Exists(target))
                 Directory.Move(backupRoot, target);
             backupRoot = null;
 
-            throw;
+            throw new PromotionRuntimeSwapException(
+                "move-staged-runtime-to-target",
+                stage,
+                exception);
         }
     }
     internal static void CommitRuntimeDirectoryForBootstrap(
@@ -1927,9 +1953,31 @@ public static class ToolchainPromotionService
         if (Directory.Exists(target))
         {
             archiveRoot = target + ".legacy-archive-" + Guid.NewGuid().ToString("N");
-            Directory.Move(target, archiveRoot);
+            try
+            {
+                Directory.Move(target, archiveRoot);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                throw new PromotionRuntimeSwapException(
+                    "move-target-to-legacy-archive",
+                    target,
+                    exception);
+            }
         }
-        Directory.Move(stage, target);
+        try
+        {
+            Directory.Move(stage, target);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            throw new PromotionRuntimeSwapException(
+                "move-staged-runtime-to-target",
+                stage,
+                exception);
+        }
     }
 
     internal static void RestoreRuntimeDirectoryForTransaction(string targetRoot, string? backupRoot)
@@ -3330,6 +3378,35 @@ internal sealed class ProductionRuntimeQuiescenceVerifier : IPromotionRuntimeQui
         }
         if (!File.Exists(commandPath))
         {
+            bool empty;
+            try
+            {
+                empty = !Directory.EnumerateFileSystemEntries(expectedRoot).Any();
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                return Failed(
+                    "The active production runtime could not be inspected before replacement: " +
+                    exception.Message,
+                    expectedRoot,
+                    commandPath,
+                    "inspection-failed",
+                    null,
+                    null,
+                    null);
+            }
+            if (empty)
+            {
+                PromotionRuntimeQuiescenceEvidence evidence = new(
+                    "already-absent",
+                    expectedRoot,
+                    commandPath,
+                    null,
+                    null,
+                    null);
+                return new(true, "The active production runtime directory was empty.", null, evidence);
+            }
             return Failed(
                 "The active production runtime does not contain its DevBridge.cmd control entrypoint.",
                 expectedRoot,
@@ -3359,6 +3436,25 @@ internal sealed class ProductionRuntimeQuiescenceVerifier : IPromotionRuntimeQui
                 expectedRoot,
                 commandPath,
                 "probe-invalid",
+                beforeEvidence,
+                null,
+                null);
+        }
+        if (!beforeQuiesced &&
+            beforeEvidence?.CoordinatorExecutable is { } coordinatorExecutable &&
+            !string.Equals(
+                Path.GetFullPath(coordinatorExecutable),
+                Path.Combine(expectedRoot, "Coordinator", "DevBridge.Coordinator.exe"),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string processId = beforeEvidence.CoordinatorPid?.ToString(
+                System.Globalization.CultureInfo.InvariantCulture) ?? "unknown";
+            return Failed(
+                "A coordinator for the production runtime root is running from an unowned executable. " +
+                $"pid={processId}; executable={coordinatorExecutable}; expectedRoot={expectedRoot}",
+                expectedRoot,
+                commandPath,
+                "foreign-process",
                 beforeEvidence,
                 null,
                 null);

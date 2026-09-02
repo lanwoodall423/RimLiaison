@@ -81,6 +81,16 @@ internal static class PromotionBootstrapHealthTests
         Assert(fixture.RuntimeQuiescenceVerifier.Calls == 1, "runtime quiescence was not invoked exactly once");
         Assert(result.RuntimeQuiescence?.Status == "stopped", "promotion omitted stopped-runtime evidence");
     }
+    public static void BootstrapQuiescesExistingRuntime()
+    {
+        using Fixture fixture = new("missing", modernState: false);
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "promoted", "bootstrap with a clean legacy destination failed");
+        Assert(fixture.RuntimeQuiescenceVerifier.Calls == 1,
+            "bootstrap did not quiesce the runtime destination before replacement");
+        Assert(result.RuntimeQuiescence?.Status == "stopped",
+            "bootstrap omitted runtime quiescence evidence");
+    }
 
     public static void AlreadyAbsentRuntimeSkipsShutdown()
     {
@@ -113,14 +123,18 @@ internal static class PromotionBootstrapHealthTests
         fixture.RuntimeDirectoryTransaction.ThrowOnCommit = true;
         ToolchainPromotionResult result = fixture.Promote();
         Assert(result.ErrorCode == "PROMOTION_RUNTIME_SWAP_FAILED", "runtime swap failure was not classified");
-        Assert(!string.IsNullOrWhiteSpace(result.TransactionEvidence?.SourcePath) &&
-               !string.Equals(result.TransactionEvidence.SourcePath, fixture.ProductionRuntimeRoot,
+        PromotionTransactionEvidence evidence = result.TransactionEvidence ??
+            throw new InvalidOperationException("runtime swap failure omitted transaction evidence");
+        Assert(!string.IsNullOrWhiteSpace(evidence.SourcePath) &&
+               !string.Equals(evidence.SourcePath, fixture.ProductionRuntimeRoot,
                    StringComparison.OrdinalIgnoreCase),
             "runtime swap evidence omitted the staged source path");
-        Assert(result.TransactionEvidence?.DestinationPath == fixture.ProductionRuntimeRoot,
+        Assert(evidence.DestinationPath == fixture.ProductionRuntimeRoot,
             "runtime swap evidence omitted the production destination path");
-        Assert(result.TransactionEvidence?.HResult is not null, "runtime swap evidence omitted HResult");
-        Assert(result.RuntimeQuiescence?.Status == "stopped", "runtime swap evidence omitted quiescence proof");
+        Assert(evidence.HResult is not null, "runtime swap evidence omitted HResult");
+        Assert(evidence.Operation == "move-staged-runtime-to-target" &&
+               evidence.LockedPath == evidence.SourcePath,
+            "runtime swap evidence omitted the failed operation and locked path");
     }
 
     public static void ProductionQuiescenceUsesProbeShutdownProbe()
@@ -171,6 +185,58 @@ internal static class PromotionBootstrapHealthTests
             Assert(result.Evidence.After?.State == "Absent", "production verifier did not prove absent state");
             Assert(result.Evidence.After?.CoordinatorPid is null, "production verifier accepted a remaining PID");
             Assert(result.Evidence.After?.RuntimeRoot == root, "production verifier accepted a different runtime root");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+    public static void ForeignCoordinatorIsNotStopped()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-runtime-foreign-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(root, "DevBridge.cmd"),
+                """
+                @echo off
+                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                exit /b %ERRORLEVEL%
+                """);
+            File.WriteAllText(
+                Path.Combine(root, "fake-devbridge.ps1"),
+                """
+                $Arguments = $args
+                $root = [IO.Path]::GetFullPath($PSScriptRoot)
+                $marker = Join-Path $root "shutdown.marker"
+                if ($Arguments -contains "probe") {
+                    @{ state = "Responsive"; runtimeRoot = $root; coordinatorPid = 555;
+                       coordinatorExecutable = "C:\RimDev\Repos\DevBridge2\Coordinator\DevBridge.Coordinator.exe" } |
+                        ConvertTo-Json -Compress
+                    exit 0
+                }
+                if ($Arguments -contains "shutdown") {
+                    New-Item -ItemType File -Path $marker | Out-Null
+                    @{ success = $true } | ConvertTo-Json -Compress
+                    exit 0
+                }
+                exit 3
+                """);
+
+            PromotionRuntimeQuiescenceResult result =
+                new ProductionRuntimeQuiescenceVerifier()
+                    .VerifyAsync(root, CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            Assert(!result.Passed && result.Evidence.Status == "foreign-process",
+                "foreign coordinator was not classified before shutdown");
+            Assert(!File.Exists(Path.Combine(root, "shutdown.marker")),
+                "foreign coordinator was stopped by runtime quiescence");
+            Assert(result.Error?.Contains("DevBridge2\\Coordinator\\DevBridge.Coordinator.exe",
+                       StringComparison.OrdinalIgnoreCase) == true,
+                "foreign coordinator evidence omitted its executable path");
         }
         finally
         {
@@ -1085,7 +1151,10 @@ internal static class PromotionBootstrapHealthTests
             if (ThrowOnCommit)
             {
                 backupRoot = null;
-                throw new IOException("injected runtime swap sharing violation");
+                throw new PromotionRuntimeSwapException(
+                    "move-staged-runtime-to-target",
+                    stagedRoot,
+                    new IOException("injected runtime swap sharing violation"));
             }
             ToolchainPromotionService.CommitRuntimeDirectoryForTransaction(
                 stagedRoot,
