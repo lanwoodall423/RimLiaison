@@ -326,6 +326,7 @@ internal static class ToolchainCandidateMaterializer
             productionEligible = false,
             project = ToolchainPromotionSchemas.OwnerProduct,
             packageId = RuntimePackageId,
+            sourceCommit,
             sourceRoot = (string?)null,
             sourceDirty = false,
             runtimeProtocolContract,

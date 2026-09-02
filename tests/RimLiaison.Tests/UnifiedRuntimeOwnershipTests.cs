@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using RimLiaison.Git;
 using RimLiaison.Qualification;
 using RimLiaison.Toolchain;
@@ -48,8 +49,37 @@ internal static class UnifiedRuntimeOwnershipTests
     public static void OwnedRuntimeManifestBindsSourceCommit()
     {
         using CandidateFixture fixture = new();
+        using JsonDocument manifest = JsonDocument.Parse(fixture.RuntimeManifestText);
+        Assert(manifest.RootElement.GetProperty("sourceCommit").GetString() == fixture.SourceCommit &&
+            ToolchainFileHash.Sha256(fixture.RuntimeManifestPath) == fixture.RuntimeManifestHash,
+            "new unified runtime manifest must bind its exact source commit and serialized-file hash");
         PromotionCandidateHealthResult result = fixture.Verify();
         Assert(result.Passed, result.Error ?? "owned runtime candidate was rejected");
+    }
+
+    public static void RuntimeManifestSourceCommitMismatchBlocks()
+    {
+        using CandidateFixture fixture = new();
+        fixture.SetManifestSourceCommit("other-source");
+        PromotionCandidateHealthResult result = fixture.Verify();
+        Assert(!result.Passed, "a runtime manifest source commit mismatch was accepted");
+    }
+
+    public static void RuntimeManifestMissingSourceCommitBlocks()
+    {
+        using CandidateFixture fixture = new();
+        fixture.SetManifestSourceCommit(null);
+        PromotionCandidateHealthResult result = fixture.Verify();
+        Assert(!result.Passed, "a new unified runtime manifest without sourceCommit was accepted");
+    }
+
+    public static void RuntimeManifestGenerationIsDeterministic()
+    {
+        using CandidateFixture first = new();
+        using CandidateFixture second = new();
+        Assert(first.RuntimeManifestText == second.RuntimeManifestText &&
+            first.RuntimeManifestHash == second.RuntimeManifestHash,
+            "identical runtime inputs must generate identical manifest contents and hashes");
     }
 
     public static void RuntimeManifestHashMutationBlocks()
@@ -182,7 +212,12 @@ internal static class UnifiedRuntimeOwnershipTests
         private readonly string mod;
         private readonly string runtimeManifest;
         private readonly string modHash;
-        private readonly string runtimeManifestHash;
+        private string runtimeManifestHash;
+
+        public string SourceCommit => sourceCommit;
+        public string RuntimeManifestPath => runtimeManifest;
+        public string RuntimeManifestText => File.ReadAllText(runtimeManifest);
+        public string RuntimeManifestHash => runtimeManifestHash;
 
         public CandidateFixture(bool legacyMetadata = false)
         {
@@ -221,6 +256,17 @@ internal static class UnifiedRuntimeOwnershipTests
                     new { path = "1.6/Assemblies/DevBridge2.dll", sha256 = modHash }
                 }
             }));
+            runtimeManifestHash = Hash(runtimeManifest);
+        }
+
+        public void SetManifestSourceCommit(string? value)
+        {
+            JsonObject manifest = JsonNode.Parse(RuntimeManifestText)!.AsObject();
+            if (value is null)
+                manifest.Remove("sourceCommit");
+            else
+                manifest["sourceCommit"] = value;
+            File.WriteAllText(runtimeManifest, manifest.ToJsonString());
             runtimeManifestHash = Hash(runtimeManifest);
         }
 
