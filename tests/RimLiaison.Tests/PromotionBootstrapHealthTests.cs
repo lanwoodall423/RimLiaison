@@ -212,8 +212,12 @@ internal static class PromotionBootstrapHealthTests
             "bootstrap post-commit failure was not classified");
         using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
         Assert(manifest.RootElement.GetProperty("productionState").GetString() == "NO_PRODUCTION" &&
-               manifest.RootElement.GetProperty("bootstrapStatus").GetString() == "BOOTSTRAP_FAILED",
-            "bootstrap failure did not leave an explicit NO_PRODUCTION state");
+               manifest.RootElement.GetProperty("bootstrapStatus").GetString() == "BOOTSTRAP_FAILED" &&
+               manifest.RootElement.GetProperty("devBridgeRuntimeRoot").GetString() ==
+                   fixture.ProductionRuntimeRoot &&
+               manifest.RootElement.GetProperty("runtimeProtocolContract").GetString() ==
+                   ToolchainPromotionSchemas.RuntimeProtocolContract,
+            "bootstrap failure did not leave a reusable NO_PRODUCTION destination");
         Assert(!Directory.Exists(fixture.ProductionRuntimeRoot),
             "bootstrap failure left a partially installed runtime authoritative");
         Assert(Directory.EnumerateFiles(fixture.Root, "*.legacy-*.json").Any(),

@@ -1404,7 +1404,13 @@ public static class ToolchainPromotionService
                 {
                     bootstrapArchivePath = RetireLegacyManifest(manifestPath, promotionTransactionId!);
                     bootstrapRetired = true;
-                    WriteNoProductionState(manifestPath, "BOOTSTRAP_IN_PROGRESS", null, null, bootstrapArchivePath);
+                    WriteNoProductionState(
+                        manifestPath,
+                        "BOOTSTRAP_IN_PROGRESS",
+                        null,
+                        null,
+                        bootstrapArchivePath,
+                        previous);
                 }
                 catch (Exception exception) when (
                     exception is IOException or UnauthorizedAccessException)
@@ -1541,7 +1547,8 @@ public static class ToolchainPromotionService
                         "BOOTSTRAP_FAILED",
                         errorCode,
                         exception.Message,
-                        bootstrapArchivePath);
+                        bootstrapArchivePath,
+                        previous);
                 WriteFailureHandoff(
                     packagePath,
                     package,
@@ -1614,7 +1621,8 @@ public static class ToolchainPromotionService
                         "BOOTSTRAP_FAILED",
                         "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
                         installed.Failure?.Error,
-                        bootstrapArchivePath);
+                        bootstrapArchivePath,
+                        previous);
                 else
                     TryRestoreProductionManifest(manifestPath, previous);
                 WriteFailureHandoff(
@@ -1672,7 +1680,8 @@ public static class ToolchainPromotionService
                         "BOOTSTRAP_FAILED",
                         "PROMOTION_POST_COMMIT_HEALTH_FAILED",
                         postCommitHealth.Error,
-                        bootstrapArchivePath);
+                        bootstrapArchivePath,
+                        previous);
                 else
                     TryRestoreProductionManifest(manifestPath, previous);
                 WriteFailureHandoff(
@@ -1803,7 +1812,8 @@ public static class ToolchainPromotionService
                     "BOOTSTRAP_FAILED",
                     "BOOTSTRAP_TRANSACTION_FAILED",
                     exception.Message,
-                    bootstrapArchivePath);
+                    bootstrapArchivePath,
+                    previous);
             else
                 TryRestoreProductionManifest(manifestPath, previous);
             transactionEvidence ??= new(
@@ -1949,16 +1959,18 @@ public static class ToolchainPromotionService
         string status,
         string? errorCode,
         string? error,
-        string? archivePath)
+        string? archivePath,
+        ProductionToolchainManifest? previous)
     {
         var marker = new ProductionToolchainManifest
         {
             SchemaVersion = "rimliaison-production-toolchain/v1",
             ProductionState = "NO_PRODUCTION",
             BootstrapStatus = status,
-            BootstrapErrorCode = errorCode,
             BootstrapError = error,
-            BootstrapArchivePath = archivePath
+            BootstrapArchivePath = archivePath,
+            DevBridgeRuntimeRoot = previous?.DevBridgeRuntimeRoot,
+            RuntimeProtocolContract = previous?.RuntimeProtocolContract
         };
         AtomicReplace(manifestPath, JsonSerializer.Serialize(marker, WriteOptions));
     }
