@@ -310,6 +310,48 @@ public static class ToolchainPromotionService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = true
     };
+    private static readonly IReadOnlyDictionary<string, string> CanonicalProductionChildEnvironment =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["RIMLIAISON_TOOLCHAIN_MODE"] = string.Empty,
+            ["RIMLIAISON_PRODUCTION_CLI"] = string.Empty,
+            ["RIMLIAISON_PRODUCTION_ROOT"] = string.Empty,
+            ["RIMTEST_ROOT"] = string.Empty,
+            ["RIMTEST_DEVBRIDGE_ROOT"] = string.Empty,
+            ["RIMTEST_DEVBRIDGE_CMD"] = string.Empty,
+            ["RIMTEST_DEVBRIDGE_PROJECT"] = string.Empty,
+            ["RIMTEST_DEVBRIDGE_PINNED_ROOT"] = string.Empty,
+            ["DEVBRIDGE_CMD"] = string.Empty,
+            ["DEVBRIDGE_SOURCE_ROOT"] = string.Empty,
+            ["DEVBRIDGE_RUNTIME_ROOT"] = string.Empty,
+            ["DEVBRIDGE_PINNED_WORKTREE_ROOT"] = string.Empty,
+            ["RIMTEST_RIMCONTEXT_CMD"] = string.Empty,
+            ["RIMTEST_RIMCONTEXT_ROOT"] = string.Empty,
+            ["RIMTEST_RIMCONTEXT_STORE"] = string.Empty,
+            ["RIMCONTEXT_CMD"] = string.Empty,
+            ["RIMCONTEXT_ROOT"] = string.Empty,
+            ["RIMCONTEXT_STORE"] = string.Empty,
+            ["RIMTEST_RIMERROR_CMD"] = string.Empty,
+            ["RIMTEST_RIMERROR_LOG"] = string.Empty,
+            ["RIMTEST_RIMERROR_STORE"] = string.Empty,
+            ["RIMERROR_CMD"] = string.Empty,
+            ["RIMERROR_LOG"] = string.Empty,
+            ["RIMERROR_STATE_PATH"] = string.Empty
+        };
+    private static IReadOnlyDictionary<string, string> CreateCanonicalProductionChildEnvironment(
+        string productionManifestPath,
+        string executable)
+    {
+        var environment = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, string> pair in CanonicalProductionChildEnvironment)
+            environment[pair.Key] = pair.Value;
+        environment[ProductionManifestEnvironment] = productionManifestPath;
+        environment["RIMLIAISON_PRODUCTION_CLI"] = executable;
+        return environment;
+    }
+
+
     public static string WriteQualifiedPromotionPackage(
         QualificationAggregate qualification,
         string qualificationArtifactPath,
@@ -1613,6 +1655,7 @@ public static class ToolchainPromotionService
                         sourceRoot,
                         installedExecutable,
                         promotedFingerprint,
+                        manifestPath,
                         cancellationToken)
                     .ConfigureAwait(false)
                 : await canonicalHealthVerifier.VerifyAsync(
@@ -1640,7 +1683,10 @@ public static class ToolchainPromotionService
                     postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
                     "Restore the prior production identity or retry the qualified promotion transaction.",
                     promotionPhase,
-                    transactionEvidence);
+                    transactionEvidence,
+                    postCommitHealth.Summary,
+                    postCommitHealth.ErrorCode,
+                    postCommitHealth.ProcessEvidence);
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_POST_COMMIT_HEALTH_FAILED",
                     postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
@@ -2609,6 +2655,7 @@ public static class ToolchainPromotionService
         string sourceRoot,
         string executable,
         string expectedFingerprint,
+        string productionManifestPath,
         CancellationToken cancellationToken)
     {
         ProductionToolchainBindingResolution identity = ProductionToolchainBindingResolver.Resolve(
@@ -2636,6 +2683,9 @@ public static class ToolchainPromotionService
                 executable,
                 ["doctor", "--json"],
                 cancellationToken,
+                environment: CreateCanonicalProductionChildEnvironment(
+                    productionManifestPath,
+                    executable),
                 workingDirectory: sourceRoot)
             .ConfigureAwait(false);
         bool ready = IsReady(doctor.ExitCode, doctor.Stdout);
@@ -2702,6 +2752,12 @@ public static class ToolchainPromotionService
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        if (environment is not null)
+        {
+            foreach (KeyValuePair<string, string> pair in environment)
+                startInfo.Environment[pair.Key] = pair.Value;
+        }
+
         bool batchScript = executable.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
             executable.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
         if (batchScript)
@@ -2803,7 +2859,10 @@ public static class ToolchainPromotionService
         string error,
         string nextAction,
         string? promotionPhase = null,
-        PromotionTransactionEvidence? transactionEvidence = null)
+        PromotionTransactionEvidence? transactionEvidence = null,
+        string? productionDoctor = null,
+        string? productionDoctorErrorCode = null,
+        PromotionChildProcessResult? productionDoctorProcessEvidence = null)
     {
         try
         {
@@ -2821,6 +2880,9 @@ public static class ToolchainPromotionService
                         nextAction,
                         promotionPhase,
                         transactionEvidence,
+                        productionDoctor,
+                        productionDoctorErrorCode,
+                        productionDoctorProcessEvidence,
                         package,
                         previousProductionManifest = previous
                     },

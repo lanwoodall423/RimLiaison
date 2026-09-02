@@ -144,6 +144,8 @@ internal static class Program
         ("published self-check is read-only and workspace-independent", CliDeploymentTests.PublishedSelfCheckIsReadOnlyAndWorkspaceIndependent),
         ("published self-check works in read-only directory", CliDeploymentTests.PublishedSelfCheckWorksInReadOnlyDirectory),
         ("child process start failure retains evidence", CliDeploymentTests.ChildProcessStartFailureRetainsBoundedEvidence),
+        ("child process environment overrides are applied", CliDeploymentTests.ChildProcessEnvironmentOverridesAreApplied),
+
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),
         ("machine preflight ready is read-only", UnifiedRuntimeOwnershipTests.MachinePreflightReadyIsReadOnly),

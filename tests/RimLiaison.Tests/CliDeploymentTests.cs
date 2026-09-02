@@ -143,6 +143,44 @@ internal static class CliDeploymentTests
             string.IsNullOrWhiteSpace(result.Stderr),
             "published self-check must not require a writable working directory");
     }
+    public static void ChildProcessEnvironmentOverridesAreApplied()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-child-environment-" + Guid.NewGuid().ToString("N"));
+        string script = Path.Combine(root, "print-environment.cmd");
+        const string variable = "RIMTEST_DEVBRIDGE_ROOT";
+        string? previous = Environment.GetEnvironmentVariable(variable);
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(
+                script,
+                "@echo off\r\necho {\"value\":\"%" + variable + "%\"}\r\n");
+            Environment.SetEnvironmentVariable(variable, "C:\\stale\\DevBridge2");
+            PromotionChildProcessResult result = ToolchainPromotionService.RunJsonCommandAsync(
+                    script,
+                    [],
+                    CancellationToken.None,
+                    environment: new Dictionary<string, string>
+                    {
+                        [variable] = string.Empty
+                    })
+                .GetAwaiter()
+                .GetResult();
+            Assert(
+                result.ExitCode == 0 &&
+                result.Stdout.Contains("\"value\":\"\"", StringComparison.Ordinal),
+                "child process environment overrides must remove stale source-checkout values");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, previous);
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
 
     private static string FindSourceRoot()
     {

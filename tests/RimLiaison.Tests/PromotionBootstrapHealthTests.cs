@@ -333,6 +333,11 @@ internal static class PromotionBootstrapHealthTests
 
     public static void PostCommitDoctorFailureRollsBack()
     {
+        string handoffRoot = Path.Combine("C:\\RimDev", ".rimdev", "failure-handoffs");
+        HashSet<string> existingHandoffs = Directory.Exists(handoffRoot)
+            ? Directory.EnumerateFiles(handoffRoot, "unified-production-package-*.json")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : [];
         using Fixture fixture = new("missing") { CanonicalPass = false };
         string before = File.ReadAllText(fixture.ManifestPath);
         ToolchainPromotionResult result = fixture.Promote();
@@ -345,6 +350,22 @@ internal static class PromotionBootstrapHealthTests
             "post-commit failure left a new manifest active");
         Assert(!Directory.Exists(Path.Combine(fixture.ProductionRuntimeRoot, "Coordinator")),
             "post-commit rollback left candidate runtime contents active");
+        string[] newHandoffs = Directory.EnumerateFiles(
+                handoffRoot,
+                "unified-production-package-*.json")
+            .Where(path => !existingHandoffs.Contains(path))
+            .ToArray();
+        Assert(newHandoffs.Length == 1, "post-commit failure did not retain one failure handoff");
+        using JsonDocument handoff = JsonDocument.Parse(File.ReadAllText(newHandoffs[0]));
+        JsonElement handoffRootElement = handoff.RootElement;
+        Assert(
+            handoffRootElement.GetProperty("productionDoctor").GetString() ==
+                "fixture-canonical-health" &&
+            handoffRootElement.GetProperty("productionDoctorErrorCode").GetString() ==
+                "FIXTURE_DOCTOR_FAILURE" &&
+            handoffRootElement.GetProperty("productionDoctorProcessEvidence")
+                .GetProperty("stderr").GetString() == "fixture stderr",
+            "post-commit failure handoff omitted nested doctor process evidence");
     }
 
     public static void FailedPromotionNeverChangesActiveIdentity()
@@ -1037,10 +1058,24 @@ internal static class PromotionBootstrapHealthTests
                 "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST")!;
             using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
             ResolvedFingerprint = manifest.RootElement.GetProperty("promotedFingerprint").GetString();
-            return Task.FromResult(new PromotionCanonicalHealthResult(
-                Pass,
-                "fixture-canonical-health",
-                Pass ? null : "fixture post-commit doctor failed"));
+            return Task.FromResult(
+                new PromotionCanonicalHealthResult(
+                    Pass,
+                    "fixture-canonical-health",
+                    Pass ? null : "fixture post-commit doctor failed")
+                {
+                    ErrorCode = Pass ? null : "FIXTURE_DOCTOR_FAILURE",
+                    ProcessEvidence = Pass
+                        ? null
+                        : new PromotionChildProcessResult(
+                            3,
+                            "fixture stdout",
+                            "fixture stderr",
+                            false,
+                            false,
+                            "fixture.exe",
+                            "fixture")
+                });
         }
     }
 }
