@@ -2696,9 +2696,8 @@ public static class ToolchainPromotionService
         string productionManifestPath,
         CancellationToken cancellationToken)
     {
-        ProductionToolchainBindingResolution identity = ProductionToolchainBindingResolver.Resolve(
-            sourceRoot,
-            currentExecutablePath: executable);
+        ProductionToolchainBindingResolution identity =
+            ProductionToolchainBindingResolver.ResolvePromotedIdentity(sourceRoot);
         if (!identity.Succeeded ||
             !string.Equals(
                 identity.Binding!.PromotedFingerprint,
