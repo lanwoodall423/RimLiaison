@@ -30,6 +30,8 @@ public sealed record ProductionToolchainBinding(
     string UnifiedManifestHash,
     string RuntimeProtocolContract)
 {
+    public string? DevBridgeModHash { get; init; }
+    public string? DevBridgeRuntimeManifestHash { get; init; }
     public object ToEvidence() => new
     {
         mode = "production",
@@ -49,7 +51,9 @@ public sealed record ProductionToolchainBinding(
             commandPath = DevBridgeCommandPath,
             runtimeRoot = DevBridgeRuntimeRoot,
             packageSha256 = DevBridgePackageHash,
-            coordinatorSha256 = DevBridgeCoordinatorHash
+            coordinatorSha256 = DevBridgeCoordinatorHash,
+            modSha256 = DevBridgeModHash,
+            manifestSha256 = DevBridgeRuntimeManifestHash
         },
         rimBridgeServer = new
         {
@@ -146,6 +150,10 @@ internal sealed class ProductionToolchainManifest
     public string? QualificationArtifactSha256 { get; init; }
     [JsonPropertyName("devBridgeCoordinatorSha256")]
     public string? DevBridgeCoordinatorSha256 { get; init; }
+    [JsonPropertyName("devBridgeModSha256")]
+    public string? DevBridgeModSha256 { get; init; }
+    [JsonPropertyName("devBridgeRuntimeManifestSha256")]
+    public string? DevBridgeRuntimeManifestSha256 { get; init; }
     [JsonPropertyName("unifiedManifestPath")]
     public string? UnifiedManifestPath { get; init; }
     [JsonPropertyName("unifiedManifestSha256")]
@@ -407,22 +415,36 @@ internal static class ProductionToolchainBindingResolver
         string unifiedManifestHash;
         string packageHash;
         string coordinatorHash;
+        string modHash;
+        string runtimeManifestHash;
+        string? runtimeSourceCommit;
         string recordedCoordinatorHash;
+        string recordedModHash;
         string coordinatorPath = Path.Combine(
             runtimeRoot,
             "Coordinator",
             "DevBridge.Coordinator.exe");
+        string modPath = Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll");
+        bool modernRuntimeIdentity =
+            !string.IsNullOrWhiteSpace(manifest.DevBridgeModSha256) &&
+            !string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256);
         try
         {
             cliHash = Sha256(cliPath);
             assemblyHash = Sha256(assemblyPath);
             consumerHash = Sha256(consumerPath);
             unifiedManifestHash = Sha256(unifiedManifestPath);
+            runtimeManifestHash = Sha256(runtimeManifestPath);
+            runtimeSourceCommit = ReadRuntimeSourceCommit(runtimeManifestPath);
             packageHash = ReadRuntimePackageHash(runtimeManifestPath);
             recordedCoordinatorHash = ReadRuntimeFileHash(
                 runtimeManifestPath,
                 "Coordinator/DevBridge.Coordinator.exe");
             coordinatorHash = Sha256(coordinatorPath);
+            recordedModHash = modernRuntimeIdentity
+                ? ReadRuntimeFileHash(runtimeManifestPath, "1.6/Assemblies/DevBridge2.dll")
+                : string.Empty;
+            modHash = modernRuntimeIdentity ? Sha256(modPath) : string.Empty;
         }
         catch (Exception exception) when (exception is IOException or
             UnauthorizedAccessException or JsonException or CryptographicException)
@@ -451,6 +473,20 @@ internal static class ProductionToolchainBindingResolver
             mismatching.Add(consumerPath);
         if (!string.Equals(unifiedManifestHash, manifest.UnifiedManifestSha256, StringComparison.OrdinalIgnoreCase))
             mismatching.Add(unifiedManifestPath);
+        if (!string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256) &&
+            !string.Equals(runtimeManifestHash, manifest.DevBridgeRuntimeManifestSha256,
+                StringComparison.OrdinalIgnoreCase))
+            mismatching.Add(runtimeManifestPath);
+        if (!string.IsNullOrWhiteSpace(manifest.DevBridgeModSha256) &&
+            (!string.Equals(modHash, manifest.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase) ||
+             !string.Equals(recordedModHash, manifest.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase)))
+            mismatching.Add(modPath);
+        if (!string.IsNullOrWhiteSpace(manifest.QualifiedSourceCommit) &&
+            ((modernRuntimeIdentity && string.IsNullOrWhiteSpace(runtimeSourceCommit)) ||
+             (!string.IsNullOrWhiteSpace(runtimeSourceCommit) &&
+              !string.Equals(runtimeSourceCommit, manifest.QualifiedSourceCommit,
+                  StringComparison.OrdinalIgnoreCase))))
+            mismatching.Add(runtimeManifestPath);
         if (mismatching.Count > 0)
         {
             return Fail(
@@ -466,6 +502,8 @@ internal static class ProductionToolchainBindingResolver
                     cliPath,
                     assemblyPath,
                     Path.Combine(runtimeRoot, "DevBridge.cmd"),
+                    modPath,
+                    runtimeManifestPath,
                     consumerPath,
                     unifiedManifestPath
                 ],
@@ -473,7 +511,10 @@ internal static class ProductionToolchainBindingResolver
         }
         if (!UnifiedManifestOwnsProductionRuntime(
                 unifiedManifestPath,
-                manifest.PromotedFingerprint))
+                manifest.PromotedFingerprint,
+                manifest.QualifiedSourceCommit,
+                manifest.DevBridgeModSha256,
+                manifest.DevBridgeRuntimeManifestSha256))
         {
             return Fail(
                 "PRODUCTION_TOOLCHAIN_MANIFEST_INVALID",
@@ -501,26 +542,33 @@ internal static class ProductionToolchainBindingResolver
                 runtimeRoot);
         }
 
-        return new ProductionToolchainBindingResolution(
-            new ProductionToolchainBinding(
-                fingerprint,
-                manifest.PromotedFingerprint!,
-                manifest.OwnerProduct!,
-                manifest.RuntimeSubsystem!,
-                cliPath,
-                cliHash,
-                assemblyPath,
-                assemblyHash,
-                commandPath,
-                runtimeRoot,
-                packageHash,
-                coordinatorHash,
-                consumerPath,
-                consumerHash,
-                unifiedManifestPath,
-                unifiedManifestHash,
-                manifest.RuntimeProtocolContract!),
-            null);
+        ProductionToolchainBinding binding = new(
+            fingerprint,
+            manifest.PromotedFingerprint!,
+            manifest.OwnerProduct!,
+            manifest.RuntimeSubsystem!,
+            cliPath,
+            cliHash,
+            assemblyPath,
+            assemblyHash,
+            commandPath,
+            runtimeRoot,
+            packageHash,
+            coordinatorHash,
+            consumerPath,
+            consumerHash,
+            unifiedManifestPath,
+            unifiedManifestHash,
+            manifest.RuntimeProtocolContract!)
+        {
+            DevBridgeModHash = string.IsNullOrWhiteSpace(manifest.DevBridgeModSha256)
+                ? null
+                : modHash,
+            DevBridgeRuntimeManifestHash = string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256)
+                ? null
+                : runtimeManifestHash
+        };
+        return new ProductionToolchainBindingResolution(binding, null);
     }
 
     private static ProductionToolchainBindingResolution Fail(
@@ -597,28 +645,36 @@ internal static class ProductionToolchainBindingResolver
             ? packageHash.GetString() ?? string.Empty
             : string.Empty;
     }
+    private static string? ReadRuntimeSourceCommit(string runtimeManifestPath)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
+        return document.RootElement.TryGetProperty("sourceCommit", out JsonElement sourceCommit)
+            ? sourceCommit.GetString()
+            : null;
+    }
+
     private static string ReadRuntimeFileHash(string runtimeManifestPath, string relativePath)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
         if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
             files.ValueKind != JsonValueKind.Array)
-        {
             return string.Empty;
-        }
-
         foreach (JsonElement file in files.EnumerateArray())
         {
             if (file.TryGetProperty("path", out JsonElement path) &&
                 string.Equals(path.GetString(), relativePath, StringComparison.OrdinalIgnoreCase) &&
                 file.TryGetProperty("sha256", out JsonElement hash))
-            {
                 return hash.GetString() ?? string.Empty;
-            }
         }
         return string.Empty;
     }
 
-    private static bool UnifiedManifestOwnsProductionRuntime(string path, string? fingerprint)
+    private static bool UnifiedManifestOwnsProductionRuntime(
+        string path,
+        string? fingerprint,
+        string? expectedSourceCommit = null,
+        string? expectedModHash = null,
+        string? expectedRuntimeManifestHash = null)
     {
         try
         {
@@ -634,7 +690,27 @@ internal static class ProductionToolchainBindingResolver
             bool fingerprintMatches = fingerprint is null ||
                 root.TryGetProperty("productFingerprint", out JsonElement productFingerprint) &&
                 string.Equals(productFingerprint.GetString(), fingerprint, StringComparison.OrdinalIgnoreCase);
-            return ownerMatches && subsystemMatches && boundaryMatches && fingerprintMatches;
+            bool sourceMatches = expectedSourceCommit is null ||
+                root.TryGetProperty("sourceCommit", out JsonElement sourceCommit) &&
+                string.Equals(sourceCommit.GetString(), expectedSourceCommit, StringComparison.OrdinalIgnoreCase);
+            bool modMatches = expectedModHash is null ||
+                root.TryGetProperty("modSha256", out JsonElement mod) &&
+                string.Equals(mod.GetString(), expectedModHash, StringComparison.OrdinalIgnoreCase);
+            bool runtimeManifestMatches = expectedRuntimeManifestHash is null ||
+                root.TryGetProperty("runtimeManifestSha256", out JsonElement runtimeManifest) &&
+                string.Equals(runtimeManifest.GetString(), expectedRuntimeManifestHash, StringComparison.OrdinalIgnoreCase);
+            bool schemaMatches = !root.TryGetProperty("schemaVersion", out JsonElement schema) ||
+                string.Equals(schema.GetString(), "rimliaison-unified-production-package/v2", StringComparison.Ordinal) ||
+                string.Equals(schema.GetString(), "rimliaison-unified-production-package/v3", StringComparison.Ordinal);
+            bool unifiedHashesPresent = !root.TryGetProperty("schemaVersion", out schema) ||
+                !string.Equals(schema.GetString(), "rimliaison-unified-production-package/v3", StringComparison.Ordinal) ||
+                root.TryGetProperty("runtimeManifestSha256", out JsonElement runtimeManifestField) &&
+                runtimeManifestField.ValueKind == JsonValueKind.String &&
+                root.TryGetProperty("modSha256", out JsonElement modField) &&
+                modField.ValueKind == JsonValueKind.String;
+            return ownerMatches && subsystemMatches && boundaryMatches && fingerprintMatches &&
+                sourceMatches && modMatches && runtimeManifestMatches && schemaMatches &&
+                unifiedHashesPresent;
         }
         catch (Exception) when (File.Exists(path))
         {

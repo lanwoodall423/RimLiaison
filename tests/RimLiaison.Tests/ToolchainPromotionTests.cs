@@ -140,6 +140,8 @@ internal static class ToolchainPromotionTests
             string packageRoot = Path.Combine(root, "unified");
             Directory.CreateDirectory(Path.Combine(artifactRoot));
             Directory.CreateDirectory(Path.Combine(runtimeRoot, "Coordinator"));
+            string modPath = Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll");
+            Directory.CreateDirectory(Path.GetDirectoryName(modPath)!);
             Directory.CreateDirectory(packageRoot);
             string executablePath = Path.Combine(artifactRoot, "rimliaison.exe");
             string assemblyPath = Path.Combine(artifactRoot, "rimliaison.dll");
@@ -149,6 +151,7 @@ internal static class ToolchainPromotionTests
             File.WriteAllText(executablePath, "qualified-executable");
             File.WriteAllText(assemblyPath, "qualified-assembly");
             File.WriteAllText(coordinatorPath, "qualified-coordinator");
+            File.WriteAllText(modPath, "qualified-mod");
             File.WriteAllText(Path.Combine(runtimeRoot, "DevBridge.cmd"), "qualified-runtime-command");
             Directory.CreateDirectory(Path.GetDirectoryName(consumerPath)!);
             File.WriteAllText(consumerPath, "qualified-consumer");
@@ -159,10 +162,19 @@ internal static class ToolchainPromotionTests
                 Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
                 JsonSerializer.Serialize(new
                 {
+                    schemaVersion = "devbridge-runtime-manifest/v1",
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    productionEligible = false,
+                    sourceCommit = "source-commit",
+                    componentRole = "DevBridge runtime",
+                    project = ToolchainPromotionSchemas.OwnerProduct,
+                    packageId = "lan.devbridge2",
+                    runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract,
                     packageSha256 = "runtime-package",
                     files = new[]
                     {
-                        new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = coordinatorHash }
+                        new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = coordinatorHash },
+                        new { path = "1.6/Assemblies/DevBridge2.dll", sha256 = Hash(modPath) }
                     }
                 }));
             string manifestPath = Path.Combine(root, "production-toolchain.json");
@@ -252,11 +264,13 @@ internal static class ToolchainPromotionTests
                 "runtime-package",
                 coordinatorHash,
                 consumerPath,
-                ToolchainPromotionSchemas.RuntimeProtocolContract,
-                root,
-                "component-commit",
-                Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json"),
-                Hash(Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json")));
+                ToolchainPromotionSchemas.RuntimeProtocolContract)
+            {
+                DevBridgeModSha256 = Hash(modPath),
+                DevBridgeRuntimeManifestSha256 = Hash(Path.Combine(
+                    runtimeRoot,
+                    ".devbridge-runtime-manifest.json"))
+            };
             string conflictQualificationPath = Path.Combine(root, "conflicting-qualification.json");
             File.WriteAllText(conflictQualificationPath, "{\"proof\":\"conflict\"}");
             string conflictPayloadRoot = Path.Combine(
@@ -270,7 +284,9 @@ internal static class ToolchainPromotionTests
                     candidate.DevBridgePackageSha256,
                     candidate.DevBridgeCoordinatorSha256,
                     candidate.TransactionConsumerSha256,
-                    candidate.RuntimeProtocolContract));
+                    candidate.RuntimeProtocolContract,
+                    candidate.DevBridgeModSha256,
+                    candidate.DevBridgeRuntimeManifestSha256));
             Directory.CreateDirectory(conflictPayloadRoot);
             File.WriteAllText(Path.Combine(conflictPayloadRoot, "rimliaison.exe"), "conflicting");
             bool payloadSubstitutionRejected = false;

@@ -92,17 +92,13 @@ internal static class ToolchainCandidateTests
         Assert(result.ManagedDirectory == Path.Combine(Path.GetFullPath(root), "RimWorldWin64_Data", "Managed"), "current managed directory resolved incorrectly");
     }
 
-    public static void ReleaseArgumentsPassExactManagedDirectory()
+    public static void CandidateContractDoesNotExposeExternalReleaseWorkflow()
     {
-        string managed = Path.Combine("C:\\Games", "RimWorldWin64_Data", "Managed");
-        string[] arguments = ToolchainCandidateMaterializer.BuildReleaseArguments(
-            "C:\\pinned\\DevBridge2\\scripts\\release.ps1",
-            "C:\\candidate\\devbridge-build",
-            managed);
-
-        int option = Array.IndexOf(arguments, "-RimWorldManagedDir");
-        Assert(option >= 0 && option + 1 < arguments.Length, "release arguments omitted RimWorldManagedDir");
-        Assert(arguments[option + 1] == managed, "release arguments changed the resolved managed directory");
+        Assert(!typeof(ToolchainCandidate).GetProperties().Any(property =>
+            property.Name.Contains("DevBridgeRelease", StringComparison.Ordinal) ||
+            property.Name.Contains("DevBridgeSource", StringComparison.Ordinal)),
+            "candidate contract must not expose an external DevBridge checkout or release manifest");
+        Assert(ToolchainPromotionSchemas.OwnerProduct == "RimLiaison", "candidate ownership must remain RimLiaison");
     }
 
     public static void CandidateEvidenceMarksProjectUnimplicated()

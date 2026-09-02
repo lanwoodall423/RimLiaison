@@ -187,17 +187,20 @@ public static partial class DevBridgeCapabilityRecovery
                     ElapsedRecoveryMilliseconds: ElapsedMilliseconds(started));
             }
 
-            LegacyPromotionMigrationResult migration =
-                LegacyPromotionMigrationService.Ensure(repositoryRoot);
-            if (migration.State == LegacyPromotionMigrationState.Blocked)
+            if (!IsUnifiedProductionManifest(failure.ManifestPath))
             {
-                return ToolchainRecoveryFailure(
-                    failure,
-                    migration.ErrorCode ?? "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE",
-                    migration.Error ?? "The active legacy promotion could not be made self-restorable.",
-                    started,
-                    PrerequisiteRecoveryState.RecoveryFailed,
-                    migration.NextAction ?? "Create and intentionally promote a new qualified RimLiaison production package.");
+                LegacyPromotionMigrationResult migration =
+                    LegacyPromotionMigrationService.Ensure(repositoryRoot);
+                if (migration.State == LegacyPromotionMigrationState.Blocked)
+                {
+                    return ToolchainRecoveryFailure(
+                        failure,
+                        migration.ErrorCode ?? "PRODUCTION_TOOLCHAIN_LEGACY_RECOVERY_UNAVAILABLE",
+                        migration.Error ?? "The active legacy promotion could not be made self-restorable.",
+                        started,
+                        PrerequisiteRecoveryState.RecoveryFailed,
+                        migration.NextAction ?? "Create and intentionally promote a new qualified RimLiaison production package.");
+                }
             }
 
             PromotedToolchainInstallResult installation = await installer
@@ -298,6 +301,22 @@ public static partial class DevBridgeCapabilityRecovery
         }
     }
 
+    private static bool IsUnifiedProductionManifest(string? manifestPath)
+    {
+        if (string.IsNullOrWhiteSpace(manifestPath) || !File.Exists(manifestPath))
+            return false;
+        try
+        {
+            ProductionToolchainManifest? manifest = JsonSerializer.Deserialize<ProductionToolchainManifest>(
+                File.ReadAllText(manifestPath));
+            return !string.IsNullOrWhiteSpace(manifest?.DevBridgeModSha256) &&
+                !string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256);
+        }
+        catch (Exception) when (File.Exists(manifestPath))
+        {
+            return false;
+        }
+    }
     private static PromotedToolchainRecoveryResult ToolchainRecoveryFailure(
         ProductionToolchainBindingFailure failure,
         string code,
@@ -437,8 +456,11 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                     "PRODUCTION_TOOLCHAIN_RECOVERY_PACKAGE_HASH_MISMATCH",
                     "The immutable qualified package artifacts do not match their qualified hashes."));
             }
+            bool unifiedPackage = !string.IsNullOrWhiteSpace(package.DevBridgeModSha256) &&
+                !string.IsNullOrWhiteSpace(package.DevBridgeRuntimeManifestSha256);
 
             bool runtimeFault =
+                unifiedPackage ||
                 failure.ErrorCode.Contains("RUNTIME", StringComparison.OrdinalIgnoreCase) ||
                 failure.ErrorCode.Contains("COORDINATOR", StringComparison.OrdinalIgnoreCase) ||
                 failure.ErrorCode.Contains("ARTIFACT_UNREADABLE", StringComparison.OrdinalIgnoreCase) ||
@@ -464,8 +486,14 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                     package.DevBridgeRuntimeArtifactRoot,
                     "Coordinator",
                     "DevBridge.Coordinator.exe");
+                string mod = Path.Combine(
+                    package.DevBridgeRuntimeArtifactRoot,
+                    "1.6",
+                    "Assemblies",
+                    "DevBridge2.dll");
                 if (!File.Exists(runtimeManifest) ||
                     !File.Exists(coordinator) ||
+                    unifiedPackage && !File.Exists(mod) ||
                     !string.Equals(
                         ReadRuntimePackageHash(runtimeManifest),
                         package.DevBridgePackageSha256,
@@ -474,6 +502,13 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                         ReadRuntimeFileHash(runtimeManifest, "Coordinator/DevBridge.Coordinator.exe"),
                         package.DevBridgeCoordinatorSha256,
                         StringComparison.OrdinalIgnoreCase) ||
+                    unifiedPackage &&
+                    (!string.Equals(
+                        ReadRuntimeFileHash(runtimeManifest, "1.6/Assemblies/DevBridge2.dll"),
+                        package.DevBridgeModSha256,
+                        StringComparison.OrdinalIgnoreCase) ||
+                     !HashEquals(mod, package.DevBridgeModSha256) ||
+                     !HashEquals(runtimeManifest, package.DevBridgeRuntimeManifestSha256)) ||
                     !HashEquals(coordinator, package.DevBridgeCoordinatorSha256))
                 {
                     return Task.FromResult(Fail(
@@ -540,7 +575,9 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
         return JsonSerializer.Serialize(
             new
             {
-                schemaVersion = "rimliaison-unified-production-package/v2",
+                schemaVersion = package.DevBridgeModSha256 is null
+                    ? "rimliaison-unified-production-package/v2"
+                    : "rimliaison-unified-production-package/v3",
                 productFingerprint = manifest.PromotedFingerprint,
                 ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
                 runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
@@ -550,6 +587,8 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                     ownership = "RimBridgeServer"
                 },
                 sourceCommit = package.SourceCommit,
+                runtimeManifestSha256 = package.DevBridgeRuntimeManifestSha256,
+                modSha256 = package.DevBridgeModSha256,
                 rimLiaison = new
                 {
                     executablePath = Relative(manifest.RimLiaisonExecutablePath!),
@@ -592,7 +631,11 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
             !string.Equals(package.RimLiaisonAssemblySha256, manifest.RimLiaisonAssemblySha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(package.DevBridgePackageSha256, manifest.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(package.DevBridgeCoordinatorSha256, manifest.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(package.TransactionConsumerSha256, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(package.TransactionConsumerSha256, manifest.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.IsNullOrWhiteSpace(package.DevBridgeModSha256) &&
+            !string.Equals(package.DevBridgeModSha256, manifest.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.IsNullOrWhiteSpace(package.DevBridgeRuntimeManifestSha256) &&
+            !string.Equals(package.DevBridgeRuntimeManifestSha256, manifest.DevBridgeRuntimeManifestSha256, StringComparison.OrdinalIgnoreCase))
         {
             return "The promotion package identity does not equal the already-promoted production identity.";
         }
@@ -605,7 +648,9 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
             package.TransactionConsumerSha256!,
             package.RuntimeProtocolContract!,
             package.OwnerProduct!,
-            package.RuntimeSubsystem!);
+            package.RuntimeSubsystem!,
+            package.DevBridgeModSha256,
+            package.DevBridgeRuntimeManifestSha256);
         if (!string.Equals(fingerprint, manifest.PromotedFingerprint, StringComparison.OrdinalIgnoreCase))
         {
             return "The qualified package fingerprint does not equal the previously promoted identity.";

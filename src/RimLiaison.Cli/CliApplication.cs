@@ -537,41 +537,6 @@ public static class CliApplication
                             cancellationToken)
                         .ConfigureAwait(false);
                 }
-                if (candidateResult.Succeeded &&
-                    candidateResult.RimWorldManagedAssemblies is
-                    {
-                        Succeeded: true,
-                        OldCheckoutRelativePath: not null,
-                        ManagedDirectory: not null
-                    } managed &&
-                    !string.Equals(
-                        Path.GetFullPath(managed.OldCheckoutRelativePath),
-                        Path.GetFullPath(managed.ManagedDirectory),
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    observabilityAgent.Record(
-                        DevelopmentStage.Packaging,
-                        AgentEventTypes.ToolFailed,
-                        "Recovered tooling issue: the isolated DevBridge2 candidate received an explicit RimWorld managed directory.",
-                        new
-                        {
-                            operationKey = "qualification.candidate.devbridge",
-                            issueKind = "TOOLING_FAILURE",
-                            blocking = false,
-                            projectImplicated = false,
-                            recovered = managed.ReleaseModBuilt == true,
-                            componentOwner = "RimLiaison",
-                            errorCode = "DEVBRIDGE_CHECKOUT_RELATIVE_RIMWORLD_DISCOVERY",
-                            candidateWorktreePath = candidateResult.Candidate?.DevBridgeSourceRoot,
-                            actualRimWorldRoot = managed.RimWorldRoot,
-                            oldIncorrectPath = managed.OldCheckoutRelativePath,
-                            correctedExplicitPath = managed.ManagedDirectory,
-                            impact = "DevBridge mod was not built without explicit RimWorld managed assembly propagation.",
-                            finalRecoveryOutcome = managed.ReleaseModBuilt == true
-                                ? "DevBridge2 release completed with modBuilt=true."
-                                : "DevBridge2 release completed without proving modBuilt=true."
-                        });
-                }
 
                 QualificationAggregate aggregate = new QualificationHarness().Run(
                     request.QualificationRuns,
@@ -4911,9 +4876,8 @@ public static class CliApplication
             hashes["rimLiaisonAssemblySha256"] = candidate.RimLiaisonAssemblySha256;
             hashes["devBridgePackageSha256"] = candidate.DevBridgePackageSha256;
             hashes["devBridgeCoordinatorSha256"] = candidate.DevBridgeCoordinatorSha256;
-            hashes["transactionConsumerSha256"] = candidate.TransactionConsumerSha256;
-            hashes["devBridgeReleaseManifestSha256"] = candidate.DevBridgeReleaseManifestSha256;
-            hashes["devBridgeSourceCommit"] = candidate.DevBridgeSourceCommit;
+            hashes["devBridgeModSha256"] = candidate.DevBridgeModSha256 ?? string.Empty;
+            hashes["devBridgeRuntimeManifestSha256"] = candidate.DevBridgeRuntimeManifestSha256 ?? string.Empty;
         }
         return aggregate with
         {

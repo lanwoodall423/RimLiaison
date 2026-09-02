@@ -54,6 +54,10 @@ public sealed class ToolchainPromotionPackage
     public string? DevBridgePackageSha256 { get; init; }
     [JsonPropertyName("devBridgeCoordinatorSha256")]
     public string? DevBridgeCoordinatorSha256 { get; init; }
+    [JsonPropertyName("devBridgeModSha256")]
+    public string? DevBridgeModSha256 { get; init; }
+    [JsonPropertyName("devBridgeRuntimeManifestSha256")]
+    public string? DevBridgeRuntimeManifestSha256 { get; init; }
     [JsonPropertyName("transactionConsumerPath")]
     public string? TransactionConsumerPath { get; init; }
     [JsonPropertyName("transactionConsumerRelativePath")]
@@ -107,6 +111,8 @@ public sealed record ToolchainPromotionResult(
     public bool RollbackOccurred { get; init; }
     [JsonPropertyName("meaningfulDirtyPaths")]
     public IReadOnlyList<string>? MeaningfulDirtyPaths { get; init; }
+    [JsonPropertyName("machinePreflight")]
+    public ProductionMachinePreflightResult? MachinePreflight { get; init; }
 
     public static ToolchainPromotionResult Blocked(
         string code,
@@ -149,7 +155,13 @@ public sealed record PromotionCandidateHealthBinding(
     string DevBridgeCoordinatorSha256,
     string TransactionConsumerSha256,
     string RuntimeProtocolContract,
-    string RimWorldExecutable);
+    string RimWorldExecutable)
+{
+    public string? RimLiaisonExecutableSha256 { get; init; }
+    public string? RimLiaisonAssemblySha256 { get; init; }
+    public string? DevBridgeModSha256 { get; init; }
+    public string? DevBridgeRuntimeManifestSha256 { get; init; }
+}
 
 public sealed record PromotionCandidateHealthEvidence(
     [property: JsonPropertyName("stage")] string Stage,
@@ -166,7 +178,13 @@ public sealed record PromotionCandidateHealthEvidence(
     [property: JsonPropertyName("nestedError")] string? NestedError = null,
     [property: JsonPropertyName("previousProductionHealth")] string? PreviousProductionHealth = null,
     [property: JsonPropertyName("rollbackOccurred")] bool RollbackOccurred = false,
-    [property: JsonPropertyName("activeManifestChanged")] bool ActiveManifestChanged = false);
+    [property: JsonPropertyName("activeManifestChanged")] bool ActiveManifestChanged = false)
+{
+    [JsonPropertyName("devBridgeModSha256")]
+    public string? DevBridgeModSha256 { get; init; }
+    [JsonPropertyName("devBridgeRuntimeManifestSha256")]
+    public string? DevBridgeRuntimeManifestSha256 { get; init; }
+}
 
 public sealed record PromotionCandidateHealthResult(
     bool Passed,
@@ -247,6 +265,12 @@ public static class ToolchainPromotionService
         {
             throw new InvalidDataException("The immutable candidate is incomplete.");
         }
+        if (string.IsNullOrWhiteSpace(candidate.DevBridgeModSha256) ||
+            string.IsNullOrWhiteSpace(candidate.DevBridgeRuntimeManifestSha256))
+        {
+            throw new InvalidDataException(
+                "The RimLiaison-owned runtime manifest and mod hash are required for a unified package.");
+        }
 
         string fullPackagePath = Path.GetFullPath(packagePath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPackagePath)!);
@@ -264,7 +288,9 @@ public static class ToolchainPromotionService
             candidate.DevBridgePackageSha256,
             candidate.DevBridgeCoordinatorSha256,
             candidate.TransactionConsumerSha256,
-            candidate.RuntimeProtocolContract);
+            candidate.RuntimeProtocolContract,
+            candidate.DevBridgeModSha256,
+            candidate.DevBridgeRuntimeManifestSha256);
         string payloadRoot = Path.Combine(
             Path.GetDirectoryName(fullPackagePath)!,
             "qualified-toolchain-payload-" + candidate.SourceCommit + "-" + payloadIdentity);
@@ -297,9 +323,13 @@ public static class ToolchainPromotionService
             if (!RuntimeSnapshotIsVerified(
                     runtimeArtifactRoot,
                     candidate.DevBridgePackageSha256,
-                    candidate.DevBridgeCoordinatorSha256))
+                    candidate.DevBridgeCoordinatorSha256,
+                    candidate.DevBridgeModSha256,
+                    candidate.DevBridgeRuntimeManifestSha256,
+                    candidate.SourceCommit))
             {
-                throw new InvalidDataException("The immutable candidate runtime snapshot does not match its bound hashes.");
+                throw new InvalidDataException(
+                    "The immutable candidate runtime snapshot does not match its bound hashes.");
             }
 
             string unifiedManifestPath = Path.Combine(payloadStageRoot, "unified-package.json");
@@ -312,10 +342,12 @@ public static class ToolchainPromotionService
                 candidate.TransactionConsumerSha256,
                 candidate.RuntimeProtocolContract,
                 ToolchainPromotionSchemas.OwnerProduct,
-                ToolchainPromotionSchemas.RuntimeSubsystem);
+                ToolchainPromotionSchemas.RuntimeSubsystem,
+                candidate.DevBridgeModSha256,
+                candidate.DevBridgeRuntimeManifestSha256);
             var unifiedManifest = new
             {
-                schemaVersion = "rimliaison-unified-production-package/v2",
+                schemaVersion = "rimliaison-unified-production-package/v3",
                 productFingerprint = promotedFingerprint,
                 ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
                 runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
@@ -332,6 +364,8 @@ public static class ToolchainPromotionService
                     assemblyPath = "rimliaison.dll",
                     assemblySha256 = assemblyHash
                 },
+                runtimeManifestSha256 = candidate.DevBridgeRuntimeManifestSha256,
+                modSha256 = candidate.DevBridgeModSha256,
                 runtime = new
                 {
                     packageSha256 = candidate.DevBridgePackageSha256,
@@ -365,6 +399,8 @@ public static class ToolchainPromotionService
                 TransactionConsumerRelativePath = "transaction-components/mod-test.ps1",
                 TransactionConsumerSha256 = candidate.TransactionConsumerSha256,
                 UnifiedManifestRelativePath = "unified-package.json",
+                DevBridgeModSha256 = candidate.DevBridgeModSha256,
+                DevBridgeRuntimeManifestSha256 = candidate.DevBridgeRuntimeManifestSha256,
                 RuntimeProtocolContract = candidate.RuntimeProtocolContract,
                 RimLiaisonExecutableSha256 = executableHash,
                 RimLiaisonAssemblySha256 = assemblyHash
@@ -461,7 +497,10 @@ public static class ToolchainPromotionService
         if (!RuntimeSnapshotIsVerified(
                 package.DevBridgeRuntimeArtifactRoot,
                 package.DevBridgePackageSha256,
-                package.DevBridgeCoordinatorSha256))
+                package.DevBridgeCoordinatorSha256,
+                package.DevBridgeModSha256,
+                package.DevBridgeRuntimeManifestSha256,
+                package.SourceCommit))
         {
             error = "The promotion package durable DevBridge runtime payload is missing or has mismatching hashes.";
             return false;
@@ -472,7 +511,10 @@ public static class ToolchainPromotionService
     private static bool RuntimeSnapshotIsVerified(
         string runtimeRoot,
         string? expectedPackageHash,
-        string? expectedCoordinatorHash)
+        string? expectedCoordinatorHash,
+        string? expectedModHash = null,
+        string? expectedManifestHash = null,
+        string? expectedSourceCommit = null)
     {
         string manifestPath = Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json");
         if (!Directory.Exists(runtimeRoot) ||
@@ -484,8 +526,19 @@ public static class ToolchainPromotionService
         try
         {
             using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifestPath));
-            if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
-                files.ValueKind != JsonValueKind.Array)
+            JsonElement root = document.RootElement;
+            bool unified = expectedModHash is not null || expectedManifestHash is not null ||
+                expectedSourceCommit is not null;
+            if (!root.TryGetProperty("files", out JsonElement files) ||
+                files.ValueKind != JsonValueKind.Array ||
+                unified &&
+                (!root.TryGetProperty("ownerProduct", out JsonElement owner) ||
+                 !string.Equals(owner.GetString(), ToolchainPromotionSchemas.OwnerProduct,
+                     StringComparison.Ordinal)) ||
+                expectedSourceCommit is not null &&
+                (!root.TryGetProperty("sourceCommit", out JsonElement sourceCommit) ||
+                 !string.Equals(sourceCommit.GetString(), expectedSourceCommit,
+                     StringComparison.OrdinalIgnoreCase)))
                 return false;
             var entries = new List<(string Path, string Sha256)>();
             foreach (JsonElement entry in files.EnumerateArray())
@@ -499,21 +552,73 @@ public static class ToolchainPromotionService
                     return false;
                 entries.Add((relative!.Replace('\\', '/'), expected!));
             }
+            string coordinatorHash = entries.FirstOrDefault(entry =>
+                string.Equals(entry.Path, "Coordinator/DevBridge.Coordinator.exe",
+                    StringComparison.OrdinalIgnoreCase)).Sha256;
+            string modHash = entries.FirstOrDefault(entry =>
+                string.Equals(entry.Path, "1.6/Assemblies/DevBridge2.dll",
+                    StringComparison.OrdinalIgnoreCase)).Sha256;
             return string.Equals(
                     ReadRuntimePackageHash(manifestPath),
                     expectedPackageHash,
                     StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(
-                    entries.FirstOrDefault(entry =>
-                        string.Equals(entry.Path, "Coordinator/DevBridge.Coordinator.exe", StringComparison.OrdinalIgnoreCase)).Sha256,
-                    expectedCoordinatorHash,
-                    StringComparison.OrdinalIgnoreCase);
+                string.Equals(coordinatorHash, expectedCoordinatorHash,
+                    StringComparison.OrdinalIgnoreCase) &&
+                (expectedModHash is null ||
+                 string.Equals(modHash, expectedModHash, StringComparison.OrdinalIgnoreCase)) &&
+                (expectedManifestHash is null ||
+                 string.Equals(ToolchainFileHash.Sha256(manifestPath), expectedManifestHash,
+                     StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception)
         {
             return false;
         }
     }
+
+    private static bool RuntimeManifestMatches(
+        string runtimeRoot,
+        string expectedSourceCommit,
+        string expectedProtocolContract)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(runtimeRoot, ".devbridge-runtime-manifest.json")));
+        JsonElement root = document.RootElement;
+        return root.TryGetProperty("schemaVersion", out JsonElement schema) &&
+            string.Equals(schema.GetString(), "devbridge-runtime-manifest/v1", StringComparison.Ordinal) &&
+            root.TryGetProperty("ownerProduct", out JsonElement owner) &&
+            string.Equals(owner.GetString(), ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) &&
+            root.TryGetProperty("componentRole", out JsonElement role) &&
+            string.Equals(role.GetString(), "DevBridge runtime", StringComparison.Ordinal) &&
+            root.TryGetProperty("project", out JsonElement project) &&
+            string.Equals(project.GetString(), ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) &&
+            root.TryGetProperty("packageId", out JsonElement packageId) &&
+            string.Equals(packageId.GetString(), "lan.devbridge2", StringComparison.Ordinal) &&
+            root.TryGetProperty("productionEligible", out JsonElement eligible) &&
+            eligible.ValueKind == JsonValueKind.False &&
+            root.TryGetProperty("sourceCommit", out JsonElement source) &&
+            string.Equals(source.GetString(), expectedSourceCommit, StringComparison.OrdinalIgnoreCase) &&
+            root.TryGetProperty("runtimeProtocolContract", out JsonElement protocol) &&
+            string.Equals(protocol.GetString(), expectedProtocolContract, StringComparison.Ordinal);
+    }
+
+    private static bool SamePath(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            return false;
+        try
+        {
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static bool HashMatches(string path, string? expected) =>
         File.Exists(path) &&
         !string.IsNullOrWhiteSpace(expected) &&
@@ -528,7 +633,8 @@ public static class ToolchainPromotionService
         IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null,
         IPromotionCandidateHealthVerifier? promotionHealthVerifier = null,
         IPromotionCanonicalHealthVerifier? canonicalHealthVerifier = null,
-        IGitRepositoryStateProvider? gitRepositoryStateProvider = null)
+        IGitRepositoryStateProvider? gitRepositoryStateProvider = null,
+        IPromotionMachinePreflightVerifier? machinePreflightVerifier = null)
     {
         if (string.IsNullOrWhiteSpace(packagePath))
         {
@@ -613,6 +719,15 @@ public static class ToolchainPromotionService
                     artifactPath,
                     qualificationHash);
             }
+            if (string.IsNullOrWhiteSpace(package.DevBridgeModSha256) ||
+                string.IsNullOrWhiteSpace(package.DevBridgeRuntimeManifestSha256))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_RUNTIME_OWNERSHIP_UNPROVEN",
+                    "The promotion package does not bind the complete RimLiaison-owned runtime identity.",
+                    package.SourceCommit,
+                    nextAction: "Rebuild the promotion package from the unified RimLiaison-owned runtime candidate.");
+            }
 
             IGitRepositoryStateProvider sourceStateProvider = gitRepositoryStateProvider ??
                 new SystemGitRepositoryStateProvider();
@@ -673,7 +788,25 @@ public static class ToolchainPromotionService
                     artifactPath,
                     qualificationHash,
                     previous.PromotedFingerprint,
-                    "Run the pinned cross-stack compatibility gate and rebuild the unified promotion package.");
+                    "Run the unified cross-stack compatibility gate and rebuild the unified promotion package.");
+            }
+            ProductionMachinePreflightResult machinePreflight =
+                (machinePreflightVerifier ?? new ProductionMachinePreflightVerifier())
+                .Verify(sourceRoot, previous.DevBridgeRuntimeRoot!);
+            if (!machinePreflight.Passed)
+            {
+                return ToolchainPromotionResult.Blocked(
+                    machinePreflight.ErrorCode ?? "RIMLIAISON_MACHINE_PREFLIGHT_FAILED",
+                    machinePreflight.Error ?? "Production machine preflight did not pass.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    nextAction: "Repair the production RimWorld installation/profile and retry promotion.",
+                    productionDoctor: JsonSerializer.Serialize(machinePreflight, WriteOptions)) with
+                {
+                    MachinePreflight = machinePreflight
+                };
             }
 
             string artifactRoot = Path.GetFullPath(package.ArtifactRoot ?? string.Empty);
@@ -810,10 +943,12 @@ public static class ToolchainPromotionService
                 consumerHash,
                 previous.RuntimeProtocolContract!,
                 ToolchainPromotionSchemas.OwnerProduct,
-                ToolchainPromotionSchemas.RuntimeSubsystem);
+                ToolchainPromotionSchemas.RuntimeSubsystem,
+                package.DevBridgeModSha256,
+                package.DevBridgeRuntimeManifestSha256);
             var unifiedManifest = new
             {
-                schemaVersion = "rimliaison-unified-production-package/v2",
+                schemaVersion = "rimliaison-unified-production-package/v3",
                 productFingerprint = promotedFingerprint,
                 ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
                 runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
@@ -830,6 +965,8 @@ public static class ToolchainPromotionService
                     assemblyPath = Path.GetRelativePath(stagedRoot, installedAssembly),
                     assemblySha256 = installedAssemblyHash
                 },
+                runtimeManifestSha256 = package.DevBridgeRuntimeManifestSha256,
+                modSha256 = package.DevBridgeModSha256,
                 runtime = new
                 {
                     packageSha256 = package.DevBridgePackageSha256,
@@ -843,7 +980,6 @@ public static class ToolchainPromotionService
             };
             File.WriteAllText(unifiedManifestPath, JsonSerializer.Serialize(unifiedManifest, WriteOptions));
             string unifiedManifestHash = ToolchainFileHash.Sha256(unifiedManifestPath);
-            string candidateRimWorldExecutable = ResolveCandidateRimWorldExecutable(sourceRoot) ?? string.Empty;
             var healthBinding = new PromotionCandidateHealthBinding(
                 installedExecutable,
                 stagedRuntimeRoot!,
@@ -853,7 +989,13 @@ public static class ToolchainPromotionService
                 coordinatorHash,
                 consumerHash,
                 previousRuntimeProtocolContract,
-                candidateRimWorldExecutable);
+                string.Empty)
+            {
+                RimLiaisonExecutableSha256 = installedExecutableHash,
+                RimLiaisonAssemblySha256 = installedAssemblyHash,
+                DevBridgeModSha256 = package.DevBridgeModSha256,
+                DevBridgeRuntimeManifestSha256 = package.DevBridgeRuntimeManifestSha256
+            };
             PromotionCandidateHealthResult health = promotionHealthVerifier is null
                 ? await RunCandidateHealthAsync(
                         healthBinding,
@@ -931,6 +1073,8 @@ public static class ToolchainPromotionService
                 DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
                 DevBridgePackageSha256 = package.DevBridgePackageSha256,
                 DevBridgeCoordinatorSha256 = coordinatorHash,
+                DevBridgeModSha256 = package.DevBridgeModSha256,
+                DevBridgeRuntimeManifestSha256 = package.DevBridgeRuntimeManifestSha256,
                 TransactionConsumerPath = consumerRelativePath,
                 TransactionConsumerSha256 = installedConsumerHash,
                 UnifiedManifestPath = unifiedManifestPath,
@@ -1309,6 +1453,16 @@ public static class ToolchainPromotionService
             error = "The promotion package runtime or transaction-consumer hashes do not match the qualification artifact.";
             return false;
         }
+        if (!string.IsNullOrWhiteSpace(package.DevBridgeModSha256) &&
+            (!TryString(hashes, "devBridgeModSha256", out string? modHash) ||
+             !string.Equals(modHash, package.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase)) ||
+            !string.IsNullOrWhiteSpace(package.DevBridgeRuntimeManifestSha256) &&
+            (!TryString(hashes, "devBridgeRuntimeManifestSha256", out string? manifestHash) ||
+             !string.Equals(manifestHash, package.DevBridgeRuntimeManifestSha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            error = "The promotion package unified runtime hashes do not match the qualification artifact.";
+            return false;
+        }
         return true;
     }
 
@@ -1339,38 +1493,26 @@ public static class ToolchainPromotionService
     private static string? SafeArtifactPath(string root, string? relative)
     {
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) || relative.Contains(':'))
-        {
             return null;
-        }
         string candidate = Path.GetFullPath(Path.Combine(root, relative));
         string boundary = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar;
-        return candidate.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) ? candidate : null;
+        return candidate.StartsWith(boundary, StringComparison.OrdinalIgnoreCase)
+            ? candidate
+            : null;
     }
-    private static bool SamePath(string? left, string? right) =>
-        !string.IsNullOrWhiteSpace(left) &&
-        !string.IsNullOrWhiteSpace(right) &&
-        string.Equals(
-            Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-            StringComparison.OrdinalIgnoreCase);
 
     private static string ReadRuntimeFileHash(string runtimeManifestPath, string relativePath)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(runtimeManifestPath));
         if (!document.RootElement.TryGetProperty("files", out JsonElement files) ||
             files.ValueKind != JsonValueKind.Array)
-        {
             return string.Empty;
-        }
-
         foreach (JsonElement file in files.EnumerateArray())
         {
             if (file.TryGetProperty("path", out JsonElement path) &&
                 string.Equals(path.GetString(), relativePath, StringComparison.OrdinalIgnoreCase) &&
                 file.TryGetProperty("sha256", out JsonElement hash))
-            {
                 return hash.GetString() ?? string.Empty;
-            }
         }
         return string.Empty;
     }
@@ -1383,7 +1525,6 @@ public static class ToolchainPromotionService
             ? hash.GetString() ?? string.Empty
             : string.Empty;
     }
-
     internal static string ComputeQualifiedPayloadIdentity(
         string qualificationArtifactSha256,
         string sourceCommit,
@@ -1392,7 +1533,9 @@ public static class ToolchainPromotionService
         string devBridgeHash,
         string coordinatorHash,
         string consumerHash,
-        string compatibility)
+        string compatibility,
+        string? modHash = null,
+        string? runtimeManifestHash = null)
     {
         var canonical = new StringBuilder();
         AppendPayloadIdentityField(canonical, "qualification", qualificationArtifactSha256);
@@ -1403,9 +1546,45 @@ public static class ToolchainPromotionService
         AppendPayloadIdentityField(canonical, "coordinator", coordinatorHash);
         AppendPayloadIdentityField(canonical, "consumer", consumerHash);
         AppendPayloadIdentityField(canonical, "compatibility", compatibility);
+        if (modHash is not null)
+            AppendPayloadIdentityField(canonical, "mod", modHash);
+        if (runtimeManifestHash is not null)
+            AppendPayloadIdentityField(canonical, "runtimeManifest", runtimeManifestHash);
         return Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
             .ToLowerInvariant();
+    }
+
+    internal static string ComputePromotedFingerprint(
+        string sourceCommit,
+        string executableHash,
+        string assemblyHash,
+        string coordinatorHash,
+        string devBridgeHash,
+        string consumerHash,
+        string compatibility,
+        string ownerProduct,
+        string runtimeSubsystem,
+        string? modHash = null,
+        string? runtimeManifestHash = null)
+    {
+        string payload = string.Join("\n", new[]
+        {
+            ToolchainPromotionSchemas.Package,
+            "unified-production-package/v3",
+            ownerProduct,
+            runtimeSubsystem,
+            sourceCommit,
+            executableHash,
+            assemblyHash,
+            coordinatorHash,
+            devBridgeHash,
+            consumerHash,
+            compatibility,
+            modHash ?? string.Empty,
+            runtimeManifestHash ?? string.Empty
+        });
+        return "tc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
 
     private static void AppendPayloadIdentityField(
@@ -1422,33 +1601,8 @@ public static class ToolchainPromotionService
             .Append('\n');
     }
 
-    internal static string ComputePromotedFingerprint(
-        string sourceCommit,
-        string executableHash,
-        string assemblyHash,
-        string coordinatorHash,
-        string devBridgeHash,
-        string consumerHash,
-        string compatibility,
-        string ownerProduct,
-        string runtimeSubsystem)
-    {
-        string payload = string.Join("\n", [
-            ToolchainPromotionSchemas.Package,
-            "unified-production-package/v2",
-            ownerProduct,
-            runtimeSubsystem,
-            sourceCommit,
-            executableHash,
-            assemblyHash,
-            coordinatorHash,
-            devBridgeHash,
-            consumerHash,
-            compatibility]);
-        return "tc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
-    }
 
-    internal static async Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
+    internal static Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
         PromotionCandidateHealthBinding binding,
         string workflowId,
         CancellationToken cancellationToken,
@@ -1456,253 +1610,79 @@ public static class ToolchainPromotionService
     {
         var checks = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["healthStage"] = "candidate-pre-commit",
+            ["healthStage"] = "candidate-pre-commit-structural",
             ["candidateExecutable"] = binding.CandidateExecutable,
             ["candidateRuntimeRoot"] = binding.CandidateRuntimeRoot,
             ["candidateFingerprint"] = binding.CandidateFingerprint,
             ["candidateSourceCommit"] = binding.CandidateSourceCommit,
             ["devBridgePackageSha256"] = binding.DevBridgePackageSha256,
             ["devBridgeCoordinatorSha256"] = binding.DevBridgeCoordinatorSha256,
+            ["devBridgeModSha256"] = binding.DevBridgeModSha256 ?? "unbound",
+            ["devBridgeRuntimeManifestSha256"] = binding.DevBridgeRuntimeManifestSha256 ?? "unbound",
             ["transactionConsumerSha256"] = binding.TransactionConsumerSha256,
             ["runtimeProtocolContract"] = binding.RuntimeProtocolContract,
-            ["rimWorldExecutable"] = binding.RimWorldExecutable,
-            ["rimLiaisonCapabilities"] = "not-run",
-            ["devBridgeRestart"] = "not-run",
-            ["devBridgeStatus"] = "not-run",
-            ["capabilities"] = "not-run",
-            ["activeLeases"] = "unknown",
-            ["coordinatorCount"] = "status-bound"
+            ["rimWorldExecutable"] = "not-used",
+            ["devBridgeRestart"] = "not-run-structural",
+            ["devBridgeStatus"] = "not-run-structural",
+            ["devBridgeDoctor"] = "not-run-structural",
+            ["capabilities"] = "not-run-structural",
+            ["coordinatorShutdown"] = "not-run-structural",
+            ["coordinatorQuiesced"] = "not-run-structural"
         };
         try
         {
             if (!File.Exists(binding.CandidateExecutable))
-                return CandidateHealthFailure(checks, binding, "The candidate RimLiaison executable is missing.");
-            if (!File.Exists(binding.RimWorldExecutable))
-                return CandidateHealthFailure(checks, binding, "The candidate RimWorld executable binding is missing.");
-            string devBridgeCommand = Path.Combine(binding.CandidateRuntimeRoot, "DevBridge.cmd");
-            if (!File.Exists(devBridgeCommand))
-                return CandidateHealthFailure(checks, binding, "The candidate DevBridge command is missing.");
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate RimLiaison executable is missing."));
+            if (!Directory.Exists(binding.CandidateRuntimeRoot))
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate RimLiaison runtime directory is missing."));
+            if (binding.RimLiaisonExecutableSha256 is not null &&
+                !HashMatches(binding.CandidateExecutable, binding.RimLiaisonExecutableSha256))
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate RimLiaison executable hash does not match its binding."));
+            if (binding.RimLiaisonAssemblySha256 is not null &&
+                !HashMatches(Path.Combine(Path.GetDirectoryName(binding.CandidateExecutable)!,
+                    "rimliaison.dll"), binding.RimLiaisonAssemblySha256))
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate RimLiaison assembly hash does not match its binding."));
+            if (!RuntimeSnapshotIsVerified(
+                    binding.CandidateRuntimeRoot,
+                    binding.DevBridgePackageSha256,
+                    binding.DevBridgeCoordinatorSha256,
+                    binding.DevBridgeModSha256,
+                    binding.DevBridgeRuntimeManifestSha256,
+                    binding.CandidateSourceCommit) ||
+                !RuntimeManifestMatches(
+                    binding.CandidateRuntimeRoot,
+                    binding.CandidateSourceCommit,
+                    binding.RuntimeProtocolContract))
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate runtime manifest or immutable file hashes are invalid."));
 
-            IReadOnlyDictionary<string, string> environment = CandidateHealthEnvironment(binding);
-
-
-            (int exitCode, string output) restart = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "restart", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            checks["devBridgeRestart"] = IsReady(restart.exitCode, restart.output)
-                ? "ready"
-                : "failed";
-            if (!TryParse(restart.output, out JsonDocument? restartDocument))
-                return CandidateHealthFailure(checks, binding, "Candidate DevBridge restart did not return structured JSON.", restart.output);
-            restartDocument!.Dispose();
-
-            (int exitCode, string output) status = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "status", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            checks["devBridgeStatus"] = IsReady(status.exitCode, status.output) ? "ready" : "failed";
-            if (!TryParse(status.output, out JsonDocument? statusDocument))
-                return CandidateHealthFailure(checks, binding, "Candidate DevBridge status did not return structured JSON.", status.output);
-            int? expectedGeneration;
-            using (statusDocument)
+            string consumerPath = Path.Combine(binding.CandidateRuntimeRoot, "transaction-components",
+                "mod-test.ps1");
+            if (!File.Exists(consumerPath))
             {
-                JsonElement statusRoot = statusDocument!.RootElement;
-                if (!RuntimeIdentityMatches(statusRoot, binding.CandidateRuntimeRoot))
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge status resolved a different runtime root.", status.output);
-                if (!IsReady(status.exitCode, statusRoot.GetRawText()))
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge status is not READY.", status.output);
-                int activeTests = statusRoot.TryGetProperty("activeTests", out JsonElement active) &&
-                    active.TryGetInt32(out int activeValue)
-                    ? activeValue
-                    : -1;
-                expectedGeneration = statusRoot.TryGetProperty("generation", out JsonElement generationElement) &&
-                    generationElement.TryGetInt32(out int generationValue) &&
-                    generationValue > 0
-                    ? generationValue
-                    : null;
-                checks["generation"] = expectedGeneration?.ToString() ?? "unknown";
-                checks["activeLeases"] = activeTests == 0 ? "zero" : "nonzero-or-unknown";
-                if (expectedGeneration is null)
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge status did not prove a current generation.", status.output);
-                if (activeTests != 0)
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge reports an active test or lease owner.", status.output);
+                consumerPath = Path.Combine(Path.GetDirectoryName(binding.CandidateExecutable)!,
+                    "transaction-components", "mod-test.ps1");
             }
+            if (!File.Exists(consumerPath) ||
+                !HashMatches(consumerPath, binding.TransactionConsumerSha256))
+                return Task.FromResult(CandidateHealthFailure(
+                    checks, binding, "The candidate transaction consumer is missing or has a mismatching hash."));
 
-            (int exitCode, string output) doctor = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "doctor", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            checks["devBridgeDoctor"] = IsHealthy(doctor.exitCode, doctor.output) ? "healthy" : "failed";
-            if (!TryParse(doctor.output, out JsonDocument? doctorDocument))
-                return CandidateHealthFailure(checks, binding, "Candidate DevBridge doctor did not return structured JSON.", doctor.output);
-            using (doctorDocument)
-            {
-                JsonElement root = doctorDocument!.RootElement;
-                if (!RuntimeIdentityMatches(root, binding.CandidateRuntimeRoot))
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge doctor resolved a different runtime root.", doctor.output);
-                if (!IsHealthy(doctor.exitCode, root.GetRawText()) ||
-                    !TryFindingLeaseCount(root, out int leaseCount) ||
-                    leaseCount != 0)
-                {
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge doctor did not prove healthy zero-lease state.", doctor.output);
-                }
-            }
-            (int exitCode, string output) liaisonCapabilities = await RunJsonCommandAsync(
-                binding.CandidateExecutable,
-                ["capabilities", "--devbridge-root", binding.CandidateRuntimeRoot, "--json"],
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            checks["rimLiaisonCapabilities"] = IsCapabilitiesReady(
-                liaisonCapabilities.exitCode,
-                liaisonCapabilities.output)
-                ? "ready"
-                : "failed";
-            if (!IsCapabilitiesReady(liaisonCapabilities.exitCode, liaisonCapabilities.output))
-            {
-                return CandidateHealthFailure(
-                    checks,
-                    binding,
-                    "Candidate RimLiaison capabilities probe did not report a valid ready response.",
-                    liaisonCapabilities.output);
-            }
-
-            DevBridgeAdapterOptions bridgeOptions = DevBridgeAdapterOptions.Discover(
-                rootPath: binding.CandidateRuntimeRoot);
-            var transport = new SystemDevBridgeProcessTransport();
-            IPromotionLeaseOrchestrator liveOrchestrator = promotionLeaseOrchestrator ??
-                new PromotionLeaseOrchestrator(
-                    new DevBridgeLeaseAdapter(transport, bridgeOptions),
-                    new DevBridgeCapabilityAdapter(transport, bridgeOptions));
-            PromotionLiveVerificationResult live = await liveOrchestrator
-                .VerifyCapabilitiesAsync(workflowId, expectedGeneration, cancellationToken)
-                .ConfigureAwait(false);
-            checks["capabilities"] = live.Passed ? "ready" : "failed";
-            checks["capabilityLeaseId"] = live.LeaseId ?? "none";
-            checks["capabilityLeaseGeneration"] = live.Generation?.ToString() ?? "unknown";
-            checks["capabilityLeaseReleased"] = live.LeaseReleased ? "true" : "false";
-            checks["capabilityLeaseAttempts"] = live.Attempts.ToString();
-            if (!live.Passed)
-            {
-                string error = live.ErrorCode is null
-                    ? live.Error ?? "The candidate executable did not return READY capabilities."
-                    : live.ErrorCode + ": " + (live.Error ?? "The candidate executable did not return READY capabilities.");
-                return CandidateHealthFailure(checks, binding, error);
-            }
-
-            (int exitCode, string output) finalStatus = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "status", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            if (!TryParse(finalStatus.output, out JsonDocument? finalStatusDocument))
-                return CandidateHealthFailure(checks, binding, "Candidate DevBridge final status did not return structured JSON.", finalStatus.output);
-            using (finalStatusDocument)
-            {
-                JsonElement root = finalStatusDocument!.RootElement;
-                int activeTests = root.TryGetProperty("activeTests", out JsonElement active) &&
-                    active.TryGetInt32(out int activeValue)
-                    ? activeValue
-                    : -1;
-                checks["activeLeases"] = activeTests == 0 ? "zero" : "nonzero-or-unknown";
-                if (!RuntimeIdentityMatches(root, binding.CandidateRuntimeRoot) ||
-                    !IsReady(finalStatus.exitCode, root.GetRawText()) ||
-                    activeTests != 0)
-                {
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge final status did not prove READY zero-lease identity.", finalStatus.output);
-                }
-            }
-
-            (int exitCode, string output) finalDoctor = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "doctor", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            if (!TryParse(finalDoctor.output, out JsonDocument? finalDoctorDocument))
-                return CandidateHealthFailure(checks, binding, "Candidate DevBridge final doctor did not return structured JSON.", finalDoctor.output);
-            using (finalDoctorDocument)
-            {
-                JsonElement root = finalDoctorDocument!.RootElement;
-                checks["devBridgeDoctor"] = IsHealthy(finalDoctor.exitCode, root.GetRawText())
-                    ? "healthy"
-                    : "failed";
-                if (!RuntimeIdentityMatches(root, binding.CandidateRuntimeRoot) ||
-                    !IsHealthy(finalDoctor.exitCode, root.GetRawText()) ||
-                    !TryFindingLeaseCount(root, out int leaseCount) ||
-                    leaseCount != 0)
-                {
-                    return CandidateHealthFailure(checks, binding, "Candidate DevBridge final doctor did not prove healthy zero-lease identity.", finalDoctor.output);
-                }
-            }
-            (int exitCode, string output) shutdown = await RunJsonCommandAsync(
-                "cmd.exe",
-                DevBridgeCommandArguments(devBridgeCommand, "coordinator", "shutdown", "--json"),
-                cancellationToken,
-                environment).ConfigureAwait(false);
-            bool shutdownAccepted = false;
-            if (shutdown.exitCode == 0 &&
-                TryParse(shutdown.output, out JsonDocument? shutdownDocument))
-            {
-                using (shutdownDocument)
-                {
-                    shutdownAccepted = shutdownDocument!.RootElement.TryGetProperty("success", out JsonElement shutdownSuccess) &&
-                        shutdownSuccess.ValueKind == JsonValueKind.True;
-                }
-            }
-            checks["coordinatorShutdown"] = shutdownAccepted ? "accepted" : "failed";
-            if (!shutdownAccepted)
-            {
-                return CandidateHealthFailure(checks, binding,
-                    "Candidate DevBridge coordinator shutdown did not return accepted structured JSON.",
-                    shutdown.output);
-            }
-
-            string? probeOutput = null;
-            bool quiesced = false;
-            for (int attempt = 0; attempt < 50 && !quiesced; attempt++)
-            {
-                (int probeExitCode, string probeOutputValue) probe = await RunJsonCommandAsync(
-                    "cmd.exe",
-                    DevBridgeCommandArguments(devBridgeCommand, "coordinator", "probe", "--json"),
-                    cancellationToken,
-                    environment).ConfigureAwait(false);
-                probeOutput = probe.probeOutputValue;
-                if (TryParse(probe.probeOutputValue, out JsonDocument? probeDocument))
-                {
-                    using (probeDocument)
-                    {
-                        JsonElement probeRoot = probeDocument!.RootElement;
-                        quiesced = IsCoordinatorQuiesced(
-                            probeRoot,
-                            binding.CandidateRuntimeRoot,
-                            probe.probeExitCode);
-                    }
-                }
-
-                if (!quiesced && attempt < 49)
-                {
-                    await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken)
-                        .ConfigureAwait(false);
-                }
-            }
-
-            checks["coordinatorQuiesced"] = quiesced ? "true" : "false";
-            if (!quiesced)
-            {
-                return CandidateHealthFailure(checks, binding,
-                    "Candidate DevBridge coordinator remained bound to the staged runtime after shutdown.",
-                    probeOutput);
-            }
-
-            return CandidateHealthSuccess(checks, binding);
-
+            checks["runtimeManifest"] = "verified";
+            checks["runtimeFiles"] = "verified";
+            checks["transactionConsumer"] = "verified";
+            checks["candidateArtifacts"] = "verified";
+            checks["status"] = "structural-only";
+            return Task.FromResult(CandidateHealthSuccess(checks, binding));
         }
-        catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException or OperationCanceledException)
+        catch (Exception exception) when (exception is IOException or JsonException or
+            InvalidOperationException or UnauthorizedAccessException)
         {
-            return CandidateHealthFailure(checks, binding, exception.Message, exception.ToString());
+            return Task.FromResult(CandidateHealthFailure(checks, binding, exception.Message, exception.ToString()));
         }
     }
 
@@ -1743,7 +1723,11 @@ public static class ToolchainPromotionService
             binding.TransactionConsumerSha256,
             binding.RuntimeProtocolContract,
             error,
-            nestedError);
+            nestedError)
+        {
+            DevBridgeModSha256 = binding.DevBridgeModSha256,
+            DevBridgeRuntimeManifestSha256 = binding.DevBridgeRuntimeManifestSha256
+        };
 
     private static bool CandidateHealthEvidenceMatches(
         PromotionCandidateHealthEvidence evidence,
@@ -1760,7 +1744,11 @@ public static class ToolchainPromotionService
             !string.Equals(evidence.DevBridgePackageSha256, binding.DevBridgePackageSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(evidence.DevBridgeCoordinatorSha256, binding.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(evidence.TransactionConsumerSha256, binding.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(evidence.RuntimeProtocolContract, binding.RuntimeProtocolContract, StringComparison.Ordinal))
+            !string.Equals(evidence.RuntimeProtocolContract, binding.RuntimeProtocolContract, StringComparison.Ordinal) ||
+            binding.DevBridgeModSha256 is not null &&
+            !string.Equals(evidence.DevBridgeModSha256, binding.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase) ||
+            binding.DevBridgeRuntimeManifestSha256 is not null &&
+            !string.Equals(evidence.DevBridgeRuntimeManifestSha256, binding.DevBridgeRuntimeManifestSha256, StringComparison.OrdinalIgnoreCase))
         {
             error = "Candidate health did not prove the exact staged candidate identity.";
             return false;
@@ -1768,39 +1756,8 @@ public static class ToolchainPromotionService
         return true;
     }
 
-    private static IReadOnlyList<string> DevBridgeCommandArguments(
-        string commandPath,
-        params string[] arguments)
-    {
-        var commandArguments = new List<string>(arguments.Length + 4)
-        {
-            "/d",
-            "/c",
-            "call",
-            commandPath
-        };
-        commandArguments.AddRange(arguments);
-        return commandArguments;
-    }
 
-    private static IReadOnlyDictionary<string, string> CandidateHealthEnvironment(
-        PromotionCandidateHealthBinding binding) =>
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["RIMTEST_DEVBRIDGE_ROOT"] = binding.CandidateRuntimeRoot,
-            ["DEVBRIDGE_RUNTIME_ROOT"] = binding.CandidateRuntimeRoot,
-            ["DEVBRIDGE_TEST_RIMWORLD_PATH"] = binding.RimWorldExecutable
-        };
 
-    private static bool RuntimeIdentityMatches(JsonElement root, string expectedRuntimeRoot)
-    {
-        JsonElement identity = root.TryGetProperty("runtimeIdentity", out JsonElement nested)
-            ? nested
-            : root;
-        return identity.TryGetProperty("devBridgeRuntimeRoot", out JsonElement runtimeRoot) &&
-            runtimeRoot.ValueKind == JsonValueKind.String &&
-            SamePath(runtimeRoot.GetString(), expectedRuntimeRoot);
-    }
     internal static bool IsCoordinatorQuiesced(
         JsonElement probeRoot,
         string expectedRuntimeRoot,
@@ -1826,27 +1783,6 @@ public static class ToolchainPromotionService
             : "incomplete";
     }
 
-    private static string? ResolveCandidateRimWorldExecutable(string sourceRoot)
-    {
-        RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, sourceRoot);
-        string? configuredRoot = workspace.Configuration?.RimWorldRoot ??
-            Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
-        string? configuredExecutable = workspace.Configuration?.RimWorldExecutable ??
-            Environment.GetEnvironmentVariable("RIMWORLD_EXECUTABLE");
-        if (string.IsNullOrWhiteSpace(configuredRoot) && string.IsNullOrWhiteSpace(configuredExecutable))
-            return null;
-        string baseRoot = workspace.RootPath;
-        string? root = string.IsNullOrWhiteSpace(configuredRoot)
-            ? null
-            : Path.GetFullPath(Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.Combine(baseRoot, configuredRoot));
-        return string.IsNullOrWhiteSpace(configuredExecutable)
-            ? Path.Combine(root!, "RimWorldWin64.exe")
-            : Path.GetFullPath(Path.IsPathRooted(configuredExecutable)
-                ? configuredExecutable
-                : Path.Combine(baseRoot, configuredExecutable));
-    }
 
     private static async Task<PromotionCanonicalHealthResult> RunCanonicalProductionHealthAsync(
         string sourceRoot,

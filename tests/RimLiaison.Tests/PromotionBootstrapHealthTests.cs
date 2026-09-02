@@ -512,6 +512,14 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(candidatePayloadRoot, ".devbridge-runtime-manifest.json"),
                 JsonSerializer.Serialize(new
                 {
+                    schemaVersion = "devbridge-runtime-manifest/v1",
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    productionEligible = false,
+                    sourceCommit = SourceCommit,
+                    componentRole = "DevBridge runtime",
+                    project = ToolchainPromotionSchemas.OwnerProduct,
+                    packageId = "lan.devbridge2",
+                    runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract,
                     packageSha256 = "candidate-package",
                     files = new[]
                     {
@@ -519,6 +527,7 @@ internal static class PromotionBootstrapHealthTests
                         new { path = "1.6/Assemblies/DevBridge2.dll", sha256 = modHash }
                     }
                 }));
+            string runtimeManifestHash = Hash(Path.Combine(candidatePayloadRoot, ".devbridge-runtime-manifest.json"));
 
             string executableHash = Hash(Path.Combine(artifactRoot, "rimliaison.exe"));
             string assemblyHash = Hash(Path.Combine(artifactRoot, "rimliaison.dll"));
@@ -532,16 +541,20 @@ internal static class PromotionBootstrapHealthTests
                 consumerHash,
                 ToolchainPromotionSchemas.RuntimeProtocolContract,
                 ToolchainPromotionSchemas.OwnerProduct,
-                ToolchainPromotionSchemas.RuntimeSubsystem);
+                ToolchainPromotionSchemas.RuntimeSubsystem,
+                modHash,
+                runtimeManifestHash);
             File.WriteAllText(
                 Path.Combine(artifactRoot, "unified-package.json"),
                 JsonSerializer.Serialize(new
                 {
-                    schemaVersion = "rimliaison-unified-production-package/v2",
+                    schemaVersion = "rimliaison-unified-production-package/v3",
                     productFingerprint = ExpectedFingerprint,
                     ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
                     runtimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
-                    rimBridgeServer = new { boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary }
+                    rimBridgeServer = new { boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary },
+                    runtimeManifestSha256 = runtimeManifestHash,
+                    modSha256 = modHash
                 }));
 
             string qualificationPath = Path.Combine(Root, "qualification.json");
@@ -558,6 +571,8 @@ internal static class PromotionBootstrapHealthTests
                     {
                         rimLiaisonExecutableSha256 = executableHash,
                         rimLiaisonAssemblySha256 = assemblyHash,
+                        devBridgeModSha256 = modHash,
+                        devBridgeRuntimeManifestSha256 = runtimeManifestHash,
                         devBridgePackageSha256 = "candidate-package",
                         devBridgeCoordinatorSha256 = coordinatorHash,
                         transactionConsumerSha256 = consumerHash
@@ -627,6 +642,8 @@ internal static class PromotionBootstrapHealthTests
                     devBridgeRuntimeArtifactRoot = candidatePayloadRoot,
                     devBridgePackageSha256 = "candidate-package",
                     devBridgeCoordinatorSha256 = coordinatorHash,
+                    devBridgeModSha256 = modHash,
+                    devBridgeRuntimeManifestSha256 = runtimeManifestHash,
                     transactionConsumerPath = Path.Combine(transactionRoot, "mod-test.ps1"),
                     transactionConsumerRelativePath = "transaction-components/mod-test.ps1",
                     transactionConsumerSha256 = consumerHash,
@@ -652,7 +669,8 @@ internal static class PromotionBootstrapHealthTests
                     canonicalHealthVerifier: CanonicalVerifier,
                     gitRepositoryStateProvider: new FakeGitProvider(
                         SourceHeadCommit ?? SourceCommit,
-                        SourceChanges))
+                        SourceChanges),
+                    machinePreflightVerifier: new ReadyMachinePreflight())
                 .GetAwaiter()
                 .GetResult();
         }
@@ -739,8 +757,28 @@ internal static class PromotionBootstrapHealthTests
                     binding.DevBridgeCoordinatorSha256,
                     binding.TransactionConsumerSha256,
                     binding.RuntimeProtocolContract,
-                    pass ? null : "fixture candidate health failed"));
+                    pass ? null : "fixture candidate health failed")
+                {
+                    DevBridgeModSha256 = binding.DevBridgeModSha256,
+                    DevBridgeRuntimeManifestSha256 = binding.DevBridgeRuntimeManifestSha256
+                });
         }
+    }
+
+    private sealed class ReadyMachinePreflight : IPromotionMachinePreflightVerifier
+    {
+        public ProductionMachinePreflightResult Verify(string sourceRoot, string productionRuntimeRoot) =>
+            new(
+                "rimliaison-production-machine-preflight/v1",
+                "ready",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                productionRuntimeRoot,
+                false);
     }
 
     private sealed class FakeCanonicalVerifier : IPromotionCanonicalHealthVerifier
