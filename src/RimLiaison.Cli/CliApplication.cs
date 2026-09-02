@@ -105,6 +105,31 @@ public static class CliApplication
         IAgentObservabilityTelemetry? observabilityTelemetry = null,
         IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
     {
+        CliRequest? earlyRequest = null;
+        try
+        {
+            earlyRequest = CliParser.Parse(args);
+        }
+        catch (CliParseException)
+        {
+            // Let the normal profiled path preserve parsing-error semantics.
+        }
+
+        if (earlyRequest?.Command == CliCommand.SelfCheck)
+        {
+            WriteJson(stdout, new
+            {
+                schemaVersion = "rimliaison-self-check/v1",
+                status = "ready",
+                ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                assembly = typeof(CliApplication).Assembly.GetName().Name,
+                assemblyVersion = typeof(CliApplication).Assembly.GetName().Version?.ToString(),
+                framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+                processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString()
+            });
+            return CliExitCodes.Success;
+        }
+
         EfficiencyProfiler profiler = EfficiencyProfiler.Start();
         long started = Stopwatch.GetTimestamp();
         string? commandName = null;
@@ -116,7 +141,7 @@ public static class CliApplication
         IDisposable? observabilityActivation = null;
         try
         {
-            CliRequest request = CliParser.Parse(args);
+            CliRequest request = earlyRequest ?? CliParser.Parse(args);
             if (request.HelpRequested)
             {
                 profiler.SetCommand("help");
@@ -349,21 +374,6 @@ public static class CliApplication
                     toolName = "RimLiaison",
                     componentOwner = "RimLiaison"
                 });
-            if (request.Command == CliCommand.SelfCheck)
-            {
-                WriteJson(stdout, new
-                {
-                    schemaVersion = "rimliaison-self-check/v1",
-                    status = "ready",
-                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
-                    assembly = typeof(CliApplication).Assembly.GetName().Name,
-                    assemblyVersion = typeof(CliApplication).Assembly.GetName().Version?.ToString(),
-                    framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
-                    processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString()
-                });
-                exitCode = CliExitCodes.Success;
-                return exitCode;
-            }
 
             if (legacyPromotionMigration?.Migrated == true)
             {

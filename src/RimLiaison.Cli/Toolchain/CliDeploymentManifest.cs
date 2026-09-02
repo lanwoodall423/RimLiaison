@@ -25,7 +25,8 @@ public sealed record CliDeploymentManifest(
 internal static class CliDeploymentManifestService
 {
     public const string FileName = "rimliaison-cli-manifest.json";
-
+    private const int MaximumMismatchPaths = 8;
+    private const int MaximumMismatchPathCharacters = 160;
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -114,8 +115,11 @@ internal static class CliDeploymentManifestService
                     return false;
                 }
                 string? file = SafePath(root, entry.Path);
-                if (file is null || !File.Exists(file) ||
-                    !string.Equals(ToolchainFileHash.Sha256(file), entry.Sha256,
+                if (file is null || !File.Exists(file))
+                {
+                    continue;
+                }
+                if (!string.Equals(ToolchainFileHash.Sha256(file), entry.Sha256,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     error = "The CLI deployment closure is missing or contains a mismatching file: " + entry.Path;
@@ -131,7 +135,17 @@ internal static class CliDeploymentManifestService
             string[] expected = seen.OrderBy(file => file, StringComparer.Ordinal).ToArray();
             if (!actual.SequenceEqual(expected, StringComparer.Ordinal))
             {
-                error = "The CLI deployment closure contains an unqualified or missing file.";
+                string[] unexpected = actual.Except(expected, StringComparer.Ordinal)
+                    .Take(MaximumMismatchPaths)
+                    .ToArray();
+                string[] missing = expected.Except(actual, StringComparer.Ordinal)
+                    .Take(MaximumMismatchPaths)
+                    .ToArray();
+                error = "CLI deployment closure mismatch: unexpected=[" +
+                    FormatMismatchPaths(unexpected) +
+                    "], missing=[" +
+                    FormatMismatchPaths(missing) +
+                    "]";
                 return false;
             }
             if (!string.Equals(ComputePackageHash(manifest.Files), manifest.PackageSha256,
@@ -167,12 +181,19 @@ internal static class CliDeploymentManifestService
             .OrderBy(entry => entry.Path, StringComparer.Ordinal)
             .ToArray();
 
+    private static string FormatMismatchPaths(IEnumerable<string> paths) =>
+        string.Join(",", paths.Select(path =>
+            path.Length <= MaximumMismatchPathCharacters
+                ? path
+                : path[..(MaximumMismatchPathCharacters - 3)] + "..."));
+
     private static string ComputePackageHash(IEnumerable<(string Path, string Sha256)> entries)
     {
         string canonical = string.Join("\n", entries
             .OrderBy(entry => entry.Path, StringComparer.Ordinal)
             .Select(entry => entry.Path.ToLowerInvariant() + "\0" + entry.Sha256));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+
     }
 
     private static string? SafePath(string root, string relative)

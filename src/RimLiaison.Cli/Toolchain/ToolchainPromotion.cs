@@ -1799,7 +1799,8 @@ public static class ToolchainPromotionService
         PromotionCandidateHealthBinding binding,
         string workflowId,
         CancellationToken cancellationToken,
-        IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null)
+        IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null,
+        Action? afterCandidateCliProbe = null)
     {
         _ = workflowId;
         var checks = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1907,6 +1908,42 @@ public static class ToolchainPromotionService
                 };
             }
 
+            afterCandidateCliProbe?.Invoke();
+            string? postProbeCliError;
+            CliDeploymentManifest? postProbeCliManifest;
+            bool postProbeCliVerified = CliDeploymentManifestService.Verify(
+                cliRoot,
+                cliManifestPath,
+                binding.RimLiaisonCliDeploymentManifestSha256,
+                binding.RimLiaisonCliDeploymentPackageSha256,
+                out postProbeCliManifest,
+                out postProbeCliError);
+            if (!postProbeCliVerified ||
+                postProbeCliManifest is null ||
+                !string.Equals(postProbeCliManifest.SourceCommit, binding.CandidateSourceCommit,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                checks["candidateCliClosure"] = "failed";
+                PromotionCandidateHealthResult failure = CandidateHealthFailure(
+                    checks,
+                    binding,
+                    postProbeCliError ??
+                        "The candidate CLI deployment changed during its executable self-check.",
+                    JsonSerializer.Serialize(
+                        new
+                        {
+                            selfCheck = probe,
+                            postSelfCheckVerification = postProbeCliError
+                        },
+                        WriteOptions));
+                return failure with
+                {
+                    ErrorCode = "PROMOTION_CANDIDATE_CLI_MUTATED",
+                    Evidence = failure.Evidence with { ProcessEvidence = probe }
+                };
+            }
+
+            checks["candidateCliClosure"] = "verified";
             checks["runtimeManifest"] = "verified";
             checks["runtimeFiles"] = "verified";
             checks["transactionConsumer"] = "verified";

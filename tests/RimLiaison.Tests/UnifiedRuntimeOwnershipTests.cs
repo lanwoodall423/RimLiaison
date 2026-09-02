@@ -107,6 +107,23 @@ internal static class UnifiedRuntimeOwnershipTests
             result.Error ?? "candidate health did not run the published CLI self-check");
     }
 
+    public static void CandidateHealthReverifiesCliClosureAfterSelfCheck()
+    {
+        using CandidateFixture fixture = new();
+        string profile = Path.Combine(fixture.CandidateCliRoot, ".rimdev", "profiles", "test.json");
+        PromotionCandidateHealthResult result = fixture.Verify(
+            afterCandidateCliProbe: () =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(profile)!);
+                File.WriteAllText(profile, "{}");
+            });
+        Assert(!result.Passed &&
+            result.ErrorCode == "PROMOTION_CANDIDATE_CLI_MUTATED" &&
+            result.Error?.Contains("unexpected=[.rimdev/profiles/test.json]", StringComparison.Ordinal) == true,
+            result.Error ?? "candidate health accepted a CLI mutation after self-check");
+    }
+
+
     public static void IsolatedRuntimeBuildAvoidsExecutingCliOutput()
     {
         string sourceRoot = FindSourceRoot();
@@ -357,6 +374,7 @@ internal static class UnifiedRuntimeOwnershipTests
         private string runtimeManifestHash;
 
         public string SourceCommit => sourceCommit;
+        public string CandidateCliRoot => Path.GetDirectoryName(executable)!;
         public string RuntimeManifestPath => runtimeManifest;
         public string RuntimeManifestText => File.ReadAllText(runtimeManifest);
 
@@ -422,7 +440,8 @@ internal static class UnifiedRuntimeOwnershipTests
         public PromotionCandidateHealthResult Verify(
             string? modHash = null,
             string? runtimeManifestHash = null,
-            string? rimWorldExecutable = null)
+            string? rimWorldExecutable = null,
+            Action? afterCandidateCliProbe = null)
         {
             var binding = new PromotionCandidateHealthBinding(
                 executable,
@@ -447,7 +466,8 @@ internal static class UnifiedRuntimeOwnershipTests
                         CliDeploymentManifestService.FileName)))!.PackageSha256
             };
             return ToolchainPromotionService.RunCandidateHealthAsync(
-                binding, "owned-runtime-test", CancellationToken.None).GetAwaiter().GetResult();
+                binding, "owned-runtime-test", CancellationToken.None,
+                afterCandidateCliProbe: afterCandidateCliProbe).GetAwaiter().GetResult();
         }
 
         public void Dispose()
