@@ -266,6 +266,77 @@ internal static class PromotionBootstrapHealthTests
             Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", previousRoot);
         }
     }
+    public static void ProductHealthIgnoresUnrelatedProfileFailure()
+    {
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimliaison-product-health-" + Guid.NewGuid().ToString("N"));
+        string coordinatorPath = Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(coordinatorPath)!);
+        string commandPath = Path.Combine(runtimeRoot, "DevBridge.cmd");
+        string consumerPath = Path.Combine(runtimeRoot, "transaction-components", "mod-test.ps1");
+        string unifiedManifestPath = Path.Combine(runtimeRoot, "unified-package.json");
+        ProductionToolchainBinding binding = new(
+            "tc-test",
+            "tc-test",
+            ToolchainPromotionSchemas.OwnerProduct,
+            ToolchainPromotionSchemas.RuntimeSubsystem,
+            Path.Combine(runtimeRoot, "rimliaison.exe"),
+            "cli-hash",
+            Path.Combine(runtimeRoot, "rimliaison.dll"),
+            "assembly-hash",
+            commandPath,
+            runtimeRoot,
+            "package-hash",
+            "coordinator-hash",
+            consumerPath,
+            "consumer-hash",
+            unifiedManifestPath,
+            "manifest-hash",
+            ToolchainPromotionSchemas.RuntimeProtocolContract);
+        PromotionChildProcessResult status = new(
+            0,
+            JsonSerializer.Serialize(new
+            {
+                success = true,
+                state = "STOPPED",
+                coordinatorRoot = runtimeRoot,
+                devBridgeRuntimeRoot = runtimeRoot,
+                profileErrorCode = "PROFILE_MISSING_PACKAGE"
+            }),
+            string.Empty,
+            false,
+            false,
+            commandPath,
+            runtimeRoot);
+        PromotionChildProcessResult probe = new(
+            0,
+            JsonSerializer.Serialize(new
+            {
+                success = true,
+                state = "Responsive",
+                runtimeRoot,
+                coordinatorExecutable = coordinatorPath,
+                coordinatorExecutableSha256 = binding.DevBridgeCoordinatorHash
+            }),
+            string.Empty,
+            false,
+            false,
+            commandPath,
+            runtimeRoot);
+        Assert(
+            ToolchainPromotionService.IsCanonicalRuntimeStatusReady(status, runtimeRoot, out _) &&
+            ToolchainPromotionService.IsCanonicalCoordinatorResponsive(probe, binding, out _),
+            "an unrelated profile failure must not invalidate owned product health");
+        PromotionChildProcessResult brokenProbe = probe with
+        {
+            Stdout = probe.Stdout.Replace(
+                binding.DevBridgeCoordinatorHash,
+                "wrong-coordinator-hash",
+                StringComparison.Ordinal)
+        };
+        Assert(
+            !ToolchainPromotionService.IsCanonicalCoordinatorResponsive(brokenProbe, binding, out _),
+            "product health accepted a broken coordinator identity");
+    }
 
     public static void OrdinaryPromotionRejectsLegacyBaseline()
     {

@@ -107,6 +107,7 @@ internal static class Program
         ("bootstrap failure leaves no production", PromotionBootstrapHealthTests.BootstrapFailureLeavesNoProduction),
         ("bootstrap resolves nested no-production archive", PromotionBootstrapHealthTests.BootstrapResolvesNestedNoProductionArchive),
         ("promotion identity ignores source environment", PromotionBootstrapHealthTests.PromotionIdentityVerificationIgnoresSourceEnvironment),
+        ("product health ignores unrelated profile failure", PromotionBootstrapHealthTests.ProductHealthIgnoresUnrelatedProfileFailure),
         ("bootstrap ordinary legacy promotion rejects", PromotionBootstrapHealthTests.OrdinaryPromotionRejectsLegacyBaseline),
         ("bootstrap executable legacy runtime rejects", PromotionBootstrapHealthTests.BootstrapRejectsExecutableLegacyRuntime),
         ("bootstrap post-commit doctor sees new fingerprint", PromotionBootstrapHealthTests.PostCommitDoctorResolvesNewFingerprint),

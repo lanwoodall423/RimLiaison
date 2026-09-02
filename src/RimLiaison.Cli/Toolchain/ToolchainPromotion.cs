@@ -1715,7 +1715,7 @@ public static class ToolchainPromotionService
                     package,
                     previous,
                     "PROMOTION_POST_COMMIT_HEALTH_FAILED",
-                    postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
+                    postCommitHealth.Error ?? "Canonical post-commit product health did not pass.",
                     "Restore the prior production identity or retry the qualified promotion transaction.",
                     promotionPhase,
                     transactionEvidence,
@@ -1724,7 +1724,7 @@ public static class ToolchainPromotionService
                     postCommitHealth.ProcessEvidence);
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_POST_COMMIT_HEALTH_FAILED",
-                    postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
+                    postCommitHealth.Error ?? "Canonical post-commit product health did not pass.",
                     package.SourceCommit,
                     artifactPath,
                     qualificationHash,
@@ -2700,7 +2700,7 @@ public static class ToolchainPromotionService
             ProductionToolchainBindingResolver.ResolvePromotedIdentity(sourceRoot);
         if (!identity.Succeeded ||
             !string.Equals(
-                identity.Binding!.PromotedFingerprint,
+                identity.Binding?.PromotedFingerprint,
                 expectedFingerprint,
                 StringComparison.Ordinal))
         {
@@ -2713,62 +2713,195 @@ public static class ToolchainPromotionService
                     expectedFingerprint,
                     resolvedFingerprint = identity.Binding?.PromotedFingerprint
                 }, WriteOptions),
-                error);
+                error)
+            {
+                ErrorCode = "PROMOTION_POST_COMMIT_IDENTITY_FAILED"
+            };
         }
 
-        PromotionChildProcessResult doctor = await RunJsonCommandAsync(
+        ProductionToolchainBinding binding = identity.Binding!;
+        var checks = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["healthStage"] = "canonical-production-toolchain",
+            ["expectedFingerprint"] = expectedFingerprint,
+            ["identity"] = binding.ToEvidence(),
+            ["environmentIsolation"] = "source-checkout-overrides-removed"
+        };
+        IReadOnlyDictionary<string, string> environment =
+            CreateCanonicalProductionChildEnvironment(productionManifestPath, executable);
+        PromotionChildProcessResult cliSelfCheck = await RunJsonCommandAsync(
                 executable,
-                ["doctor", "--json"],
+                ["self-check", "--json"],
                 cancellationToken,
-                environment: CreateCanonicalProductionChildEnvironment(
-                    productionManifestPath,
-                    executable),
+                environment: environment,
                 environmentVariablesToRemove: CanonicalProductionChildEnvironmentVariables,
                 workingDirectory: sourceRoot)
             .ConfigureAwait(false);
-        bool ready = IsReady(doctor.ExitCode, doctor.Stdout);
-        if (ready)
+        checks["cliSelfCheck"] = cliSelfCheck;
+        if (!IsSelfCheckReady(cliSelfCheck.ExitCode, cliSelfCheck.Stdout))
         {
-            return new(true, doctor.Stdout, null)
-            {
-                ProcessEvidence = doctor
-            };
+            return CanonicalHealthFailure(
+                "PROMOTION_POST_COMMIT_CLI_START_FAILED",
+                "The promoted RimLiaison executable failed its self-check.",
+                checks,
+                cliSelfCheck);
         }
 
-        bool structuredStdout = TryParse(doctor.Stdout, out JsonDocument? parsed);
-        parsed?.Dispose();
-        if (structuredStdout)
+        PromotionChildProcessResult runtimeStatus = await RunJsonCommandAsync(
+                binding.DevBridgeCommandPath,
+                ["--root", binding.DevBridgeRuntimeRoot, "status", "--json"],
+                cancellationToken,
+                environment: environment,
+                environmentVariablesToRemove: CanonicalProductionChildEnvironmentVariables,
+                workingDirectory: binding.DevBridgeRuntimeRoot)
+            .ConfigureAwait(false);
+        checks["runtimeStatus"] = runtimeStatus;
+        if (!IsCanonicalRuntimeStatusReady(
+                runtimeStatus,
+                binding.DevBridgeRuntimeRoot,
+                out string? runtimeStatusError))
         {
-            return new(
-                false,
-                doctor.Stdout,
-                "Canonical post-commit doctor did not report READY.")
-            {
-                ErrorCode = "PROMOTION_POST_COMMIT_HEALTH_FAILED",
-                ProcessEvidence = doctor
-            };
+            return CanonicalHealthFailure(
+                "PROMOTION_POST_COMMIT_RUNTIME_STATUS_FAILED",
+                runtimeStatusError!,
+                checks,
+                runtimeStatus);
         }
 
-        string nestedCode = doctor.StartError is not null || doctor.ExitCode != 0
-            ? "POST_COMMIT_CLI_START_FAILED"
-            : "POST_COMMIT_CLI_NO_STRUCTURED_OUTPUT";
-        string summary = JsonSerializer.Serialize(
-            new
-            {
-                schemaVersion = "rimliaison-promotion-health/v1",
-                status = "blocked",
-                errorCode = nestedCode,
-                childProcess = doctor
-            },
-            WriteOptions);
+        PromotionChildProcessResult coordinatorProbe = await RunJsonCommandAsync(
+                binding.DevBridgeCommandPath,
+                ["--root", binding.DevBridgeRuntimeRoot, "coordinator", "probe", "--json"],
+                cancellationToken,
+                environment: environment,
+                environmentVariablesToRemove: CanonicalProductionChildEnvironmentVariables,
+                workingDirectory: binding.DevBridgeRuntimeRoot)
+            .ConfigureAwait(false);
+        checks["coordinatorProbe"] = coordinatorProbe;
+        if (!IsCanonicalCoordinatorResponsive(
+                coordinatorProbe,
+                binding,
+                out string? coordinatorError))
+        {
+            return CanonicalHealthFailure(
+                "PROMOTION_POST_COMMIT_COORDINATOR_FAILED",
+                coordinatorError!,
+                checks,
+                coordinatorProbe);
+        }
+
         return new(
-            false,
-            summary,
-            "Canonical post-commit doctor did not report READY.")
+            true,
+            JsonSerializer.Serialize(
+                new
+                {
+                    schemaVersion = "rimliaison-promotion-health/v1",
+                    status = "ready",
+                    checks
+                },
+                WriteOptions),
+            null)
         {
-            ErrorCode = "PROMOTION_POST_COMMIT_HEALTH_FAILED",
-            ProcessEvidence = doctor
+            ProcessEvidence = coordinatorProbe
         };
+    }
+
+    private static PromotionCanonicalHealthResult CanonicalHealthFailure(
+        string errorCode,
+        string error,
+        IReadOnlyDictionary<string, object?> checks,
+        PromotionChildProcessResult process) =>
+        new(
+            false,
+            JsonSerializer.Serialize(
+                new
+                {
+                    schemaVersion = "rimliaison-promotion-health/v1",
+                    status = "blocked",
+                    errorCode,
+                    error,
+                    checks
+                },
+                WriteOptions),
+            error)
+        {
+            ErrorCode = errorCode,
+            ProcessEvidence = process
+        };
+
+    internal static bool IsCanonicalRuntimeStatusReady(
+        PromotionChildProcessResult process,
+        string expectedRuntimeRoot,
+        out string? error)
+    {
+        error = null;
+        if (process.ExitCode != 0 ||
+            !TryParse(process.Stdout, out JsonDocument? document))
+        {
+            error = "The promoted DevBridge status command did not return a successful JSON response.";
+            return false;
+        }
+
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            if (!root.TryGetProperty("success", out JsonElement success) ||
+                success.ValueKind != JsonValueKind.True)
+            {
+                error = ReadString(root, "error") ??
+                    "The promoted DevBridge status command reported failure.";
+                return false;
+            }
+            string? coordinatorRoot = ReadString(root, "coordinatorRoot");
+            string? runtimeRoot = ReadString(root, "devBridgeRuntimeRoot");
+            if (!SamePath(coordinatorRoot, expectedRuntimeRoot) ||
+                !SamePath(runtimeRoot, expectedRuntimeRoot))
+            {
+                error = "The promoted DevBridge status response did not bind the canonical runtime root.";
+                return false;
+            }
+            return true;
+        }
+    }
+
+    internal static bool IsCanonicalCoordinatorResponsive(
+        PromotionChildProcessResult process,
+        ProductionToolchainBinding binding,
+        out string? error)
+    {
+        error = null;
+        if (process.ExitCode != 0 ||
+            !TryParse(process.Stdout, out JsonDocument? document))
+        {
+            error = "The promoted DevBridge coordinator probe did not return a successful JSON response.";
+            return false;
+        }
+
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            string? state = ReadString(root, "state");
+            string? runtimeRoot = ReadString(root, "runtimeRoot");
+            string? coordinator = ReadString(root, "coordinatorExecutable");
+            string? coordinatorHash = ReadString(root, "coordinatorExecutableSha256");
+            if (!root.TryGetProperty("success", out JsonElement success) ||
+                success.ValueKind != JsonValueKind.True ||
+                state is not ("Responsive" or "BusyHealthy" or "Draining") ||
+                !SamePath(runtimeRoot, binding.DevBridgeRuntimeRoot) ||
+                !SamePath(coordinator, Path.Combine(
+                    binding.DevBridgeRuntimeRoot,
+                    "Coordinator",
+                    "DevBridge.Coordinator.exe")) ||
+                !string.Equals(
+                    coordinatorHash,
+                    binding.DevBridgeCoordinatorHash,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                error = ReadString(root, "error") ??
+                    "The promoted DevBridge coordinator did not prove responsive canonical identity.";
+                return false;
+            }
+            return true;
+        }
     }
 
     internal static async Task<PromotionChildProcessResult> RunJsonCommandAsync(
