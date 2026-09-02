@@ -310,44 +310,44 @@ public static class ToolchainPromotionService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = true
     };
-    private static readonly IReadOnlyDictionary<string, string> CanonicalProductionChildEnvironment =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    private static readonly IReadOnlySet<string> CanonicalProductionChildEnvironmentVariables =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["RIMLIAISON_TOOLCHAIN_MODE"] = string.Empty,
-            ["RIMLIAISON_PRODUCTION_CLI"] = string.Empty,
-            ["RIMLIAISON_PRODUCTION_ROOT"] = string.Empty,
-            ["RIMTEST_ROOT"] = string.Empty,
-            ["RIMTEST_DEVBRIDGE_ROOT"] = string.Empty,
-            ["RIMTEST_DEVBRIDGE_CMD"] = string.Empty,
-            ["RIMTEST_DEVBRIDGE_PROJECT"] = string.Empty,
-            ["RIMTEST_DEVBRIDGE_PINNED_ROOT"] = string.Empty,
-            ["DEVBRIDGE_CMD"] = string.Empty,
-            ["DEVBRIDGE_SOURCE_ROOT"] = string.Empty,
-            ["DEVBRIDGE_RUNTIME_ROOT"] = string.Empty,
-            ["DEVBRIDGE_PINNED_WORKTREE_ROOT"] = string.Empty,
-            ["RIMTEST_RIMCONTEXT_CMD"] = string.Empty,
-            ["RIMTEST_RIMCONTEXT_ROOT"] = string.Empty,
-            ["RIMTEST_RIMCONTEXT_STORE"] = string.Empty,
-            ["RIMCONTEXT_CMD"] = string.Empty,
-            ["RIMCONTEXT_ROOT"] = string.Empty,
-            ["RIMCONTEXT_STORE"] = string.Empty,
-            ["RIMTEST_RIMERROR_CMD"] = string.Empty,
-            ["RIMTEST_RIMERROR_LOG"] = string.Empty,
-            ["RIMTEST_RIMERROR_STORE"] = string.Empty,
-            ["RIMERROR_CMD"] = string.Empty,
-            ["RIMERROR_LOG"] = string.Empty,
-            ["RIMERROR_STATE_PATH"] = string.Empty
+            "RIMLIAISON_TOOLCHAIN_MODE",
+            "RIMLIAISON_PRODUCTION_CLI",
+            "RIMLIAISON_PRODUCTION_ROOT",
+            "RIMTEST_ROOT",
+            "RIMTEST_DEVBRIDGE_ROOT",
+            "RIMTEST_DEVBRIDGE_CMD",
+            "RIMTEST_DEVBRIDGE_PROJECT",
+            "RIMTEST_DEVBRIDGE_PINNED_ROOT",
+            "DEVBRIDGE_CMD",
+            "DEVBRIDGE_SOURCE_ROOT",
+            "DEVBRIDGE_RUNTIME_ROOT",
+            "DEVBRIDGE_PINNED_WORKTREE_ROOT",
+            "RIMTEST_RIMCONTEXT_CMD",
+            "RIMTEST_RIMCONTEXT_ROOT",
+            "RIMTEST_RIMCONTEXT_STORE",
+            "RIMCONTEXT_CMD",
+            "RIMCONTEXT_ROOT",
+            "RIMCONTEXT_STORE",
+            "RIMTEST_RIMERROR_CMD",
+            "RIMTEST_RIMERROR_LOG",
+            "RIMTEST_RIMERROR_STORE",
+            "RIMERROR_CMD",
+            "RIMERROR_LOG",
+            "RIMERROR_STATE_PATH"
         };
     private static IReadOnlyDictionary<string, string> CreateCanonicalProductionChildEnvironment(
         string productionManifestPath,
         string executable)
     {
         var environment = new Dictionary<string, string>(
-            StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> pair in CanonicalProductionChildEnvironment)
-            environment[pair.Key] = pair.Value;
-        environment[ProductionManifestEnvironment] = productionManifestPath;
-        environment["RIMLIAISON_PRODUCTION_CLI"] = executable;
+            StringComparer.OrdinalIgnoreCase)
+        {
+            [ProductionManifestEnvironment] = productionManifestPath,
+            ["RIMLIAISON_PRODUCTION_CLI"] = executable
+        };
         return environment;
     }
 
@@ -2723,6 +2723,7 @@ public static class ToolchainPromotionService
                 environment: CreateCanonicalProductionChildEnvironment(
                     productionManifestPath,
                     executable),
+                environmentVariablesToRemove: CanonicalProductionChildEnvironmentVariables,
                 workingDirectory: sourceRoot)
             .ConfigureAwait(false);
         bool ready = IsReady(doctor.ExitCode, doctor.Stdout);
@@ -2775,6 +2776,7 @@ public static class ToolchainPromotionService
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null,
+        IReadOnlySet<string>? environmentVariablesToRemove = null,
         string? workingDirectory = null,
         TimeSpan? processTimeout = null)
     {
@@ -2789,6 +2791,11 @@ public static class ToolchainPromotionService
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        if (environmentVariablesToRemove is not null)
+        {
+            foreach (string variable in environmentVariablesToRemove)
+                startInfo.Environment.Remove(variable);
+        }
         if (environment is not null)
         {
             foreach (KeyValuePair<string, string> pair in environment)

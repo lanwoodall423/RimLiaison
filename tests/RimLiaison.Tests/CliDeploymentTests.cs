@@ -162,10 +162,7 @@ internal static class CliDeploymentTests
                     script,
                     [],
                     CancellationToken.None,
-                    environment: new Dictionary<string, string>
-                    {
-                        [variable] = string.Empty
-                    })
+                    environmentVariablesToRemove: new HashSet<string> { variable })
                 .GetAwaiter()
                 .GetResult();
             Assert(
