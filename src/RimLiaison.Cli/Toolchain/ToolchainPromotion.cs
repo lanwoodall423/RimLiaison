@@ -1637,9 +1637,8 @@ public static class ToolchainPromotionService
             AtomicReplace(manifestPath, JsonSerializer.Serialize(updated, WriteOptions));
 
             promotionPhase = "identity-verification";
-            ProductionToolchainBindingResolution installed = ProductionToolchainBindingResolver.Resolve(
-                sourceRoot,
-                currentExecutablePath: installedExecutable);
+            ProductionToolchainBindingResolution installed =
+                ProductionToolchainBindingResolver.ResolvePromotedIdentity(sourceRoot);
             if (!installed.Succeeded)
             {
                 if (bootstrap)

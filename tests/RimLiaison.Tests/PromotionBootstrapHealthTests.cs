@@ -250,6 +250,22 @@ internal static class PromotionBootstrapHealthTests
         ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
         Assert(result.Status == "promoted", "bootstrap did not resolve a nested NO_PRODUCTION archive");
     }
+    public static void PromotionIdentityVerificationIgnoresSourceEnvironment()
+    {
+        using Fixture fixture = new("missing");
+        string? previousRoot = Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT");
+        try
+        {
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", Path.Combine(fixture.Root, "source-checkout"));
+            ToolchainPromotionResult result = fixture.Promote();
+            Assert(result.Status == "promoted",
+                $"source-checkout environment blocked installed identity verification: {result.ErrorCode} {result.Error}");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", previousRoot);
+        }
+    }
 
     public static void OrdinaryPromotionRejectsLegacyBaseline()
     {
