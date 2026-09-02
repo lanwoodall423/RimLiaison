@@ -231,6 +231,8 @@ internal sealed record ToolchainCandidateMaterializationResult(
 {
     public RimWorldManagedAssemblyResolution? RimWorldManagedAssemblies { get; init; }
 
+    public object? RuntimeBuildEvidence { get; init; }
+
     public bool Succeeded => Candidate is not null;
 
     public static ToolchainCandidateMaterializationResult Failure(

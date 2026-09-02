@@ -107,6 +107,119 @@ internal static class UnifiedRuntimeOwnershipTests
             result.Error ?? "candidate health did not run the published CLI self-check");
     }
 
+    public static void IsolatedRuntimeBuildAvoidsExecutingCliOutput()
+    {
+        string sourceRoot = FindSourceRoot();
+        string componentRoot = Path.Combine(sourceRoot, "src", "DevBridgeRuntime");
+        string sourcePackageRoot = Path.Combine(componentRoot, "Package");
+        RimWorldManagedAssemblyResolution managed = RimWorldManagedAssemblyResolver.Resolve(
+            sourceRoot,
+            componentRoot);
+        Assert(managed.Succeeded && managed.ManagedDirectory is not null,
+            managed.Error ?? "RimWorld managed assemblies could not be resolved for isolated build coverage");
+        string packageSnapshot = Snapshot(sourcePackageRoot);
+        string cliSnapshot = Snapshot(Path.Combine(sourceRoot, "src", "RimLiaison.Cli", "bin", "Release", "net8.0"));
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            "rimliaison-isolated-runtime-" + Guid.NewGuid().ToString("N"));
+        string first = Path.Combine(root, "candidate-a", "runtime-build", "package");
+        string second = Path.Combine(root, "candidate-b", "runtime-build", "package");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string executingCliAssembly = Path.Combine(
+                sourceRoot,
+                "src",
+                "RimLiaison.Cli",
+                "bin",
+                "Release",
+                "net8.0",
+                "rimliaison.dll");
+            using FileStream heldCliAssembly = File.Open(
+                executingCliAssembly,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+            ToolchainCandidateMaterializer.RuntimeBuildResult[] builds = Task.WhenAll(
+                    ToolchainCandidateMaterializer.BuildOwnedRuntimeAsync(
+                        sourceRoot,
+                        sourcePackageRoot,
+                        first,
+                        managed.ManagedDirectory!,
+                        CancellationToken.None),
+                    ToolchainCandidateMaterializer.BuildOwnedRuntimeAsync(
+                        sourceRoot,
+                        sourcePackageRoot,
+                        second,
+                        managed.ManagedDirectory!,
+                        CancellationToken.None))
+                .GetAwaiter()
+                .GetResult();
+            foreach ((ToolchainCandidateMaterializer.RuntimeBuildResult build, string packageRoot) in builds.Zip(
+                         [first, second],
+                         (build, packageRoot) => (build, packageRoot)))
+            {
+                Assert(build.Succeeded,
+                    (build.Error ?? "isolated runtime build failed") +
+                    "\nstdout=" + build.Stdout +
+                    "\nstderr=" + build.Stderr);
+                Assert(build.ProjectPath.EndsWith("runtime-build.proj", StringComparison.OrdinalIgnoreCase) &&
+                    !build.ProjectPath.EndsWith("RimLiaison.sln", StringComparison.OrdinalIgnoreCase),
+                    "candidate runtime build must use the isolated runtime project graph");
+                Assert(Path.GetFullPath(build.IsolatedPackageRoot) == Path.GetFullPath(packageRoot),
+                    "runtime build evidence must identify its isolated package root");
+                Assert(ToolchainCandidateMaterializer.ValidateRuntimePackage(
+                        packageRoot,
+                        out string? packageError),
+                    packageError ?? "isolated runtime package was incomplete");
+                Assert(File.Exists(Path.Combine(packageRoot, "About", "About.xml")) &&
+                    File.Exists(Path.Combine(packageRoot, "CHANGELOG.md")) &&
+                    File.Exists(Path.Combine(packageRoot, "Coordinator", "DevBridge.Coordinator.exe")) &&
+                    File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+                    File.Exists(Path.Combine(packageRoot, "1.6", "Assemblies", "DevBridge2.dll")),
+                    "isolated runtime package omitted static or generated product content");
+                Assert(packageRoot.StartsWith(Path.Combine(root, "candidate-"),
+                        StringComparison.OrdinalIgnoreCase),
+                    "runtime output escaped the candidate-owned build root");
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+        Assert(packageSnapshot == Snapshot(sourcePackageRoot),
+            "candidate runtime materialization mutated the source runtime package");
+        Assert(cliSnapshot == Snapshot(Path.Combine(
+                sourceRoot,
+                "src",
+                "RimLiaison.Cli",
+                "bin",
+                "Release",
+                "net8.0")),
+            "candidate runtime materialization mutated the executing CLI deployment");
+    }
+
+    private static string FindSourceRoot()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "RimLiaison.sln")))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+        throw new InvalidOperationException("RimLiaison source root could not be found");
+    }
+
+    private static string Snapshot(string root) =>
+        string.Join(
+            "\n",
+            Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/') + "\0" +
+                    ToolchainFileHash.Sha256(path))
+                .OrderBy(value => value, StringComparer.Ordinal));
+
     public static void CandidateHealthIgnoresRimWorldExecutable()
     {
         using CandidateFixture fixture = new();

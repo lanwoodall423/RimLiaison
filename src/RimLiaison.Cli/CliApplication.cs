@@ -569,7 +569,8 @@ public static class CliApplication
                     CandidateComplete = candidateResult.Succeeded,
                     CandidateFailureCode = candidateResult.ErrorCode,
                     CandidateFailure = candidateResult.Error,
-                    CandidateBuildEvidence = candidateResult.RimWorldManagedAssemblies?.ToEvidence(),
+                    CandidateBuildEvidence = candidateResult.RuntimeBuildEvidence ??
+                        candidateResult.RimWorldManagedAssemblies?.ToEvidence(),
                     QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
                     QualifiedPromotionPackagePath = Path.GetFullPath(packagePath)
                 };

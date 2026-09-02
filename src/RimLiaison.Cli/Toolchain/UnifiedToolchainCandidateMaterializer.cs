@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -25,6 +26,9 @@ internal static class ToolchainCandidateMaterializer
         string runtimeProtocolContract,
         CancellationToken cancellationToken)
     {
+        string fullCandidateRoot = Path.GetFullPath(candidateRoot);
+        bool ownsCandidateRoot = false;
+        bool completed = false;
         try
         {
             GitRepositoryStateResult source = await new SystemGitRepositoryStateProvider()
@@ -45,7 +49,6 @@ internal static class ToolchainCandidateMaterializer
                     "Commit or restore the source checkout, then retry qualification.");
             }
 
-            string fullCandidateRoot = Path.GetFullPath(candidateRoot);
             if (Directory.Exists(fullCandidateRoot))
             {
                 return Failure(
@@ -55,7 +58,7 @@ internal static class ToolchainCandidateMaterializer
             }
 
             string componentRoot = Path.Combine(Path.GetFullPath(sourceRoot), "src", "DevBridgeRuntime");
-            string packageRoot = Path.Combine(componentRoot, "Package");
+            string sourcePackageRoot = Path.Combine(componentRoot, "Package");
             string consumerSource = Path.Combine(componentRoot, "Transaction", "mod-test.ps1");
             if (!Directory.Exists(componentRoot) || !File.Exists(consumerSource))
             {
@@ -76,37 +79,51 @@ internal static class ToolchainCandidateMaterializer
                     managedAssemblies);
             }
 
-            (bool built, string buildError) = await BuildOwnedRuntimeAsync(
+            Directory.CreateDirectory(fullCandidateRoot);
+            ownsCandidateRoot = true;
+            string runtimeBuildRoot = Path.Combine(fullCandidateRoot, "runtime-build");
+            string isolatedPackageRoot = Path.Combine(runtimeBuildRoot, "package");
+            RuntimeBuildResult build = await BuildOwnedRuntimeAsync(
                     sourceRoot,
+                    sourcePackageRoot,
+                    isolatedPackageRoot,
+                    managedAssemblies.ManagedDirectory!,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!built)
+            object buildEvidence = BuildEvidence(build, managedAssemblies);
+            if (!build.Succeeded)
             {
                 return Failure(
                     "RIMLIAISON_RUNTIME_BUILD_FAILED",
-                    buildError,
-                    "Repair the RimLiaison-owned runtime build, then retry qualification.",
-                    managedAssemblies);
+                    build.Error ?? "The isolated RimLiaison-owned runtime build failed.",
+                    "Repair the isolated RimLiaison-owned runtime build, then retry qualification.",
+                    managedAssemblies,
+                    buildEvidence);
             }
 
-            if (!ValidateRuntimePackage(packageRoot, out string? packageError))
+            if (!ValidateRuntimePackage(isolatedPackageRoot, out string? packageError))
             {
                 return Failure(
                     "RIMLIAISON_RUNTIME_PACKAGE_INVALID",
-                    packageError ?? "The RimLiaison-owned runtime package is incomplete.",
-                    "Build a complete RimLiaison-owned runtime package, then retry qualification.",
-                    managedAssemblies);
+                    packageError ?? "The isolated RimLiaison-owned runtime package is incomplete.",
+                    "Build a complete isolated RimLiaison-owned runtime package, then retry qualification.",
+                    managedAssemblies,
+                    buildEvidence);
             }
 
-            Directory.CreateDirectory(fullCandidateRoot);
+            string isolatedRuntimeManifest = Path.Combine(isolatedPackageRoot, RuntimeManifestName);
+            WriteRuntimeManifest(
+                isolatedPackageRoot,
+                source.State.HeadSha!,
+                runtimeProtocolContract,
+                isolatedRuntimeManifest);
+            string packageHash = ReadRuntimePackageHash(isolatedRuntimeManifest);
             string runtimeCandidateRoot = Path.Combine(fullCandidateRoot, "runtime");
-            CopyDirectory(packageRoot, runtimeCandidateRoot);
+            CopyDirectory(isolatedPackageRoot, runtimeCandidateRoot);
             string candidateRuntimeManifest = Path.Combine(runtimeCandidateRoot, RuntimeManifestName);
-            WriteRuntimeManifest(runtimeCandidateRoot, source.State.HeadSha!, runtimeProtocolContract,
-                candidateRuntimeManifest);
-            string packageHash = ReadRuntimePackageHash(candidateRuntimeManifest);
             string candidateCoordinator = Path.Combine(runtimeCandidateRoot, "Coordinator", "DevBridge.Coordinator.exe");
             string candidateMod = Path.Combine(runtimeCandidateRoot, "1.6", "Assemblies", "DevBridge2.dll");
+
             string cliDeploymentRoot = Path.Combine(fullCandidateRoot, "cli");
             (bool published, string publishError) = await PublishCliAsync(
                     sourceRoot,
@@ -119,7 +136,8 @@ internal static class ToolchainCandidateMaterializer
                     "RIMLIAISON_CLI_PUBLISH_FAILED",
                     publishError,
                     "Publish the complete RimLiaison CLI deployment, then retry qualification.",
-                    managedAssemblies);
+                    managedAssemblies,
+                    buildEvidence);
             }
             CliDeploymentManifest cliManifest = CliDeploymentManifestService.Write(
                 cliDeploymentRoot,
@@ -136,7 +154,8 @@ internal static class ToolchainCandidateMaterializer
                     "RIMLIAISON_CLI_PUBLISH_INVALID",
                     "The published RimLiaison CLI deployment is missing its executable, assembly, or manifest entries.",
                     "Publish a complete RimLiaison CLI deployment, then retry qualification.",
-                    managedAssemblies);
+                    managedAssemblies,
+                    buildEvidence);
             }
             string? cliManifestError = null;
             if (!CliDeploymentManifestService.Verify(
@@ -151,7 +170,8 @@ internal static class ToolchainCandidateMaterializer
                     "RIMLIAISON_CLI_DEPLOYMENT_INVALID",
                     cliManifestError ?? "The published RimLiaison CLI deployment failed complete closure verification.",
                     "Publish a complete RimLiaison CLI deployment, then retry qualification.",
-                    managedAssemblies);
+                    managedAssemblies,
+                    buildEvidence);
             }
 
             string candidateConsumer = Path.Combine(fullCandidateRoot, ConsumerRelativePath);
@@ -164,8 +184,9 @@ internal static class ToolchainCandidateMaterializer
                 return Failure(
                     "RIMLIAISON_RUNTIME_PACKAGE_INVALID",
                     "The copied RimLiaison-owned runtime package is incomplete.",
-                    "Build a complete RimLiaison-owned runtime package, then retry qualification.",
-                    managedAssemblies);
+                    "Build a complete isolated RimLiaison-owned runtime package, then retry qualification.",
+                    managedAssemblies,
+                    buildEvidence);
             }
             ToolchainCandidate candidate = new(
                 source.State.HeadSha!,
@@ -190,9 +211,11 @@ internal static class ToolchainCandidateMaterializer
                 DevBridgeRuntimeManifestSha256 = ToolchainFileHash.Sha256(candidateRuntimeManifest)
             };
             WriteCandidateDescriptor(candidate);
+            completed = true;
             return new(candidate, null, null, null)
             {
-                RimWorldManagedAssemblies = managedAssemblies
+                RimWorldManagedAssemblies = managedAssemblies,
+                RuntimeBuildEvidence = buildEvidence
             };
         }
         catch (OperationCanceledException)
@@ -212,6 +235,22 @@ internal static class ToolchainCandidateMaterializer
                     : "RIMLIAISON_RUNTIME_BUILD_FAILED",
                 exception.Message,
                 "Inspect the RimLiaison-owned runtime build diagnostics, then retry qualification.");
+        }
+        finally
+        {
+            if (ownsCandidateRoot && !completed && Directory.Exists(fullCandidateRoot))
+            {
+                try
+                {
+                    Directory.Delete(fullCandidateRoot, recursive: true);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
         }
     }
 
@@ -272,43 +311,173 @@ internal static class ToolchainCandidateMaterializer
         string code,
         string error,
         string nextAction,
-        RimWorldManagedAssemblyResolution? managedAssemblies = null) =>
-        ToolchainCandidateMaterializationResult.Failure(
+        RimWorldManagedAssemblyResolution? managedAssemblies = null,
+        object? runtimeBuildEvidence = null)
+    {
+        ToolchainCandidateMaterializationResult result = ToolchainCandidateMaterializationResult.Failure(
             code,
             error,
             nextAction,
             managedAssemblies);
+        return result with { RuntimeBuildEvidence = runtimeBuildEvidence };
+    }
 
-    private static async Task<(bool Succeeded, string Error)> BuildOwnedRuntimeAsync(
+    internal sealed record RuntimeBuildResult(
+        bool Succeeded,
+        string ProjectPath,
+        string BuildTarget,
+        int? ExitCode,
+        string Stdout,
+        string Stderr,
+        string IsolatedPackageRoot,
+        string RimWorldManagedDirectory,
+        string? Error)
+    {
+        public object ToEvidence() => new
+        {
+            schemaVersion = "rimliaison-runtime-build/v1",
+            status = Succeeded ? "ready" : "blocked",
+            projectPath = ProjectPath,
+            buildTarget = BuildTarget,
+            exitCode = ExitCode,
+            stdout = Stdout,
+            stderr = Stderr,
+            isolatedPackageRoot = IsolatedPackageRoot,
+            rimWorldManagedDirectory = RimWorldManagedDirectory,
+            error = Error
+        };
+    }
+
+    internal static async Task<RuntimeBuildResult> BuildOwnedRuntimeAsync(
         string sourceRoot,
+        string sourcePackageRoot,
+        string isolatedPackageRoot,
+        string rimWorldManagedDirectory,
         CancellationToken cancellationToken)
     {
-        string solution = Path.Combine(Path.GetFullPath(sourceRoot), "RimLiaison.sln");
-        if (!File.Exists(solution))
-            return (false, "The RimLiaison solution is missing from the qualified source checkout.");
+        string fullSourceRoot = Path.GetFullPath(sourceRoot);
+        string fullSourcePackageRoot = Path.GetFullPath(sourcePackageRoot);
+        string fullIsolatedPackageRoot = Path.GetFullPath(isolatedPackageRoot);
+        string fullManagedDirectory = Path.GetFullPath(rimWorldManagedDirectory);
+        string runtimeBuildRoot = Path.GetDirectoryName(fullIsolatedPackageRoot)!;
+        string project = Path.Combine(runtimeBuildRoot, "runtime-build.proj");
+        const string buildTarget = "Build";
+        string[] projects =
+        [
+            Path.Combine(fullSourceRoot, "src", "DevBridgeRuntime", "Coordinator", "DevBridge.Coordinator.csproj"),
+            Path.Combine(fullSourceRoot, "src", "DevBridgeRuntime", "BridgeTools", "DevBridge2.BridgeTools.csproj"),
+            Path.Combine(fullSourceRoot, "src", "DevBridgeRuntime", "Mod", "DevBridge2.csproj")
+        ];
+
+        foreach (string runtimeProject in projects)
+        {
+            if (!File.Exists(runtimeProject))
+            {
+                return new(
+                    false,
+                    project,
+                    buildTarget,
+                    null,
+                    string.Empty,
+                    string.Empty,
+                    fullIsolatedPackageRoot,
+                    fullManagedDirectory,
+                    "Required runtime project is missing: " + runtimeProject);
+            }
+        }
+        if (!Directory.Exists(fullManagedDirectory))
+        {
+            return new(
+                false,
+                project,
+                buildTarget,
+                null,
+                string.Empty,
+                string.Empty,
+                fullIsolatedPackageRoot,
+                fullManagedDirectory,
+                "RimWorld managed assembly directory is missing: " + fullManagedDirectory);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(fullIsolatedPackageRoot);
+            SeedStaticPackageAssets(fullSourcePackageRoot, fullIsolatedPackageRoot);
+            File.WriteAllText(project, BuildProjectFile(projects));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return new(
+                false,
+                project,
+                buildTarget,
+                null,
+                string.Empty,
+                string.Empty,
+                fullIsolatedPackageRoot,
+                fullManagedDirectory,
+                exception.Message);
+        }
 
         using Process process = new()
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                WorkingDirectory = Path.GetFullPath(sourceRoot),
+                WorkingDirectory = fullSourceRoot,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             }
         };
-        foreach (string argument in new[] { "build", solution, "--configuration", "Release", "--nologo" })
+        string packageRootProperty = fullIsolatedPackageRoot + Path.DirectorySeparatorChar;
+        string intermediateRoot = Path.Combine(runtimeBuildRoot, "obj") + Path.DirectorySeparatorChar;
+        foreach (string argument in new[]
+        {
+            "build",
+            project,
+            "--configuration",
+            "Release",
+            "--nologo",
+            "/p:DevBridgeRuntimePackageRoot=" + packageRootProperty,
+            "/p:RimWorldManagedDir=" + fullManagedDirectory,
+            "/p:BaseIntermediateOutputPath=" + intermediateRoot
+        })
             process.StartInfo.ArgumentList.Add(argument);
-        if (!process.Start())
-            return (false, "The RimLiaison-owned runtime build process could not be started.");
 
-        Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
-        Task<string> errorTask = process.StandardError.ReadToEndAsync();
         try
         {
+            if (!process.Start())
+            {
+                return new(
+                    false,
+                    project,
+                    buildTarget,
+                    null,
+                    string.Empty,
+                    string.Empty,
+                    fullIsolatedPackageRoot,
+                    fullManagedDirectory,
+                    "The isolated RimLiaison-owned runtime build process could not be started.");
+            }
+            Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            string output = BoundBuildOutput(await outputTask.ConfigureAwait(false));
+            string error = BoundBuildOutput(await errorTask.ConfigureAwait(false));
+            return new(
+                process.ExitCode == 0,
+                project,
+                buildTarget,
+                process.ExitCode,
+                output,
+                error,
+                fullIsolatedPackageRoot,
+                fullManagedDirectory,
+                process.ExitCode == 0
+                    ? null
+                    : "The isolated runtime project graph build failed.");
         }
         catch (OperationCanceledException)
         {
@@ -316,12 +485,64 @@ internal static class ToolchainCandidateMaterializer
                 process.Kill(entireProcessTree: true);
             throw;
         }
+        catch (Win32Exception exception)
+        {
+            return new(
+                false,
+                project,
+                buildTarget,
+                null,
+                string.Empty,
+                string.Empty,
+                fullIsolatedPackageRoot,
+                fullManagedDirectory,
+                exception.Message);
+        }
+    }
 
-        string output = BoundBuildOutput(await outputTask.ConfigureAwait(false));
-        string error = BoundBuildOutput(await errorTask.ConfigureAwait(false));
-        if (process.ExitCode == 0)
-            return (true, string.Empty);
-        return (false, string.Join(" ", new[] { error, output }.Where(value => !string.IsNullOrWhiteSpace(value))));
+    private static object BuildEvidence(
+        RuntimeBuildResult build,
+        RimWorldManagedAssemblyResolution managedAssemblies) => new
+        {
+            schemaVersion = "rimliaison-candidate-build/v1",
+            runtimeBuild = build.ToEvidence(),
+            rimWorldManagedAssemblies = managedAssemblies.ToEvidence()
+        };
+
+    private static void SeedStaticPackageAssets(string sourcePackageRoot, string destinationPackageRoot)
+    {
+        if (!Directory.Exists(sourcePackageRoot))
+            throw new DirectoryNotFoundException("Runtime package source is missing: " + sourcePackageRoot);
+        string[] generatedDirectories = ["Coordinator", "BridgeTools", "1.6"];
+        foreach (string sourceFile in Directory.EnumerateFiles(sourcePackageRoot, "*", SearchOption.AllDirectories))
+        {
+            string relativePath = Path.GetRelativePath(sourcePackageRoot, sourceFile);
+            string topLevel = relativePath.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries)[0];
+            if (generatedDirectories.Contains(topLevel, StringComparer.OrdinalIgnoreCase))
+                continue;
+            string destinationFile = Path.Combine(destinationPackageRoot, relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            File.Copy(sourceFile, destinationFile, overwrite: false);
+        }
+    }
+
+    private static string BuildProjectFile(IEnumerable<string> projects)
+    {
+        StringBuilder builder = new(
+            "<Project>\n" +
+            "  <ItemGroup>\n");
+        foreach (string project in projects)
+            builder.Append("    <ProjectReference Include=\"")
+                .Append(SecurityElement.Escape(project))
+                .Append("\" />\n");
+        return builder.Append(
+            "  </ItemGroup>\n" +
+            "  <Target Name=\"Build\">\n" +
+            "    <MSBuild Projects=\"@(ProjectReference)\" Targets=\"Build\" BuildInParallel=\"true\" />\n" +
+            "  </Target>\n" +
+            "</Project>\n").ToString();
     }
 
     private static string BoundBuildOutput(string value)
@@ -332,7 +553,7 @@ internal static class ToolchainCandidateMaterializer
             : trimmed[..MaximumBuildOutputCharacters] + " [truncated]";
     }
 
-    private static bool ValidateRuntimePackage(string packageRoot, out string? error)
+    internal static bool ValidateRuntimePackage(string packageRoot, out string? error)
     {
         error = null;
         string[] requiredFiles =
@@ -352,7 +573,6 @@ internal static class ToolchainCandidateMaterializer
         {
             if (!File.Exists(Path.Combine(packageRoot, relativePath)))
             {
-                error = "Required runtime package file is missing: " + relativePath;
                 return false;
             }
         }
