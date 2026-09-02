@@ -94,6 +94,11 @@ internal static class Program
         ("bootstrap failed candidate rolls back missing legacy", PromotionBootstrapHealthTests.MissingLegacyUnhealthyCandidateRollback),
         ("bootstrap health binds candidate root", PromotionBootstrapHealthTests.CandidateRootHealthBinding),
         ("bootstrap staged coordinator quiescence requires absent process", PromotionBootstrapHealthTests.StagedCoordinatorQuiescenceRequiresAbsentProcess),
+        ("bootstrap active runtime quiesces before swap", PromotionBootstrapHealthTests.ActiveRuntimeIsQuiescedBeforeSwap),
+        ("bootstrap already absent skips shutdown", PromotionBootstrapHealthTests.AlreadyAbsentRuntimeSkipsShutdown),
+        ("bootstrap runtime quiescence failure blocks", PromotionBootstrapHealthTests.FailedRuntimeQuiescenceBlocksWithoutMutation),
+        ("bootstrap runtime swap failure includes evidence", PromotionBootstrapHealthTests.RuntimeSwapFailureIncludesTransactionEvidence),
+        ("bootstrap production quiescence uses probe shutdown probe", PromotionBootstrapHealthTests.ProductionQuiescenceUsesProbeShutdownProbe),
         ("bootstrap missing candidate DLL fails", PromotionBootstrapHealthTests.MissingCandidateDllFailsAccurately),
         ("bootstrap corrupt coordinator fails", PromotionBootstrapHealthTests.CorruptCandidateCoordinatorFailsAccurately),
         ("bootstrap fingerprint mismatch fails", PromotionBootstrapHealthTests.CandidateFingerprintMismatchFails),
@@ -7407,10 +7412,10 @@ internal static class Program
     {
         var requests = new List<DevBridgeProcessRequest>();
         TimeSpan innerContract =
-            DevBridgeDoctorTimeoutContract.CoordinatorConnectionAllowance +
-            DevBridgeDoctorTimeoutContract.FiniteCommandAllowance;
+            DevBridgeTimeoutContract.CoordinatorConnectionAllowance +
+            DevBridgeTimeoutContract.FiniteCommandAllowance;
         Assert(
-            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog > innerContract,
+            DevBridgeTimeoutContract.SupervisoryWatchdog > innerContract,
             "The supervisory watchdog must exceed the owned DevBridge finite contract.");
 
         CliResult result = RunDoctorFixture(
@@ -7429,7 +7434,7 @@ internal static class Program
         Assert(
             requests.Count >= 2 &&
             requests.All(request =>
-                request.Timeout == DevBridgeDoctorTimeoutContract.SupervisoryWatchdog),
+                request.Timeout == DevBridgeTimeoutContract.SupervisoryWatchdog),
             "All finite DevBridge doctor probes must use the shared supervisory watchdog.");
     }
 

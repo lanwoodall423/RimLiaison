@@ -5,6 +5,19 @@ using System.Text.Json.Serialization;
 using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
+internal static class DevBridgeTimeoutContract
+{
+    // DevBridge owns a 15-second coordinator connection allowance and a
+    // 60-second finite-command response allowance. This watchdog supervises
+    // the complete owned operation and leaves only a small process margin.
+    internal static readonly TimeSpan CoordinatorConnectionAllowance =
+        TimeSpan.FromSeconds(15);
+    internal static readonly TimeSpan FiniteCommandAllowance =
+        TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan SupervisoryWatchdog =
+        TimeSpan.FromSeconds(80);
+}
+
 
 public static class DevBridgeRecipeSchemas
 {

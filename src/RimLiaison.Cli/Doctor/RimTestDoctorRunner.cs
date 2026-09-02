@@ -16,18 +16,6 @@ public static class RimTestDoctorSchema
 {
     public const string Current = "rimtest-doctor/v1";
 }
-internal static class DevBridgeDoctorTimeoutContract
-{
-    // DevBridge owns a 15-second coordinator connection allowance and a
-    // 60-second finite-command response allowance. This watchdog supervises
-    // the complete owned operation and leaves only a small process margin.
-    internal static readonly TimeSpan CoordinatorConnectionAllowance =
-        TimeSpan.FromSeconds(15);
-    internal static readonly TimeSpan FiniteCommandAllowance =
-        TimeSpan.FromSeconds(60);
-    internal static readonly TimeSpan SupervisoryWatchdog =
-        TimeSpan.FromSeconds(80);
-}
 
 
 internal sealed class RimTestDoctorRunner
@@ -411,7 +399,7 @@ internal sealed class RimTestDoctorRunner
             options.CommandPath,
             options.RootPath,
             ["--root", options.RootPath, "doctor", "--json"],
-            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog,
+            DevBridgeTimeoutContract.SupervisoryWatchdog,
             MaximumProbeStdoutBytes,
             MaximumProbeStderrBytes,
             OperationKey: "cli:doctor");
@@ -520,7 +508,7 @@ internal sealed class RimTestDoctorRunner
                 project,
                 "--json"
             ],
-            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog,
+            DevBridgeTimeoutContract.SupervisoryWatchdog,
             MaximumProbeStdoutBytes,
             MaximumProbeStderrBytes,
             OperationKey: "cli:doctor:project-resolve");

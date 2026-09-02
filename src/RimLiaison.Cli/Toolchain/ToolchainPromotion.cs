@@ -101,6 +101,14 @@ public sealed record ToolchainPromotionResult(
     string? InstalledRoot,
     string? NextAction)
 {
+    [JsonPropertyName("promotionPhase")]
+    public string? PromotionPhase { get; init; }
+
+    [JsonPropertyName("transactionEvidence")]
+    public PromotionTransactionEvidence? TransactionEvidence { get; init; }
+
+    [JsonPropertyName("runtimeQuiescence")]
+    public PromotionRuntimeQuiescenceEvidence? RuntimeQuiescence { get; init; }
     [JsonPropertyName("promotionTransactionId")]
     public string? PromotionTransactionId { get; init; }
 
@@ -215,6 +223,54 @@ public sealed record PromotionChildProcessResult(
     [property: JsonPropertyName("executablePath")] string ExecutablePath,
     [property: JsonPropertyName("workingDirectory")] string WorkingDirectory,
     [property: JsonPropertyName("startError")] string? StartError = null);
+
+public sealed record PromotionCoordinatorProbeEvidence(
+    [property: JsonPropertyName("exitCode")] int ExitCode,
+    [property: JsonPropertyName("state")] string? State,
+    [property: JsonPropertyName("runtimeRoot")] string? RuntimeRoot,
+    [property: JsonPropertyName("coordinatorPid")] int? CoordinatorPid,
+    [property: JsonPropertyName("coordinatorStartIdentity")] string? CoordinatorStartIdentity,
+    [property: JsonPropertyName("coordinatorExecutable")] string? CoordinatorExecutable,
+    [property: JsonPropertyName("process")] PromotionChildProcessResult Process);
+
+public sealed record PromotionRuntimeQuiescenceEvidence(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("runtimeRoot")] string RuntimeRoot,
+    [property: JsonPropertyName("commandPath")] string CommandPath,
+    [property: JsonPropertyName("before")] PromotionCoordinatorProbeEvidence? Before,
+    [property: JsonPropertyName("shutdown")] PromotionChildProcessResult? Shutdown,
+    [property: JsonPropertyName("after")] PromotionCoordinatorProbeEvidence? After,
+    [property: JsonPropertyName("error")] string? Error = null);
+
+public sealed record PromotionRuntimeQuiescenceResult(
+    bool Passed,
+    string Summary,
+    string? Error,
+    PromotionRuntimeQuiescenceEvidence Evidence);
+
+public interface IPromotionRuntimeQuiescenceVerifier
+{
+    Task<PromotionRuntimeQuiescenceResult> VerifyAsync(
+        string runtimeRoot,
+        CancellationToken cancellationToken);
+}
+
+
+public sealed record PromotionTransactionEvidence(
+    [property: JsonPropertyName("phase")] string Phase,
+    [property: JsonPropertyName("sourcePath")] string? SourcePath,
+    [property: JsonPropertyName("destinationPath")] string? DestinationPath,
+    [property: JsonPropertyName("backupPath")] string? BackupPath,
+    [property: JsonPropertyName("hResult")] int? HResult,
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("runtimeQuiescence")] PromotionRuntimeQuiescenceEvidence? RuntimeQuiescence);
+
+public interface IPromotionRuntimeDirectoryTransaction
+{
+    void Commit(string stagedRoot, string targetRoot, out string? backupRoot);
+    void Restore(string targetRoot, string? backupRoot);
+}
+
 
 public sealed record PromotionCandidateHealthResult(
     bool Passed,
@@ -738,7 +794,9 @@ public static class ToolchainPromotionService
         IPromotionCandidateHealthVerifier? promotionHealthVerifier = null,
         IPromotionCanonicalHealthVerifier? canonicalHealthVerifier = null,
         IGitRepositoryStateProvider? gitRepositoryStateProvider = null,
-        IPromotionMachinePreflightVerifier? machinePreflightVerifier = null)
+        IPromotionMachinePreflightVerifier? machinePreflightVerifier = null,
+        IPromotionRuntimeQuiescenceVerifier? runtimeQuiescenceVerifier = null,
+        IPromotionRuntimeDirectoryTransaction? runtimeDirectoryTransaction = null)
     {
         if (string.IsNullOrWhiteSpace(packagePath))
         {
@@ -758,10 +816,16 @@ public static class ToolchainPromotionService
         ToolchainPromotionPackage? package = null;
         bool runtimeCommitted = false;
         bool promotionCommitted = false;
+        string promotionPhase = "lock";
+        string? promotionTransactionId = null;
+        PromotionTransactionEvidence? transactionEvidence = null;
+        PromotionRuntimeQuiescenceEvidence? runtimeQuiescenceEvidence = null;
+        runtimeQuiescenceVerifier ??= new ProductionRuntimeQuiescenceVerifier();
+        runtimeDirectoryTransaction ??= new FileSystemPromotionRuntimeDirectoryTransaction();
         try
         {
             promotionLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            string promotionTransactionId = "promotion-" + Guid.NewGuid().ToString("N");
+            promotionTransactionId = "promotion-" + Guid.NewGuid().ToString("N");
             package = ReadPackage(packagePath, out string? packageError);
             if (package is null)
             {
@@ -1213,11 +1277,104 @@ public static class ToolchainPromotionService
                 };
             }
 
-            CommitRuntimeDirectory(
-                stagedRuntimeRoot!,
-                previous.DevBridgeRuntimeRoot!,
-                out runtimeBackupRoot);
-            runtimeCommitted = true;
+            promotionPhase = "runtime-quiescence";
+            PromotionRuntimeQuiescenceResult runtimeQuiescence =
+                await runtimeQuiescenceVerifier!.VerifyAsync(
+                        previous.DevBridgeRuntimeRoot!,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            runtimeQuiescenceEvidence = runtimeQuiescence.Evidence;
+            transactionEvidence = new(
+                promotionPhase,
+                null,
+                previous.DevBridgeRuntimeRoot,
+                null,
+                null,
+                runtimeQuiescence.Error,
+                runtimeQuiescenceEvidence);
+            if (!runtimeQuiescence.Passed)
+            {
+                const string errorCode = "PROMOTION_RUNTIME_QUIESCE_FAILED";
+                WriteFailureHandoff(
+                    packagePath,
+                    package,
+                    previous,
+                    errorCode,
+                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
+                    promotionPhase,
+                    transactionEvidence);
+                return ToolchainPromotionResult.Blocked(
+                    errorCode,
+                    runtimeQuiescence.Error ?? runtimeQuiescence.Summary,
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Repair or orderly-stop the active production DevBridge runtime, then retry the supported promotion command.",
+                    runtimeQuiescence.Summary) with
+                {
+                    PromotionTransactionId = promotionTransactionId,
+                    PromotionPhase = promotionPhase,
+                    TransactionEvidence = transactionEvidence,
+                    RuntimeQuiescence = runtimeQuiescenceEvidence,
+                    PreviousProductionHealth = previousProductionHealth
+                };
+            }
+
+            promotionPhase = "runtime-swap";
+            try
+            {
+                runtimeDirectoryTransaction!.Commit(
+                    stagedRuntimeRoot!,
+                    previous.DevBridgeRuntimeRoot!,
+                    out runtimeBackupRoot);
+                runtimeCommitted = true;
+                transactionEvidence = new(
+                    promotionPhase,
+                    stagedRuntimeRoot,
+                    previous.DevBridgeRuntimeRoot,
+                    runtimeBackupRoot,
+                    null,
+                    null,
+                    runtimeQuiescenceEvidence);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                transactionEvidence = new(
+                    promotionPhase,
+                    stagedRuntimeRoot,
+                    previous.DevBridgeRuntimeRoot,
+                    runtimeBackupRoot,
+                    exception.HResult,
+                    exception.Message,
+                    runtimeQuiescenceEvidence);
+                const string errorCode = "PROMOTION_RUNTIME_SWAP_FAILED";
+                WriteFailureHandoff(
+                    packagePath,
+                    package,
+                    previous,
+                    errorCode,
+                    exception.Message,
+                    "Repair the production runtime directory ownership or sharing violation, then retry the supported promotion command.",
+                    promotionPhase,
+                    transactionEvidence);
+                return ToolchainPromotionResult.Blocked(
+                    errorCode,
+                    exception.Message,
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    previous.PromotedFingerprint,
+                    "Repair the production runtime directory ownership or sharing violation, then retry the supported promotion command.") with
+                {
+                    PromotionTransactionId = promotionTransactionId,
+                    PromotionPhase = promotionPhase,
+                    TransactionEvidence = transactionEvidence,
+                    RuntimeQuiescence = runtimeQuiescenceEvidence,
+                    PreviousProductionHealth = previousProductionHealth
+                };
+            }
 
             var updated = new ProductionToolchainManifest
             {
@@ -1247,8 +1404,10 @@ public static class ToolchainPromotionService
                 PromotionPackagePath = Path.GetFullPath(packagePath),
                 PromotionPackageSha256 = ToolchainFileHash.Sha256(packagePath)
             };
+            promotionPhase = "manifest-commit";
             AtomicReplace(manifestPath, JsonSerializer.Serialize(updated, WriteOptions));
 
+            promotionPhase = "identity-verification";
             ProductionToolchainBindingResolution installed = ProductionToolchainBindingResolver.Resolve(
                 sourceRoot,
                 currentExecutablePath: installedExecutable);
@@ -1261,7 +1420,9 @@ public static class ToolchainPromotionService
                     previous,
                     "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
                     installed.Failure?.Error ?? "The installed production identity could not be verified.",
-                    "Repair the unified package manifest and retry the supported promotion command.");
+                    "Repair the unified package manifest and retry the supported promotion command.",
+                    promotionPhase,
+                    transactionEvidence);
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_INSTALLED_IDENTITY_UNVERIFIED",
                     installed.Failure?.Error ?? "The installed production identity could not be verified.",
@@ -1270,6 +1431,10 @@ public static class ToolchainPromotionService
                     qualificationHash,
                     previous.PromotedFingerprint) with
                 {
+                    PromotionTransactionId = promotionTransactionId,
+                    PromotionPhase = promotionPhase,
+                    TransactionEvidence = transactionEvidence,
+                    RuntimeQuiescence = runtimeQuiescenceEvidence,
                     CandidateHealth = health.Evidence with
                     {
                         PreviousProductionHealth = previousProductionHealth,
@@ -1281,6 +1446,7 @@ public static class ToolchainPromotionService
                     RollbackOccurred = true
                 };
             }
+            promotionPhase = "post-commit-health";
             PromotionCanonicalHealthResult postCommitHealth = canonicalHealthVerifier is null
                 ? await RunCanonicalProductionHealthAsync(
                         sourceRoot,
@@ -1303,7 +1469,9 @@ public static class ToolchainPromotionService
                     previous,
                     "PROMOTION_POST_COMMIT_HEALTH_FAILED",
                     postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
-                    "Restore the prior production identity or retry the qualified promotion transaction.");
+                    "Restore the prior production identity or retry the qualified promotion transaction.",
+                    promotionPhase,
+                    transactionEvidence);
                 return ToolchainPromotionResult.Blocked(
                     "PROMOTION_POST_COMMIT_HEALTH_FAILED",
                     postCommitHealth.Error ?? "Canonical post-commit doctor did not report READY.",
@@ -1314,6 +1482,10 @@ public static class ToolchainPromotionService
                     "Restore the prior production identity or retry the qualified promotion transaction.",
                     postCommitHealth.Summary) with
                 {
+                    PromotionTransactionId = promotionTransactionId,
+                    PromotionPhase = promotionPhase,
+                    TransactionEvidence = transactionEvidence,
+                    RuntimeQuiescence = runtimeQuiescenceEvidence,
                     CandidateHealth = health.Evidence with
                     {
                         PreviousProductionHealth = previousProductionHealth,
@@ -1331,6 +1503,15 @@ public static class ToolchainPromotionService
             if (runtimeBackupRoot is not null) TryDelete(runtimeBackupRoot);
             runtimeBackupRoot = null;
             runtimeCommitted = false;
+            promotionPhase = "completed";
+            transactionEvidence = new(
+                promotionPhase,
+                stagedRoot,
+                previous.DevBridgeRuntimeRoot,
+                null,
+                null,
+                null,
+                runtimeQuiescenceEvidence);
             promotionCommitted = true;
             var qualifiedHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -1375,6 +1556,9 @@ public static class ToolchainPromotionService
                 stagedRoot,
                 null)
             {
+                PromotionPhase = promotionPhase,
+                TransactionEvidence = transactionEvidence,
+                RuntimeQuiescence = runtimeQuiescenceEvidence,
                 PromotionTransactionId = promotionTransactionId,
                 CandidateHealth = health.Evidence with
                 {
@@ -1400,21 +1584,37 @@ public static class ToolchainPromotionService
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or OperationCanceledException)
         {
             TryRestoreProductionManifest(manifestPath, previous);
+            transactionEvidence ??= new(
+                promotionPhase,
+                stagedRuntimeRoot,
+                previous?.DevBridgeRuntimeRoot,
+                runtimeBackupRoot,
+                exception.HResult,
+                exception.Message,
+                runtimeQuiescenceEvidence);
             WriteFailureHandoff(
                 packagePath,
                 package,
                 previous,
                 "PROMOTION_TRANSACTION_FAILED",
                 exception.Message,
-                "Repair the unified package inputs or production control plane, then retry rimliaison qualification promote --json.");
-            return ToolchainPromotionResult.Blocked("PROMOTION_TRANSACTION_FAILED", exception.Message);
+                "Repair the unified package inputs or production control plane, then retry rimliaison qualification promote --json.",
+                promotionPhase,
+                transactionEvidence);
+            return ToolchainPromotionResult.Blocked("PROMOTION_TRANSACTION_FAILED", exception.Message) with
+            {
+                PromotionTransactionId = promotionTransactionId,
+                PromotionPhase = promotionPhase,
+                TransactionEvidence = transactionEvidence,
+                RuntimeQuiescence = runtimeQuiescenceEvidence
+            };
         }
         finally
         {
             promotionLock?.Dispose();
             if (!promotionCommitted && runtimeCommitted && previous?.DevBridgeRuntimeRoot is not null)
             {
-                RestoreRuntimeDirectory(previous.DevBridgeRuntimeRoot, runtimeBackupRoot);
+                runtimeDirectoryTransaction!.Restore(previous.DevBridgeRuntimeRoot, runtimeBackupRoot);
             }
             else if (!promotionCommitted && stagedRuntimeRoot is not null)
             {
@@ -1429,7 +1629,7 @@ public static class ToolchainPromotionService
         }
 
     }
-    private static void CommitRuntimeDirectory(
+    internal static void CommitRuntimeDirectoryForTransaction(
         string stagedRoot,
         string targetRoot,
         out string? backupRoot)
@@ -1455,7 +1655,7 @@ public static class ToolchainPromotionService
         }
     }
 
-    private static void RestoreRuntimeDirectory(string targetRoot, string? backupRoot)
+    internal static void RestoreRuntimeDirectoryForTransaction(string targetRoot, string? backupRoot)
     {
         string target = Path.GetFullPath(targetRoot);
         TryDelete(target);
@@ -2065,6 +2265,77 @@ public static class ToolchainPromotionService
                 pid.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined);
     }
 
+    internal static bool TryReadCoordinatorProbe(
+        PromotionChildProcessResult process,
+        string expectedRuntimeRoot,
+        out PromotionCoordinatorProbeEvidence? evidence,
+        out bool quiesced,
+        out string? error)
+    {
+        evidence = null;
+        quiesced = false;
+        error = null;
+        if (!TryParse(process.Stdout, out JsonDocument? document))
+        {
+            error = "The DevBridge coordinator probe did not return JSON. " +
+                "exitCode=" + process.ExitCode +
+                "; startError=" + (process.StartError ?? "none") +
+                "; stderr=" + process.Stderr +
+                "; stdout=" + process.Stdout;
+            return false;
+        }
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            string? state = root.TryGetProperty("state", out JsonElement stateElement) &&
+                stateElement.ValueKind == JsonValueKind.String
+                    ? stateElement.GetString()
+                    : null;
+            string? runtimeRoot = root.TryGetProperty("runtimeRoot", out JsonElement rootElement) &&
+                rootElement.ValueKind == JsonValueKind.String
+                    ? rootElement.GetString()
+                    : null;
+            int? coordinatorPid = null;
+            if (root.TryGetProperty("coordinatorPid", out JsonElement pidElement) &&
+                pidElement.ValueKind == JsonValueKind.Number)
+            {
+                if (!pidElement.TryGetInt32(out int pid))
+                {
+                    error = "The DevBridge coordinator probe returned an invalid coordinator PID.";
+                    return false;
+                }
+                coordinatorPid = pid;
+            }
+            else if (root.TryGetProperty("coordinatorPid", out pidElement) &&
+                     pidElement.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+            {
+                error = "The DevBridge coordinator probe returned an invalid coordinator PID.";
+                return false;
+            }
+            if (state is null || runtimeRoot is null)
+            {
+                error = "The DevBridge coordinator probe omitted state or runtimeRoot.";
+                return false;
+            }
+            evidence = new(
+                process.ExitCode,
+                state,
+                runtimeRoot,
+                coordinatorPid,
+                ReadString(root, "coordinatorStartIdentity"),
+                ReadString(root, "coordinatorExecutable"),
+                process);
+            quiesced = IsCoordinatorQuiesced(root, expectedRuntimeRoot, process.ExitCode);
+            return true;
+        }
+    }
+
+    private static string? ReadString(JsonElement root, string name) =>
+        root.TryGetProperty(name, out JsonElement value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     private static string DescribePreviousProductionHealth(ProductionToolchainManifest manifest)
     {
         if (string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeRoot) ||
@@ -2159,30 +2430,34 @@ public static class ToolchainPromotionService
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        TimeSpan? processTimeout = null)
     {
         const int MaximumStdoutCharacters = 512 * 1024;
         const int MaximumStderrCharacters = 16 * 1024;
         string resolvedWorkingDirectory = workingDirectory ?? Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory;
-        using var process = new Process
+        var startInfo = new ProcessStartInfo
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = executable,
-                WorkingDirectory = resolvedWorkingDirectory,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            }
+            WorkingDirectory = resolvedWorkingDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
         };
-        if (environment is not null)
+        bool batchScript = executable.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            executable.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        if (batchScript)
         {
-            foreach ((string name, string value) in environment)
-                process.StartInfo.Environment[name] = value;
+            startInfo.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+            startInfo.Arguments = "/d /c \"" + BuildBatchCommand(executable, arguments) + "\"";
         }
-        foreach (string argument in arguments)
-            process.StartInfo.ArgumentList.Add(argument);
+        else
+        {
+            startInfo.FileName = executable;
+            foreach (string argument in arguments)
+                startInfo.ArgumentList.Add(argument);
+        }
+        using var process = new Process { StartInfo = startInfo };
         try
         {
             if (!process.Start())
@@ -2200,7 +2475,7 @@ public static class ToolchainPromotionService
         Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
         Task<string> errorTask = process.StandardError.ReadToEndAsync();
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        timeout.CancelAfter(processTimeout ?? TimeSpan.FromSeconds(30));
         bool timedOut = false;
         bool cancelled = false;
         try
@@ -2223,6 +2498,16 @@ public static class ToolchainPromotionService
             cancelled,
             executable,
             resolvedWorkingDirectory);
+    }
+
+    private static string BuildBatchCommand(
+        string executable,
+        IReadOnlyList<string> arguments)
+    {
+        IEnumerable<string> parts = new[] { executable }.Concat(arguments);
+        return string.Join(
+            " ",
+            parts.Select(value => "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""));
     }
 
     private static string BoundProcessOutput(string value, int maximumCharacters)
@@ -2258,7 +2543,9 @@ public static class ToolchainPromotionService
         ProductionToolchainManifest? previous,
         string errorCode,
         string error,
-        string nextAction)
+        string nextAction,
+        string? promotionPhase = null,
+        PromotionTransactionEvidence? transactionEvidence = null)
     {
         try
         {
@@ -2271,11 +2558,11 @@ public static class ToolchainPromotionService
                     new
                     {
                         schemaVersion = "rimliaison-unified-production-failure-handoff/v1",
-                        createdUtc = DateTimeOffset.UtcNow,
-                        packagePath = Path.GetFullPath(packagePath),
                         errorCode,
                         error,
                         nextAction,
+                        promotionPhase,
+                        transactionEvidence,
                         package,
                         previousProductionManifest = previous
                     },
@@ -2520,4 +2807,188 @@ internal static class ToolchainFileHash
         using FileStream stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
+}
+
+internal sealed class ProductionRuntimeQuiescenceVerifier : IPromotionRuntimeQuiescenceVerifier
+{
+    public async Task<PromotionRuntimeQuiescenceResult> VerifyAsync(
+        string runtimeRoot,
+        CancellationToken cancellationToken)
+    {
+        string expectedRoot = Path.GetFullPath(runtimeRoot);
+        string commandPath = Path.Combine(expectedRoot, "DevBridge.cmd");
+        if (!Directory.Exists(expectedRoot))
+        {
+            PromotionRuntimeQuiescenceEvidence evidence = new(
+                "already-absent",
+                expectedRoot,
+                commandPath,
+                null,
+                null,
+                null);
+            return new(true, "The active production runtime directory was already absent.", null, evidence);
+        }
+        if (!File.Exists(commandPath))
+        {
+            return Failed(
+                "The active production runtime does not contain its DevBridge.cmd control entrypoint.",
+                expectedRoot,
+                commandPath,
+                "command-missing",
+                null,
+                null,
+                null);
+        }
+
+        PromotionChildProcessResult before = await RunRuntimeCommandAsync(
+                commandPath,
+                ["--root", expectedRoot, "coordinator", "probe", "--json"],
+                cancellationToken,
+                workingDirectory: expectedRoot,
+                processTimeout: DevBridgeTimeoutContract.SupervisoryWatchdog)
+            .ConfigureAwait(false);
+        if (!ToolchainPromotionService.TryReadCoordinatorProbe(
+                before,
+                expectedRoot,
+                out PromotionCoordinatorProbeEvidence? beforeEvidence,
+                out bool beforeQuiesced,
+                out string? beforeError))
+        {
+            return Failed(
+                beforeError!,
+                expectedRoot,
+                commandPath,
+                "probe-invalid",
+                beforeEvidence,
+                null,
+                null);
+        }
+        if (beforeQuiesced)
+        {
+            PromotionRuntimeQuiescenceEvidence evidence = new(
+                "already-absent",
+                expectedRoot,
+                commandPath,
+                beforeEvidence,
+                null,
+                null);
+            return new(true, "The active production coordinator was already absent.", null, evidence);
+        }
+
+        PromotionChildProcessResult shutdown = await RunRuntimeCommandAsync(
+                commandPath,
+                ["--root", expectedRoot, "coordinator", "shutdown", "--json"],
+                cancellationToken,
+                workingDirectory: expectedRoot,
+                processTimeout: DevBridgeTimeoutContract.SupervisoryWatchdog)
+            .ConfigureAwait(false);
+        PromotionChildProcessResult after = await RunRuntimeCommandAsync(
+                commandPath,
+                ["--root", expectedRoot, "coordinator", "probe", "--json"],
+                cancellationToken,
+                workingDirectory: expectedRoot,
+                processTimeout: DevBridgeTimeoutContract.SupervisoryWatchdog)
+            .ConfigureAwait(false);
+        bool afterParsed = ToolchainPromotionService.TryReadCoordinatorProbe(
+            after,
+            expectedRoot,
+            out PromotionCoordinatorProbeEvidence? afterEvidence,
+            out bool afterQuiesced,
+            out string? afterError);
+        bool shutdownAccepted = shutdown.ExitCode == 0 &&
+            !shutdown.TimedOut &&
+            !shutdown.Cancelled &&
+            shutdown.StartError is null;
+        if (!afterParsed || !shutdownAccepted || !afterQuiesced)
+        {
+            string error = !afterParsed
+                ? afterError!
+                : !shutdownAccepted
+                    ? "The active production coordinator did not accept orderly shutdown."
+                    : "The active production coordinator remained present after orderly shutdown.";
+            PromotionRuntimeQuiescenceEvidence evidence = new(
+                "failed",
+                expectedRoot,
+                commandPath,
+                beforeEvidence,
+                shutdown,
+                afterEvidence,
+                error);
+            return new(false, error, error, evidence);
+        }
+
+        PromotionRuntimeQuiescenceEvidence passedEvidence = new(
+            "stopped",
+            expectedRoot,
+            commandPath,
+            beforeEvidence,
+            shutdown,
+            afterEvidence);
+        return new(true, "The active production coordinator stopped orderly and is absent.", null, passedEvidence);
+    }
+
+    private static async Task<PromotionChildProcessResult> RunRuntimeCommandAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null,
+        string? workingDirectory = null,
+        TimeSpan? processTimeout = null)
+    {
+        DevBridgeProcessResult result = await new SystemDevBridgeProcessTransport()
+            .ExecuteAsync(
+                new DevBridgeProcessRequest(
+                    executable,
+                    workingDirectory ?? Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory,
+                    arguments,
+                    processTimeout ?? DevBridgeTimeoutContract.SupervisoryWatchdog,
+                    512 * 1024,
+                    16 * 1024,
+                    environment,
+                    OperationKey: "rimliaison:promotion:runtime-quiescence"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new(
+            result.ExitCode ?? -1,
+            result.Stdout ?? string.Empty,
+            result.Stderr ?? string.Empty,
+            result.TimedOut,
+            result.Cancelled,
+            executable,
+            workingDirectory ?? Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory,
+            result.StartError);
+    }
+
+    private static PromotionRuntimeQuiescenceResult Failed(
+        string error,
+        string runtimeRoot,
+        string commandPath,
+        string status,
+        PromotionCoordinatorProbeEvidence? before,
+        PromotionChildProcessResult? shutdown,
+        PromotionCoordinatorProbeEvidence? after) =>
+        new(
+            false,
+            error,
+            error,
+            new PromotionRuntimeQuiescenceEvidence(
+                status,
+                runtimeRoot,
+                commandPath,
+                before,
+                shutdown,
+                after,
+                error));
+}
+
+internal sealed class FileSystemPromotionRuntimeDirectoryTransaction : IPromotionRuntimeDirectoryTransaction
+{
+    public void Commit(string stagedRoot, string targetRoot, out string? backupRoot) =>
+        ToolchainPromotionService.CommitRuntimeDirectoryForTransaction(
+            stagedRoot,
+            targetRoot,
+            out backupRoot);
+
+    public void Restore(string targetRoot, string? backupRoot) =>
+        ToolchainPromotionService.RestoreRuntimeDirectoryForTransaction(targetRoot, backupRoot);
 }

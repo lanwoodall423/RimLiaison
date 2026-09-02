@@ -68,6 +68,116 @@ internal static class PromotionBootstrapHealthTests
             !ToolchainPromotionService.IsCoordinatorQuiesced(responsive.RootElement, stagedRoot, 0),
             "a responsive coordinator probe must not prove staged process quiescence.");
     }
+
+    public static void ActiveRuntimeIsQuiescedBeforeSwap()
+    {
+        using Fixture fixture = new("healthy");
+        fixture.RuntimeQuiescenceVerifier.OnVerify = root =>
+            Assert(
+                File.ReadAllText(Path.Combine(root, "DevBridge.cmd")) == "healthy",
+                "runtime swap started before quiescence completed");
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "promoted", "quiesced runtime promotion failed");
+        Assert(fixture.RuntimeQuiescenceVerifier.Calls == 1, "runtime quiescence was not invoked exactly once");
+        Assert(result.RuntimeQuiescence?.Status == "stopped", "promotion omitted stopped-runtime evidence");
+    }
+
+    public static void AlreadyAbsentRuntimeSkipsShutdown()
+    {
+        using Fixture fixture = new("healthy");
+        fixture.RuntimeQuiescenceVerifier.Status = "already-absent";
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.Status == "promoted", "already-absent runtime promotion failed");
+        Assert(fixture.RuntimeQuiescenceVerifier.Calls == 1, "already-absent runtime was not probed");
+        Assert(fixture.RuntimeQuiescenceVerifier.ShutdownCalls == 0, "already-absent runtime issued shutdown");
+    }
+
+    public static void FailedRuntimeQuiescenceBlocksWithoutMutation()
+    {
+        using Fixture fixture = new("healthy");
+        string beforeManifest = File.ReadAllText(fixture.ManifestPath);
+        fixture.RuntimeQuiescenceVerifier.Pass = false;
+        fixture.RuntimeQuiescenceVerifier.Error = "shutdown refused";
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.ErrorCode == "PROMOTION_RUNTIME_QUIESCE_FAILED", "quiescence failure was not classified");
+        Assert(result.PromotionPhase == "runtime-quiescence", "quiescence failure phase was not recorded");
+        Assert(File.ReadAllText(fixture.ManifestPath) == beforeManifest, "quiescence failure changed the active manifest");
+        Assert(File.ReadAllText(Path.Combine(fixture.ProductionRuntimeRoot, "DevBridge.cmd")) == "healthy",
+            "quiescence failure changed the active runtime");
+        Assert(fixture.RuntimeDirectoryTransaction.CommitCalls == 0, "swap ran after quiescence failure");
+    }
+
+    public static void RuntimeSwapFailureIncludesTransactionEvidence()
+    {
+        using Fixture fixture = new("healthy");
+        fixture.RuntimeDirectoryTransaction.ThrowOnCommit = true;
+        ToolchainPromotionResult result = fixture.Promote();
+        Assert(result.ErrorCode == "PROMOTION_RUNTIME_SWAP_FAILED", "runtime swap failure was not classified");
+        Assert(!string.IsNullOrWhiteSpace(result.TransactionEvidence?.SourcePath) &&
+               !string.Equals(result.TransactionEvidence.SourcePath, fixture.ProductionRuntimeRoot,
+                   StringComparison.OrdinalIgnoreCase),
+            "runtime swap evidence omitted the staged source path");
+        Assert(result.TransactionEvidence?.DestinationPath == fixture.ProductionRuntimeRoot,
+            "runtime swap evidence omitted the production destination path");
+        Assert(result.TransactionEvidence?.HResult is not null, "runtime swap evidence omitted HResult");
+        Assert(result.RuntimeQuiescence?.Status == "stopped", "runtime swap evidence omitted quiescence proof");
+    }
+
+    public static void ProductionQuiescenceUsesProbeShutdownProbe()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-runtime-quiescence-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(root, "DevBridge.cmd"),
+                """
+                @echo off
+                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                exit /b %ERRORLEVEL%
+                """);
+            File.WriteAllText(
+                Path.Combine(root, "fake-devbridge.ps1"),
+                """
+                $Arguments = $args
+                $root = [IO.Path]::GetFullPath($PSScriptRoot)
+                $marker = Join-Path $root "shutdown.marker"
+                if ($Arguments -contains "probe") {
+                    if (Test-Path -LiteralPath $marker -PathType Leaf) {
+                        @{ state = "Absent"; runtimeRoot = $root } | ConvertTo-Json -Compress
+                        exit 1
+                    }
+                    @{ state = "Responsive"; runtimeRoot = $root; coordinatorPid = 1234 } |
+                        ConvertTo-Json -Compress
+                    exit 0
+                }
+                if ($Arguments -contains "shutdown") {
+                    New-Item -ItemType File -Path $marker | Out-Null
+                    @{ success = $true } | ConvertTo-Json -Compress
+                    exit 0
+                }
+                exit 3
+                """);
+
+            PromotionRuntimeQuiescenceResult result =
+                new ProductionRuntimeQuiescenceVerifier()
+                    .VerifyAsync(root, CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            Assert(result.Passed, result.Error ?? "production quiescence verifier failed");
+            Assert(result.Evidence.Status == "stopped", "production verifier did not report stopped state");
+            Assert(result.Evidence.Before?.State == "Responsive", "production verifier skipped responsive probe");
+            Assert(result.Evidence.Shutdown?.ExitCode == 0, "production verifier did not accept shutdown");
+            Assert(result.Evidence.After?.State == "Absent", "production verifier did not prove absent state");
+            Assert(result.Evidence.After?.CoordinatorPid is null, "production verifier accepted a remaining PID");
+            Assert(result.Evidence.After?.RuntimeRoot == root, "production verifier accepted a different runtime root");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
     public static void IsolatedCandidateUsesNarrowCapabilitiesProbe()
     {
         using IsolatedCandidateFixture fixture = new();
@@ -428,11 +538,7 @@ internal static class PromotionBootstrapHealthTests
 
         private static void CopyDirectory(string source, string destination)
         {
-            foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
-            {
-                Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
-            }
-
+            Directory.CreateDirectory(destination);
             foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
             {
                 string target = Path.Combine(destination, Path.GetRelativePath(source, file));
@@ -480,6 +586,8 @@ internal static class PromotionBootstrapHealthTests
         public string ManifestBefore { get; }
         public FakeCandidateVerifier CandidateVerifier { get; } = new();
         public FakeCanonicalVerifier CanonicalVerifier { get; } = new();
+        public FakeRuntimeQuiescenceVerifier RuntimeQuiescenceVerifier { get; } = new();
+        public FakeRuntimeDirectoryTransaction RuntimeDirectoryTransaction { get; } = new();
         public bool CanonicalPass { get; init; } = true;
         public bool CancelCandidate { get; init; }
         public TimeSpan CandidateDelay { get; init; }
@@ -670,7 +778,9 @@ internal static class PromotionBootstrapHealthTests
                     gitRepositoryStateProvider: new FakeGitProvider(
                         SourceHeadCommit ?? SourceCommit,
                         SourceChanges),
-                    machinePreflightVerifier: new ReadyMachinePreflight())
+                    machinePreflightVerifier: new ReadyMachinePreflight(),
+                    runtimeQuiescenceVerifier: RuntimeQuiescenceVerifier,
+                    runtimeDirectoryTransaction: RuntimeDirectoryTransaction)
                 .GetAwaiter()
                 .GetResult();
         }
@@ -716,6 +826,63 @@ internal static class PromotionBootstrapHealthTests
                 0,
                 changes.Count > 0,
                 changes)));
+    }
+
+    private sealed class FakeRuntimeQuiescenceVerifier : IPromotionRuntimeQuiescenceVerifier
+    {
+        public bool Pass { get; set; } = true;
+        public string Status { get; set; } = "stopped";
+        public string? Error { get; set; }
+        public int Calls { get; private set; }
+        public int ShutdownCalls { get; private set; }
+        public Action<string>? OnVerify { get; set; }
+
+        public Task<PromotionRuntimeQuiescenceResult> VerifyAsync(
+            string runtimeRoot,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            OnVerify?.Invoke(runtimeRoot);
+            if (Status != "already-absent")
+                ShutdownCalls++;
+            string? error = Error ?? (Pass ? null : "runtime quiescence failed");
+            PromotionRuntimeQuiescenceEvidence evidence = new(
+                Status,
+                runtimeRoot,
+                Path.Combine(runtimeRoot, "DevBridge.cmd"),
+                null,
+                null,
+                null,
+                error);
+            return Task.FromResult(new PromotionRuntimeQuiescenceResult(
+                Pass,
+                error ?? "runtime quiescence passed",
+                error,
+                evidence));
+        }
+    }
+
+    private sealed class FakeRuntimeDirectoryTransaction : IPromotionRuntimeDirectoryTransaction
+    {
+        public bool ThrowOnCommit { get; set; }
+        public int CommitCalls { get; private set; }
+
+        public void Commit(string stagedRoot, string targetRoot, out string? backupRoot)
+        {
+            CommitCalls++;
+            if (ThrowOnCommit)
+            {
+                backupRoot = null;
+                throw new IOException("injected runtime swap sharing violation");
+            }
+            ToolchainPromotionService.CommitRuntimeDirectoryForTransaction(
+                stagedRoot,
+                targetRoot,
+                out backupRoot);
+        }
+
+        public void Restore(string targetRoot, string? backupRoot) =>
+            ToolchainPromotionService.RestoreRuntimeDirectoryForTransaction(targetRoot, backupRoot);
     }
 
     private sealed class FakeCandidateVerifier : IPromotionCandidateHealthVerifier
