@@ -439,6 +439,26 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
             string? sourceAssembly = SafePath(artifactRoot, package.RimLiaisonAssemblyRelativePath);
             string? sourceConsumer = SafePath(artifactRoot, package.TransactionConsumerRelativePath);
             string? sourceUnified = SafePath(artifactRoot, package.UnifiedManifestRelativePath);
+            string? sourceCliRoot = null;
+            if (package.SchemaVersion == ToolchainPromotionSchemas.Package)
+            {
+                sourceCliRoot = SafePath(artifactRoot, package.RimLiaisonCliDeploymentRootRelativePath);
+                string? sourceCliManifest = SafePath(artifactRoot, package.RimLiaisonCliDeploymentManifestRelativePath);
+                string? cliError = null;
+                if (sourceCliRoot is null || sourceCliManifest is null ||
+                    !CliDeploymentManifestService.Verify(
+                        sourceCliRoot,
+                        sourceCliManifest,
+                        package.RimLiaisonCliDeploymentManifestSha256,
+                        package.RimLiaisonCliDeploymentPackageSha256,
+                        out _,
+                        out cliError))
+                {
+                    return Task.FromResult(Fail(
+                        "PRODUCTION_TOOLCHAIN_RECOVERY_PACKAGE_INVALID",
+                        cliError ?? "The qualified package CLI deployment is incomplete or substituted."));
+                }
+            }
             if (sourceCli is null || sourceAssembly is null || sourceConsumer is null ||
                 !File.Exists(sourceCli) || !File.Exists(sourceAssembly) ||
                 !File.Exists(sourceConsumer))
@@ -538,6 +558,11 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                     package.DevBridgeRuntimeArtifactRoot!,
                     manifest.DevBridgeRuntimeRoot!);
             }
+            if (sourceCliRoot is not null)
+            {
+                string targetCliRoot = Path.GetDirectoryName(manifest.RimLiaisonExecutablePath!)!;
+                CopyDirectory(sourceCliRoot, targetCliRoot);
+            }
             CopyFile(sourceCli, manifest.RimLiaisonExecutablePath!);
             CopyFile(sourceAssembly, manifest.RimLiaisonAssemblyPath!);
             CopyFile(sourceConsumer, manifest.TransactionConsumerPath!);
@@ -591,6 +616,16 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                 modSha256 = package.DevBridgeModSha256,
                 rimLiaison = new
                 {
+                    deploymentRoot = package.SchemaVersion == ToolchainPromotionSchemas.Package
+                        ? Relative(Path.GetDirectoryName(manifest.RimLiaisonExecutablePath!)!)
+                        : null,
+                    deploymentManifestPath = package.SchemaVersion == ToolchainPromotionSchemas.Package
+                        ? Relative(Path.Combine(Path.GetDirectoryName(manifest.RimLiaisonExecutablePath!)!,
+                            CliDeploymentManifestService.FileName))
+                        : null,
+                    deploymentManifestSha256 = package.RimLiaisonCliDeploymentManifestSha256,
+                    deploymentPackageSha256 = package.RimLiaisonCliDeploymentPackageSha256,
+                    targetFramework = package.RimLiaisonCliTargetFramework,
                     executablePath = Relative(manifest.RimLiaisonExecutablePath!),
                     executableSha256 = manifest.RimLiaisonExecutableSha256,
                     assemblyPath = Relative(manifest.RimLiaisonAssemblyPath!),
@@ -617,7 +652,8 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
         ToolchainPromotionPackage? package,
         ProductionToolchainManifest manifest)
     {
-        if (package is null || package.SchemaVersion != ToolchainPromotionSchemas.Package ||
+        if (package is null ||
+            package.SchemaVersion is not (ToolchainPromotionSchemas.Package or ToolchainPromotionSchemas.LegacyPackage) ||
             !string.Equals(package.OwnerProduct, ToolchainPromotionSchemas.OwnerProduct, StringComparison.Ordinal) ||
             !string.Equals(package.SourceCommit, manifest.QualifiedSourceCommit, StringComparison.OrdinalIgnoreCase))
         {
@@ -639,6 +675,14 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
         {
             return "The promotion package identity does not equal the already-promoted production identity.";
         }
+        if (package.SchemaVersion == ToolchainPromotionSchemas.Package &&
+            (!string.Equals(package.RimLiaisonCliDeploymentManifestSha256,
+                manifest.RimLiaisonCliDeploymentManifestSha256, StringComparison.OrdinalIgnoreCase) ||
+             !string.Equals(package.RimLiaisonCliDeploymentPackageSha256,
+                manifest.RimLiaisonCliDeploymentPackageSha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            return "The promotion package CLI deployment identity does not equal the already-promoted production identity.";
+        }
         string fingerprint = ToolchainPromotionService.ComputePromotedFingerprint(
             package.SourceCommit!,
             package.RimLiaisonExecutableSha256!,
@@ -650,7 +694,9 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
             package.OwnerProduct!,
             package.RuntimeSubsystem!,
             package.DevBridgeModSha256,
-            package.DevBridgeRuntimeManifestSha256);
+            package.DevBridgeRuntimeManifestSha256,
+            package.RimLiaisonCliDeploymentManifestSha256,
+            package.RimLiaisonCliDeploymentPackageSha256);
         if (!string.Equals(fingerprint, manifest.PromotedFingerprint, StringComparison.OrdinalIgnoreCase))
         {
             return "The qualified package fingerprint does not equal the previously promoted identity.";

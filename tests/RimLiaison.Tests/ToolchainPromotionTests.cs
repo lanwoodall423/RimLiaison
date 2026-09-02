@@ -143,13 +143,17 @@ internal static class ToolchainPromotionTests
             string modPath = Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll");
             Directory.CreateDirectory(Path.GetDirectoryName(modPath)!);
             Directory.CreateDirectory(packageRoot);
-            string executablePath = Path.Combine(artifactRoot, "rimliaison.exe");
-            string assemblyPath = Path.Combine(artifactRoot, "rimliaison.dll");
+            string cliRoot = Path.Combine(artifactRoot, "cli");
+            Directory.CreateDirectory(cliRoot);
+            string executablePath = Path.Combine(cliRoot, "rimliaison.exe");
+            string assemblyPath = Path.Combine(cliRoot, "rimliaison.dll");
             string coordinatorPath = Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe");
             string consumerPath = Path.Combine(packageRoot, "transaction-components", "mod-test.ps1");
             string unifiedManifestPath = Path.Combine(packageRoot, "unified-package.json");
             File.WriteAllText(executablePath, "qualified-executable");
             File.WriteAllText(assemblyPath, "qualified-assembly");
+            File.WriteAllText(Path.Combine(cliRoot, "cli-dependency.json"), "qualified-dependency");
+            CliDeploymentManifest cliManifest = CliDeploymentManifestService.Write(cliRoot, "source-commit", "net8.0");
             File.WriteAllText(coordinatorPath, "qualified-coordinator");
             File.WriteAllText(modPath, "qualified-mod");
             File.WriteAllText(Path.Combine(runtimeRoot, "DevBridge.cmd"), "qualified-runtime-command");
@@ -246,7 +250,9 @@ internal static class ToolchainPromotionTests
                 new Dictionary<string, string>
                 {
                     ["rimLiaisonExecutableSha256"] = executableHash,
-                    ["rimLiaisonAssemblySha256"] = assemblyHash
+                    ["rimLiaisonAssemblySha256"] = assemblyHash,
+                    ["rimLiaisonCliDeploymentManifestSha256"] = Hash(Path.Combine(cliRoot, CliDeploymentManifestService.FileName)),
+                    ["rimLiaisonCliDeploymentPackageSha256"] = cliManifest.PackageSha256
                 })
             {
                 CandidateComplete = true,
@@ -269,7 +275,12 @@ internal static class ToolchainPromotionTests
                 DevBridgeModSha256 = Hash(modPath),
                 DevBridgeRuntimeManifestSha256 = Hash(Path.Combine(
                     runtimeRoot,
-                    ".devbridge-runtime-manifest.json"))
+                    ".devbridge-runtime-manifest.json")),
+                RimLiaisonCliDeploymentRoot = cliRoot,
+                RimLiaisonCliDeploymentManifestPath = Path.Combine(cliRoot, CliDeploymentManifestService.FileName),
+                RimLiaisonCliDeploymentManifestSha256 = Hash(Path.Combine(cliRoot, CliDeploymentManifestService.FileName)),
+                RimLiaisonCliDeploymentPackageSha256 = cliManifest.PackageSha256,
+                RimLiaisonCliTargetFramework = cliManifest.TargetFramework
             };
             string conflictQualificationPath = Path.Combine(root, "conflicting-qualification.json");
             File.WriteAllText(conflictQualificationPath, "{\"proof\":\"conflict\"}");
@@ -286,9 +297,11 @@ internal static class ToolchainPromotionTests
                     candidate.TransactionConsumerSha256,
                     candidate.RuntimeProtocolContract,
                     candidate.DevBridgeModSha256,
-                    candidate.DevBridgeRuntimeManifestSha256));
-            Directory.CreateDirectory(conflictPayloadRoot);
-            File.WriteAllText(Path.Combine(conflictPayloadRoot, "rimliaison.exe"), "conflicting");
+                    candidate.DevBridgeRuntimeManifestSha256,
+                    candidate.RimLiaisonCliDeploymentManifestSha256,
+                    candidate.RimLiaisonCliDeploymentPackageSha256));
+            Directory.CreateDirectory(Path.Combine(conflictPayloadRoot, "cli"));
+            File.WriteAllText(Path.Combine(conflictPayloadRoot, "cli", "rimliaison.exe"), "conflicting");
             bool payloadSubstitutionRejected = false;
             try
             {
@@ -305,7 +318,7 @@ internal static class ToolchainPromotionTests
             Assert(payloadSubstitutionRejected, "a prepopulated conflicting payload was accepted");
             Assert(!File.Exists(Path.Combine(root, "conflicting-package.json")),
                 "conflicting payload rejection published a package");
-            Assert(File.ReadAllText(Path.Combine(conflictPayloadRoot, "rimliaison.exe")) == "conflicting",
+            Assert(File.ReadAllText(Path.Combine(conflictPayloadRoot, "cli", "rimliaison.exe")) == "conflicting",
                 "conflicting historical payload content was overwritten");
 
             string failedPayloadRoot = Path.Combine(
@@ -327,7 +340,11 @@ internal static class ToolchainPromotionTests
                 incompleteCandidate.DevBridgePackageSha256,
                 incompleteCandidate.DevBridgeCoordinatorSha256,
                 incompleteCandidate.TransactionConsumerSha256,
-                incompleteCandidate.RuntimeProtocolContract);
+                incompleteCandidate.RuntimeProtocolContract,
+                incompleteCandidate.DevBridgeModSha256,
+                incompleteCandidate.DevBridgeRuntimeManifestSha256,
+                incompleteCandidate.RimLiaisonCliDeploymentManifestSha256,
+                incompleteCandidate.RimLiaisonCliDeploymentPackageSha256);
             string failedPayloadDestination = Path.Combine(
                 root,
                 "qualified-toolchain-payload-source-commit-" + failedPayloadIdentity);
@@ -379,7 +396,7 @@ internal static class ToolchainPromotionTests
             string immutablePayloadRoot = packageRootJson.GetProperty("artifactRoot").GetString()!;
             Assert(immutablePayloadRoot != Path.GetFullPath(artifactRoot),
                 "recovery payload must not point at the mutable local Release directory");
-            Assert(File.ReadAllText(Path.Combine(immutablePayloadRoot, "rimliaison.exe")) == "qualified-executable",
+            Assert(File.ReadAllText(Path.Combine(immutablePayloadRoot, "cli", "rimliaison.exe")) == "qualified-executable",
                 "recovery payload must preserve the qualified executable");
             string burnInQualificationPath = Path.Combine(root, "burn-in-qualification.json");
             File.WriteAllText(burnInQualificationPath, "{\"proof\":\"burn-in-25\"}");
@@ -464,7 +481,7 @@ internal static class ToolchainPromotionTests
             packagePath,
             JsonSerializer.Serialize(new
             {
-                schemaVersion = ToolchainPromotionSchemas.Package,
+                schemaVersion = ToolchainPromotionSchemas.LegacyPackage,
                 sourceCommit,
                 qualificationArtifactPath = qualificationPath,
                 qualificationArtifactSha256 = qualificationHash,

@@ -107,28 +107,51 @@ internal static class ToolchainCandidateMaterializer
             string packageHash = ReadRuntimePackageHash(candidateRuntimeManifest);
             string candidateCoordinator = Path.Combine(runtimeCandidateRoot, "Coordinator", "DevBridge.Coordinator.exe");
             string candidateMod = Path.Combine(runtimeCandidateRoot, "1.6", "Assemblies", "DevBridge2.dll");
-            string runtimeManifestHash = ToolchainFileHash.Sha256(candidateRuntimeManifest);
-            string fullArtifactRoot = Path.GetFullPath(artifactRoot);
-            string sourceExecutable = Path.Combine(fullArtifactRoot, "rimliaison.exe");
-            string sourceAssembly = Path.Combine(fullArtifactRoot, "rimliaison.dll");
-            if (!File.Exists(sourceExecutable) || !File.Exists(sourceAssembly))
+            string cliDeploymentRoot = Path.Combine(fullCandidateRoot, "cli");
+            (bool published, string publishError) = await PublishCliAsync(
+                    sourceRoot,
+                    cliDeploymentRoot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!published)
             {
                 return Failure(
-                    "CANDIDATE_RIMLIAISON_ARTIFACT_MISSING",
-                    "The current Release RimLiaison executable or assembly is missing.",
-                    "Build the RimLiaison Release artifacts, then retry qualification.",
+                    "RIMLIAISON_CLI_PUBLISH_FAILED",
+                    publishError,
+                    "Publish the complete RimLiaison CLI deployment, then retry qualification.",
                     managedAssemblies);
             }
-
-            string candidateExecutable = Path.Combine(fullCandidateRoot, "rimliaison.exe");
-            string candidateAssembly = Path.Combine(fullCandidateRoot, "rimliaison.dll");
-            File.Copy(sourceExecutable, candidateExecutable, overwrite: false);
-            File.Copy(sourceAssembly, candidateAssembly, overwrite: false);
-            foreach (string companionName in new[] { "rimliaison.deps.json", "rimliaison.runtimeconfig.json" })
+            CliDeploymentManifest cliManifest = CliDeploymentManifestService.Write(
+                cliDeploymentRoot,
+                source.State.HeadSha!,
+                "net8.0");
+            string cliManifestPath = Path.Combine(cliDeploymentRoot, CliDeploymentManifestService.FileName);
+            string candidateExecutable = Path.Combine(cliDeploymentRoot, "rimliaison.exe");
+            string candidateAssembly = Path.Combine(cliDeploymentRoot, "rimliaison.dll");
+            if (!File.Exists(candidateExecutable) || !File.Exists(candidateAssembly) ||
+                !CliDeploymentManifestService.ContainsFile(cliManifest, "rimliaison.exe") ||
+                !CliDeploymentManifestService.ContainsFile(cliManifest, "rimliaison.dll"))
             {
-                string sourceCompanion = Path.Combine(fullArtifactRoot, companionName);
-                if (File.Exists(sourceCompanion))
-                    File.Copy(sourceCompanion, Path.Combine(fullCandidateRoot, companionName), overwrite: false);
+                return Failure(
+                    "RIMLIAISON_CLI_PUBLISH_INVALID",
+                    "The published RimLiaison CLI deployment is missing its executable, assembly, or manifest entries.",
+                    "Publish a complete RimLiaison CLI deployment, then retry qualification.",
+                    managedAssemblies);
+            }
+            string? cliManifestError = null;
+            if (!CliDeploymentManifestService.Verify(
+                    cliDeploymentRoot,
+                    cliManifestPath,
+                    ToolchainFileHash.Sha256(cliManifestPath),
+                    cliManifest.PackageSha256,
+                    out _,
+                    out cliManifestError))
+            {
+                return Failure(
+                    "RIMLIAISON_CLI_DEPLOYMENT_INVALID",
+                    cliManifestError ?? "The published RimLiaison CLI deployment failed complete closure verification.",
+                    "Publish a complete RimLiaison CLI deployment, then retry qualification.",
+                    managedAssemblies);
             }
 
             string candidateConsumer = Path.Combine(fullCandidateRoot, ConsumerRelativePath);
@@ -158,6 +181,11 @@ internal static class ToolchainCandidateMaterializer
                 managedAssemblies.RimWorldRoot,
                 managedAssemblies.ManagedDirectory)
             {
+                RimLiaisonCliDeploymentRoot = cliDeploymentRoot,
+                RimLiaisonCliDeploymentManifestPath = cliManifestPath,
+                RimLiaisonCliDeploymentManifestSha256 = ToolchainFileHash.Sha256(cliManifestPath),
+                RimLiaisonCliDeploymentPackageSha256 = cliManifest.PackageSha256,
+                RimLiaisonCliTargetFramework = cliManifest.TargetFramework,
                 DevBridgeModSha256 = ToolchainFileHash.Sha256(candidateMod),
                 DevBridgeRuntimeManifestSha256 = ToolchainFileHash.Sha256(candidateRuntimeManifest)
             };
@@ -184,6 +212,59 @@ internal static class ToolchainCandidateMaterializer
                     : "RIMLIAISON_RUNTIME_BUILD_FAILED",
                 exception.Message,
                 "Inspect the RimLiaison-owned runtime build diagnostics, then retry qualification.");
+        }
+    }
+
+    private static async Task<(bool Succeeded, string Error)> PublishCliAsync(
+        string sourceRoot,
+        string destination,
+        CancellationToken cancellationToken)
+    {
+        string project = Path.Combine(Path.GetFullPath(sourceRoot), "src", "RimLiaison.Cli", "RimLiaison.Cli.csproj");
+        if (!File.Exists(project))
+            return (false, "The RimLiaison CLI project is missing from the qualified source checkout.");
+        Directory.CreateDirectory(destination);
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = Path.GetFullPath(sourceRoot),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+        foreach (string argument in new[]
+        {
+            "publish", project, "--configuration", "Release", "--no-build", "--no-restore",
+            "--no-self-contained", "--output", Path.GetFullPath(destination), "--nologo"
+        })
+            process.StartInfo.ArgumentList.Add(argument);
+        try
+        {
+            if (!process.Start())
+                return (false, "The RimLiaison CLI publish process could not be started.");
+            Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            string output = BoundBuildOutput(await outputTask.ConfigureAwait(false));
+            string error = BoundBuildOutput(await errorTask.ConfigureAwait(false));
+            if (process.ExitCode == 0)
+                return (true, string.Empty);
+            return (false, string.Join(" ", new[] { error, output }
+                .Where(value => !string.IsNullOrWhiteSpace(value))));
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+            throw;
+        }
+        catch (Win32Exception exception)
+        {
+            return (false, exception.Message);
         }
     }
 

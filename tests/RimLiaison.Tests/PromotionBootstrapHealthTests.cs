@@ -627,7 +627,7 @@ internal static class PromotionBootstrapHealthTests
                 PackagePath,
                 JsonSerializer.Serialize(new
                 {
-                    schemaVersion = ToolchainPromotionSchemas.Package,
+                    schemaVersion = ToolchainPromotionSchemas.LegacyPackage,
                     sourceCommit = SourceCommit,
                     qualificationArtifactPath = qualificationPath,
                     qualificationArtifactSha256 = qualificationHash,

@@ -349,6 +349,22 @@ public static class CliApplication
                     toolName = "RimLiaison",
                     componentOwner = "RimLiaison"
                 });
+            if (request.Command == CliCommand.SelfCheck)
+            {
+                WriteJson(stdout, new
+                {
+                    schemaVersion = "rimliaison-self-check/v1",
+                    status = "ready",
+                    ownerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    assembly = typeof(CliApplication).Assembly.GetName().Name,
+                    assemblyVersion = typeof(CliApplication).Assembly.GetName().Version?.ToString(),
+                    framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+                    processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString()
+                });
+                exitCode = CliExitCodes.Success;
+                return exitCode;
+            }
+
             if (legacyPromotionMigration?.Migrated == true)
             {
                 observabilityAgent.Record(
@@ -433,9 +449,9 @@ public static class CliApplication
                     "Project runtime binding resolved.",
                     projectBinding.ToEvidence());
             }
-            workflowId = NeedsWorkflowCorrelation(request)
-                ? WorkflowCorrelation.Create()
-                : null;
+            workflowId = request.Command == CliCommand.SelfCheck
+                ? null
+                : WorkflowCorrelation.Create();
             profiler.SetWorkflow(workflowId);
             if (request.Command == CliCommand.ToolchainPromotion)
             {
@@ -4851,14 +4867,6 @@ public static class CliApplication
             request.StackManifest.Manifest);
     }
 
-    private static bool NeedsWorkflowCorrelation(CliRequest request) =>
-        request.Command is CliCommand.RecipeRun or
-            CliCommand.RunTest or
-            CliCommand.SuiteRun or
-            CliCommand.GoldenPath ||
-        request.Command == CliCommand.Affected && request.RunSelected ||
-        request.Command == CliCommand.UiScreenshot && request.UiViewport is not null;
-
     private static async Task<QualificationAggregate> AttachQualificationProvenanceAsync(
         QualificationAggregate aggregate,
         string sourceRoot,
@@ -4873,6 +4881,10 @@ public static class CliApplication
         {
             hashes["rimLiaisonExecutableSha256"] = candidate.RimLiaisonExecutableSha256;
             hashes["rimLiaisonAssemblySha256"] = candidate.RimLiaisonAssemblySha256;
+            hashes["rimLiaisonCliDeploymentManifestSha256"] =
+                candidate.RimLiaisonCliDeploymentManifestSha256 ?? string.Empty;
+            hashes["rimLiaisonCliDeploymentPackageSha256"] =
+                candidate.RimLiaisonCliDeploymentPackageSha256 ?? string.Empty;
             hashes["devBridgePackageSha256"] = candidate.DevBridgePackageSha256;
             hashes["devBridgeCoordinatorSha256"] = candidate.DevBridgeCoordinatorSha256;
             hashes["devBridgeModSha256"] = candidate.DevBridgeModSha256 ?? string.Empty;

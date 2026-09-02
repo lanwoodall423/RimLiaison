@@ -18,6 +18,21 @@ public sealed record ToolchainCandidate(
     string? RimWorldRoot = null,
     string? RimWorldManagedDirectory = null)
 {
+    [JsonPropertyName("rimLiaisonCliDeploymentRoot")]
+    public string? RimLiaisonCliDeploymentRoot { get; init; }
+
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestPath")]
+    public string? RimLiaisonCliDeploymentManifestPath { get; init; }
+
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestSha256")]
+    public string? RimLiaisonCliDeploymentManifestSha256 { get; init; }
+
+    [JsonPropertyName("rimLiaisonCliDeploymentPackageSha256")]
+    public string? RimLiaisonCliDeploymentPackageSha256 { get; init; }
+
+    [JsonPropertyName("rimLiaisonCliTargetFramework")]
+    public string? RimLiaisonCliTargetFramework { get; init; }
+
     [JsonPropertyName("rimLiaisonExecutableSha256")]
     public string RimLiaisonExecutableSha256 =>
         ToolchainFileHash.Sha256(RimLiaisonExecutablePath);

@@ -351,7 +351,7 @@ internal static class LegacyPromotionMigrationService
     private static ToolchainPromotionPackage CreatePackage(HistoricalCandidate candidate, string payloadRoot) =>
         new()
         {
-            SchemaVersion = ToolchainPromotionSchemas.Package,
+            SchemaVersion = ToolchainPromotionSchemas.LegacyPackage,
             SourceCommit = candidate.Package.SourceCommit,
             QualificationArtifactPath = Path.Combine(payloadRoot, "qualification.json"),
             QualificationArtifactSha256 = ToolchainFileHash.Sha256(Path.Combine(payloadRoot, "qualification.json")),

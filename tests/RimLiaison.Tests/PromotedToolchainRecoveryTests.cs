@@ -807,7 +807,7 @@ internal static class PromotedToolchainRecoveryTests
                 }));
             ToolchainPromotionPackage package = new()
             {
-                SchemaVersion = ToolchainPromotionSchemas.Package,
+                SchemaVersion = ToolchainPromotionSchemas.LegacyPackage,
                 SourceCommit = "qualified-commit",
                 QualificationArtifactPath = QualificationPath,
                 QualificationArtifactSha256 = Hash(QualificationPath),

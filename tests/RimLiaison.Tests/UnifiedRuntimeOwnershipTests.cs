@@ -96,14 +96,15 @@ internal static class UnifiedRuntimeOwnershipTests
         Assert(!result.Passed, "runtime mod hash substitution was accepted");
     }
 
-    public static void CandidateHealthReportsStructuralOnly()
+    public static void CandidateHealthRunsPublishedCliSelfCheck()
     {
         using CandidateFixture fixture = new();
         PromotionCandidateHealthResult result = fixture.Verify();
         using JsonDocument summary = JsonDocument.Parse(result.Summary);
-        Assert(summary.RootElement.GetProperty("devBridgeDoctor").GetString() == "not-run-structural" &&
-            summary.RootElement.GetProperty("capabilities").GetString() == "not-run-structural",
-            "candidate health must not run live DevBridge checks before activation");
+        Assert(result.Passed &&
+            summary.RootElement.GetProperty("healthStage").GetString() == "candidate-pre-commit" &&
+            summary.RootElement.GetProperty("candidateCliProbe").GetString() == "passed",
+            result.Error ?? "candidate health did not run the published CLI self-check");
     }
 
     public static void CandidateHealthIgnoresRimWorldExecutable()
@@ -235,6 +236,12 @@ internal static class UnifiedRuntimeOwnershipTests
             File.WriteAllText(executable, "candidate-cli");
             File.WriteAllText(assembly, "candidate-assembly");
             File.WriteAllText(consumer, "candidate-consumer");
+            foreach (string publishedFile in Directory.EnumerateFiles(AppContext.BaseDirectory))
+                File.Copy(publishedFile, Path.Combine(Path.GetDirectoryName(executable)!, Path.GetFileName(publishedFile)), overwrite: true);
+            CliDeploymentManifest cliManifest = CliDeploymentManifestService.Write(
+                Path.GetDirectoryName(executable)!,
+                sourceCommit,
+                "net8.0");
             File.WriteAllText(Path.Combine(runtime, "DevBridge.cmd"), "owned-runtime");
             File.WriteAllText(coordinator, "owned-coordinator");
             File.WriteAllText(mod, "owned-mod");
@@ -289,7 +296,13 @@ internal static class UnifiedRuntimeOwnershipTests
                 DevBridgeModSha256 = modHash ?? this.modHash,
                 DevBridgeRuntimeManifestSha256 = runtimeManifestHash ?? this.runtimeManifestHash,
                 RimLiaisonExecutableSha256 = Hash(executable),
-                RimLiaisonAssemblySha256 = Hash(assembly)
+                RimLiaisonAssemblySha256 = Hash(assembly),
+                RimLiaisonCliDeploymentManifestSha256 = Hash(Path.Combine(
+                    Path.GetDirectoryName(executable)!,
+                    CliDeploymentManifestService.FileName)),
+                RimLiaisonCliDeploymentPackageSha256 = JsonSerializer.Deserialize<CliDeploymentManifest>(
+                    File.ReadAllText(Path.Combine(Path.GetDirectoryName(executable)!,
+                        CliDeploymentManifestService.FileName)))!.PackageSha256
             };
             return ToolchainPromotionService.RunCandidateHealthAsync(
                 binding, "owned-runtime-test", CancellationToken.None).GetAwaiter().GetResult();

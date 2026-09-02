@@ -30,6 +30,8 @@ public sealed record ProductionToolchainBinding(
     string UnifiedManifestHash,
     string RuntimeProtocolContract)
 {
+    public string? RimLiaisonCliDeploymentManifestHash { get; init; }
+    public string? RimLiaisonCliDeploymentPackageHash { get; init; }
     public string? DevBridgeModHash { get; init; }
     public string? DevBridgeRuntimeManifestHash { get; init; }
     public object ToEvidence() => new
@@ -44,7 +46,9 @@ public sealed record ProductionToolchainBinding(
             executablePath = RimLiaisonExecutablePath,
             executableSha256 = RimLiaisonExecutableHash,
             assemblyPath = RimLiaisonAssemblyPath,
-            assemblySha256 = RimLiaisonAssemblyHash
+            assemblySha256 = RimLiaisonAssemblyHash,
+            cliDeploymentManifestSha256 = RimLiaisonCliDeploymentManifestHash,
+            cliDeploymentPackageSha256 = RimLiaisonCliDeploymentPackageHash
         },
         runtime = new
         {
@@ -129,6 +133,10 @@ internal sealed class ProductionToolchainManifest
     public string? RimLiaisonAssemblyPath { get; init; }
     [JsonPropertyName("rimLiaisonAssemblySha256")]
     public string? RimLiaisonAssemblySha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestSha256")]
+    public string? RimLiaisonCliDeploymentManifestSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentPackageSha256")]
+    public string? RimLiaisonCliDeploymentPackageSha256 { get; init; }
     [JsonPropertyName("devBridgeRuntimeRoot")]
     public string? DevBridgeRuntimeRoot { get; init; }
     [JsonPropertyName("devBridgePackageSha256")]
@@ -348,6 +356,41 @@ internal static class ProductionToolchainBindingResolver
                 expectedArtifacts,
                 missingArtifacts);
         }
+        if (!string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentManifestSha256) ||
+            !string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentPackageSha256))
+        {
+            string cliRoot = Path.GetDirectoryName(cliPath)!;
+            string cliManifest = Path.Combine(cliRoot, CliDeploymentManifestService.FileName);
+            CliDeploymentManifest? deployment = null;
+            string? cliError = null;
+            bool cliIdentityComplete =
+                !string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentManifestSha256) &&
+                !string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentPackageSha256);
+            bool cliVerified = cliIdentityComplete &&
+                IsWithin(packageRoot, cliPath) &&
+                CliDeploymentManifestService.Verify(
+                    cliRoot,
+                    cliManifest,
+                    manifest.RimLiaisonCliDeploymentManifestSha256,
+                    manifest.RimLiaisonCliDeploymentPackageSha256,
+                    out deployment,
+                    out cliError);
+            if (!cliVerified ||
+                deployment is null ||
+                !string.Equals(deployment.SourceCommit, manifest.QualifiedSourceCommit,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Fail(
+                    "PRODUCTION_TOOLCHAIN_CLI_DEPLOYMENT_INVALID",
+                    cliError ?? "The installed CLI deployment manifest source commit is invalid.",
+                    "Repair or reinstall the complete promoted RimLiaison CLI deployment.",
+                    rejected,
+                    manifestPath,
+                    manifest.PromotedFingerprint,
+                    currentCli,
+                    runtimeRoot);
+            }
+        }
 
         if (!IsWithin(packageRoot, consumerPath) || !IsWithin(packageRoot, unifiedManifestPath))
         {
@@ -514,8 +557,9 @@ internal static class ProductionToolchainBindingResolver
                 manifest.PromotedFingerprint,
                 manifest.QualifiedSourceCommit,
                 manifest.DevBridgeModSha256,
-                manifest.DevBridgeRuntimeManifestSha256))
-        {
+                manifest.DevBridgeRuntimeManifestSha256,
+                manifest.RimLiaisonCliDeploymentManifestSha256,
+                manifest.RimLiaisonCliDeploymentPackageSha256))
             return Fail(
                 "PRODUCTION_TOOLCHAIN_MANIFEST_INVALID",
                 "The staged unified manifest does not identify RimLiaison as its production owner.",
@@ -525,9 +569,38 @@ internal static class ProductionToolchainBindingResolver
                 manifest.PromotedFingerprint,
                 currentCli,
                 runtimeRoot);
-        }
 
         string fingerprint = manifest.PromotedFingerprint!;
+        if (!string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentManifestSha256) &&
+            !string.IsNullOrWhiteSpace(manifest.RimLiaisonCliDeploymentPackageSha256))
+        {
+            string computedFingerprint = ToolchainPromotionService.ComputePromotedFingerprint(
+                manifest.QualifiedSourceCommit!,
+                manifest.RimLiaisonExecutableSha256!,
+                manifest.RimLiaisonAssemblySha256!,
+                manifest.DevBridgeCoordinatorSha256!,
+                manifest.DevBridgePackageSha256!,
+                manifest.TransactionConsumerSha256!,
+                manifest.RuntimeProtocolContract!,
+                manifest.OwnerProduct!,
+                manifest.RuntimeSubsystem!,
+                manifest.DevBridgeModSha256,
+                manifest.DevBridgeRuntimeManifestSha256,
+                manifest.RimLiaisonCliDeploymentManifestSha256,
+                manifest.RimLiaisonCliDeploymentPackageSha256);
+            if (!string.Equals(computedFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+            {
+                return Fail(
+                    "PRODUCTION_TOOLCHAIN_FINGERPRINT_MISMATCH",
+                    "The production fingerprint does not include the complete CLI deployment identity.",
+                    "Re-promote the complete published CLI deployment.",
+                    rejected,
+                    manifestPath,
+                    manifest.PromotedFingerprint,
+                    currentCli,
+                    runtimeRoot);
+            }
+        }
         if (!string.IsNullOrWhiteSpace(manifest.Fingerprint) &&
             !string.Equals(manifest.Fingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
         {
@@ -561,6 +634,8 @@ internal static class ProductionToolchainBindingResolver
             unifiedManifestHash,
             manifest.RuntimeProtocolContract!)
         {
+            RimLiaisonCliDeploymentManifestHash = manifest.RimLiaisonCliDeploymentManifestSha256,
+            RimLiaisonCliDeploymentPackageHash = manifest.RimLiaisonCliDeploymentPackageSha256,
             DevBridgeModHash = string.IsNullOrWhiteSpace(manifest.DevBridgeModSha256)
                 ? null
                 : modHash,
@@ -674,7 +749,9 @@ internal static class ProductionToolchainBindingResolver
         string? fingerprint,
         string? expectedSourceCommit = null,
         string? expectedModHash = null,
-        string? expectedRuntimeManifestHash = null)
+        string? expectedRuntimeManifestHash = null,
+        string? expectedCliManifestHash = null,
+        string? expectedCliPackageHash = null)
     {
         try
         {
@@ -699,6 +776,13 @@ internal static class ProductionToolchainBindingResolver
             bool runtimeManifestMatches = expectedRuntimeManifestHash is null ||
                 root.TryGetProperty("runtimeManifestSha256", out JsonElement runtimeManifest) &&
                 string.Equals(runtimeManifest.GetString(), expectedRuntimeManifestHash, StringComparison.OrdinalIgnoreCase);
+            bool cliDeploymentMatches = expectedCliManifestHash is null &&
+                expectedCliPackageHash is null ||
+                root.TryGetProperty("rimLiaison", out JsonElement rimLiaison) &&
+                rimLiaison.TryGetProperty("deploymentManifestSha256", out JsonElement cliManifest) &&
+                rimLiaison.TryGetProperty("deploymentPackageSha256", out JsonElement cliPackage) &&
+                string.Equals(cliManifest.GetString(), expectedCliManifestHash, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(cliPackage.GetString(), expectedCliPackageHash, StringComparison.OrdinalIgnoreCase);
             bool schemaMatches = !root.TryGetProperty("schemaVersion", out JsonElement schema) ||
                 string.Equals(schema.GetString(), "rimliaison-unified-production-package/v2", StringComparison.Ordinal) ||
                 string.Equals(schema.GetString(), "rimliaison-unified-production-package/v3", StringComparison.Ordinal);
@@ -709,8 +793,8 @@ internal static class ProductionToolchainBindingResolver
                 root.TryGetProperty("modSha256", out JsonElement modField) &&
                 modField.ValueKind == JsonValueKind.String;
             return ownerMatches && subsystemMatches && boundaryMatches && fingerprintMatches &&
-                sourceMatches && modMatches && runtimeManifestMatches && schemaMatches &&
-                unifiedHashesPresent;
+                sourceMatches && modMatches && runtimeManifestMatches && cliDeploymentMatches &&
+                schemaMatches && unifiedHashesPresent;
         }
         catch (Exception) when (File.Exists(path))
         {

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,7 +15,8 @@ namespace RimLiaison.Toolchain;
 
 public static class ToolchainPromotionSchemas
 {
-    public const string Package = "rimliaison-toolchain-promotion/v2";
+    public const string Package = "rimliaison-toolchain-promotion/v3";
+    public const string LegacyPackage = "rimliaison-toolchain-promotion/v2";
     public const string Result = "rimliaison-toolchain-promotion-result/v1";
     public const string OwnerProduct = "RimLiaison";
     public const string RuntimeProtocolContract = "devbridge-mod-development/v1";
@@ -42,6 +44,16 @@ public sealed class ToolchainPromotionPackage
     public string? RimLiaisonExecutableSha256 { get; init; }
     [JsonPropertyName("rimLiaisonAssemblySha256")]
     public string? RimLiaisonAssemblySha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentRootRelativePath")]
+    public string? RimLiaisonCliDeploymentRootRelativePath { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestRelativePath")]
+    public string? RimLiaisonCliDeploymentManifestRelativePath { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestSha256")]
+    public string? RimLiaisonCliDeploymentManifestSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentPackageSha256")]
+    public string? RimLiaisonCliDeploymentPackageSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliTargetFramework")]
+    public string? RimLiaisonCliTargetFramework { get; init; }
     [JsonPropertyName("ownerProduct")]
     public string? OwnerProduct { get; init; }
     [JsonPropertyName("runtimeSubsystem")]
@@ -161,6 +173,8 @@ public sealed record PromotionCandidateHealthBinding(
     public string? RimLiaisonAssemblySha256 { get; init; }
     public string? DevBridgeModSha256 { get; init; }
     public string? DevBridgeRuntimeManifestSha256 { get; init; }
+    public string? RimLiaisonCliDeploymentManifestSha256 { get; init; }
+    public string? RimLiaisonCliDeploymentPackageSha256 { get; init; }
 }
 
 public sealed record PromotionCandidateHealthEvidence(
@@ -184,13 +198,33 @@ public sealed record PromotionCandidateHealthEvidence(
     public string? DevBridgeModSha256 { get; init; }
     [JsonPropertyName("devBridgeRuntimeManifestSha256")]
     public string? DevBridgeRuntimeManifestSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentManifestSha256")]
+    public string? RimLiaisonCliDeploymentManifestSha256 { get; init; }
+    [JsonPropertyName("rimLiaisonCliDeploymentPackageSha256")]
+    public string? RimLiaisonCliDeploymentPackageSha256 { get; init; }
+    [JsonPropertyName("processEvidence")]
+    public PromotionChildProcessResult? ProcessEvidence { get; init; }
 }
+
+public sealed record PromotionChildProcessResult(
+    [property: JsonPropertyName("exitCode")] int ExitCode,
+    [property: JsonPropertyName("stdout")] string Stdout,
+    [property: JsonPropertyName("stderr")] string Stderr,
+    [property: JsonPropertyName("timedOut")] bool TimedOut,
+    [property: JsonPropertyName("cancelled")] bool Cancelled,
+    [property: JsonPropertyName("executablePath")] string ExecutablePath,
+    [property: JsonPropertyName("workingDirectory")] string WorkingDirectory,
+    [property: JsonPropertyName("startError")] string? StartError = null);
 
 public sealed record PromotionCandidateHealthResult(
     bool Passed,
     string Summary,
     string? Error,
-    PromotionCandidateHealthEvidence Evidence);
+    PromotionCandidateHealthEvidence Evidence)
+{
+    [JsonPropertyName("errorCode")]
+    public string? ErrorCode { get; init; }
+}
 
 public interface IPromotionCandidateHealthVerifier
 {
@@ -251,6 +285,43 @@ public static class ToolchainPromotionService
             throw new InvalidDataException(
                 "The immutable candidate artifacts do not equal the artifacts captured by qualification.");
         }
+        CliDeploymentManifest? cliManifest;
+        string? cliManifestError = null;
+        if (string.IsNullOrWhiteSpace(candidate.RimLiaisonCliDeploymentRoot) ||
+            string.IsNullOrWhiteSpace(candidate.RimLiaisonCliDeploymentManifestPath) ||
+            string.IsNullOrWhiteSpace(candidate.RimLiaisonCliDeploymentManifestSha256) ||
+            string.IsNullOrWhiteSpace(candidate.RimLiaisonCliDeploymentPackageSha256) ||
+            !CliDeploymentManifestService.Verify(
+                candidate.RimLiaisonCliDeploymentRoot,
+                candidate.RimLiaisonCliDeploymentManifestPath,
+                candidate.RimLiaisonCliDeploymentManifestSha256,
+                candidate.RimLiaisonCliDeploymentPackageSha256,
+                out cliManifest,
+                out cliManifestError))
+        {
+            throw new InvalidDataException(
+                cliManifestError ?? "The complete candidate CLI deployment manifest is required.");
+        }
+        if (!string.Equals(cliManifest!.SourceCommit, candidate.SourceCommit,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The CLI deployment manifest source commit does not equal the qualified candidate source.");
+        }
+        if (!qualification.QualifiedArtifactHashes.TryGetValue(
+                "rimLiaisonCliDeploymentManifestSha256",
+                out string? qualifiedCliManifestHash) ||
+            !qualification.QualifiedArtifactHashes.TryGetValue(
+                "rimLiaisonCliDeploymentPackageSha256",
+                out string? qualifiedCliPackageHash) ||
+            !string.Equals(candidate.RimLiaisonCliDeploymentManifestSha256, qualifiedCliManifestHash,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(candidate.RimLiaisonCliDeploymentPackageSha256, qualifiedCliPackageHash,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The complete CLI deployment identity does not equal the identity captured by qualification.");
+        }
         if (!HashMatches(candidate.RimLiaisonExecutablePath, executableHash) ||
             !HashMatches(candidate.RimLiaisonAssemblyPath, assemblyHash) ||
             !HashMatches(candidate.TransactionConsumerPath, candidate.TransactionConsumerSha256))
@@ -290,7 +361,9 @@ public static class ToolchainPromotionService
             candidate.TransactionConsumerSha256,
             candidate.RuntimeProtocolContract,
             candidate.DevBridgeModSha256,
-            candidate.DevBridgeRuntimeManifestSha256);
+            candidate.DevBridgeRuntimeManifestSha256,
+            candidate.RimLiaisonCliDeploymentManifestSha256,
+            candidate.RimLiaisonCliDeploymentPackageSha256);
         string payloadRoot = Path.Combine(
             Path.GetDirectoryName(fullPackagePath)!,
             "qualified-toolchain-payload-" + candidate.SourceCommit + "-" + payloadIdentity);
@@ -301,21 +374,22 @@ public static class ToolchainPromotionService
         try
         {
             Directory.CreateDirectory(payloadStageRoot);
-            string payloadExecutable = Path.Combine(payloadStageRoot, "rimliaison.exe");
-            string payloadAssembly = Path.Combine(payloadStageRoot, "rimliaison.dll");
+            string payloadCliRoot = Path.Combine(payloadStageRoot, "cli");
             string payloadQualification = Path.Combine(payloadStageRoot, "qualification.json");
             string payloadConsumer = Path.Combine(payloadStageRoot, "transaction-components", "mod-test.ps1");
-            CopyImmutableFile(candidate.RimLiaisonExecutablePath, payloadExecutable);
-            CopyImmutableFile(candidate.RimLiaisonAssemblyPath, payloadAssembly);
+            CopyImmutableDirectory(candidate.RimLiaisonCliDeploymentRoot!, payloadCliRoot);
             CopyImmutableFile(qualificationArtifactPath, payloadQualification);
             CopyImmutableFile(candidate.TransactionConsumerPath, payloadConsumer);
-            foreach (string companionName in new[] { "rimliaison.deps.json", "rimliaison.runtimeconfig.json" })
+            if (!CliDeploymentManifestService.Verify(
+                    payloadCliRoot,
+                    Path.Combine(payloadCliRoot, CliDeploymentManifestService.FileName),
+                    candidate.RimLiaisonCliDeploymentManifestSha256,
+                    candidate.RimLiaisonCliDeploymentPackageSha256,
+                    out _,
+                    out string? payloadCliError))
             {
-                string sourceCompanion = Path.Combine(candidate.CandidateRoot, companionName);
-                if (File.Exists(sourceCompanion))
-                {
-                    CopyImmutableFile(sourceCompanion, Path.Combine(payloadStageRoot, companionName));
-                }
+                throw new InvalidDataException(
+                    payloadCliError ?? "The immutable qualified CLI deployment is incomplete.");
             }
 
             string runtimeArtifactRoot = Path.Combine(payloadStageRoot, "runtime");
@@ -344,7 +418,9 @@ public static class ToolchainPromotionService
                 ToolchainPromotionSchemas.OwnerProduct,
                 ToolchainPromotionSchemas.RuntimeSubsystem,
                 candidate.DevBridgeModSha256,
-                candidate.DevBridgeRuntimeManifestSha256);
+                candidate.DevBridgeRuntimeManifestSha256,
+                candidate.RimLiaisonCliDeploymentManifestSha256,
+                candidate.RimLiaisonCliDeploymentPackageSha256);
             var unifiedManifest = new
             {
                 schemaVersion = "rimliaison-unified-production-package/v3",
@@ -359,9 +435,14 @@ public static class ToolchainPromotionService
                 sourceCommit = candidate.SourceCommit,
                 rimLiaison = new
                 {
-                    executablePath = "rimliaison.exe",
+                    deploymentRoot = "cli",
+                    deploymentManifestPath = "cli/" + CliDeploymentManifestService.FileName,
+                    deploymentManifestSha256 = candidate.RimLiaisonCliDeploymentManifestSha256,
+                    deploymentPackageSha256 = candidate.RimLiaisonCliDeploymentPackageSha256,
+                    targetFramework = candidate.RimLiaisonCliTargetFramework,
+                    executablePath = "cli/rimliaison.exe",
                     executableSha256 = executableHash,
-                    assemblyPath = "rimliaison.dll",
+                    assemblyPath = "cli/rimliaison.dll",
                     assemblySha256 = assemblyHash
                 },
                 runtimeManifestSha256 = candidate.DevBridgeRuntimeManifestSha256,
@@ -389,8 +470,13 @@ public static class ToolchainPromotionService
                 QualificationArtifactPath = Path.Combine(payloadRoot, "qualification.json"),
                 QualificationArtifactSha256 = qualificationHash,
                 ArtifactRoot = payloadRoot,
-                RimLiaisonExecutableRelativePath = "rimliaison.exe",
-                RimLiaisonAssemblyRelativePath = "rimliaison.dll",
+                RimLiaisonExecutableRelativePath = "cli/rimliaison.exe",
+                RimLiaisonAssemblyRelativePath = "cli/rimliaison.dll",
+                RimLiaisonCliDeploymentRootRelativePath = "cli",
+                RimLiaisonCliDeploymentManifestRelativePath = "cli/" + CliDeploymentManifestService.FileName,
+                RimLiaisonCliDeploymentManifestSha256 = candidate.RimLiaisonCliDeploymentManifestSha256,
+                RimLiaisonCliDeploymentPackageSha256 = candidate.RimLiaisonCliDeploymentPackageSha256,
+                RimLiaisonCliTargetFramework = cliManifest!.TargetFramework,
                 DevBridgeRuntimeRoot = candidate.DevBridgeRuntimeRoot,
                 DevBridgeRuntimeArtifactRoot = Path.Combine(payloadRoot, "runtime"),
                 DevBridgePackageSha256 = candidate.DevBridgePackageSha256,
@@ -481,6 +567,24 @@ public static class ToolchainPromotionService
         {
             error = "The promotion package durable RimLiaison payload is incomplete or has mismatching hashes.";
             return false;
+        }
+        if (string.Equals(package.SchemaVersion, ToolchainPromotionSchemas.Package, StringComparison.Ordinal))
+        {
+            string? cliRoot = SafeArtifactPath(artifactRoot, package.RimLiaisonCliDeploymentRootRelativePath);
+            string? cliManifest = SafeArtifactPath(artifactRoot, package.RimLiaisonCliDeploymentManifestRelativePath);
+            string? cliError = null;
+            if (cliRoot is null || cliManifest is null ||
+                !CliDeploymentManifestService.Verify(
+                    cliRoot,
+                    cliManifest,
+                    package.RimLiaisonCliDeploymentManifestSha256,
+                    package.RimLiaisonCliDeploymentPackageSha256,
+                    out _,
+                    out cliError))
+            {
+                error = cliError ?? "The promotion package durable CLI deployment is incomplete.";
+                return false;
+            }
         }
 
         string qualification = Path.GetFullPath(package.QualificationArtifactPath!);
@@ -728,6 +832,20 @@ public static class ToolchainPromotionService
                     package.SourceCommit,
                     nextAction: "Rebuild the promotion package from the unified RimLiaison-owned runtime candidate.");
             }
+            if (string.Equals(package.SchemaVersion, ToolchainPromotionSchemas.Package, StringComparison.Ordinal) &&
+                (string.IsNullOrWhiteSpace(package.RimLiaisonCliDeploymentRootRelativePath) ||
+                 string.IsNullOrWhiteSpace(package.RimLiaisonCliDeploymentManifestRelativePath) ||
+                 string.IsNullOrWhiteSpace(package.RimLiaisonCliDeploymentManifestSha256) ||
+                 string.IsNullOrWhiteSpace(package.RimLiaisonCliDeploymentPackageSha256)))
+            {
+                return ToolchainPromotionResult.Blocked(
+                    "PROMOTION_CLI_DEPLOYMENT_MANIFEST_MISSING",
+                    "The new promotion package does not bind a complete CLI deployment manifest.",
+                    package.SourceCommit,
+                    artifactPath,
+                    qualificationHash,
+                    nextAction: "Rebuild the promotion package from the complete published RimLiaison CLI deployment.");
+            }
 
             IGitRepositoryStateProvider sourceStateProvider = gitRepositoryStateProvider ??
                 new SystemGitRepositoryStateProvider();
@@ -886,6 +1004,34 @@ public static class ToolchainPromotionService
             string? unifiedManifestPath = SafeArtifactPath(
                 stagedRoot,
                 package.UnifiedManifestRelativePath);
+            if (string.Equals(package.SchemaVersion, ToolchainPromotionSchemas.Package, StringComparison.Ordinal))
+            {
+                string? stagedCliRoot = SafeArtifactPath(
+                    stagedRoot,
+                    package.RimLiaisonCliDeploymentRootRelativePath);
+                string? stagedCliManifest = SafeArtifactPath(
+                    stagedRoot,
+                    package.RimLiaisonCliDeploymentManifestRelativePath);
+                string? stagedCliError = null;
+                if (stagedCliRoot is null || stagedCliManifest is null ||
+                    !CliDeploymentManifestService.Verify(
+                        stagedCliRoot,
+                        stagedCliManifest,
+                        package.RimLiaisonCliDeploymentManifestSha256,
+                        package.RimLiaisonCliDeploymentPackageSha256,
+                        out _,
+                        out stagedCliError))
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "PROMOTION_CLI_DEPLOYMENT_VERIFY_FAILED",
+                        stagedCliError ?? "The staged CLI deployment does not match the qualified closure.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash,
+                        previous.PromotedFingerprint,
+                        "Rebuild the unified package from the complete published CLI deployment.");
+                }
+            }
             if (consumerRelativePath is null || unifiedManifestPath is null)
             {
                 return ToolchainPromotionResult.Blocked(
@@ -945,7 +1091,9 @@ public static class ToolchainPromotionService
                 ToolchainPromotionSchemas.OwnerProduct,
                 ToolchainPromotionSchemas.RuntimeSubsystem,
                 package.DevBridgeModSha256,
-                package.DevBridgeRuntimeManifestSha256);
+                package.DevBridgeRuntimeManifestSha256,
+                package.RimLiaisonCliDeploymentManifestSha256,
+                package.RimLiaisonCliDeploymentPackageSha256);
             var unifiedManifest = new
             {
                 schemaVersion = "rimliaison-unified-production-package/v3",
@@ -957,12 +1105,20 @@ public static class ToolchainPromotionService
                     boundary = ToolchainPromotionSchemas.RimBridgeServerBoundary,
                     ownership = "RimBridgeServer"
                 },
-                sourceCommit,
+                sourceCommit = sourceCommit,
                 rimLiaison = new
                 {
-                    executablePath = Path.GetRelativePath(stagedRoot, installedExecutable),
+                    deploymentRoot = Path.GetRelativePath(stagedRoot, Path.GetDirectoryName(installedExecutable)!).Replace('\\', '/'),
+                    deploymentManifestPath = Path.GetRelativePath(
+                        stagedRoot,
+                        Path.Combine(Path.GetDirectoryName(installedExecutable)!,
+                            CliDeploymentManifestService.FileName)).Replace('\\', '/'),
+                    deploymentManifestSha256 = package.RimLiaisonCliDeploymentManifestSha256,
+                    deploymentPackageSha256 = package.RimLiaisonCliDeploymentPackageSha256,
+                    targetFramework = package.RimLiaisonCliTargetFramework,
+                    executablePath = Path.GetRelativePath(stagedRoot, installedExecutable).Replace('\\', '/'),
                     executableSha256 = installedExecutableHash,
-                    assemblyPath = Path.GetRelativePath(stagedRoot, installedAssembly),
+                    assemblyPath = Path.GetRelativePath(stagedRoot, installedAssembly).Replace('\\', '/'),
                     assemblySha256 = installedAssemblyHash
                 },
                 runtimeManifestSha256 = package.DevBridgeRuntimeManifestSha256,
@@ -994,7 +1150,9 @@ public static class ToolchainPromotionService
                 RimLiaisonExecutableSha256 = installedExecutableHash,
                 RimLiaisonAssemblySha256 = installedAssemblyHash,
                 DevBridgeModSha256 = package.DevBridgeModSha256,
-                DevBridgeRuntimeManifestSha256 = package.DevBridgeRuntimeManifestSha256
+                DevBridgeRuntimeManifestSha256 = package.DevBridgeRuntimeManifestSha256,
+                RimLiaisonCliDeploymentManifestSha256 = package.RimLiaisonCliDeploymentManifestSha256,
+                RimLiaisonCliDeploymentPackageSha256 = package.RimLiaisonCliDeploymentPackageSha256
             };
             PromotionCandidateHealthResult health = promotionHealthVerifier is null
                 ? await RunCandidateHealthAsync(
@@ -1011,28 +1169,30 @@ public static class ToolchainPromotionService
             if (health.Passed &&
                 !CandidateHealthEvidenceMatches(health.Evidence, healthBinding, out string? evidenceError))
             {
-                health = new(
-                    false,
-                    health.Summary,
-                    evidenceError,
-                    health.Evidence with
+                health = health with
+                {
+                    Error = evidenceError,
+                    ErrorCode = health.ErrorCode ?? "PROMOTION_CANDIDATE_HEALTH_FAILED",
+                    Evidence = health.Evidence with
                     {
                         Status = "failed",
                         Error = evidenceError,
                         NestedError = health.Error
-                    });
+                    }
+                };
             }
             if (!health.Passed)
             {
+                string healthErrorCode = health.ErrorCode ?? "PROMOTION_CANDIDATE_HEALTH_FAILED";
                 WriteFailureHandoff(
                     packagePath,
                     package,
                     previous,
-                    "PROMOTION_CANDIDATE_HEALTH_FAILED",
+                    healthErrorCode,
                     health.Error ?? "The candidate health checks did not pass.",
                     "Repair the candidate package or runtime, then retry the supported promotion command.");
                 return ToolchainPromotionResult.Blocked(
-                    "PROMOTION_CANDIDATE_HEALTH_FAILED",
+                    healthErrorCode,
                     health.Error ?? "The candidate health checks did not pass.",
                     package.SourceCommit,
                     artifactPath,
@@ -1070,6 +1230,8 @@ public static class ToolchainPromotionService
                 RimLiaisonExecutableSha256 = installedExecutableHash,
                 RimLiaisonAssemblyPath = installedAssembly,
                 RimLiaisonAssemblySha256 = installedAssemblyHash,
+                RimLiaisonCliDeploymentManifestSha256 = package.RimLiaisonCliDeploymentManifestSha256,
+                RimLiaisonCliDeploymentPackageSha256 = package.RimLiaisonCliDeploymentPackageSha256,
                 DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
                 DevBridgePackageSha256 = package.DevBridgePackageSha256,
                 DevBridgeCoordinatorSha256 = coordinatorHash,
@@ -1170,6 +1332,30 @@ public static class ToolchainPromotionService
             runtimeBackupRoot = null;
             runtimeCommitted = false;
             promotionCommitted = true;
+            var qualifiedHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["rimLiaisonExecutableSha256"] = executableHash,
+                ["rimLiaisonAssemblySha256"] = assemblyHash,
+                ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
+                ["devBridgeCoordinatorSha256"] = coordinatorHash,
+                ["transactionConsumerSha256"] = consumerHash
+            };
+            var promotedHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["rimLiaisonExecutableSha256"] = installedExecutableHash,
+                ["rimLiaisonAssemblySha256"] = installedAssemblyHash,
+                ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
+                ["devBridgeCoordinatorSha256"] = coordinatorHash,
+                ["transactionConsumerSha256"] = installedConsumerHash
+            };
+            if (package.RimLiaisonCliDeploymentManifestSha256 is not null &&
+                package.RimLiaisonCliDeploymentPackageSha256 is not null)
+            {
+                qualifiedHashes["rimLiaisonCliDeploymentManifestSha256"] = package.RimLiaisonCliDeploymentManifestSha256;
+                qualifiedHashes["rimLiaisonCliDeploymentPackageSha256"] = package.RimLiaisonCliDeploymentPackageSha256;
+                promotedHashes["rimLiaisonCliDeploymentManifestSha256"] = package.RimLiaisonCliDeploymentManifestSha256;
+                promotedHashes["rimLiaisonCliDeploymentPackageSha256"] = package.RimLiaisonCliDeploymentPackageSha256;
+            }
             return new(
                 ToolchainPromotionSchemas.Result,
                 "promoted",
@@ -1178,22 +1364,8 @@ public static class ToolchainPromotionService
                 package.SourceCommit,
                 artifactPath,
                 qualificationHash,
-                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["rimLiaisonExecutableSha256"] = executableHash,
-                    ["rimLiaisonAssemblySha256"] = assemblyHash,
-                    ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
-                    ["devBridgeCoordinatorSha256"] = coordinatorHash,
-                    ["transactionConsumerSha256"] = consumerHash
-                },
-                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["rimLiaisonExecutableSha256"] = installedExecutableHash,
-                    ["rimLiaisonAssemblySha256"] = installedAssemblyHash,
-                    ["devBridgePackageSha256"] = package.DevBridgePackageSha256!,
-                    ["devBridgeCoordinatorSha256"] = coordinatorHash,
-                    ["transactionConsumerSha256"] = installedConsumerHash
-                },
+                qualifiedHashes,
+                promotedHashes,
                 promotedFingerprint,
                 previous.PromotedFingerprint,
                 ["RimLiaison"],
@@ -1335,7 +1507,7 @@ public static class ToolchainPromotionService
             ToolchainPromotionPackage? package = JsonSerializer.Deserialize<ToolchainPromotionPackage>(
                 File.ReadAllText(Path.GetFullPath(path)), ReadOptions);
             if (package is null ||
-                package.SchemaVersion != ToolchainPromotionSchemas.Package ||
+                package.SchemaVersion is not (ToolchainPromotionSchemas.Package or ToolchainPromotionSchemas.LegacyPackage) ||
                 string.IsNullOrWhiteSpace(package.SourceCommit) ||
                 string.IsNullOrWhiteSpace(package.QualificationArtifactPath) ||
                 string.IsNullOrWhiteSpace(package.QualificationArtifactSha256) ||
@@ -1463,6 +1635,17 @@ public static class ToolchainPromotionService
             error = "The promotion package unified runtime hashes do not match the qualification artifact.";
             return false;
         }
+        if (string.Equals(package.SchemaVersion, ToolchainPromotionSchemas.Package, StringComparison.Ordinal) &&
+            (!TryString(hashes, "rimLiaisonCliDeploymentManifestSha256", out string? cliManifestHash) ||
+             !TryString(hashes, "rimLiaisonCliDeploymentPackageSha256", out string? cliPackageHash) ||
+             !string.Equals(cliManifestHash, package.RimLiaisonCliDeploymentManifestSha256,
+                 StringComparison.OrdinalIgnoreCase) ||
+             !string.Equals(cliPackageHash, package.RimLiaisonCliDeploymentPackageSha256,
+                 StringComparison.OrdinalIgnoreCase)))
+        {
+            error = "The complete CLI deployment hashes do not match the qualification artifact.";
+            return false;
+        }
         return true;
     }
 
@@ -1535,7 +1718,9 @@ public static class ToolchainPromotionService
         string consumerHash,
         string compatibility,
         string? modHash = null,
-        string? runtimeManifestHash = null)
+        string? runtimeManifestHash = null,
+        string? cliManifestHash = null,
+        string? cliPackageHash = null)
     {
         var canonical = new StringBuilder();
         AppendPayloadIdentityField(canonical, "qualification", qualificationArtifactSha256);
@@ -1550,6 +1735,10 @@ public static class ToolchainPromotionService
             AppendPayloadIdentityField(canonical, "mod", modHash);
         if (runtimeManifestHash is not null)
             AppendPayloadIdentityField(canonical, "runtimeManifest", runtimeManifestHash);
+        if (cliManifestHash is not null)
+            AppendPayloadIdentityField(canonical, "cliManifest", cliManifestHash);
+        if (cliPackageHash is not null)
+            AppendPayloadIdentityField(canonical, "cliPackage", cliPackageHash);
         return Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
             .ToLowerInvariant();
@@ -1566,7 +1755,9 @@ public static class ToolchainPromotionService
         string ownerProduct,
         string runtimeSubsystem,
         string? modHash = null,
-        string? runtimeManifestHash = null)
+        string? runtimeManifestHash = null,
+        string? cliManifestHash = null,
+        string? cliPackageHash = null)
     {
         string payload = string.Join("\n", new[]
         {
@@ -1582,7 +1773,9 @@ public static class ToolchainPromotionService
             consumerHash,
             compatibility,
             modHash ?? string.Empty,
-            runtimeManifestHash ?? string.Empty
+            runtimeManifestHash ?? string.Empty,
+            cliManifestHash ?? string.Empty,
+            cliPackageHash ?? string.Empty
         });
         return "tc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
     }
@@ -1602,15 +1795,16 @@ public static class ToolchainPromotionService
     }
 
 
-    internal static Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
+    internal static async Task<PromotionCandidateHealthResult> RunCandidateHealthAsync(
         PromotionCandidateHealthBinding binding,
         string workflowId,
         CancellationToken cancellationToken,
         IPromotionLeaseOrchestrator? promotionLeaseOrchestrator = null)
     {
+        _ = workflowId;
         var checks = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["healthStage"] = "candidate-pre-commit-structural",
+            ["healthStage"] = "candidate-pre-commit",
             ["candidateExecutable"] = binding.CandidateExecutable,
             ["candidateRuntimeRoot"] = binding.CandidateRuntimeRoot,
             ["candidateFingerprint"] = binding.CandidateFingerprint,
@@ -1622,30 +1816,51 @@ public static class ToolchainPromotionService
             ["transactionConsumerSha256"] = binding.TransactionConsumerSha256,
             ["runtimeProtocolContract"] = binding.RuntimeProtocolContract,
             ["rimWorldExecutable"] = "not-used",
-            ["devBridgeRestart"] = "not-run-structural",
-            ["devBridgeStatus"] = "not-run-structural",
-            ["devBridgeDoctor"] = "not-run-structural",
-            ["capabilities"] = "not-run-structural",
-            ["coordinatorShutdown"] = "not-run-structural",
-            ["coordinatorQuiesced"] = "not-run-structural"
+            ["devBridgeRestart"] = "not-run",
+            ["devBridgeStatus"] = "not-run",
+            ["devBridgeDoctor"] = "not-run",
+            ["capabilities"] = "not-run",
+            ["coordinatorShutdown"] = "not-run",
+            ["coordinatorQuiesced"] = "not-run"
         };
         try
         {
             if (!File.Exists(binding.CandidateExecutable))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate RimLiaison executable is missing."));
+                return CandidateHealthFailure(checks, binding, "The candidate RimLiaison executable is missing.");
             if (!Directory.Exists(binding.CandidateRuntimeRoot))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate RimLiaison runtime directory is missing."));
+                return CandidateHealthFailure(checks, binding, "The candidate RimLiaison runtime directory is missing.");
             if (binding.RimLiaisonExecutableSha256 is not null &&
                 !HashMatches(binding.CandidateExecutable, binding.RimLiaisonExecutableSha256))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate RimLiaison executable hash does not match its binding."));
+                return CandidateHealthFailure(checks, binding, "The candidate RimLiaison executable hash does not match its binding.");
             if (binding.RimLiaisonAssemblySha256 is not null &&
                 !HashMatches(Path.Combine(Path.GetDirectoryName(binding.CandidateExecutable)!,
                     "rimliaison.dll"), binding.RimLiaisonAssemblySha256))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate RimLiaison assembly hash does not match its binding."));
+                return CandidateHealthFailure(checks, binding, "The candidate RimLiaison assembly hash does not match its binding.");
+
+            string cliRoot = Path.GetDirectoryName(binding.CandidateExecutable)!;
+            string cliManifestPath = Path.Combine(cliRoot, CliDeploymentManifestService.FileName);
+            string? cliError = null;
+            CliDeploymentManifest? cliManifest = null;
+            bool cliVerified = !string.IsNullOrWhiteSpace(binding.RimLiaisonCliDeploymentManifestSha256) &&
+                !string.IsNullOrWhiteSpace(binding.RimLiaisonCliDeploymentPackageSha256) &&
+                CliDeploymentManifestService.Verify(
+                    cliRoot,
+                    cliManifestPath,
+                    binding.RimLiaisonCliDeploymentManifestSha256,
+                    binding.RimLiaisonCliDeploymentPackageSha256,
+                    out cliManifest,
+                    out cliError);
+            if (!cliVerified ||
+                cliManifest is null ||
+                !string.Equals(cliManifest.SourceCommit, binding.CandidateSourceCommit,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return CandidateHealthFailure(
+                    checks,
+                    binding,
+                    cliError ?? "The complete candidate CLI deployment is not verified.");
+            }
+
             if (!RuntimeSnapshotIsVerified(
                     binding.CandidateRuntimeRoot,
                     binding.DevBridgePackageSha256,
@@ -1657,34 +1872,68 @@ public static class ToolchainPromotionService
                     binding.CandidateRuntimeRoot,
                     binding.CandidateSourceCommit,
                     binding.RuntimeProtocolContract))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate runtime manifest or immutable file hashes are invalid."));
+                return CandidateHealthFailure(checks, binding, "The candidate runtime manifest or immutable file hashes are invalid.");
 
-            string consumerPath = Path.Combine(binding.CandidateRuntimeRoot, "transaction-components",
-                "mod-test.ps1");
-            if (!File.Exists(consumerPath))
+            string[] consumerCandidates =
+            [
+                Path.Combine(binding.CandidateRuntimeRoot, "transaction-components", "mod-test.ps1"),
+                Path.Combine(cliRoot, "transaction-components", "mod-test.ps1"),
+                Path.Combine(cliRoot, "..", "transaction-components", "mod-test.ps1")
+            ];
+            string consumerPath = consumerCandidates.FirstOrDefault(File.Exists) ?? consumerCandidates[0];
+            if (!HashMatches(consumerPath, binding.TransactionConsumerSha256))
+                return CandidateHealthFailure(checks, binding, "The candidate transaction consumer is missing or has a mismatching hash.");
+
+            PromotionChildProcessResult probe = await RunJsonCommandAsync(
+                    binding.CandidateExecutable,
+                    ["self-check", "--json"],
+                    cancellationToken,
+                    workingDirectory: cliRoot)
+                .ConfigureAwait(false);
+            checks["candidateCliProbe"] = IsSelfCheckReady(probe.ExitCode, probe.Stdout)
+                ? "passed"
+                : "failed";
+            if (!IsSelfCheckReady(probe.ExitCode, probe.Stdout))
             {
-                consumerPath = Path.Combine(Path.GetDirectoryName(binding.CandidateExecutable)!,
-                    "transaction-components", "mod-test.ps1");
+                PromotionCandidateHealthResult failure = CandidateHealthFailure(
+                    checks,
+                    binding,
+                    "The complete candidate CLI failed its executable self-check.",
+                    JsonSerializer.Serialize(probe, WriteOptions));
+                return failure with
+                {
+                    ErrorCode = "PROMOTION_CANDIDATE_CLI_START_FAILED",
+                    Evidence = failure.Evidence with { ProcessEvidence = probe }
+                };
             }
-            if (!File.Exists(consumerPath) ||
-                !HashMatches(consumerPath, binding.TransactionConsumerSha256))
-                return Task.FromResult(CandidateHealthFailure(
-                    checks, binding, "The candidate transaction consumer is missing or has a mismatching hash."));
 
             checks["runtimeManifest"] = "verified";
             checks["runtimeFiles"] = "verified";
             checks["transactionConsumer"] = "verified";
             checks["candidateArtifacts"] = "verified";
-            checks["status"] = "structural-only";
-            return Task.FromResult(CandidateHealthSuccess(checks, binding));
+            checks["status"] = "ready";
+            return CandidateHealthSuccess(checks, binding);
         }
         catch (Exception exception) when (exception is IOException or JsonException or
             InvalidOperationException or UnauthorizedAccessException)
         {
-            return Task.FromResult(CandidateHealthFailure(checks, binding, exception.Message, exception.ToString()));
+            return CandidateHealthFailure(checks, binding, exception.Message, exception.ToString());
         }
     }
+    private static bool IsSelfCheckReady(int exitCode, string stdout)
+    {
+        if (exitCode != 0 || !TryParse(stdout, out JsonDocument? document))
+            return false;
+        using (document)
+        {
+            JsonElement root = document!.RootElement;
+            return root.TryGetProperty("schemaVersion", out JsonElement schema) &&
+                string.Equals(schema.GetString(), "rimliaison-self-check/v1", StringComparison.Ordinal) &&
+                root.TryGetProperty("status", out JsonElement status) &&
+                string.Equals(status.GetString(), "ready", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
 
     private static PromotionCandidateHealthResult CandidateHealthSuccess(
         IReadOnlyDictionary<string, string> checks,
@@ -1726,7 +1975,9 @@ public static class ToolchainPromotionService
             nestedError)
         {
             DevBridgeModSha256 = binding.DevBridgeModSha256,
-            DevBridgeRuntimeManifestSha256 = binding.DevBridgeRuntimeManifestSha256
+            DevBridgeRuntimeManifestSha256 = binding.DevBridgeRuntimeManifestSha256,
+            RimLiaisonCliDeploymentManifestSha256 = binding.RimLiaisonCliDeploymentManifestSha256,
+            RimLiaisonCliDeploymentPackageSha256 = binding.RimLiaisonCliDeploymentPackageSha256
         };
 
     private static bool CandidateHealthEvidenceMatches(
@@ -1745,6 +1996,10 @@ public static class ToolchainPromotionService
             !string.Equals(evidence.DevBridgeCoordinatorSha256, binding.DevBridgeCoordinatorSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(evidence.TransactionConsumerSha256, binding.TransactionConsumerSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(evidence.RuntimeProtocolContract, binding.RuntimeProtocolContract, StringComparison.Ordinal) ||
+            !string.Equals(evidence.RimLiaisonCliDeploymentManifestSha256,
+                binding.RimLiaisonCliDeploymentManifestSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(evidence.RimLiaisonCliDeploymentPackageSha256,
+                binding.RimLiaisonCliDeploymentPackageSha256, StringComparison.OrdinalIgnoreCase) ||
             binding.DevBridgeModSha256 is not null &&
             !string.Equals(evidence.DevBridgeModSha256, binding.DevBridgeModSha256, StringComparison.OrdinalIgnoreCase) ||
             binding.DevBridgeRuntimeManifestSha256 is not null &&
@@ -1811,32 +2066,73 @@ public static class ToolchainPromotionService
                 error);
         }
 
-        (int exitCode, string output) doctor = await RunJsonCommandAsync(
-            executable,
-            ["doctor", "--json"],
-            cancellationToken,
-            workingDirectory: sourceRoot).ConfigureAwait(false);
-        bool ready = IsReady(doctor.exitCode, doctor.output);
+        PromotionChildProcessResult doctor = await RunJsonCommandAsync(
+                executable,
+                ["doctor", "--json"],
+                cancellationToken,
+                workingDirectory: sourceRoot)
+            .ConfigureAwait(false);
+        bool ready = IsReady(doctor.ExitCode, doctor.Stdout);
+        if (ready)
+        {
+            return new(true, doctor.Stdout, null)
+            {
+                ProcessEvidence = doctor
+            };
+        }
+
+        bool structuredStdout = TryParse(doctor.Stdout, out JsonDocument? parsed);
+        parsed?.Dispose();
+        if (structuredStdout)
+        {
+            return new(
+                false,
+                doctor.Stdout,
+                "Canonical post-commit doctor did not report READY.")
+            {
+                ErrorCode = "PROMOTION_POST_COMMIT_HEALTH_FAILED",
+                ProcessEvidence = doctor
+            };
+        }
+
+        string nestedCode = doctor.StartError is not null || doctor.ExitCode != 0
+            ? "POST_COMMIT_CLI_START_FAILED"
+            : "POST_COMMIT_CLI_NO_STRUCTURED_OUTPUT";
+        string summary = JsonSerializer.Serialize(
+            new
+            {
+                schemaVersion = "rimliaison-promotion-health/v1",
+                status = "blocked",
+                errorCode = nestedCode,
+                childProcess = doctor
+            },
+            WriteOptions);
         return new(
-            ready,
-            doctor.output,
-            ready ? null : "Canonical post-commit doctor did not report READY.");
+            false,
+            summary,
+            "Canonical post-commit doctor did not report READY.")
+        {
+            ErrorCode = "PROMOTION_POST_COMMIT_HEALTH_FAILED",
+            ProcessEvidence = doctor
+        };
     }
 
-
-    private static async Task<(int exitCode, string output)> RunJsonCommandAsync(
+    internal static async Task<PromotionChildProcessResult> RunJsonCommandAsync(
         string executable,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null,
         string? workingDirectory = null)
     {
+        const int MaximumStdoutCharacters = 512 * 1024;
+        const int MaximumStderrCharacters = 16 * 1024;
+        string resolvedWorkingDirectory = workingDirectory ?? Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory;
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = executable,
-                WorkingDirectory = workingDirectory ?? Path.GetDirectoryName(executable) ?? Environment.CurrentDirectory,
+                WorkingDirectory = resolvedWorkingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -1850,26 +2146,54 @@ public static class ToolchainPromotionService
         }
         foreach (string argument in arguments)
             process.StartInfo.ArgumentList.Add(argument);
-        if (!process.Start())
-            return (-1, string.Empty);
+        try
+        {
+            if (!process.Start())
+            {
+                return new(-1, string.Empty, string.Empty, false, false, executable,
+                    resolvedWorkingDirectory, "The child process could not be started.");
+            }
+        }
+        catch (Win32Exception exception)
+        {
+            return new(-1, string.Empty, string.Empty, false, false, executable,
+                resolvedWorkingDirectory, exception.Message);
+        }
 
         Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
         Task<string> errorTask = process.StandardError.ReadToEndAsync();
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        bool timedOut = false;
+        bool cancelled = false;
         try
         {
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
+            timedOut = !cancellationToken.IsCancellationRequested;
+            cancelled = cancellationToken.IsCancellationRequested;
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
-            await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
-            throw;
         }
         await Task.WhenAll(outputTask, errorTask).ConfigureAwait(false);
-        return (process.ExitCode, outputTask.Result);
+        return new(
+            process.HasExited ? process.ExitCode : -1,
+            BoundProcessOutput(outputTask.Result, MaximumStdoutCharacters),
+            BoundProcessOutput(errorTask.Result, MaximumStderrCharacters),
+            timedOut,
+            cancelled,
+            executable,
+            resolvedWorkingDirectory);
+    }
+
+    private static string BoundProcessOutput(string value, int maximumCharacters)
+    {
+        string trimmed = value?.Trim() ?? string.Empty;
+        return trimmed.Length <= maximumCharacters
+            ? trimmed
+            : trimmed[..maximumCharacters] + " [truncated]";
     }
     private static bool TryLeaseId(int exitCode, string output, out string? leaseId)
     {
@@ -2135,7 +2459,13 @@ public static class ToolchainPromotionService
 public sealed record PromotionCanonicalHealthResult(
     bool Passed,
     string Summary,
-    string? Error);
+    string? Error)
+{
+    [JsonPropertyName("errorCode")]
+    public string? ErrorCode { get; init; }
+    [JsonPropertyName("processEvidence")]
+    public PromotionChildProcessResult? ProcessEvidence { get; init; }
+}
 
 public interface IPromotionCanonicalHealthVerifier
 {

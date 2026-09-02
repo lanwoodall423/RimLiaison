@@ -22,6 +22,7 @@ internal enum CliCommand
     UiTargets,
     UiScreenshot,
     Doctor,
+    SelfCheck,
     Preflight,
     Init,
     Context,
@@ -459,6 +460,9 @@ internal static class CliParser
             case "doctor" when positionals.Count == 1:
                 command = CliCommand.Doctor;
                 break;
+            case "self-check" when positionals.Count == 1:
+                command = CliCommand.SelfCheck;
+                break;
             case "context" when positionals.Count == 1:
                 command = CliCommand.Context;
                 break;
@@ -546,6 +550,7 @@ internal static class CliParser
             case "develop":
             case "preflight":
             case "doctor":
+            case "self-check":
             case "context":
             case "publish":
             case "benchmarks":
@@ -849,6 +854,7 @@ internal static class CliParser
                 "run <test>",
                 "affected [<changed-path> ...]",
                 "golden-path (or develop)",
+                "self-check",
                 "preflight",
                 "capabilities",
                 "ui targets",
