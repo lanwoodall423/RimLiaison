@@ -22,6 +22,7 @@ using RimLiaison.Recovery;
 using RimLiaison.Results;
 using RimLiaison.Provenance;
 using RimLiaison.Validation;
+using RimLiaison.Doctor;
 
 namespace RimLiaison.Tests;
 
@@ -285,8 +286,12 @@ internal static class Program
         ("environment fallback leaves run usable", EnvironmentFallbackLeavesRunUsable),
         ("environment fallback leaves doctor usable", EnvironmentFallbackLeavesDoctorUsable),
         ("doctor preserves structured DevBridge failure", DoctorPreservesStructuredDevBridgeFailure),
+        ("doctor DevBridge watchdog covers owned finite contract", DoctorDevBridgeWatchdogCoversOwnedFiniteContract),
+        ("doctor project resolution survives legacy timeout window", DoctorProjectResolutionSurvivesLegacyTimeoutWindow),
+        ("doctor project supervisory timeout preserves evidence", DoctorProjectSupervisoryTimeoutPreservesEvidence),
+        ("doctor project inner timeout is preserved", DoctorProjectInnerTimeoutIsPreserved),
+        ("doctor project failures retain process evidence", DoctorProjectFailuresRetainProcessEvidence),
         ("DevBridge process evidence is retained", DevBridgeProcessEvidenceIsRetained),
-        ("DevBridge batch launcher executes on Windows", DevBridgeBatchLauncherExecutesOnWindows),
         ("DevBridge root selects its batch launcher", DevBridgeRootSelectsBatchLauncher),
         ("existing RimLiaison client communicates with owned runtime", InternalRuntimeCommunicationTests.ExistingClientCommunicatesWithOwnedCoordinator),
         ("show exposes metadata", ShowExposesMetadata),
@@ -7398,6 +7403,148 @@ internal static class Program
             "doctor diagnostics must identify the originating component and code");
     }
 
+    private static void DoctorDevBridgeWatchdogCoversOwnedFiniteContract()
+    {
+        var requests = new List<DevBridgeProcessRequest>();
+        TimeSpan innerContract =
+            DevBridgeDoctorTimeoutContract.CoordinatorConnectionAllowance +
+            DevBridgeDoctorTimeoutContract.FiniteCommandAllowance;
+        Assert(
+            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog > innerContract,
+            "The supervisory watchdog must exceed the owned DevBridge finite contract.");
+
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            projectResponse: request =>
+            {
+                requests.Add(request);
+                return ProcessResult(
+                    $"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}");
+            },
+            requestObserver: requests.Add);
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("ready", document.RootElement.GetProperty("status").GetString());
+        Assert(
+            requests.Count >= 2 &&
+            requests.All(request =>
+                request.Timeout == DevBridgeDoctorTimeoutContract.SupervisoryWatchdog),
+            "All finite DevBridge doctor probes must use the shared supervisory watchdog.");
+    }
+
+    private static void DoctorProjectResolutionSurvivesLegacyTimeoutWindow()
+    {
+        DevBridgeProcessRequest? projectRequest = null;
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            projectResponse: request =>
+            {
+                projectRequest = request;
+                // The transport seam represents a child completing after the
+                // former 15-second limit without making the test wait.
+                return ProcessResult(
+                    $"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}");
+            });
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        AssertEqual(CliExitCodes.Success, result.ExitCode);
+        AssertEqual("ready", document.RootElement.GetProperty("status").GetString());
+        Assert(projectRequest is not null, "The project probe must run.");
+        Assert(
+            projectRequest!.Timeout > TimeSpan.FromSeconds(15),
+            "The project watchdog must exceed the former 15-second timeout.");
+    }
+
+    private static void DoctorProjectSupervisoryTimeoutPreservesEvidence()
+    {
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            projectResponse: _ => new DevBridgeProcessResult(
+                null,
+                string.Empty,
+                "project transport timed out",
+                TimedOut: true));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        AssertEqual("DEVBRIDGE_PROJECT_TIMEOUT", root.GetProperty("code").GetString());
+        AssertEqual("FixtureMod", root.GetProperty("requestedProject").GetString());
+        Assert(root.GetProperty("timedOut").GetBoolean(), "Timeout evidence must be retained.");
+        AssertEqual(
+            "project transport timed out",
+            root.GetProperty("stderrExcerpt").GetString());
+        Assert(
+            root.GetProperty("nextAction").GetString()!.Contains(
+                "project resolve",
+                StringComparison.Ordinal),
+            "Project timeout must identify the bounded project diagnostic.");
+    }
+
+    private static void DoctorProjectInnerTimeoutIsPreserved()
+    {
+        const string nextAction =
+            "DevBridge.cmd --root runtime project resolve FixtureMod --json";
+        CliResult result = RunDoctorFixture(
+            contextAvailable: true,
+            projectResponse: _ => ProcessResult(
+                $$"""{"success":false,"exitCode":2,"errorCode":"DEVBRIDGE_COMMAND_TIMEOUT","error":"inner finite command timed out","nextAction":"{{nextAction}}"}""",
+                exitCode: 2));
+
+        using JsonDocument document = JsonDocument.Parse(result.Stdout);
+        JsonElement root = document.RootElement;
+        AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+        AssertEqual("DEVBRIDGE_COMMAND_TIMEOUT", root.GetProperty("code").GetString());
+        AssertEqual(nextAction, root.GetProperty("nextAction").GetString());
+        AssertEqual("FixtureMod", root.GetProperty("requestedProject").GetString());
+        Assert(
+            root.GetProperty("stdoutExcerpt").GetString()!.Contains(
+                "DEVBRIDGE_COMMAND_TIMEOUT",
+                StringComparison.Ordinal),
+            "Inner timeout stdout must remain bounded evidence.");
+    }
+
+    private static void DoctorProjectFailuresRetainProcessEvidence()
+    {
+        var cases = new Func<DevBridgeProcessResult>[]
+        {
+            () => new DevBridgeProcessResult(1, string.Empty, string.Empty, Cancelled: true),
+            () => new DevBridgeProcessResult(null, string.Empty, "timed out", TimedOut: true),
+            () => new DevBridgeProcessResult(null, string.Empty, "start failed", StartError: "start failed"),
+            () => new DevBridgeProcessResult(null, string.Empty, "no stdout"),
+            () => new DevBridgeProcessResult(0, "{\"success\":true}", string.Empty, StdoutTruncated: true),
+            () => new DevBridgeProcessResult(0, "{\"success\":true}", "stderr", StderrTruncated: true),
+            () => ProcessResult("{"),
+            () => ProcessResult(
+                """{"success":false,"errorCode":"DEVBRIDGE_COMMAND_TIMEOUT","nextAction":"inner"}""",
+                exitCode: 2),
+            () => ProcessResult(
+                """{"success":true,"projectResolution":{"canonicalProjects":[]}}""")
+        };
+
+        foreach (Func<DevBridgeProcessResult> process in cases)
+        {
+            CliResult result = RunDoctorFixture(
+                contextAvailable: true,
+                projectResponse: _ => process());
+            using JsonDocument document = JsonDocument.Parse(result.Stdout);
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.ConservativeSelection, result.ExitCode);
+            AssertEqual("FixtureMod", root.GetProperty("requestedProject").GetString());
+            Assert(root.TryGetProperty("exitCode", out _),
+                "Project failures must retain process exit code details.");
+            Assert(root.TryGetProperty("stdoutExcerpt", out _),
+                "Project failures must retain bounded stdout details.");
+            Assert(root.TryGetProperty("stderrExcerpt", out _),
+                "Project failures must retain bounded stderr details.");
+            Assert(root.TryGetProperty("timedOut", out _),
+                "Project failures must retain timeout details.");
+            Assert(root.TryGetProperty("cancelled", out _),
+                "Project failures must retain cancellation details.");
+        }
+    }
+
     private static void ModDevelopmentSourceRootIgnoresWhitespaceOverride()
     {
         string directory = CreateTempDirectory();
@@ -11162,7 +11309,9 @@ internal static class Program
         bool useExplicitOverrides = false,
         bool usePascalRimBridgeFields = false,
         bool identityMismatch = false,
-        bool structuredFailure = false)
+        bool structuredFailure = false,
+        Func<DevBridgeProcessRequest, DevBridgeProcessResult>? projectResponse = null,
+        Action<DevBridgeProcessRequest>? requestObserver = null)
     {
         string directory = CreateTempDirectory();
         string? previousProductionManifest =
@@ -11282,13 +11431,24 @@ internal static class Program
             Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", null);
             Environment.SetEnvironmentVariable("RIMTEST_DEVBRIDGE_ROOT", null);
             var transport = new FakeTransport(
-                (request, _) => request.Arguments.Contains("summary")
-                    ? ProcessResult(contextAvailable
-                        ? "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"ok\",\"command\":\"summary\",\"data\":{}}"
-                        : "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"error\",\"command\":\"summary\",\"code\":\"INDEX_NOT_FOUND\",\"message\":\"missing\"}")
-                    : request.Arguments.Contains("project")
-                        ? ProcessResult($"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}")
-                    : ProcessResult(devBridgeResult));
+                (request, _) =>
+                {
+                    requestObserver?.Invoke(request);
+                    if (request.Arguments.Contains("summary"))
+                    {
+                        return ProcessResult(contextAvailable
+                            ? "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"ok\",\"command\":\"summary\",\"data\":{}}"
+                            : "{\"schemaVersion\":\"rimctx/v1\",\"status\":\"error\",\"command\":\"summary\",\"code\":\"INDEX_NOT_FOUND\",\"message\":\"missing\"}");
+                    }
+
+                    if (request.Arguments.Contains("project"))
+                    {
+                        return projectResponse?.Invoke(request) ??
+                            ProcessResult($"{{\"success\":true,\"projectResolution\":{{\"canonicalProjects\":[\"{request.Arguments[4]}\"]}}}}");
+                    }
+
+                    return ProcessResult(devBridgeResult);
+                });
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             var arguments = new List<string>

@@ -16,6 +16,19 @@ public static class RimTestDoctorSchema
 {
     public const string Current = "rimtest-doctor/v1";
 }
+internal static class DevBridgeDoctorTimeoutContract
+{
+    // DevBridge owns a 15-second coordinator connection allowance and a
+    // 60-second finite-command response allowance. This watchdog supervises
+    // the complete owned operation and leaves only a small process margin.
+    internal static readonly TimeSpan CoordinatorConnectionAllowance =
+        TimeSpan.FromSeconds(15);
+    internal static readonly TimeSpan FiniteCommandAllowance =
+        TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan SupervisoryWatchdog =
+        TimeSpan.FromSeconds(80);
+}
+
 
 internal sealed class RimTestDoctorRunner
 {
@@ -290,7 +303,11 @@ internal sealed class RimTestDoctorRunner
         if (!projectProbe.Ready)
         {
             WriteDiagnostic("devbridge", projectProbe.Code);
-            return Blocked("devbridge", projectProbe.Code!, projectProbe.NextAction);
+            return Blocked(
+                "devbridge",
+                projectProbe.Code!,
+                projectProbe.NextAction,
+                details: projectProbe.Details);
         }
 
         if (string.Equals(
@@ -394,7 +411,7 @@ internal sealed class RimTestDoctorRunner
             options.CommandPath,
             options.RootPath,
             ["--root", options.RootPath, "doctor", "--json"],
-            TimeSpan.FromSeconds(20),
+            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog,
             MaximumProbeStdoutBytes,
             MaximumProbeStderrBytes,
             OperationKey: "cli:doctor");
@@ -491,6 +508,7 @@ internal sealed class RimTestDoctorRunner
         IDevBridgeProcessTransport transport,
         CancellationToken cancellationToken)
     {
+        string nextAction = ProjectResolveNextAction(options.RootPath, project);
         var request = new DevBridgeProcessRequest(
             options.CommandPath,
             options.RootPath,
@@ -502,9 +520,10 @@ internal sealed class RimTestDoctorRunner
                 project,
                 "--json"
             ],
-            TimeSpan.FromSeconds(15),
+            DevBridgeDoctorTimeoutContract.SupervisoryWatchdog,
             MaximumProbeStdoutBytes,
-            MaximumProbeStderrBytes);
+            MaximumProbeStderrBytes,
+            OperationKey: "cli:doctor:project-resolve");
         DevBridgeProcessResult process = await ExecuteProbeAsync(
                 transport,
                 request,
@@ -512,12 +531,18 @@ internal sealed class RimTestDoctorRunner
             .ConfigureAwait(false);
         if (process.Cancelled)
         {
-            return Failure("DEVBRIDGE_CANCELLED");
+            return Failure(
+                "DEVBRIDGE_CANCELLED",
+                nextAction,
+                details: ProjectProcessDetails(options, project, process));
         }
 
         if (process.TimedOut)
         {
-            return Failure("DEVBRIDGE_PROJECT_TIMEOUT", DevBridgeDoctorNextAction);
+            return Failure(
+                "DEVBRIDGE_PROJECT_TIMEOUT",
+                nextAction,
+                details: ProjectProcessDetails(options, project, process));
         }
 
         if (!string.IsNullOrWhiteSpace(process.StartError) ||
@@ -525,7 +550,10 @@ internal sealed class RimTestDoctorRunner
             process.StderrTruncated ||
             string.IsNullOrWhiteSpace(process.Stdout))
         {
-            return Failure("DEVBRIDGE_PROJECT_RESPONSE_INVALID", DevBridgeDoctorNextAction);
+            return Failure(
+                "DEVBRIDGE_PROJECT_RESPONSE_INVALID",
+                nextAction,
+                details: ProjectProcessDetails(options, project, process));
         }
 
         try
@@ -539,7 +567,15 @@ internal sealed class RimTestDoctorRunner
                 string code = TryGetString(root, "errorCode", out string? errorCode)
                     ? errorCode!
                     : "DEVBRIDGE_PROJECT_UNRESOLVED";
-                return Failure(code, DevBridgeDoctorNextAction);
+                string innerNextAction =
+                    TryGetString(root, "nextAction", out string? responseNextAction) &&
+                    !string.IsNullOrWhiteSpace(responseNextAction)
+                        ? responseNextAction!
+                        : nextAction;
+                return Failure(
+                    code,
+                    innerNextAction,
+                    details: ProjectProcessDetails(options, project, process));
             }
 
             if (!root.TryGetProperty("projectResolution", out JsonElement resolution) ||
@@ -550,14 +586,20 @@ internal sealed class RimTestDoctorRunner
                     value.ValueKind == JsonValueKind.String &&
                     string.Equals(value.GetString(), project, StringComparison.OrdinalIgnoreCase)))
             {
-                return Failure("DEVBRIDGE_PROJECT_RESPONSE_INVALID", DevBridgeDoctorNextAction);
+                return Failure(
+                    "DEVBRIDGE_PROJECT_RESPONSE_INVALID",
+                    nextAction,
+                    details: ProjectProcessDetails(options, project, process));
             }
 
             return Success();
         }
         catch (JsonException)
         {
-            return Failure("DEVBRIDGE_PROJECT_RESPONSE_INVALID", DevBridgeDoctorNextAction);
+            return Failure(
+                "DEVBRIDGE_PROJECT_RESPONSE_INVALID",
+                nextAction,
+                details: ProjectProcessDetails(options, project, process));
         }
     }
 
@@ -726,6 +768,30 @@ internal sealed class RimTestDoctorRunner
         string name = Path.GetFileName(trimmed);
         return string.IsNullOrWhiteSpace(name) ? "workspace" : name;
     }
+    private static string ProjectResolveNextAction(string rootPath, string project) =>
+        $"DevBridge.cmd --root \"{rootPath}\" project resolve \"{project}\" --json";
+
+    private static Dictionary<string, object?> ProjectProcessDetails(
+        DevBridgeAdapterOptions options,
+        string project,
+        DevBridgeProcessResult process)
+    {
+        var details = ProcessDetails(process);
+        details["commandPath"] = options.CommandPath;
+        details["workingDirectory"] = options.RootPath;
+        details["arguments"] = new[]
+        {
+            "--root",
+            options.RootPath,
+            "project",
+            "resolve",
+            project,
+            "--json"
+        };
+        details["requestedProject"] = project;
+        return details;
+    }
+
 
     private void WriteDiagnostic(string component, string? code)
     {
