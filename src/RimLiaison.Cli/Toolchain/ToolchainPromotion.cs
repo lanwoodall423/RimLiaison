@@ -1008,30 +1008,57 @@ public static class ToolchainPromotionService
             if (bootstrap &&
                 string.Equals(previous.ProductionState, "NO_PRODUCTION", StringComparison.Ordinal))
             {
-                if (string.IsNullOrWhiteSpace(previous.BootstrapArchivePath) ||
-                    !File.Exists(previous.BootstrapArchivePath))
+                var visitedArchives = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int archiveDepth = 0;
+                     archiveDepth < 8 &&
+                     string.Equals(previous.ProductionState, "NO_PRODUCTION", StringComparison.Ordinal);
+                     archiveDepth++)
                 {
-                    return ToolchainPromotionResult.Blocked(
-                        "BOOTSTRAP_ARCHIVE_MISSING",
-                        "The NO_PRODUCTION state has no archived legacy baseline for retry.",
-                        package.SourceCommit,
-                        artifactPath,
-                        qualificationHash,
-                        nextAction: "Restore the archived legacy manifest or repair the bootstrap transaction evidence.");
+                    string? archivePath = previous.BootstrapArchivePath;
+                    if (string.IsNullOrWhiteSpace(archivePath) ||
+                        !File.Exists(archivePath))
+                    {
+                        return ToolchainPromotionResult.Blocked(
+                            "BOOTSTRAP_ARCHIVE_MISSING",
+                            "The NO_PRODUCTION state has no archived legacy baseline for retry.",
+                            package.SourceCommit,
+                            artifactPath,
+                            qualificationHash,
+                            nextAction: "Restore the archived legacy manifest or repair the bootstrap transaction evidence.");
+                    }
+                    string fullArchivePath = Path.GetFullPath(archivePath);
+                    if (!visitedArchives.Add(fullArchivePath))
+                    {
+                        return ToolchainPromotionResult.Blocked(
+                            "BOOTSTRAP_ARCHIVE_INVALID",
+                            "The NO_PRODUCTION archive chain contains a cycle.",
+                            package.SourceCommit,
+                            artifactPath,
+                            qualificationHash);
+                    }
+                    ProductionToolchainManifest? archived = ReadProductionManifest(
+                        fullArchivePath,
+                        out _);
+                    if (archived is null)
+                    {
+                        return ToolchainPromotionResult.Blocked(
+                            "BOOTSTRAP_ARCHIVE_INVALID",
+                            "The archived legacy production manifest is invalid.",
+                            package.SourceCommit,
+                            artifactPath,
+                            qualificationHash);
+                    }
+                    previous = archived;
                 }
-                ProductionToolchainManifest? archived = ReadProductionManifest(
-                    previous.BootstrapArchivePath,
-                    out _);
-                if (archived is null)
+                if (string.Equals(previous.ProductionState, "NO_PRODUCTION", StringComparison.Ordinal))
                 {
                     return ToolchainPromotionResult.Blocked(
                         "BOOTSTRAP_ARCHIVE_INVALID",
-                        "The archived legacy production manifest is invalid.",
+                        "The archived NO_PRODUCTION chain does not resolve to a legacy baseline.",
                         package.SourceCommit,
                         artifactPath,
                         qualificationHash);
                 }
-                previous = archived;
             }
             if (bootstrap && HasModernProductionIdentity(previous))
             {

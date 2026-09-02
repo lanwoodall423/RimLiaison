@@ -105,6 +105,7 @@ internal static class Program
         ("bootstrap explicit transition retires legacy", PromotionBootstrapHealthTests.ExplicitBootstrapRetiresLegacyAndInstallsModern),
         ("bootstrap rejects modern identity", PromotionBootstrapHealthTests.BootstrapRejectsExistingModernIdentity),
         ("bootstrap failure leaves no production", PromotionBootstrapHealthTests.BootstrapFailureLeavesNoProduction),
+        ("bootstrap resolves nested no-production archive", PromotionBootstrapHealthTests.BootstrapResolvesNestedNoProductionArchive),
         ("bootstrap ordinary legacy promotion rejects", PromotionBootstrapHealthTests.OrdinaryPromotionRejectsLegacyBaseline),
         ("bootstrap executable legacy runtime rejects", PromotionBootstrapHealthTests.BootstrapRejectsExecutableLegacyRuntime),
         ("bootstrap post-commit doctor sees new fingerprint", PromotionBootstrapHealthTests.PostCommitDoctorResolvesNewFingerprint),

@@ -223,6 +223,34 @@ internal static class PromotionBootstrapHealthTests
         Assert(Directory.EnumerateFiles(fixture.Root, "*.legacy-*.json").Any(),
             "bootstrap failure lost the retired legacy manifest evidence");
     }
+    public static void BootstrapResolvesNestedNoProductionArchive()
+    {
+        using Fixture fixture = new("missing", modernState: false);
+        string legacyPath = Path.Combine(fixture.Root, "legacy-baseline.json");
+        File.WriteAllText(legacyPath, fixture.ManifestBefore);
+        string markerPath = Path.Combine(fixture.Root, "no-production-marker.json");
+        File.WriteAllText(
+            markerPath,
+            JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimliaison-production-toolchain/v1",
+                productionState = "NO_PRODUCTION",
+                bootstrapStatus = "BOOTSTRAP_FAILED",
+                bootstrapArchivePath = legacyPath
+            }));
+        File.WriteAllText(
+            fixture.ManifestPath,
+            JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimliaison-production-toolchain/v1",
+                productionState = "NO_PRODUCTION",
+                bootstrapStatus = "BOOTSTRAP_FAILED",
+                bootstrapArchivePath = markerPath
+            }));
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "promoted", "bootstrap did not resolve a nested NO_PRODUCTION archive");
+    }
+
     public static void OrdinaryPromotionRejectsLegacyBaseline()
     {
         using Fixture fixture = new("missing", modernState: false);
