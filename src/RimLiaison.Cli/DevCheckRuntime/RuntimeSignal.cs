@@ -38,7 +38,7 @@ namespace DirectValidationRuntimeSignal
                     return "{\"name\":\"" + Escape(name) + "\",\"loaded\":" + (loaded ? "true" : "false") + "}";
                 }).ToList();
                 bool targetAssemblyLoaded = assemblyResults.Count == 0 || assemblyResults.All(
-                    result => result.Contains("\"loaded\":true", StringComparison.Ordinal));
+                    result => result.IndexOf("\"loaded\":true", StringComparison.Ordinal) >= 0);
                 var defResults = new List<string>();
                 foreach (string defName in requestedDefs)
                 {
