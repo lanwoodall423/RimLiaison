@@ -376,6 +376,88 @@ internal static class DevCheckTests
             DeleteWorkspace(runtimeRoot);
         }
     }
+    public static void NestedFixtureAboutIsNotDiscovered()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["nested.fixture"]);
+            WriteRuntimePackageNested(runtimeRoot, "FixtureContainer", "PackageFixture", "nested.fixture");
+            try
+            {
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+                throw new InvalidOperationException("nested fixture metadata was discovered.");
+            }
+            catch (InvalidDataException exception) when (
+                exception.Message == "REQUIRED_MOD_DEPENDENCY_MISSING: nested.fixture")
+            {
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void MalformedNestedFixtureDoesNotAbortDiscovery()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["required.mod"]);
+            WriteRuntimePackage(runtimeRoot, "Required", "required.mod", []);
+            WriteMalformedRuntimePackageNested(runtimeRoot, "FixtureContainer", "PackageFixture");
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "required.mod")
+                throw new InvalidOperationException("malformed nested fixture interfered with dependency discovery.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void MalformedUnrelatedCandidateDoesNotLeakXmlException()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["required.mod"]);
+            WriteRuntimePackage(runtimeRoot, "Required", "required.mod", []);
+            WriteMalformedRuntimePackage(runtimeRoot, "Malformed");
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "required.mod")
+                throw new InvalidOperationException("malformed unrelated candidate interfered with dependency discovery.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
     public static void HarmonyResolvesByPackageId()
     {
         string target = CreateWorkspace();
@@ -499,6 +581,36 @@ internal static class DevCheckTests
         string packageRoot = Path.Combine(runtimeRoot, directoryName);
         Directory.CreateDirectory(Path.Combine(packageRoot, "About"));
         WriteAbout(Path.Combine(packageRoot, "About", "About.xml"), packageId, dependencies);
+        return packageRoot;
+    }
+    private static string WriteRuntimePackageNested(
+        string runtimeRoot,
+        string containerName,
+        string directoryName,
+        string packageId)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, containerName, directoryName);
+        Directory.CreateDirectory(Path.Combine(packageRoot, "About"));
+        WriteAbout(Path.Combine(packageRoot, "About", "About.xml"), packageId, []);
+        return packageRoot;
+    }
+
+    private static string WriteMalformedRuntimePackageNested(
+        string runtimeRoot,
+        string containerName,
+        string directoryName)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, containerName, directoryName, "About");
+        Directory.CreateDirectory(packageRoot);
+        File.WriteAllText(Path.Combine(packageRoot, "About.xml"), "about\r\n");
+        return packageRoot;
+    }
+
+    private static string WriteMalformedRuntimePackage(string runtimeRoot, string directoryName)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, directoryName, "About");
+        Directory.CreateDirectory(packageRoot);
+        File.WriteAllText(Path.Combine(packageRoot, "About.xml"), "about\r\n");
         return packageRoot;
     }
 

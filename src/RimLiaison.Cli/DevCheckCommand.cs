@@ -931,28 +931,21 @@ internal static class DevCheckCommand
         var installed = new List<RuntimeModPackage>();
         foreach (string root in runtimeRoots)
         {
-            IEnumerable<string> aboutFiles;
             try
             {
-                aboutFiles = Directory.EnumerateFiles(root, "About.xml", SearchOption.AllDirectories);
+                foreach (string packageRoot in EnumerateRuntimeModPackageRoots(root))
+                {
+                    try
+                    {
+                        installed.Add(ReadRuntimeModPackage(packageRoot));
+                    }
+                    catch (Exception exception) when (exception is InvalidDataException or XmlException)
+                    {
+                    }
+                }
             }
             catch (UnauthorizedAccessException)
             {
-                continue;
-            }
-            foreach (string aboutFile in aboutFiles)
-            {
-                string? aboutDirectory = Path.GetDirectoryName(aboutFile);
-                string? packageRoot = aboutDirectory is null ? null : Directory.GetParent(aboutDirectory)?.FullName;
-                if (packageRoot is null)
-                    continue;
-                try
-                {
-                    installed.Add(ReadRuntimeModPackage(packageRoot));
-                }
-                catch (InvalidDataException)
-                {
-                }
             }
         }
 
@@ -999,6 +992,15 @@ internal static class DevCheckCommand
                 result.Add(packageId);
         }
         return result;
+    }
+
+    private static IEnumerable<string> EnumerateRuntimeModPackageRoots(string runtimeRoot)
+    {
+        foreach (string packageRoot in Directory.EnumerateDirectories(runtimeRoot))
+        {
+            if (File.Exists(Path.Combine(packageRoot, "About", "About.xml")))
+                yield return packageRoot;
+        }
     }
 
     private static RuntimeModPackage ReadRuntimeModPackage(string packageRoot)
