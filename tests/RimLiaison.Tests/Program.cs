@@ -159,6 +159,11 @@ internal static class Program
         ("dev-check runtime process lifecycle waits for exit and streams", DevCheckTests.RuntimeProcessLifecycleWaitsForExitAndStreams),
         ("dev-check stages only explicit runtime payload", DevCheckTests.StagesOnlyExplicitRuntimePayload),
         ("dev-check passes runtime signal result path", DevCheckTests.RuntimeSignalResultPathIsPassedToChildEnvironment),
+        ("dev-check includes declared runtime dependencies", DevCheckTests.DeclaredRequiredDependencyIsIncluded),
+        ("dev-check resolves Harmony by package ID", DevCheckTests.HarmonyResolvesByPackageId),
+        ("dev-check missing runtime dependency fails closed", DevCheckTests.MissingRequiredDependencyFailsClosed),
+        ("dev-check bounds dependency cycles and duplicates", DevCheckTests.DependencyCyclesAndDuplicatesAreBounded),
+        ("dev-check excludes unrelated runtime mods", DevCheckTests.UnrelatedInstalledModsAreExcluded),
 
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),

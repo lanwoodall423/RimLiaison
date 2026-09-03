@@ -631,11 +631,22 @@ internal static class DevCheckCommand
                     File.Copy(source, target);
                 }
             }
+            IReadOnlyList<RuntimeModPackage> dependencies = ResolveRequiredRuntimeDependencies(
+                Path.Combine(state.Workspace, "About", "About.xml"),
+                DiscoverRuntimeModRoots(rimWorldRoot));
+            foreach (RuntimeModPackage dependency in dependencies)
+            {
+                string dependencyDeployment = Path.Combine(
+                    modsRoot,
+                    ".rimtest-dev-check-dependency-" + Guid.NewGuid().ToString("N"));
+                CopyDirectory(dependency.RootPath, dependencyDeployment);
+                state.DependencyDeploymentPaths.Add(dependencyDeployment);
+            }
             CopyDirectory(state.HelperPackagePath!, helperDeployment);
             string configDirectory = Path.Combine(savedata, "Config");
             Directory.CreateDirectory(configDirectory);
             string configPath = Path.Combine(configDirectory, "ModsConfig.xml");
-            WriteModsConfig(configPath, state.Mod.PackageId);
+            WriteModsConfig(configPath, BuildActiveModPackageIds(state.Mod.PackageId, dependencies));
             string signalPath = Path.Combine(savedata, "direct-validation-signal.json");
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
             string logPath = Path.Combine(savedata, "rimworld-direct-validation.log");
@@ -884,14 +895,147 @@ internal static class DevCheckCommand
         }
     }
 
-    private static void WriteModsConfig(string path, string packageId)
+    internal static IReadOnlyList<string> DiscoverRuntimeModRoots(string rimWorldRoot)
+    {
+        var roots = new List<string>
+        {
+            Path.Combine(rimWorldRoot, "Data"),
+            Path.Combine(rimWorldRoot, "Mods")
+        };
+        string? configuredWorkshopRoot = Environment.GetEnvironmentVariable("RIMWORLD_WORKSHOP_ROOT");
+        if (string.IsNullOrWhiteSpace(configuredWorkshopRoot))
+            configuredWorkshopRoot = Environment.GetEnvironmentVariable("RIMWORLD_WORKSHOP_PATH");
+        if (string.IsNullOrWhiteSpace(configuredWorkshopRoot))
+        {
+            DirectoryInfo? steamApps = Directory.GetParent(rimWorldRoot)?.Parent;
+            if (steamApps is not null)
+                configuredWorkshopRoot = Path.Combine(steamApps.FullName, "workshop", "content", "294100");
+        }
+        if (!string.IsNullOrWhiteSpace(configuredWorkshopRoot))
+            roots.Add(configuredWorkshopRoot);
+        return roots
+            .Where(Directory.Exists)
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    internal static IReadOnlyList<RuntimeModPackage> ResolveRequiredRuntimeDependencies(
+        string targetAboutPath,
+        IReadOnlyList<string> runtimeRoots)
+    {
+        RuntimeModPackage target = ReadRuntimeModPackage(
+            Path.GetFullPath(Path.Combine(Path.GetDirectoryName(targetAboutPath)!, "..")));
+        var installed = new List<RuntimeModPackage>();
+        foreach (string root in runtimeRoots)
+        {
+            IEnumerable<string> aboutFiles;
+            try
+            {
+                aboutFiles = Directory.EnumerateFiles(root, "About.xml", SearchOption.AllDirectories);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue;
+            }
+            foreach (string aboutFile in aboutFiles)
+            {
+                string? aboutDirectory = Path.GetDirectoryName(aboutFile);
+                string? packageRoot = aboutDirectory is null ? null : Directory.GetParent(aboutDirectory)?.FullName;
+                if (packageRoot is null)
+                    continue;
+                try
+                {
+                    installed.Add(ReadRuntimeModPackage(packageRoot));
+                }
+                catch (InvalidDataException)
+                {
+                }
+            }
+        }
+
+        var visiting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var resolved = new List<RuntimeModPackage>();
+        foreach (string dependency in target.RequiredDependencies)
+            Visit(dependency);
+        return resolved;
+
+        void Visit(string packageId)
+        {
+            if (!visited.Add(packageId))
+                return;
+            RuntimeModPackage[] matches = installed
+                .Where(package => string.Equals(package.PackageId, packageId, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(package => package.RootPath, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToArray();
+            if (matches.Length == 0)
+                throw new InvalidDataException("REQUIRED_MOD_DEPENDENCY_MISSING: " + packageId);
+            if (matches.Length > 1)
+                throw new InvalidDataException("REQUIRED_MOD_DEPENDENCY_AMBIGUOUS: " + packageId);
+            if (!visiting.Add(packageId))
+                return;
+            foreach (string nested in matches[0].RequiredDependencies)
+                Visit(nested);
+            visiting.Remove(packageId);
+            resolved.Add(matches[0]);
+        }
+    }
+
+    internal static IReadOnlyList<string> BuildActiveModPackageIds(
+        string targetPackageId,
+        IReadOnlyList<RuntimeModPackage> dependencies)
+    {
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string packageId in new[] { "ludeon.rimworld" }
+                     .Concat(dependencies.Select(package => package.PackageId))
+                     .Concat([HelperPackageId, targetPackageId]))
+        {
+            if (seen.Add(packageId))
+                result.Add(packageId);
+        }
+        return result;
+    }
+
+    private static RuntimeModPackage ReadRuntimeModPackage(string packageRoot)
+    {
+        string aboutPath = Path.Combine(packageRoot, "About", "About.xml");
+        if (!File.Exists(aboutPath))
+            throw new InvalidDataException("Runtime mod package metadata is missing: " + aboutPath);
+        XDocument document = XDocument.Load(aboutPath, LoadOptions.SetLineInfo);
+        string packageId = ElementText(document, "packageId");
+        if (string.IsNullOrWhiteSpace(packageId) ||
+            !packageId.All(static c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-'))
+            throw new InvalidDataException("Runtime mod packageId is invalid: " + aboutPath);
+        IReadOnlyList<string> dependencies = document.Root?
+            .Elements()
+            .FirstOrDefault(element => element.Name.LocalName.Equals("modDependencies", StringComparison.OrdinalIgnoreCase))?
+            .Elements()
+            .Where(element => element.Name.LocalName.Equals("li", StringComparison.OrdinalIgnoreCase))
+            .Select(element => element.Elements()
+                .FirstOrDefault(child => child.Name.LocalName.Equals("packageId", StringComparison.OrdinalIgnoreCase))
+                ?.Value.Trim())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(value => value, StringComparer.Ordinal)
+            .ToArray() ?? [];
+        return new RuntimeModPackage(packageId, Path.GetFullPath(packageRoot), dependencies);
+    }
+
+    private static void WriteModsConfig(string path, IReadOnlyList<string> packageIds)
     {
         var document = new XmlDocument();
         XmlElement root = document.CreateElement("ModsConfigData");
         document.AppendChild(root);
         XmlElement active = document.CreateElement("activeMods");
         root.AppendChild(active);
-        foreach (string package in new[] { "ludeon.rimworld", HelperPackageId, packageId })
+        foreach (string package in packageIds)
         {
             XmlElement item = document.CreateElement("li");
             item.InnerText = package;
@@ -1063,14 +1207,16 @@ internal static class DevCheckCommand
         }
         else
         {
-            foreach ((string? path, string label) in new[]
+            var temporaryPaths = new List<(string? Path, string Label)>
             {
                 (state.DeploymentPath, "target deployment"),
                 (state.HelperDeploymentPath, "runtime helper deployment"),
                 (state.SavedataPath, "isolated save-data"),
                 (state.HelperStagingPath, "helper staging"),
                 (state.StorePath is null ? null : Path.GetDirectoryName(state.StorePath), "RimContext store")
-            })
+            };
+            temporaryPaths.AddRange(state.DependencyDeploymentPaths.Select(path => ((string?)path, "required dependency deployment")));
+            foreach ((string? path, string label) in temporaryPaths)
             {
                 if (string.IsNullOrWhiteSpace(path))
                     continue;
@@ -1151,6 +1297,7 @@ internal static class DevCheckCommand
         public string? HelperStagingPath { get; set; }
         public string? DeploymentPath { get; set; }
         public string? HelperDeploymentPath { get; set; }
+        public List<string> DependencyDeploymentPaths { get; } = [];
         public string? SavedataPath { get; set; }
         public string BuildStatus { get; set; } = "BUILD_NOT_RUN";
         public string StaticStatus { get; set; } = "STATIC_NOT_RUN";
@@ -1169,6 +1316,10 @@ internal static class DevCheckCommand
         string? Error);
     private sealed record DiscoveredInput(string AbsolutePath, string RelativePath, string Kind);
     private sealed record ModIdentity(string Name, string PackageId);
+    internal sealed record RuntimeModPackage(
+        string PackageId,
+        string RootPath,
+        IReadOnlyList<string> RequiredDependencies);
     private sealed record ProcessResult(int ExitCode, bool TimedOut, string Stdout, string Stderr);
     internal sealed record ProcessLifecycleResult(int ExitCode, bool ControlledTermination);
     private sealed record AssemblyLoadResult(string Name, bool Loaded);

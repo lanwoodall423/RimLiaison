@@ -274,6 +274,170 @@ internal static class DevCheckTests
     }
 
 
+    public static void DeclaredRequiredDependencyIsIncluded()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["required.mod"]);
+            WriteRuntimePackage(runtimeRoot, "RequiredPackage", "required.mod", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "required.mod")
+                throw new InvalidOperationException("declared required dependency was not resolved.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+    public static void HarmonyResolvesByPackageId()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["brrainz.harmony"]);
+            WriteRuntimePackage(runtimeRoot, "InstalledHarmony", "brrainz.harmony", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            if (dependencies.Count != 1 ||
+                dependencies[0].PackageId != "brrainz.harmony" ||
+                !dependencies[0].RootPath.EndsWith("InstalledHarmony", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Harmony was not resolved by its package ID.");
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void MissingRequiredDependencyFailsClosed()
+    {
+        string target = CreateWorkspace();
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["missing.required"]);
+            try
+            {
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    []);
+                throw new InvalidOperationException("missing required dependency did not fail closed.");
+            }
+            catch (InvalidDataException exception) when (
+                exception.Message == "REQUIRED_MOD_DEPENDENCY_MISSING: missing.required")
+            {
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+        }
+    }
+
+    public static void DependencyCyclesAndDuplicatesAreBounded()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["cycle.a", "cycle.a"]);
+            WriteRuntimePackage(runtimeRoot, "A", "cycle.a", ["cycle.b"]);
+            WriteRuntimePackage(runtimeRoot, "B", "cycle.b", ["cycle.a"]);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            string[] active = DevCheckCommand.BuildActiveModPackageIds("target.mod", dependencies).ToArray();
+            if (active.Length != active.Distinct(StringComparer.OrdinalIgnoreCase).Count() ||
+                !active.SequenceEqual(
+                    ["ludeon.rimworld", "cycle.b", "cycle.a", "direct.validation.runtime.signal", "target.mod"],
+                    StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("dependency cycle or duplicate produced an invalid active-mod list.");
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void UnrelatedInstalledModsAreExcluded()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(
+                Path.Combine(target, "About", "About.xml"),
+                "target.mod",
+                ["required.mod"]);
+            WriteRuntimePackage(runtimeRoot, "Required", "required.mod", []);
+            WriteRuntimePackage(runtimeRoot, "Unrelated", "unrelated.mod", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"),
+                    [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "required.mod")
+                throw new InvalidOperationException("unrelated installed mod entered the isolated dependency closure.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    private static string WriteRuntimePackage(
+        string runtimeRoot,
+        string directoryName,
+        string packageId,
+        IReadOnlyList<string> dependencies)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, directoryName);
+        Directory.CreateDirectory(Path.Combine(packageRoot, "About"));
+        WriteAbout(Path.Combine(packageRoot, "About", "About.xml"), packageId, dependencies);
+        return packageRoot;
+    }
+
+    private static void WriteAbout(string path, string packageId, IReadOnlyList<string> dependencies)
+    {
+        string dependencyXml = dependencies.Count == 0
+            ? string.Empty
+            : "<modDependencies>" + string.Join(
+                string.Empty,
+                dependencies.Select(value => "<li><packageId>" + value + "</packageId><displayName>not-id</displayName></li>")) +
+              "</modDependencies>";
+        File.WriteAllText(
+            path,
+            "<ModMetaData><name>Test Mod</name><packageId>" + packageId + "</packageId>" +
+            dependencyXml + "</ModMetaData>");
+    }
+
     private static string CreateWorkspace()
     {
         string workspace = Path.Combine(Path.GetTempPath(), "rimtest-dev-check-test-" + Guid.NewGuid().ToString("N"));
