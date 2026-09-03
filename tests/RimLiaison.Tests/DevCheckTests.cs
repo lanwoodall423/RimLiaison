@@ -82,6 +82,84 @@ internal static class DevCheckTests
             DeleteWorkspace(workspace);
         }
     }
+    public static void ExcludedTestReferencesDoNotDisqualifyProductionRoot()
+    {
+        string workspace = CreateWorkspace();
+        try
+        {
+            string source = Path.Combine(workspace, "Source", "Main.csproj");
+            string tests = Path.Combine(workspace, "Tests", "Main.Tests.csproj");
+            WriteProject(source, """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Main</AssemblyName></PropertyGroup>
+                </Project>
+                """);
+            WriteProject(tests, """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Main.Tests</AssemblyName></PropertyGroup>
+                  <ItemGroup><ProjectReference Include="../Source/Main.csproj" /></ItemGroup>
+                </Project>
+                """);
+
+            DevCheckCommand.ProjectSelectionResult selection = DevCheckCommand.SelectProjects(
+                workspace,
+                [source, tests]);
+            if (selection.IsAmbiguous ||
+                selection.BuildRoots.Count != 1 ||
+                !selection.BuildRoots.Contains(Path.GetFullPath(source), StringComparer.OrdinalIgnoreCase) ||
+                selection.ProductionProjects.Count != 1 ||
+                !selection.ProductionProjects.Contains(Path.GetFullPath(source), StringComparer.OrdinalIgnoreCase) ||
+                selection.ExcludedProjects.Count != 1 ||
+                !selection.ExcludedProjects.Contains(Path.GetFullPath(tests), StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("excluded test reference disqualified the production build root.");
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(workspace);
+        }
+    }
+
+    public static void ExcludedToolingReferencesDoNotDisqualifyProductionRoot()
+    {
+        string workspace = CreateWorkspace();
+        try
+        {
+            string source = Path.Combine(workspace, "Source", "Main.csproj");
+            string tooling = Path.Combine(workspace, "DevTools", "Inspector.csproj");
+            WriteProject(source, """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Main</AssemblyName></PropertyGroup>
+                </Project>
+                """);
+            WriteProject(tooling, """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework><AssemblyName>Inspector</AssemblyName></PropertyGroup>
+                  <ItemGroup><ProjectReference Include="../Source/Main.csproj" /></ItemGroup>
+                </Project>
+                """);
+
+            DevCheckCommand.ProjectSelectionResult selection = DevCheckCommand.SelectProjects(
+                workspace,
+                [source, tooling]);
+            if (selection.IsAmbiguous ||
+                selection.BuildRoots.Count != 1 ||
+                !selection.BuildRoots.Contains(Path.GetFullPath(source), StringComparer.OrdinalIgnoreCase) ||
+                selection.ProductionProjects.Count != 1 ||
+                !selection.ProductionProjects.Contains(Path.GetFullPath(source), StringComparer.OrdinalIgnoreCase) ||
+                selection.ExcludedProjects.Count != 1 ||
+                !selection.ExcludedProjects.Contains(Path.GetFullPath(tooling), StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("excluded tooling reference disqualified the production build root.");
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(workspace);
+        }
+    }
+
 
     public static void ProductionProjectBuildFailureIdentifiesOwner()
     {

@@ -320,8 +320,8 @@ internal static class DevCheckCommand
         var candidates = projects
             .Except(excluded, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var referencedCandidates = references.Values
-            .SelectMany(value => value)
+        var referencedCandidates = candidates
+            .SelectMany(project => references[project])
             .Where(candidates.Contains)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         string[] roots = candidates
