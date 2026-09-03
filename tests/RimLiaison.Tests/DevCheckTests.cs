@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using RimLiaison;
 
@@ -190,6 +191,33 @@ internal static class DevCheckTests
         {
             DeleteWorkspace(workspace);
         }
+    }
+
+    public static void RuntimeProcessLifecycleWaitsForExitAndStreams()
+    {
+        var start = new ProcessStartInfo("cmd.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("/d");
+        start.ArgumentList.Add("/c");
+        start.ArgumentList.Add("ping -n 30 127.0.0.1 > nul");
+        using Process process = Process.Start(start) ?? throw new InvalidOperationException("Test process did not start.");
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        DevCheckCommand.ProcessLifecycleResult result = DevCheckCommand.CompleteProcessAsync(
+                process,
+                stdout,
+                stderr,
+                terminateIfRunning: true,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        if (!result.ControlledTermination || !process.HasExited)
+            throw new InvalidOperationException("Runtime lifecycle did not terminate and confirm the test process.");
     }
 
     private static string CreateWorkspace()

@@ -617,6 +617,7 @@ internal static class DevCheckCommand
         state.DeploymentPath = deployment;
         state.HelperDeploymentPath = helperDeployment;
         state.SavedataPath = savedata;
+        Process? process = null;
         try
         {
             CopyDirectory(state.Workspace, deployment);
@@ -655,8 +656,9 @@ internal static class DevCheckCommand
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
                 ';',
                 state.TargetAssemblySources.Select(source => Path.GetFileNameWithoutExtension(source)));
-            var process = new Process { StartInfo = start };
+            process = new Process { StartInfo = start };
             state.LaunchedProcess = process;
+            state.RuntimeProcessExitConfirmed = false;
             if (!process.Start())
                 throw new InvalidOperationException("RimWorld process did not start.");
             state.Processes.Add("RimWorldWin64.exe");
@@ -685,18 +687,27 @@ internal static class DevCheckCommand
                 }
                 await Task.Delay(250, cancellationToken).ConfigureAwait(false);
             }
-            bool controlledTermination = false;
-            if (!process.HasExited)
-            {
-                controlledTermination = true;
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-            string log = File.Exists(logPath) ? ReadBoundedText(logPath) : string.Empty;
+            ProcessLifecycleResult completed = await CompleteProcessAsync(
+                    process,
+                    stdoutTask,
+                    stderrTask,
+                    terminateIfRunning: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            state.RuntimeProcessExitConfirmed = true;
+            state.LaunchedProcess = null;
+            process.Dispose();
+            process = null;
+            string log = File.Exists(logPath) ? ReadRuntimeLog(logPath) : string.Empty;
             state.RelevantErrors.AddRange(FindTargetErrors(log, state));
             bool targetConfigured = IsTargetConfigured(configPath, state.Mod.PackageId);
-            RuntimeResult result = ParseRuntime(signal, state, behaviorPath, targetConfigured, controlledTermination, process.HasExited ? process.ExitCode : null);
+            RuntimeResult result = ParseRuntime(
+                signal,
+                state,
+                behaviorPath,
+                targetConfigured,
+                completed.ControlledTermination,
+                completed.ExitCode);
             return result with
             {
                 RuntimeSeconds = Math.Round(ElapsedMilliseconds(started) / 1000d, 3),
@@ -705,8 +716,49 @@ internal static class DevCheckCommand
         }
         finally
         {
+            if (process is not null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                    if (process.WaitForExit(5_000))
+                        state.RuntimeProcessExitConfirmed = true;
+                    else
+                        state.CleanupErrors.Add("RimWorld process did not exit within the bounded termination window.");
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+                {
+                    state.CleanupErrors.Add("RimWorld process: " + Bound(exception.Message));
+                }
+                finally
+                {
+                    state.LaunchedProcess = null;
+                    process.Dispose();
+                }
+            }
             state.StageTimes["runtime"] = ElapsedMilliseconds(started);
         }
+    }
+
+    internal static async Task<ProcessLifecycleResult> CompleteProcessAsync(
+        Process process,
+        Task<string> stdoutTask,
+        Task<string> stderrTask,
+        bool terminateIfRunning,
+        CancellationToken cancellationToken)
+    {
+        bool controlledTermination = false;
+        if (!process.HasExited && terminateIfRunning)
+        {
+            controlledTermination = true;
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+        if (!process.HasExited)
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        return new ProcessLifecycleResult(process.ExitCode, controlledTermination);
     }
 
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
@@ -868,6 +920,21 @@ internal static class DevCheckCommand
         int count = reader.ReadBlock(buffer, 0, buffer.Length);
         return new string(buffer, 0, count);
     }
+    private static string ReadRuntimeLog(string path)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            try
+            {
+                return ReadBoundedText(path);
+            }
+            catch (IOException) when (attempt < 9)
+            {
+                Thread.Sleep(50);
+            }
+        }
+        return ReadBoundedText(path);
+    }
 
     private static async Task<ProcessResult> RunProcessAsync(
         string fileName,
@@ -935,16 +1002,22 @@ internal static class DevCheckCommand
 
     private static void Cleanup(State state)
     {
+        bool processExitConfirmed = state.RuntimeProcessExitConfirmed;
         if (state.LaunchedProcess is not null)
         {
             try
             {
                 if (!state.LaunchedProcess.HasExited)
                     state.LaunchedProcess.Kill(entireProcessTree: true);
-                state.LaunchedProcess.WaitForExit(5_000);
+                processExitConfirmed = state.LaunchedProcess.WaitForExit(5_000);
+                state.RuntimeProcessExitConfirmed = processExitConfirmed;
+                if (!processExitConfirmed)
+                    state.CleanupErrors.Add("RimWorld process did not exit within the bounded termination window.");
             }
             catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
             {
+                processExitConfirmed = false;
+                state.RuntimeProcessExitConfirmed = false;
                 state.CleanupErrors.Add("RimWorld process: " + Bound(exception.Message));
             }
             finally
@@ -954,29 +1027,58 @@ internal static class DevCheckCommand
             }
         }
         long started = Stopwatch.GetTimestamp();
-        foreach ((string? path, string label) in new[]
+        if (!processExitConfirmed)
         {
-            (state.DeploymentPath, "target deployment"),
-            (state.HelperDeploymentPath, "runtime helper deployment"),
-            (state.SavedataPath, "isolated save-data"),
-            (state.HelperStagingPath, "helper staging"),
-            (state.StorePath is null ? null : Path.GetDirectoryName(state.StorePath), "RimContext store")
-        })
+            state.CleanupErrors.Add("Temporary cleanup skipped because RimWorld process exit was not confirmed.");
+        }
+        else
         {
-            if (string.IsNullOrWhiteSpace(path))
-                continue;
-            try
+            foreach ((string? path, string label) in new[]
             {
-                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-                else if (File.Exists(path)) File.Delete(path);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                (state.DeploymentPath, "target deployment"),
+                (state.HelperDeploymentPath, "runtime helper deployment"),
+                (state.SavedataPath, "isolated save-data"),
+                (state.HelperStagingPath, "helper staging"),
+                (state.StorePath is null ? null : Path.GetDirectoryName(state.StorePath), "RimContext store")
+            })
             {
-                state.CleanupErrors.Add(label + ": " + Bound(exception.Message));
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                try
+                {
+                    DeleteTemporaryPath(path);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    state.CleanupErrors.Add(label + ": " + Bound(exception.Message));
+                }
             }
         }
         state.CleanupStatus = state.CleanupErrors.Count == 0 ? "CLEANUP_PASS" : "CLEANUP_FAIL";
         state.StageTimes["cleanup"] = ElapsedMilliseconds(started);
+    }
+
+    private static void DeleteTemporaryPath(string path)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+                else if (File.Exists(path))
+                    File.Delete(path);
+                return;
+            }
+            catch (Exception exception) when ((exception is IOException or UnauthorizedAccessException) && attempt < 9)
+            {
+                Thread.Sleep(50);
+            }
+        }
+        if (Directory.Exists(path))
+            Directory.Delete(path, recursive: true);
+        else if (File.Exists(path))
+            File.Delete(path);
     }
 
     private static bool IsWithin(string parent, string child)
@@ -1008,6 +1110,7 @@ internal static class DevCheckCommand
         public Dictionary<string, long> StageTimes { get; } = new(StringComparer.Ordinal);
         public IReadOnlyList<DiscoveredInput> SourceFiles { get; set; } = [];
         public Process? LaunchedProcess { get; set; }
+        public bool RuntimeProcessExitConfirmed { get; set; } = true;
         public IReadOnlyList<DiscoveredInput> ProjectFiles { get; set; } = [];
         public IReadOnlyList<DiscoveredInput> XmlFiles { get; set; } = [];
         public ProjectSelectionResult? ProjectSelection { get; set; }
@@ -1037,6 +1140,7 @@ internal static class DevCheckCommand
     private sealed record DiscoveredInput(string AbsolutePath, string RelativePath, string Kind);
     private sealed record ModIdentity(string Name, string PackageId);
     private sealed record ProcessResult(int ExitCode, bool TimedOut, string Stdout, string Stderr);
+    internal sealed record ProcessLifecycleResult(int ExitCode, bool ControlledTermination);
     private sealed record AssemblyLoadResult(string Name, bool Loaded);
     private sealed record RuntimeResult(
         string Status,

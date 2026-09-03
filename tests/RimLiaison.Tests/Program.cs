@@ -156,6 +156,7 @@ internal static class Program
         ("dev-check production build failure identifies owner", DevCheckTests.ProductionProjectBuildFailureIdentifiesOwner),
         ("dev-check excludes support project assemblies", DevCheckTests.SupportProjectsAreNotProductionAssemblies),
         ("dev-check ambiguous projects fail closed", DevCheckTests.AmbiguousProductionProjectsFailClosed),
+        ("dev-check runtime process lifecycle waits for exit and streams", DevCheckTests.RuntimeProcessLifecycleWaitsForExitAndStreams),
 
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),
