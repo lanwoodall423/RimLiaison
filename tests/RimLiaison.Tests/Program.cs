@@ -157,6 +157,8 @@ internal static class Program
         ("dev-check excludes support project assemblies", DevCheckTests.SupportProjectsAreNotProductionAssemblies),
         ("dev-check ambiguous projects fail closed", DevCheckTests.AmbiguousProductionProjectsFailClosed),
         ("dev-check runtime process lifecycle waits for exit and streams", DevCheckTests.RuntimeProcessLifecycleWaitsForExitAndStreams),
+        ("dev-check stages only explicit runtime payload", DevCheckTests.StagesOnlyExplicitRuntimePayload),
+        ("dev-check passes runtime signal result path", DevCheckTests.RuntimeSignalResultPathIsPassedToChildEnvironment),
 
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),

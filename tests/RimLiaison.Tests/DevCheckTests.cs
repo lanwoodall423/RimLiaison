@@ -219,6 +219,60 @@ internal static class DevCheckTests
         if (!result.ControlledTermination || !process.HasExited)
             throw new InvalidOperationException("Runtime lifecycle did not terminate and confirm the test process.");
     }
+    public static void StagesOnlyExplicitRuntimePayload()
+    {
+        string source = CreateWorkspace();
+        string destination = Path.Combine(Path.GetTempPath(), "rimtest-dev-check-payload-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            File.WriteAllText(Path.Combine(source, "LoadFolders.xml"), "<loadFolders />");
+            Directory.CreateDirectory(Path.Combine(source, "1.6", "Assemblies"));
+            File.WriteAllText(Path.Combine(source, "1.6", "Assemblies", "Payload.dll"), "payload");
+            Directory.CreateDirectory(Path.Combine(source, ".git", "objects"));
+            File.WriteAllText(Path.Combine(source, ".git", "objects", "read-only-object"), "repository");
+            Directory.CreateDirectory(Path.Combine(source, "Source"));
+            File.WriteAllText(Path.Combine(source, "Source", "Payload.cs"), "source");
+            File.WriteAllText(Path.Combine(source, "README.md"), "documentation");
+
+            DevCheckCommand.CopyRuntimePayload(source, destination);
+
+            string[] expected =
+            [
+                "About/About.xml",
+                "LoadFolders.xml",
+                "1.6/Assemblies/Payload.dll"
+            ];
+            foreach (string relative in expected)
+            {
+                if (!File.Exists(Path.Combine(destination, relative.Replace('/', Path.DirectorySeparatorChar))))
+                    throw new InvalidOperationException("Expected runtime payload was not staged: " + relative);
+            }
+            string[] forbidden = [".git", "Source", "README.md"];
+            foreach (string relative in forbidden)
+            {
+                if (Directory.Exists(Path.Combine(destination, relative)) || File.Exists(Path.Combine(destination, relative)))
+                    throw new InvalidOperationException("Repository-only content was staged: " + relative);
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(source);
+            DeleteWorkspace(destination);
+        }
+    }
+
+    public static void RuntimeSignalResultPathIsPassedToChildEnvironment()
+    {
+        string signalPath = Path.Combine(Path.GetTempPath(), "rimtest-signal-" + Guid.NewGuid().ToString("N") + ".json");
+        var start = new ProcessStartInfo("RimWorldWin64.exe");
+        DevCheckCommand.SetRuntimeSignalEnvironment(start, signalPath);
+        if (!start.Environment.TryGetValue("DIRECT_VALIDATION_SIGNAL_RESULT", out string? configured) ||
+            !string.Equals(configured, signalPath, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Runtime signal result path was not passed to the launch environment.");
+        }
+    }
+
 
     private static string CreateWorkspace()
     {

@@ -620,7 +620,7 @@ internal static class DevCheckCommand
         Process? process = null;
         try
         {
-            CopyDirectory(state.Workspace, deployment);
+            CopyRuntimePayload(state.Workspace, deployment);
             string targetAssemblyDirectory = Path.Combine(deployment, "1.6", "Assemblies");
             foreach (string source in state.TargetAssemblySources)
             {
@@ -656,6 +656,7 @@ internal static class DevCheckCommand
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
                 ';',
                 state.TargetAssemblySources.Select(source => Path.GetFileNameWithoutExtension(source)));
+            SetRuntimeSignalEnvironment(start, signalPath);
             process = new Process { StartInfo = start };
             state.LaunchedProcess = process;
             state.RuntimeProcessExitConfirmed = false;
@@ -759,6 +760,10 @@ internal static class DevCheckCommand
         if (!process.HasExited)
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         return new ProcessLifecycleResult(process.ExitCode, controlledTermination);
+    }
+    internal static void SetRuntimeSignalEnvironment(ProcessStartInfo start, string signalPath)
+    {
+        start.Environment["DIRECT_VALIDATION_SIGNAL_RESULT"] = signalPath;
     }
 
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
@@ -985,6 +990,31 @@ internal static class DevCheckCommand
         state.StageTimes[fileName] = ElapsedMilliseconds(started);
         return new ProcessResult(process.HasExited ? process.ExitCode : -1, timedOut, stdout, stderr);
     }
+
+    internal static void CopyRuntimePayload(string source, string destination)
+    {
+        string about = Path.Combine(source, "About");
+        if (!Directory.Exists(about) || !File.Exists(Path.Combine(about, "About.xml")))
+            throw new InvalidDataException("The workspace has no explicit About/About.xml runtime payload.");
+
+        CopyDirectory(about, Path.Combine(destination, "About"));
+        string loadFolders = Path.Combine(source, "LoadFolders.xml");
+        if (File.Exists(loadFolders))
+        {
+            Directory.CreateDirectory(destination);
+            File.Copy(loadFolders, Path.Combine(destination, "LoadFolders.xml"), overwrite: true);
+        }
+        foreach (string directory in Directory.EnumerateDirectories(source, "1.*", SearchOption.TopDirectoryOnly)
+                     .Where(path => IsVersionedRuntimeDirectory(Path.GetFileName(path))))
+        {
+            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
+    }
+
+    private static bool IsVersionedRuntimeDirectory(string name) =>
+        name.StartsWith("1.", StringComparison.Ordinal) &&
+        name.Length > 2 &&
+        name[2..].All(char.IsDigit);
 
     private static void CopyDirectory(string source, string destination)
     {
