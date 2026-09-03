@@ -486,6 +486,128 @@ internal static class DevCheckTests
             DeleteWorkspace(runtimeRoot);
         }
     }
+    public static void RootPackageIdWinsOverEarlierDependencyId()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(Path.Combine(target, "About", "About.xml"), "target.mod", ["required.mod"]);
+            WriteRuntimePackageWithDependencyBeforeIdentity(
+                runtimeRoot, "Required", "Ordinary Required Mod", "required.mod", ["unrelated.mod"]);
+            WriteRuntimePackage(runtimeRoot, "Unrelated", "unrelated.mod", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"), [runtimeRoot]);
+            if (dependencies.Count != 2 ||
+                !dependencies.Any(dependency => dependency.PackageId == "required.mod"))
+                throw new InvalidOperationException("the direct root package ID was not used.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void HarmonyDependencyDoesNotMasqueradeAsAnotherMod()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(Path.Combine(target, "About", "About.xml"), "target.mod", ["brrainz.harmony"]);
+            WriteRuntimePackage(runtimeRoot, "Harmony", "brrainz.harmony", []);
+            WriteRuntimePackageWithDependencyBeforeIdentity(
+                runtimeRoot, "ArchitectIcons", "Architect Icons", "com.bymarcin.ArchitectIcons", ["brrainz.harmony"]);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"), [runtimeRoot]);
+            if (dependencies.Count != 1 ||
+                dependencies[0].PackageId != "brrainz.harmony" ||
+                !dependencies[0].RootPath.EndsWith("Harmony", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("a Harmony dependency was mistaken for another package identity.");
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void ActualHarmonyMetadataResolvesAsHarmony()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(Path.Combine(target, "About", "About.xml"), "target.mod", ["brrainz.harmony"]);
+            WriteRuntimePackageWithDependencyBeforeIdentity(
+                runtimeRoot, "InstalledHarmony", "Harmony", "brrainz.harmony", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"), [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "brrainz.harmony")
+                throw new InvalidOperationException("actual Harmony metadata did not resolve as brrainz.harmony.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void MissingRootPackageIdDoesNotFallbackToDependencyId()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(Path.Combine(target, "About", "About.xml"), "target.mod", ["brrainz.harmony"]);
+            WriteRuntimePackageWithoutRootPackageId(
+                runtimeRoot, "Broken", "Broken Mod", ["brrainz.harmony"]);
+            try
+            {
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"), [runtimeRoot]);
+                throw new InvalidOperationException("a dependency package ID became a fallback package identity.");
+            }
+            catch (InvalidDataException exception) when (
+                exception.Message == "REQUIRED_MOD_DEPENDENCY_MISSING: brrainz.harmony")
+            {
+            }
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
+    public static void OrdinaryRootMetadataStillParses()
+    {
+        string target = CreateWorkspace();
+        string runtimeRoot = Path.Combine(Path.GetTempPath(), "rimtest-runtime-mods-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAbout(Path.Combine(target, "About", "About.xml"), "target.mod", ["ordinary.mod"]);
+            WriteRuntimePackageWithDependencyBeforeIdentity(
+                runtimeRoot, "Ordinary", "Ordinary Mod", "ordinary.mod", []);
+            IReadOnlyList<DevCheckCommand.RuntimeModPackage> dependencies =
+                DevCheckCommand.ResolveRequiredRuntimeDependencies(
+                    Path.Combine(target, "About", "About.xml"), [runtimeRoot]);
+            if (dependencies.Count != 1 || dependencies[0].PackageId != "ordinary.mod")
+                throw new InvalidOperationException("ordinary root About metadata did not parse.");
+        }
+        finally
+        {
+            DeleteWorkspace(target);
+            DeleteWorkspace(runtimeRoot);
+        }
+    }
+
 
     public static void MissingRequiredDependencyFailsClosed()
     {
@@ -583,6 +705,46 @@ internal static class DevCheckTests
         WriteAbout(Path.Combine(packageRoot, "About", "About.xml"), packageId, dependencies);
         return packageRoot;
     }
+    private static string WriteRuntimePackageWithDependencyBeforeIdentity(
+        string runtimeRoot,
+        string directoryName,
+        string name,
+        string packageId,
+        IReadOnlyList<string> dependencies)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, directoryName);
+        Directory.CreateDirectory(Path.Combine(packageRoot, "About"));
+        string dependencyXml = dependencies.Count == 0
+            ? string.Empty
+            : "<modDependencies>" + string.Join(
+                string.Empty,
+                dependencies.Select(value => "<li><packageId>" + value + "</packageId><displayName>dependency</displayName></li>")) +
+              "</modDependencies>";
+        File.WriteAllText(
+            Path.Combine(packageRoot, "About", "About.xml"),
+            "<ModMetaData><name>" + name + "</name>" + dependencyXml +
+            "<packageId>" + packageId + "</packageId></ModMetaData>");
+        return packageRoot;
+    }
+
+    private static string WriteRuntimePackageWithoutRootPackageId(
+        string runtimeRoot,
+        string directoryName,
+        string name,
+        IReadOnlyList<string> dependencies)
+    {
+        string packageRoot = Path.Combine(runtimeRoot, directoryName);
+        Directory.CreateDirectory(Path.Combine(packageRoot, "About"));
+        string dependencyXml = "<modDependencies>" + string.Join(
+            string.Empty,
+            dependencies.Select(value => "<li><packageId>" + value + "</packageId><displayName>dependency</displayName></li>")) +
+          "</modDependencies>";
+        File.WriteAllText(
+            Path.Combine(packageRoot, "About", "About.xml"),
+            "<ModMetaData><name>" + name + "</name>" + dependencyXml + "</ModMetaData>");
+        return packageRoot;
+    }
+
     private static string WriteRuntimePackageNested(
         string runtimeRoot,
         string containerName,

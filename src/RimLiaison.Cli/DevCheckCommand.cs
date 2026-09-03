@@ -214,8 +214,8 @@ internal static class DevCheckCommand
         if (!File.Exists(aboutPath))
             throw new InvalidDataException("About/About.xml is required.");
         XDocument document = XDocument.Load(aboutPath, LoadOptions.PreserveWhitespace);
-        string name = ElementText(document, "name");
-        string packageId = ElementText(document, "packageId");
+        string name = RootElementText(document, "name");
+        string packageId = RootElementText(document, "packageId");
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(packageId))
             throw new InvalidDataException("About.xml requires name and packageId.");
         if (!packageId.All(static c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-'))
@@ -223,8 +223,13 @@ internal static class DevCheckCommand
         return new ModIdentity(name, packageId);
     }
 
+    private static string RootElementText(XDocument document, string name) =>
+        document.Root is { Name.LocalName: "ModMetaData" }
+            ? document.Root.Elements().FirstOrDefault(element => element.Name.LocalName == name)?.Value.Trim() ?? string.Empty
+            : string.Empty;
     private static string ElementText(XDocument document, string name) =>
         document.Descendants().FirstOrDefault(element => element.Name.LocalName == name)?.Value.Trim() ?? string.Empty;
+
 
     private static IReadOnlyList<DiscoveredInput> DiscoverInputs(string workspace)
     {
@@ -1009,7 +1014,7 @@ internal static class DevCheckCommand
         if (!File.Exists(aboutPath))
             throw new InvalidDataException("Runtime mod package metadata is missing: " + aboutPath);
         XDocument document = XDocument.Load(aboutPath, LoadOptions.SetLineInfo);
-        string packageId = ElementText(document, "packageId");
+        string packageId = RootElementText(document, "packageId");
         if (string.IsNullOrWhiteSpace(packageId) ||
             !packageId.All(static c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-'))
             throw new InvalidDataException("Runtime mod packageId is invalid: " + aboutPath);
