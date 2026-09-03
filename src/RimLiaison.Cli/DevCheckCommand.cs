@@ -35,6 +35,8 @@ internal static class DevCheckCommand
             state.SourceFiles = inputs.Where(input => input.Kind == DiscoveredFileKinds.Source).ToArray();
             state.ProjectFiles = inputs.Where(input => input.Kind == DiscoveredFileKinds.Project).ToArray();
             state.XmlFiles = inputs.Where(input => input.Kind == DiscoveredFileKinds.Xml).ToArray();
+            string? rimWorldRootForBuild = TryResolveRimWorldRoot();
+            IReadOnlyDictionary<string, string> buildEnvironment = BuildEnvironment(rimWorldRootForBuild);
             state.ProjectSelection = SelectProjects(
                 state.Workspace,
                 state.ProjectFiles.Select(project => project.AbsolutePath).ToArray());
@@ -56,7 +58,8 @@ internal static class DevCheckCommand
                         state.Workspace,
                         BuildTimeout,
                         state,
-                        cancellationToken)
+                        cancellationToken,
+                        buildEnvironment)
                     .ConfigureAwait(false);
                 state.BuildStatus = build.ExitCode == 0 && !build.TimedOut ? "BUILD_PASS" : "BUILD_FAIL";
                 if (state.BuildStatus == "BUILD_FAIL")
@@ -365,15 +368,13 @@ internal static class DevCheckCommand
             file.EndsWith("." + segment, StringComparison.OrdinalIgnoreCase) ||
             file.EndsWith(segment, StringComparison.OrdinalIgnoreCase));
     }
-
     private static void AddBuildDiagnostics(State state, ProcessResult build)
     {
         string output = string.Join(
             Environment.NewLine,
             new[] { build.Stdout, build.Stderr }.Where(value => !string.IsNullOrWhiteSpace(value)));
         string[] lines = output.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
-        foreach (string line in lines.Where(line =>
-                     line.Contains("error", StringComparison.OrdinalIgnoreCase)))
+        foreach (string line in lines.Where(IsBuildErrorLine))
         {
             string owner = state.ProjectSelection?.ProductionProjects
                 .FirstOrDefault(project =>
@@ -394,6 +395,60 @@ internal static class DevCheckCommand
         }
         if (state.BuildErrors.Count == 0 && !string.IsNullOrWhiteSpace(output))
             state.BuildErrors.Add(Bound(output));
+    }
+
+    private static bool IsBuildErrorLine(string line) =>
+        line.Contains(": error ", StringComparison.OrdinalIgnoreCase) ||
+        line.Contains(" error :", StringComparison.OrdinalIgnoreCase) ||
+        line.TrimStart().StartsWith("error ", StringComparison.OrdinalIgnoreCase);
+
+    private static string? TryResolveRimWorldRoot()
+    {
+        try
+        {
+            return ResolveRimWorldRoot();
+        }
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string> BuildEnvironment(string? rimWorldRoot)
+    {
+        if (string.IsNullOrWhiteSpace(rimWorldRoot))
+            return new Dictionary<string, string>();
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["RIMWORLD_ROOT"] = rimWorldRoot
+        };
+        string? harmony = Environment.GetEnvironmentVariable("DEFERRED_REALITY_HARMONY_PATH");
+        if (string.IsNullOrWhiteSpace(harmony) || !File.Exists(harmony))
+            harmony = FindWorkshopHarmony(rimWorldRoot);
+        if (!string.IsNullOrWhiteSpace(harmony))
+            environment["DEFERRED_REALITY_HARMONY_PATH"] = harmony;
+        return environment;
+    }
+
+    private static string? FindWorkshopHarmony(string rimWorldRoot)
+    {
+        DirectoryInfo? steamApps = Directory.GetParent(rimWorldRoot)?.Parent;
+        string workshop = steamApps is null
+            ? string.Empty
+            : Path.Combine(steamApps.FullName, "workshop", "content", "294100");
+        if (!Directory.Exists(workshop))
+            return null;
+        try
+        {
+            return Directory.EnumerateFiles(workshop, "0Harmony.dll", SearchOption.AllDirectories)
+                .Where(path => path.Replace('\\', '/').Contains("/Current/Assemblies/", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static void ValidateXml(State state)
@@ -820,7 +875,8 @@ internal static class DevCheckCommand
         string workingDirectory,
         TimeSpan timeout,
         State state,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var start = new ProcessStartInfo(fileName)
         {
@@ -832,6 +888,11 @@ internal static class DevCheckCommand
         };
         foreach (string argument in arguments)
             start.ArgumentList.Add(argument);
+        if (environment is not null)
+        {
+            foreach ((string key, string value) in environment)
+                start.Environment[key] = value;
+        }
         using var process = new Process { StartInfo = start };
         long started = Stopwatch.GetTimestamp();
         if (!process.Start())
