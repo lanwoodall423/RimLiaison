@@ -1,69 +1,53 @@
-# RimLiaison agent usage
+# Agent usage
 
-Use the only ordinary agent workflow:
+## Ordinary mod development
+
+For normal iterative XML or C# RimWorld mod development, use the direct validation path:
 
 ```text
-rimliaison affected --run --fail-fast --json
+edit -> rimtest dev-check --json -> fix the reported mod defect -> repeat
 ```
 
-This command coordinates affected selection, build/deploy, readiness, runtime validation, evidence
-collection, classification, and cleanup. It emits structured production state; agents must not
-scrape prose, invoke DevBridge commands, select a transaction consumer, or repair supporting
-repositories.
+When workspace resolution requires an explicit path:
 
-`rimliaison preflight --json` is a read-only startup packet when readiness is unknown. Use
-`rimliaison doctor --workspace --json` for diagnosis. Human administration—`doctor`, `status`,
-`reset`, `recover`, qualification, and promotion—is exposed through RimLiaison; do not operate
-the installed runtime independently.
+```text
+rimtest dev-check <workspace> --json
+```
+
+Interpret results as follows:
+
+- `BUILD_FAIL`: fix compilation before continuing.
+- `STATIC_FAIL`: fix structural or static problems.
+- `RUNTIME_LOAD_FAIL`: inspect attributed mod, content, or runtime errors.
+- `RUNTIME_LOAD_PASS`: the target package/content was proven through the isolated runtime path;
+  it does not prove gameplay behavior that was not exercised.
+- `INFRASTRUCTURE_FAIL`: distinguish environment/tooling failure from a mod failure.
+- `CLEANUP_FAIL`: do not treat validation as healthy.
+
+For multi-project workspaces, `dev-check` builds one unambiguous production root and follows its
+`ProjectReference` graph. Projects under obvious test, tooling, sample, benchmark, or example
+paths are excluded unless a production project references them. Multiple unreferenced production
+roots fail closed as `STATIC_FAIL`; the validator never guesses which assembly is the mod.
+
+RimLiaison and DevBridge2 are not part of this ordinary inner loop. Do not invoke them merely for
+affected selection, static validation, C# builds, routine RimWorld load validation, diagnosis, or
+development-loop evidence. Do not launch RimWorld outside `dev-check`, edit the normal user
+`ModsConfig`, or scrape `Player.log`.
+
+## Explicit release and qualification workflows
+
+RimLiaison remains available for explicitly documented release, qualification, promotion, and other
+workflows that genuinely require heavier orchestration. Use those commands only when that workflow
+is the requested operation; they are not a prerequisite for ordinary mod changes.
 
 The complete ownership contract is in [docs/architecture.md](architecture.md). `RimLiaison.Runtime`
-contains the internal lifecycle/deployment implementation and remains modular. The runtime is
-installed under `RimWorld\Mods` but is not an independently released DevBridge product.
+contains the internal lifecycle/deployment implementation and remains modular. The installed
+runtime is not an independently released DevBridge product.
 
-`rimliaison preflight`, `affected`, and production release workflows perform a bounded static
-workspace-binding check before expensive work. When diagnosis is needed, use
-`rimliaison doctor --workspace --json` to audit every managed production project. Consume its
-health, repairability, issue code, and `nextAction`; never hand-edit workspace paths, copy source
-into `RimWorld\Mods`, create links, or bypass the production toolchain.
+## Advanced RimLiaison reference
 
-The affected command owns changed-file impact selection, test selection, execution, internal
-`RimLiaison.Runtime` coordination, and bounded results. It calls `RimContext.Core` and
-`RimError.Core` in-process; it does not launch `rimctx`, `rimerror`, or temporary JSON handoff files
-for the normal path. `RimBridgeServer` remains the external live-game control boundary.
-
-When an agent needs cross-stack state without starting a validation run, request the read-only
-context bundle:
-
-```text
-rimliaison context --json
-rimliaison context --json --verbose       # same facts, indented and with empty collections
-```
-
-The bundle's `ownership`, section `status`, `staleReasons`, and `decisions` fields are the handoff
-contract. Treat `unknown`, `unavailable`, and `stale` as explicit uncertainty; follow a supplied
-`nextAction` or owner rather than filling in the missing fact. Use `rimctx context --json` only for
-direct static-context debugging. The full contract is in [docs/context-bundle.md](context-bundle.md).
-
-## Minimal agent handoff
-
-Ask for `rimliaison context --json` once at task start. The compact bundle is the startup handoff:
-`agentSummary` puts blockers, actions, meaningful changes, reusable evidence, and deployment
-correspondence first; the sections identify the project/mod, Git state, DevBridge2 deployment and
-runtime state, selected/executed/reused tests, and owner-specific next actions. Use `--verbose` for
-complete changed-file, hygiene, execution, and evidence detail.
-
-After editing, ask RimTest for the affected validation it owns:
-
-```text
-rimliaison affected --run --fail-fast --json   # short edit loop
-rimliaison affected --run --json               # complete pre-submit validation
-rimliaison publish check --json                # read-only publication reuse gate
-```
-
-Do not run tests manually to replace the selector, launch RimWorld outside DevBridge2, or treat a
-DevBridge2/lease/bridge/readiness error as a mod failure. Runtime-required validation uses the
-catalog's Quicktest recipe and its artifact-freshness/generation evidence. Publication reuses
-matching evidence and does not rerun expensive validation merely because Git is being published.
+The following sections document explicit RimLiaison workflows and their contracts. They do not
+change the ordinary-development default above.
 
 RimLiaison also produces a compact Execution Packet as part of preflight when the static index is
 available. Consume it before broad repository reads, expand only its `rimctx://impact/<id>` handles

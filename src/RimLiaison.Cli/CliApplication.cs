@@ -149,6 +149,14 @@ public static class CliApplication
                 exitCode = CliExitCodes.Success;
                 return exitCode;
             }
+            if (request.Command == CliCommand.DevCheck)
+            {
+                return await DevCheckCommand.RunAsync(
+                        request,
+                        stdout,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
             commandName = request.Command.ToString().ToLowerInvariant();
             profiler.SetCommand(request.Command.ToString());
             eventStore = observabilityStore ??
@@ -1465,6 +1473,25 @@ public static class CliApplication
                             merged,
                             validationPlan.Status == "ready" ? selection.Status : "conservative");
                     }
+                    if (selection.Status is "ok" or "conservative")
+                    {
+                        ContentValidationCoverageDecision contentValidation =
+                            ContentValidationCoveragePolicy.Evaluate(
+                                request.ContentKind,
+                                changedPaths,
+                                packetGeneration.Graph,
+                                packetGeneration.Actual,
+                                loaded.Catalog,
+                                selection.Tests);
+                        if (contentValidation.Applies && !contentValidation.Sufficient)
+                        {
+                            selection = selection.WithFailure(
+                                contentValidation.ErrorCode ?? ContentValidationCoveragePolicy.InsufficientCode,
+                                contentValidation.Reason ??
+                                    "The selected validation does not prove the changed content.");
+                        }
+                    }
+
 
                     if (selection.Status == "ok" && selection.Tests.Count == 0)
                     {

@@ -17,5 +17,9 @@
                       LogicalName="RimLiaison.CanonicalAgents.md" />
     <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
     <InternalsVisibleTo Include="RimLiaison.Tests" />
+    <Compile Remove="DevCheckRuntime\RuntimeSignal.cs" />
+    <Content Include="DevCheckRuntime\About\About.xml" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="DevCheckRuntime\RuntimeSignal.cs" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="DevCheckRuntime\DirectValidationRuntimeSignal.csproj" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

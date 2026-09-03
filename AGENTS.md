@@ -1,29 +1,38 @@
-# RimLiaison agent handoff
+# Agent-facing RimWorld development
 
-Use `rimliaison` as the canonical agent-facing entrypoint. During an active edit iteration, use
-the opt-in fail-fast path so the first trustworthy ordinary test failure returns promptly:
+For ordinary iterative XML or C# mod development, use the thin direct validation path:
 
 ```text
-edit -> rimliaison affected --run --fail-fast --json -> fix immediately on failure -> repeat
+edit -> rimtest dev-check --json -> fix the reported mod defect -> repeat
 ```
 
-Once the change is stable, run `rimliaison affected --run --json` as the complete pre-submit
-validation. A fail-fast PASS is never a partial PASS: it proves that every selected test ran.
+If workspace resolution requires an explicit path, use:
 
-Use `rimliaison doctor --json` when readiness is unknown and follow its bounded `nextAction`.
-Use `rimliaison capabilities --json` for live capability discovery. For UI evidence, enumerate
-semantic targets with `rimliaison ui targets --json` and capture only the smallest relevant target
-with `rimliaison ui screenshot --target <target-id> --json`.
+```text
+rimtest dev-check <workspace> --json
+```
 
-`rimtest.cmd` is retained as a silent compatibility alias and forwards to the same implementation.
-It is not a second orchestration frontend. `rimctx` and `rimerror` are direct drill-down/debugging
-tools only; begin with RimLiaison and use their `nextAction` when directed.
+Result semantics:
 
-For substantive work, consume the automatic Execution Packet from `rimliaison preflight --json`
-before broad repository reads. Expand only its bounded RimContext handles. After edits, use
-`rimliaison affected --run --json`; its actual-diff impact is authoritative for validation and
-its packet prediction is advisory. Missing static packet evidence remains explicit and does not
-authorize narrower validation.
+- `BUILD_FAIL`: fix compilation before continuing.
+- `STATIC_FAIL`: fix structural or static problems.
+- `RUNTIME_LOAD_FAIL`: inspect attributed mod, content, or runtime errors.
+- `RUNTIME_LOAD_PASS`: the target package/content was proven through the isolated runtime path;
+  it does not prove gameplay behavior that was not exercised.
+- `INFRASTRUCTURE_FAIL`: distinguish environment/tooling failure from a mod failure.
+- `CLEANUP_FAIL`: do not treat validation as healthy.
+
+RimLiaison and DevBridge2 are not part of this ordinary development inner loop. Do not invoke them
+merely for affected selection, static checks, C# builds, routine RimWorld load validation, diagnosis,
+or development-loop evidence. Use the direct `dev-check` result to decide whether the requested mod
+change is complete.
+
+RimLiaison remains available for explicitly documented release, qualification, promotion, and other
+workflows that genuinely require its heavier orchestration. Do not delete or bypass those workflows.
+
+`rimtest.cmd` remains a silent compatibility alias and forwards to the same command implementation.
+Do not launch RimWorld manually, edit the normal user `ModsConfig`, or read `Player.log` directly;
+`dev-check` owns its isolated runtime inputs and cleanup.
 
 Canonical tooling promotion is owned by RimLiaison. After the complete burn-in
 and a verified promotion package, run:
@@ -49,18 +58,18 @@ overrides use stable task/project/source/index/packet/plan/relationship identiti
 shows this in the existing agent detail surface; unavailable metrics remain unavailable and safe
 administrative exclusions are audited without approval gates.
 
-For content-development tasks, pass only the semantic intent that cannot be derived:
+For ordinary content-development tasks, use `rimtest dev-check --json` (or provide the workspace
+path) and fix the reported build, static, runtime, infrastructure, or cleanup result.
+
+The following RimLiaison content commands are retained only for an explicitly requested
+content-intelligence or precedent workflow; they are not part of routine mod iteration:
 
 ```text
 rimliaison affected --run --content-kind ThingDef --content-role "early-game ranged weapon" --json
+rimliaison content query --content-kind ThingDef --content-role "early-game ranged weapon" --json
 ```
 
-RimLiaison automatically captures `content-blueprint/v1` before selection and
-`content-evidence/v1` after validation in the shared canonical-workspace precedent store. Source,
-Def/entity, dependency, agent/session/run, and source/tool identity fields are derived when
-available; unknown values remain `null`. Query reusable references with
-`rimliaison content query --content-kind ThingDef --content-role "early-game ranged weapon" --json`.
-Creative novelty is not scored; reuse is ordered `RimContent -> precedent -> vanilla/reference -> novel`.
+Those commands retain their existing `content-blueprint/v1` and `content-evidence/v1` semantics.
 
 Ownership:
 
@@ -114,9 +123,9 @@ PASS proofs by content fingerprint; use `-NoProofReuse` for a diagnostic bypass.
 escalates unknown paths, wrappers, shared build configuration, renames, deletions, and
 status/parser uncertainty to complete deterministic plus cross-stack validation. See
 [docs/ci-validation.md](docs/ci-validation.md) and [docs/validation-proofs.md](docs/validation-proofs.md)
-for the selector and proof contracts. The canonical `rimliaison affected --run --json` workflow
-above remains the normal agent-facing validation for target RimWorld projects, and its live
-artifact-freshness evidence is never replaced by an offline proof.
+For target mod projects, the normal development validation is `rimtest dev-check --json`; it provides
+the isolated runtime proof and does not replace explicitly required release or qualification
+workflows. The tooling-repository CI selector above remains authoritative for changes to RimTest.
 
 Workspace layout:
 

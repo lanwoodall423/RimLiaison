@@ -266,6 +266,40 @@ public sealed class RimTestSelectionResult
             ImpactAnalysis = analysis,
             ValidationPlan = validationPlan
         };
+    public RimTestSelectionResult WithFailure(
+        string errorCode,
+        string reason,
+        string? nextAction = null) =>
+        new()
+        {
+            SchemaVersion = SchemaVersion,
+            Status = "blocked",
+            Tests = Tests,
+            ReasonCount = ReasonCount + 1,
+            ErrorCode = errorCode,
+            NextAction = nextAction,
+            RecoveryState = RecoveryState,
+            RecoveryAttempts = RecoveryAttempts,
+            RecoveryAction = RecoveryAction,
+            FallbackSuite = FallbackSuite,
+            Reasons = (Reasons ?? [])
+                .Append(new RimTestSelectionReason
+                {
+                    Tier = "content",
+                    Kind = "validation",
+                    Id = errorCode,
+                    Reason = reason,
+                    Confidence = "high",
+                    Tests = Tests
+                })
+                .ToArray(),
+            ReasonsTruncated = ReasonsTruncated,
+            ExecutionPacket = ExecutionPacket,
+            ImpactPrediction = ImpactPrediction,
+            ImpactAnalysis = ImpactAnalysis,
+            ValidationPlan = ValidationPlan
+        };
+
 
     public RimTestSelectionResult WithTests(
         IReadOnlyList<string> tests,

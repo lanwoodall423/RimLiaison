@@ -31,6 +31,7 @@ internal enum CliCommand
     Qualification,
     ToolchainPromotion,
     Content,
+    DevCheck,
     RimDev
 }
 
@@ -472,6 +473,10 @@ internal static class CliParser
             case "context" when positionals.Count == 1:
                 command = CliCommand.Context;
                 break;
+            case "dev-check" when positionals.Count is 1 or 2:
+                command = CliCommand.DevCheck;
+                id = positionals.Count == 2 ? positionals[1] : null;
+                break;
             case "content" when positionals.Count == 1:
                 command = CliCommand.Content;
                 break;
@@ -559,13 +564,12 @@ internal static class CliParser
             case "self-check":
             case "context":
             case "publish":
-            case "benchmarks":
-            case "rimdev":
-            case "capabilities":
+            case "content":
+            case "dev-check":
+                throw new CliParseException("The command arguments are invalid.");
             case "ui":
             case "init":
             case "qualification":
-            case "content":
                 throw new CliParseException("The command arguments are invalid.");
             default:
                 throw new CliParseException($"Unknown command: {positionals[0]}.");
@@ -872,6 +876,7 @@ internal static class CliParser
                 "ui screenshot",
                 "doctor",
                 "context",
+                "dev-check [<workspace>]",
                 "content query [<selector>]",
                 "publish check",
                 "qualification [burn-in]",

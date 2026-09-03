@@ -1,33 +1,26 @@
 # RimLiaison
 
-RimLiaison is the canonical agent-facing RimWorld development toolchain. The active edit loop is:
+For ordinary iterative XML or C# RimWorld mod development, the default agent validation path is:
 
 ```text
 edit
-→ rimliaison affected --run --fail-fast --json
-→ fix immediately on failure
+→ rimtest dev-check --json
+→ fix BUILD/STATIC/RUNTIME mod defects
 → repeat
 ```
 
-Once stable, run `rimliaison affected --run --json` for complete pre-submit validation. Fail-fast
-only shortens a failure path; a fail-fast PASS still means every selected test executed.
+Use `rimtest dev-check <workspace> --json` when the workspace cannot be inferred. A
+`RUNTIME_LOAD_PASS` proves the target package/content through the isolated runtime path; it does
+not prove gameplay behavior that was not exercised. `INFRASTRUCTURE_FAIL` and `CLEANUP_FAIL` are
+tooling/environment health results, not healthy mod validation.
 
-Use `rimliaison doctor --json` as the bounded onboarding/recovery entrypoint when readiness is
-unknown, and follow its `nextAction`. `rimliaison init`, `capabilities`, `ui`, `affected`, and the
-catalog/recipe commands retain their existing names and semantics. `rimtest.cmd` remains a thin,
-silent compatibility alias for old automation; it forwards every argument to `rimliaison.cmd`.
+RimLiaison and DevBridge2 are not required for this ordinary inner loop. RimLiaison remains
+available for explicitly documented release, qualification, promotion, and other workflows that
+genuinely require heavier orchestration. `rimtest.cmd` remains a thin compatibility alias and
+forwards the command to the installed CLI.
 
-Use `rimliaison context --json` for a read-only, versioned cross-stack snapshot. It reports
-topology, Git state, environment, testing, deployment/runtime evidence, recent execution, failures,
-efficiency, and explicit selection decisions without launching RimWorld or writing generated state
-into the repository. The direct `rimctx context --json` command is available for static-context
-debugging. See [docs/context-bundle.md](docs/context-bundle.md) for the `rimctx-bundle/v1` contract.
-
-Use `rimliaison publish check --json` to query whether a Git publication can reuse matching
-validation evidence; it does not rerun tests or perform publication. Use `rimliaison benchmarks
---json` for the deterministic A–H golden workflow baseline. See
-[docs/validation-provenance.md](docs/validation-provenance.md) for evidence identity, decision
-codes, and reviewed failure knowledge.
+Use `rimliaison doctor --json` for explicit RimLiaison workflow diagnosis. The existing
+`rimliaison`, `rimctx`, and `rimerror` commands retain their names and semantics.
 
 For routine human multi-repository Git/build/test/deploy/push work, use the guarded `rimdev`
 workflow. See [docs/rimdev.md](docs/rimdev.md) for workspace discovery, command semantics, safety

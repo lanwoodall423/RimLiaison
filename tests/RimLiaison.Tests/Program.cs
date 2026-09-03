@@ -150,6 +150,12 @@ internal static class Program
         ("published self-check works in read-only directory", CliDeploymentTests.PublishedSelfCheckWorksInReadOnlyDirectory),
         ("child process start failure retains evidence", CliDeploymentTests.ChildProcessStartFailureRetainsBoundedEvidence),
         ("child process environment overrides are applied", CliDeploymentTests.ChildProcessEnvironmentOverridesAreApplied),
+        ("dev-check parses optional workspace", DevCheckTests.ParsesOptionalWorkspace),
+        ("dev-check missing About fails closed", DevCheckTests.MissingAboutFailsClosed),
+        ("dev-check selects referenced production projects", DevCheckTests.SelectsReferencedProductionProjects),
+        ("dev-check production build failure identifies owner", DevCheckTests.ProductionProjectBuildFailureIdentifiesOwner),
+        ("dev-check excludes support project assemblies", DevCheckTests.SupportProjectsAreNotProductionAssemblies),
+        ("dev-check ambiguous projects fail closed", DevCheckTests.AmbiguousProductionProjectsFailClosed),
 
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),
@@ -498,6 +504,7 @@ internal static class Program
         ("doctor missing fallback provides a handoff", DoctorMissingFallbackProvidesHandoff),
         ("doctor missing catalog provides a handoff", DoctorMissingCatalogProvidesHandoff),
         ("doctor invalid catalog provides a handoff", DoctorInvalidCatalogProvidesHandoff),
+        ("ThingDef smoke does not prove changed content", ThingDefSmokeDoesNotProveChangedContent),
         ("affected discovers Git changes without paths", AffectedDiscoversGitChangesWithoutPaths),
         ("clean affected run is explicit and does not launch", CleanAffectedRunIsExplicitAndDoesNotLaunch),
         ("affected source run performs freshness transaction", AffectedSourceRunPerformsFreshnessTransaction),
@@ -8129,6 +8136,103 @@ internal static class Program
             "rimliaison validate --json --catalog catalog.json",
             document.RootElement.GetProperty("nextAction").GetString());
     }
+    private static void ThingDefSmokeDoesNotProveChangedContent()
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directory, "Defs"));
+            File.WriteAllText(
+                Path.Combine(directory, "Defs", "EarlyRifle.xml"),
+                "<Defs><ThingDef><defName>EarlyRifle</defName></ThingDef></Defs>");
+            string catalogPath = Path.Combine(directory, "catalog.json");
+            CatalogDocument catalog = new()
+            {
+                SchemaVersion = CatalogSchema.Current,
+                Tests =
+                [
+                    new CatalogTest
+                    {
+                        Id = "quicktest-smoke",
+                        Recipe = "quicktest-smoke",
+                        Tags = ["smoke", "quicktest"]
+                    }
+                ],
+                Suites =
+                [
+                    new CatalogSuite { Id = "smoke", Tests = ["quicktest-smoke"] }
+                ]
+            };
+            File.WriteAllText(catalogPath, Serialize(catalog));
+
+            var recipeAdapter = new FakeRecipeAdapter();
+            var impactAdapter = new FakeImpactAdapter(SuccessfulImpact(
+                new RimContextImpact(
+                    "direct",
+                    "def",
+                    "def-early-rifle",
+                    "EarlyRifle",
+                    "Defs/EarlyRifle.xml",
+                    1,
+                    "changed ThingDef",
+                    "high")));
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            string[] arguments =
+            [
+                "affected",
+                "Defs/EarlyRifle.xml",
+                "--run",
+                "--content-kind",
+                "ThingDef",
+                "--content-role",
+                "early-game ranged weapon",
+                "--json",
+                "--devbridge-project",
+                "fixture",
+                "--fallback-suite",
+                "smoke",
+                "--catalog",
+                catalogPath
+            ];
+
+            int exitCode = WithCurrentDirectory(
+                directory,
+                () => CliApplication.RunAsync(
+                        arguments,
+                        stdout,
+                        stderr,
+                        recipeAdapter,
+                        impactAdapter: impactAdapter)
+                    .GetAwaiter()
+                    .GetResult());
+
+            using JsonDocument document = JsonDocument.Parse(stdout.ToString());
+            JsonElement root = document.RootElement;
+            AssertEqual(CliExitCodes.InternalError, exitCode);
+            AssertEqual("infrastructure", root.GetProperty("status").GetString());
+            AssertEqual(
+                ContentValidationCoveragePolicy.InsufficientCode,
+                root.GetProperty("selectionErrorCode").GetString());
+            AssertEqual(
+                ContentValidationCoveragePolicy.InsufficientCode,
+                root.GetProperty("validationDiagnosis").GetProperty("code").GetString());
+            Assert(root.GetProperty("validationDiagnosis")
+                    .GetProperty("ownershipReason")
+                    .GetString()!
+                    .Contains("quicktest-smoke establishes toolchain readiness only",
+                        StringComparison.Ordinal),
+                "the blocked result must explain why the smoke recipe is insufficient");
+            AssertEqual(0, recipeAdapter.RunCalls.Count);
+            Assert(string.IsNullOrEmpty(stderr.ToString()),
+                "content coverage blocking should remain a structured result");
+        }
+        finally
+        {
+            DeleteDirectoryIncludingReadOnlyFiles(directory);
+        }
+    }
+
 
     private static void AffectedDiscoversGitChangesWithoutPaths()
     {

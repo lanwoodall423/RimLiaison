@@ -189,6 +189,16 @@ public static class RimTestValidationChainDiagnoser
             readiness = "not_reached";
             lease = "not_acquired";
         }
+        else if (string.Equals(code, "VALIDATION_COVERAGE_INSUFFICIENT", StringComparison.Ordinal))
+        {
+            result = "NOT_PROVEN";
+            boundary = "source";
+            owner = "RimLiaison/RimContext content validation";
+            confidence = "high";
+            reason = "quicktest-smoke establishes toolchain readiness only; no selected validation proves the changed ThingDef XML content.";
+            readiness = "not_reached";
+            lease = "not_acquired";
+        }
         else if (selectionFailure)
         {
             result = "INFRASTRUCTURE_BLOCKED";
