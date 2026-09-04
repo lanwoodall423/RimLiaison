@@ -531,6 +531,17 @@ public sealed class ManagedReadyToTestCandidateConsumer
         {
             RuntimeStatusEvidence status = await ReadStatusAsync(runtimeTransport, cancellationToken)
                 .ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(status.LeaseId))
+                return RimBridgeRequirementResult.Failed(
+                    "RIMBRIDGE_MODE_TRANSITION_BUSY",
+                    "The existing DevBridge coordinator has an active lease; required RimBridge mode was not forced.");
+            if (string.Equals(status.State, "STOPPED", StringComparison.OrdinalIgnoreCase))
+            {
+                // STOPPED is the normal lazy-launch boundary. A PROCESS_EXITED
+                // error may remain as durable evidence after the owned process
+                // has disappeared; the managed transaction owns the next launch.
+                return RimBridgeRequirementResult.Success();
+            }
             if (!string.IsNullOrWhiteSpace(status.Error))
                 return RimBridgeRequirementResult.Failed("RIMBRIDGE_MODE_STATUS_FAILED", status.Error);
             if (string.IsNullOrWhiteSpace(status.RimBridgeMode))
@@ -539,10 +550,6 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     "The coordinator status did not report an effective RimBridge mode.");
             if (string.Equals(status.RimBridgeMode, "required", StringComparison.OrdinalIgnoreCase))
                 return RimBridgeRequirementResult.Success();
-            if (!string.IsNullOrWhiteSpace(status.LeaseId))
-                return RimBridgeRequirementResult.Failed(
-                    "RIMBRIDGE_MODE_TRANSITION_BUSY",
-                    "The existing DevBridge coordinator has an active lease; required RimBridge mode was not forced.");
             DevBridgeProcessResult shutdown = await runtimeTransport.ExecuteAsync(
                     new DevBridgeProcessRequest(
                         options.BridgeOptions.CommandPath,
@@ -587,7 +594,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.ExitCode is not 0 || string.IsNullOrWhiteSpace(result.Stdout))
-            return new RuntimeStatusEvidence(null, [], result.StartError ?? result.Stderr, null, null, null, null, null);
+            return new RuntimeStatusEvidence(null, [], result.StartError ?? result.Stderr, null, null, null, null, null, null, null);
         using JsonDocument document = JsonDocument.Parse(result.Stdout);
         JsonElement root = document.RootElement;
         JsonElement rimBridge = Property(root, "rimBridge");
@@ -599,7 +606,9 @@ public sealed class ManagedReadyToTestCandidateConsumer
             StringValue(root, "leaseId"),
             StringValue(rimBridge, "packageId"),
             StringValue(rimBridge, "version"),
-            StringValue(rimBridge, "lifecycleState"));
+            StringValue(rimBridge, "lifecycleState"),
+            StringValue(root, "state"),
+            StringValue(root, "errorCode"));
     }
 
     private static bool IsTargetConfigured(
@@ -714,7 +723,6 @@ public sealed class ManagedReadyToTestCandidateConsumer
             return inner.ExecuteAsync(request with { EnvironmentVariables = environment }, cancellationToken);
         }
     }
-
     private sealed record RuntimeStatusEvidence(
         string? ProfileFingerprint,
         IReadOnlyList<string> ResolvedMods,
@@ -723,5 +731,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         string? LeaseId,
         string? RimBridgePackageId,
         string? RimBridgeVersion,
-        string? RimBridgeLifecycleState);
+        string? RimBridgeLifecycleState,
+        string? State,
+        string? ErrorCode);
 }
