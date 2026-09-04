@@ -311,6 +311,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         {
             evidence = await ReadGenericLoadEvidenceCoreAsync(
                     runtimeTransport,
+                    lease.LeaseId!,
                     expectedAssembly,
                     packageId,
                     expectedGeneration,
@@ -334,6 +335,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
 
     private async Task<GenericCandidateLoadEvidence> ReadGenericLoadEvidenceCoreAsync(
         RequiredRimBridgeProcessTransport runtimeTransport,
+        string leaseId,
         string? expectedAssembly,
         string packageId,
         int? expectedGeneration,
@@ -344,7 +346,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     options.BridgeOptions.CommandPath,
                     options.BridgeOptions.RootPath,
                     ["--root", options.BridgeOptions.RootPath, "bridge", "call",
-                        "rimworld/list_mods", "{}", "--json"],
+                        "rimworld/list_mods", "{}", "--lease", leaseId, "--json"],
                     options.Timeout,
                     options.MaxStdoutBytes,
                     options.MaxStderrBytes,
