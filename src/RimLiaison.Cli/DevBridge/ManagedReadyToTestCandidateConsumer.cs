@@ -535,14 +535,19 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 return RimBridgeRequirementResult.Failed(
                     "RIMBRIDGE_MODE_TRANSITION_BUSY",
                     "The existing DevBridge coordinator has an active lease; required RimBridge mode was not forced.");
-            if (string.Equals(status.State, "STOPPED", StringComparison.OrdinalIgnoreCase))
+            bool stopped = string.Equals(status.State, "STOPPED", StringComparison.OrdinalIgnoreCase);
+            bool staleStopped = stopped &&
+                string.Equals(status.ErrorCode, "PROCESS_EXITED", StringComparison.OrdinalIgnoreCase);
+            if (stopped &&
+                (string.IsNullOrWhiteSpace(status.RimBridgeMode) ||
+                 string.Equals(status.RimBridgeMode, "required", StringComparison.OrdinalIgnoreCase)))
             {
                 // STOPPED is the normal lazy-launch boundary. A PROCESS_EXITED
                 // error may remain as durable evidence after the owned process
                 // has disappeared; the managed transaction owns the next launch.
                 return RimBridgeRequirementResult.Success();
             }
-            if (!string.IsNullOrWhiteSpace(status.Error))
+            if (!string.IsNullOrWhiteSpace(status.Error) && !staleStopped)
                 return RimBridgeRequirementResult.Failed("RIMBRIDGE_MODE_STATUS_FAILED", status.Error);
             if (string.IsNullOrWhiteSpace(status.RimBridgeMode))
                 return RimBridgeRequirementResult.Failed(

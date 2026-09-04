@@ -191,11 +191,12 @@ internal static class ManagedReadyToTestCandidateTests
 
     public static void StoppedCandidateStartsRequiredManagedRuntime()
     {
-        using Fixture fixture = new() { InitialRuntimeStopped = true };
+        using Fixture fixture = new() { InitialRuntimeStopped = true, InitialRimBridgeMode = "off" };
         string manifestPath = fixture.CreateCandidate();
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
         Assert(result.Success && result.RimBridgeMode == "required" &&
+            fixture.CoordinatorShutdownCalls == 1 &&
             transport.Requests.Any(request => request.Arguments.Contains("begin")) &&
             transport.Requests.All(request =>
                 request.EnvironmentVariables is not null &&
@@ -206,14 +207,21 @@ internal static class ManagedReadyToTestCandidateTests
 
     public static void StaleOwnedPidReconcilesBeforeCandidate()
     {
-        using Fixture fixture = new() { InitialRuntimeStopped = true, StaleOwnedPid = true };
+        using Fixture fixture = new()
+        {
+            InitialRuntimeStopped = true,
+            InitialRimBridgeMode = "off",
+            StaleOwnedPid = true
+        };
         string manifestPath = fixture.CreateCandidate();
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
         Assert(result.Success && result.ErrorCode is null &&
+            fixture.CoordinatorShutdownCalls == 1 &&
             transport.Requests.Any(request => request.Arguments.Contains("begin")),
             "stale owned-process state was not reconciled to the stopped launch boundary");
     }
+
 
     public static void UnmanagedRimWorldStillFailsClosed()
     {
@@ -415,7 +423,7 @@ internal static class ManagedReadyToTestCandidateTests
                         string stale = StaleOwnedPid
                             ? "\"errorCode\":\"PROCESS_EXITED\",\"error\":\"The coordinator-owned RimWorld process is no longer running.\""
                             : "\"errorCode\":null,\"error\":null";
-                        return Result($"{{\"success\":true,\"state\":\"STOPPED\",{stale},\"generation\":2,\"profileFingerprint\":null,\"resolvedMods\":[],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":null,\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"STALE\"}}}}");
+                        return Result($"{{\"success\":true,\"state\":\"STOPPED\",{stale},\"generation\":2,\"profileFingerprint\":null,\"resolvedMods\":[],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"STALE\"}}}}");
                     }
                     return Result($"{{\"success\":true,\"state\":\"READY\",\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
                 }
