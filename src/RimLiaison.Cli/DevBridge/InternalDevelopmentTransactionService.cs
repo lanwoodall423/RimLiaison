@@ -358,8 +358,11 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             try
             {
                 JsonElement? previous = ReadJson(manifestPath);
-                EnsureOwnership(targetRoot, package, previous);
+                EnsureOwnership(targetRoot, previous);
                 changed = NeedsDeployment(targetRoot, package, previous, packageHash);
+                bool candidateBootstrap = verifiedCandidate is not null &&
+                    changed &&
+                    !File.Exists(Path.Combine(targetRoot, "About", "About.xml"));
 
                 DevBridgeLeaseAdapter leaseAdapter = new(transport, ToBridgeOptions());
                 DevBridgeLeaseResult lease = string.IsNullOrWhiteSpace(executionContext?.LeaseId)
@@ -374,12 +377,15 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 leaseId = lease.LeaseId;
                 string activeLeaseId = lease.LeaseId!;
 
-                DevBridgeProcessResult register = await InvokeAsync(["project", "register", project, "--id", "rimliaison-" + transactionId, "--json"], options.Timeout, workflowId, cancellationToken).ConfigureAwait(false);
-                if (!TrySuccess(register, out _, out DevBridgeAdapterStatus? registerFailure))
+                if (!candidateBootstrap)
                 {
-                    return Failure(project, workflowId, transactionId, registerFailure!.ErrorCode ?? "DEVBRIDGE_PROJECT_REGISTER_FAILED", registerFailure.Error ?? "DevBridge project registration failed.", registerFailure.Outcome, leaseId: leaseId, generation: generationBefore);
+                    DevBridgeProcessResult register = await InvokeAsync(["project", "register", project, "--id", "rimliaison-" + transactionId, "--json"], options.Timeout, workflowId, cancellationToken).ConfigureAwait(false);
+                    if (!TrySuccess(register, out _, out DevBridgeAdapterStatus? registerFailure))
+                    {
+                        return Failure(project, workflowId, transactionId, registerFailure!.ErrorCode ?? "DEVBRIDGE_PROJECT_REGISTER_FAILED", registerFailure.Error ?? "DevBridge project registration failed.", registerFailure.Outcome, leaseId: leaseId, generation: generationBefore);
+                    }
+                    registered = true;
                 }
-                registered = true;
 
                 int generationAfter = generationBefore ?? 0;
                 if (changed)
@@ -401,6 +407,16 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         {
                             return Failure(project, workflowId, transactionId, "DEVELOPMENT_DEPLOYMENT_HASH_MISMATCH", "The deployed package did not match staged content.", leaseId: leaseId, generation: generationBefore);
                         }
+                    }
+                    RemoveStaleOwnedFiles(targetRoot, package, previous);
+                    if (!registered)
+                    {
+                        DevBridgeProcessResult register = await InvokeAsync(["project", "register", project, "--id", "rimliaison-" + transactionId, "--json"], options.Timeout, workflowId, cancellationToken).ConfigureAwait(false);
+                        if (!TrySuccess(register, out _, out DevBridgeAdapterStatus? registerFailure))
+                        {
+                            return Failure(project, workflowId, transactionId, registerFailure!.ErrorCode ?? "DEVBRIDGE_PROJECT_REGISTER_FAILED", registerFailure.Error ?? "DevBridge project registration failed.", registerFailure.Outcome, leaseId: leaseId, generation: generationBefore);
+                        }
+                        registered = true;
                     }
 
                     await RequireCoordinatorSuccess(["test", "renew", activeLeaseId, "--json"], "DEVBRIDGE_LEASE_RENEW_FAILED", workflowId, cancellationToken).ConfigureAwait(false);
@@ -605,37 +621,55 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         "^" + Regex.Escape(pattern.Replace('\\', '/')).Replace(@"\*\*", ".*").Replace(@"\*", "[^/]*").Replace(@"\?", "[^/]") + "$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    private static string ComputePackageHash(IEnumerable<PackageEntry> entries) =>
-        HashText(string.Join('\n', entries.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).Select(entry => NormalizeRelative(entry.TargetPath) + '\0' + entry.Sha256)));
+    internal static string ComputePackageHash(IEnumerable<PackageEntry> entries) =>
+        HashText(string.Join('\n', entries.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).Select(entry => NormalizeRelative(entry.TargetPath) + '\0' + entry.Sha256 + '\0' + entry.Size)));
 
     private static string DeploymentManifestPath(string coordinatorRoot, string project, string targetRoot) =>
         Path.Combine(coordinatorRoot, "Runtime", "deployment-manifests", project + "-" + HashText(targetRoot.ToLowerInvariant())[..24] + ".json");
 
-    private static bool NeedsDeployment(string targetRoot, IReadOnlyList<PackageEntry> package, JsonElement? previous, string packageHash)
+    internal static bool NeedsDeployment(string targetRoot, IReadOnlyList<PackageEntry> package, JsonElement? previous, string packageHash)
     {
         if (previous is not JsonElement prior || GetString(prior, "packageSha256") != packageHash) return true;
+        HashSet<string> expected = package.Select(entry => NormalizeRelative(entry.TargetPath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (JsonElement entry in prior.GetProperty("files").EnumerateArray())
         {
-            string path = GetString(entry, "path") ?? string.Empty;
+            string path = NormalizeRelative(GetString(entry, "path") ?? string.Empty);
+            if (!expected.Contains(path)) return true;
             string sha = GetString(entry, "sha256") ?? string.Empty;
             if (!string.Equals(HashFile(SafeCombine(targetRoot, path)), sha, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return package.Any(entry => !string.Equals(HashFile(SafeCombine(targetRoot, entry.TargetPath)), entry.Sha256, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static void EnsureOwnership(string targetRoot, IReadOnlyList<PackageEntry> package, JsonElement? previous)
+    private static void EnsureOwnership(string targetRoot, JsonElement? previous)
     {
         if (previous is not JsonElement prior || !prior.TryGetProperty("files", out JsonElement files)) return;
-        HashSet<string> expected = package.Select(entry => NormalizeRelative(entry.TargetPath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (JsonElement entry in files.EnumerateArray())
         {
-            string path = GetString(entry, "path") ?? string.Empty;
+            string path = NormalizeRelative(GetString(entry, "path") ?? string.Empty);
             string? actual = HashFile(SafeCombine(targetRoot, path));
             if (actual is not null &&
                 !string.Equals(actual, GetString(entry, "sha256"), StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException("DEVBRIDGE_DEPLOYMENT_OWNERSHIP_AMBIGUOUS: managed deployment content changed outside the transaction.");
             }
+        }
+    }
+
+    internal static void RemoveStaleOwnedFiles(
+        string targetRoot,
+        IReadOnlyList<PackageEntry> package,
+        JsonElement? previous)
+    {
+        if (previous is not JsonElement prior || !prior.TryGetProperty("files", out JsonElement files)) return;
+        HashSet<string> expected = package.Select(entry => NormalizeRelative(entry.TargetPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (JsonElement entry in files.EnumerateArray())
+        {
+            string path = NormalizeRelative(GetString(entry, "path") ?? string.Empty);
+            if (expected.Contains(path)) continue;
+            string target = SafeCombine(targetRoot, path);
+            if (File.Exists(target)) File.Delete(target);
         }
     }
 
@@ -815,5 +849,5 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
     private static DevBridgeModDevelopmentResult Failure(string project, string? workflowId, string transactionId, string code, string? error, DevBridgeOutcomeKind outcome = DevBridgeOutcomeKind.InfrastructureFailure, DevBridgeBuildDiagnostics? build = null, string? leaseId = null, int? generation = null) =>
         new(project, new DevBridgeAdapterStatus(outcome, code, Bound(error)), false, transactionId, workflowId, generation, leaseId, null, build, []);
 
-    private sealed record PackageEntry(string SourcePath, string TargetPath, string Sha256, long Size);
+    internal sealed record PackageEntry(string SourcePath, string TargetPath, string Sha256, long Size);
 }
