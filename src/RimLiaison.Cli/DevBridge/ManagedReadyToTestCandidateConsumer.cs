@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RimLiaison.RimDev;
@@ -32,6 +33,10 @@ public sealed record ManagedReadyToTestCandidateResult
     [JsonPropertyName("candidatePackageSha256")] public string? CandidatePackageSha256 { get; init; }
     [JsonPropertyName("deployedPackageSha256")] public string? DeployedPackageSha256 { get; init; }
     [JsonPropertyName("generation")] public int? Generation { get; init; }
+    [JsonPropertyName("rimBridgeMode")] public string? RimBridgeMode { get; init; }
+    [JsonPropertyName("rimBridgePackageId")] public string? RimBridgePackageId { get; init; }
+    [JsonPropertyName("rimBridgeVersion")] public string? RimBridgeVersion { get; init; }
+    [JsonPropertyName("rimBridgeLifecycleState")] public string? RimBridgeLifecycleState { get; init; }
     [JsonPropertyName("targetConfigured")] public bool? TargetConfigured { get; init; }
     [JsonPropertyName("targetLoaded")] public bool? TargetLoaded { get; init; }
     [JsonPropertyName("defsValid")] public bool? DefsValid { get; init; }
@@ -55,6 +60,7 @@ public sealed record ManagedCandidateCleanupEvidence(
 
 public sealed class ManagedReadyToTestCandidateConsumer
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ModeGates = [];
     private readonly IDevBridgeProcessTransport transport;
     private readonly ManagedReadyToTestCandidateOptions options;
 
@@ -120,7 +126,20 @@ public sealed class ManagedReadyToTestCandidateConsumer
             {
                 return FailureFor(manifest, "DEPENDENCY_PREREQUISITE",
                     metadataCode ?? "PROJECT_METADATA_MISSING",
-                    metadataError ?? "The candidate project-owned metadata is not ready.");
+                    metadataError ?? "The candidate project metadata could not be materialized.");
+            }
+            RequiredRimBridgeProcessTransport runtimeTransport = new(transport);
+            RimBridgeRequirementResult rimBridge = await EnsureRequiredRimBridgeAsync(
+                    runtimeTransport,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!rimBridge.Succeeded)
+            {
+                return FailureFor(
+                    manifest,
+                    "DEPENDENCY_PREREQUISITE",
+                    rimBridge.ErrorCode ?? "RIMBRIDGE_REQUIRED_UNAVAILABLE",
+                    rimBridge.Error ?? "Required RimBridge routing could not be established.");
             }
 
             DevBridgeModDevelopmentAdapterOptions managedOptions = new()
@@ -136,7 +155,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 MaxStderrBytes = options.MaxStderrBytes
             };
             InternalDevelopmentTransactionService transaction =
-                new(transport, managedOptions);
+                new(runtimeTransport, managedOptions);
             DevBridgeModDevelopmentResult managed = await transaction.RunAsync(
                     manifest.CanonicalProjectId,
                     sourceRoot,
@@ -169,14 +188,14 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 RecipeFilePath = materialization!.Descriptor.ResolvedRecipePath ??
                     materialization.Descriptor.TestRecipePath
             };
-            DevBridgeRecipeAdapter recipe = new(transport, targetOptions);
+            DevBridgeRecipeAdapter recipe = new(runtimeTransport, targetOptions);
             DevBridgeRecipeRunResult target = await recipe.RunAsync(
                     materialization!.Descriptor.TestRecipe,
                     options.WorkflowId,
                     new DevBridgeRecipeExecutionContext(SourceFingerprint: manifest.SourceFingerprint),
                     cancellationToken)
                 .ConfigureAwait(false);
-            RuntimeStatusEvidence status = await ReadStatusAsync(cancellationToken).ConfigureAwait(false);
+            RuntimeStatusEvidence status = await ReadStatusAsync(runtimeTransport, cancellationToken).ConfigureAwait(false);
             bool targetConfigured = IsTargetConfigured(status, manifest,
                 materialization!.Descriptor.CanonicalProjectId ?? manifest.CanonicalProjectId);
             bool targetLoaded = target.Passed == true && target.Status.IsSuccess && target.Generation == managed.Generation;
@@ -211,6 +230,10 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         "The deployed package hash did not match the candidate package hash."),
                 CandidateId = manifest.CandidateId,
                 CanonicalProjectId = manifest.CanonicalProjectId,
+                RimBridgeMode = status.RimBridgeMode,
+                RimBridgePackageId = status.RimBridgePackageId,
+                RimBridgeVersion = status.RimBridgeVersion,
+                RimBridgeLifecycleState = status.RimBridgeLifecycleState,
                 SourceFingerprint = manifest.SourceFingerprint,
                 CandidatePackageSha256 = manifest.PackageSha256,
                 DeployedPackageSha256 = deployedHash,
@@ -246,9 +269,64 @@ public sealed class ManagedReadyToTestCandidateConsumer
         }
     }
 
-    private async Task<RuntimeStatusEvidence> ReadStatusAsync(CancellationToken cancellationToken)
+    private async Task<RimBridgeRequirementResult> EnsureRequiredRimBridgeAsync(
+        RequiredRimBridgeProcessTransport runtimeTransport,
+        CancellationToken cancellationToken)
     {
-        DevBridgeProcessResult result = await transport.ExecuteAsync(
+        string key = Path.GetFullPath(options.BridgeOptions.RootPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
+        SemaphoreSlim gate = ModeGates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            RuntimeStatusEvidence status = await ReadStatusAsync(runtimeTransport, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(status.Error))
+                return RimBridgeRequirementResult.Failed("RIMBRIDGE_MODE_STATUS_FAILED", status.Error);
+            if (string.IsNullOrWhiteSpace(status.RimBridgeMode))
+                return RimBridgeRequirementResult.Failed(
+                    "RIMBRIDGE_MODE_UNREPORTED",
+                    "The coordinator status did not report an effective RimBridge mode.");
+            if (string.Equals(status.RimBridgeMode, "required", StringComparison.OrdinalIgnoreCase))
+                return RimBridgeRequirementResult.Success();
+            if (!string.IsNullOrWhiteSpace(status.LeaseId))
+                return RimBridgeRequirementResult.Failed(
+                    "RIMBRIDGE_MODE_TRANSITION_BUSY",
+                    "The existing DevBridge coordinator has an active lease; required RimBridge mode was not forced.");
+            DevBridgeProcessResult shutdown = await runtimeTransport.ExecuteAsync(
+                    new DevBridgeProcessRequest(
+                        options.BridgeOptions.CommandPath,
+                        options.BridgeOptions.RootPath,
+                        ["--root", options.BridgeOptions.RootPath, "coordinator", "shutdown", "--json"],
+                        TimeSpan.FromSeconds(30),
+                        options.MaxStdoutBytes,
+                        options.MaxStderrBytes,
+                        OperationKey: "candidate-rimbridge-mode-transition"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (shutdown.ExitCode is not 0 || shutdown.TimedOut || shutdown.Cancelled ||
+                !string.IsNullOrWhiteSpace(shutdown.StartError))
+            {
+                return RimBridgeRequirementResult.Failed(
+                    "RIMBRIDGE_MODE_TRANSITION_FAILED",
+                    Bound(shutdown.StartError ?? shutdown.Stderr ?? "The coordinator did not accept the required-mode shutdown."));
+            }
+            // The shutdown boundary leaves durable state untouched. The next runtime
+            // request carries required mode and is the authoritative lazy restart.
+            return RimBridgeRequirementResult.Success();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<RuntimeStatusEvidence> ReadStatusAsync(
+        IDevBridgeProcessTransport runtimeTransport,
+        CancellationToken cancellationToken)
+    {
+        DevBridgeProcessResult result = await runtimeTransport.ExecuteAsync(
                 new DevBridgeProcessRequest(
                     options.BridgeOptions.CommandPath,
                     options.BridgeOptions.RootPath,
@@ -260,13 +338,19 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.ExitCode is not 0 || string.IsNullOrWhiteSpace(result.Stdout))
-            return new RuntimeStatusEvidence(null, [], result.StartError ?? result.Stderr);
+            return new RuntimeStatusEvidence(null, [], result.StartError ?? result.Stderr, null, null, null, null, null);
         using JsonDocument document = JsonDocument.Parse(result.Stdout);
         JsonElement root = document.RootElement;
+        JsonElement rimBridge = Property(root, "rimBridge");
         return new RuntimeStatusEvidence(
             StringValue(root, "profileFingerprint"),
             StringArray(root, "resolvedMods"),
-            StringValue(root, "error") ?? StringValue(root, "errorMessage"));
+            StringValue(root, "error") ?? StringValue(root, "errorMessage"),
+            StringValue(rimBridge, "configuredMode"),
+            StringValue(root, "leaseId"),
+            StringValue(rimBridge, "packageId"),
+            StringValue(rimBridge, "version"),
+            StringValue(rimBridge, "lifecycleState"));
     }
 
     private static bool IsTargetConfigured(
@@ -329,21 +413,66 @@ public sealed class ManagedReadyToTestCandidateConsumer
             ManagedRuntimeEvidence = managed
         };
 
+    private static JsonElement Property(JsonElement root, string name)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+            return default;
+        foreach (JsonProperty property in root.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                return property.Value;
+        }
+        return default;
+    }
+
     private static string? StringValue(JsonElement root, string name) =>
-        root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
+        Property(root, name).ValueKind == JsonValueKind.String
+            ? Property(root, name).GetString()
             : null;
 
     private static IReadOnlyList<string> StringArray(JsonElement root, string name) =>
-        root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Array
-            ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+        Property(root, name).ValueKind == JsonValueKind.Array
+            ? Property(root, name).EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
                 .Select(item => item.GetString()!).ToArray()
             : [];
 
     private static string Bound(string value) => value.Length <= 4096 ? value : value[..4096];
 
+    private sealed record RimBridgeRequirementResult(
+        bool Succeeded,
+        string? ErrorCode = null,
+        string? Error = null)
+    {
+        public static RimBridgeRequirementResult Success() => new(true);
+        public static RimBridgeRequirementResult Failed(string errorCode, string error) => new(false, errorCode, error);
+    }
+
+    private sealed class RequiredRimBridgeProcessTransport : IDevBridgeProcessTransport
+    {
+        private readonly IDevBridgeProcessTransport inner;
+
+        public RequiredRimBridgeProcessTransport(IDevBridgeProcessTransport inner) =>
+            this.inner = inner ?? throw new ArgumentNullException(nameof(inner));
+
+        public Task<DevBridgeProcessResult> ExecuteAsync(
+            DevBridgeProcessRequest request,
+            CancellationToken cancellationToken)
+        {
+            Dictionary<string, string> environment = request.EnvironmentVariables is null
+                ? new(StringComparer.Ordinal)
+                : new(request.EnvironmentVariables, StringComparer.Ordinal);
+            environment["DEVBRIDGE_RIMBRIDGE_MODE"] = "required";
+            return inner.ExecuteAsync(request with { EnvironmentVariables = environment }, cancellationToken);
+        }
+    }
+
     private sealed record RuntimeStatusEvidence(
         string? ProfileFingerprint,
         IReadOnlyList<string> ResolvedMods,
-        string? Error);
+        string? Error,
+        string? RimBridgeMode,
+        string? LeaseId,
+        string? RimBridgePackageId,
+        string? RimBridgeVersion,
+        string? RimBridgeLifecycleState);
 }

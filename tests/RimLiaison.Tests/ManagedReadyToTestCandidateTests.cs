@@ -121,6 +121,81 @@ internal static class ManagedReadyToTestCandidateTests
             "managed candidate execution used an external DevBridge2 authority: " +
             string.Join(" | ", transport.Requests.Select(request => request.FileName + "@" + request.WorkingDirectory)));
     }
+    public static void CandidateRequestsRequiredRimBridgeMode()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(result.Success && result.RimBridgeMode == "required" &&
+            transport.Requests.Count > 0 &&
+            transport.Requests.All(request =>
+                request.EnvironmentVariables is not null &&
+                request.EnvironmentVariables.TryGetValue("DEVBRIDGE_RIMBRIDGE_MODE", out string? mode) &&
+                mode == "required"),
+            "candidate execution did not carry the required RimBridge mode in every runtime request");
+    }
+
+    public static void AlreadyRequiredRimBridgeCoordinatorIsReused()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(result.Success && fixture.CoordinatorShutdownCalls == 0 &&
+            !transport.Requests.Any(request => request.Arguments.Contains("coordinator") &&
+                request.Arguments.Contains("shutdown")),
+            "an already-required coordinator was unnecessarily recycled");
+    }
+
+    public static void OffRimBridgeCoordinatorTransitionsWithoutStoppingRimWorld()
+    {
+        using Fixture fixture = new() { InitialRimBridgeMode = "off" };
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        int shutdown = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("coordinator") && request.Arguments.Contains("shutdown"));
+        int begin = transport.Requests.FindIndex(request => request.Arguments.Contains("begin"));
+        Assert(result.Success && fixture.CoordinatorShutdownCalls == 1 && shutdown >= 0 && begin > shutdown &&
+            !transport.Requests.Take(begin).Any(request => request.Arguments.Contains("restart")),
+            "off-mode transition did not use one safe coordinator shutdown before the lease");
+    }
+
+    public static void ActiveLeasePreventsUnsafeRimBridgeTransition()
+    {
+        using Fixture fixture = new()
+        {
+            InitialRimBridgeMode = "off",
+            ActiveLeaseId = "active-lease"
+        };
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(!result.Success && result.ErrorCode == "RIMBRIDGE_MODE_TRANSITION_BUSY" &&
+            fixture.CoordinatorShutdownCalls == 0 &&
+            !transport.Requests.Any(request => request.Arguments.Contains("begin")),
+            "an active lease was force-recycled while changing RimBridge mode");
+    }
+
+    public static void ConcurrentRequiredCandidatesShareOneCoordinatorTransition()
+    {
+        using Fixture fixture = new() { InitialRimBridgeMode = "off" };
+        string firstManifest = fixture.CreateCandidate();
+        string secondManifest = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateConsumer consumer = fixture.Consumer(transport);
+        Task.WhenAll(
+                consumer.RunAsync(firstManifest),
+                consumer.RunAsync(secondManifest))
+            .GetAwaiter().GetResult();
+        Assert(fixture.CoordinatorShutdownCalls == 1 &&
+            transport.Requests.All(request =>
+                request.EnvironmentVariables is not null &&
+                request.EnvironmentVariables.TryGetValue("DEVBRIDGE_RIMBRIDGE_MODE", out string? mode) &&
+                mode == "required"),
+            "concurrent candidates created competing coordinator mode transitions");
+    }
 
     private static void Assert(bool condition, string message)
     {
@@ -136,8 +211,10 @@ internal static class ManagedReadyToTestCandidateTests
         public string SourceFingerprint { get; } = new('a', 64);
         public ReadyToTestCandidateManifest? Manifest { get; private set; }
         public bool TargetRecipePasses { get; init; } = true;
+        public string InitialRimBridgeMode { get; init; } = "required";
+        public string? ActiveLeaseId { get; init; }
+        public int CoordinatorShutdownCalls { get; private set; }
         private int statusCalls;
-
         public Fixture()
         {
             Directory.CreateDirectory(Path.Combine(RepositoryRoot, ".rimdev", "recipes"));
@@ -200,7 +277,6 @@ internal static class ManagedReadyToTestCandidateTests
                 DeploymentRoot = ManagedModsRoot, WorkflowId = "candidate-test",
                 Timeout = TimeSpan.FromSeconds(5), MaxStdoutBytes = 65536, MaxStderrBytes = 4096
             });
-
         public InternalDevelopmentTransactionService Transaction(RecordingTransport transport) =>
             new(transport, new DevBridgeModDevelopmentAdapterOptions
             {
@@ -222,11 +298,20 @@ internal static class ManagedReadyToTestCandidateTests
             }
             if (request.Arguments.Contains("status"))
             {
-                statusCalls++;
                 string root = RepositoryRoot.Replace("\\", "\\\\");
+                string mode = CoordinatorShutdownCalls > 0 ? "required" : InitialRimBridgeMode;
+                string lease = ActiveLeaseId is null ? "null" : $"\"{ActiveLeaseId}\"";
+                if (request.OperationKey == "candidate-runtime-status")
+                    return Result($"{{\"success\":true,\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
+                statusCalls++;
                 return statusCalls == 1
-                    ? Result($"{{\"success\":true,\"generation\":1,\"rimworldRoot\":\"{root}\"}}")
-                    : Result("{\"success\":true,\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"]}");
+                    ? Result($"{{\"success\":true,\"generation\":1,\"rimworldRoot\":\"{root}\",\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}")
+                    : Result($"{{\"success\":true,\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"],\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
+            }
+            if (request.Arguments.Contains("coordinator") && request.Arguments.Contains("shutdown"))
+            {
+                CoordinatorShutdownCalls++;
+                return Result("{\"success\":true,\"exitCode\":0,\"state\":\"STOPPED\"}");
             }
             if (request.Arguments.Contains("wait-ready")) return Result("{\"success\":true,\"state\":\"READY\",\"generation\":2}");
             if (request.Arguments.Contains("stop")) return Result("{\"success\":true,\"gameState\":\"STOPPED\"}");
@@ -247,12 +332,16 @@ internal static class ManagedReadyToTestCandidateTests
     private sealed class RecordingTransport : IDevBridgeProcessTransport
     {
         private readonly Func<DevBridgeProcessRequest, CancellationToken, DevBridgeProcessResult> handler;
+        private readonly object gate = new();
         public List<DevBridgeProcessRequest> Requests { get; } = [];
         public RecordingTransport(Func<DevBridgeProcessRequest, CancellationToken, DevBridgeProcessResult> handler) => this.handler = handler;
         public Task<DevBridgeProcessResult> ExecuteAsync(DevBridgeProcessRequest request, CancellationToken cancellationToken)
         {
-            Requests.Add(request);
-            return Task.FromResult(handler(request, cancellationToken));
+            lock (gate)
+            {
+                Requests.Add(request);
+                return Task.FromResult(handler(request, cancellationToken));
+            }
         }
     }
 }
