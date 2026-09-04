@@ -81,7 +81,14 @@ public sealed record GenericCandidateAssemblyEvidence(
     [property: JsonPropertyName("hashMatches")] bool HashMatches,
     [property: JsonPropertyName("mvid")] string? Mvid,
     [property: JsonPropertyName("errorCode")] string? ErrorCode,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("moduleName")] string? ModuleName = null,
+    [property: JsonPropertyName("loadedMvid")] string? LoadedMvid = null,
+    [property: JsonPropertyName("expectedMvid")] string? ExpectedMvid = null,
+    [property: JsonPropertyName("mvidMatches")] bool MvidMatches = false,
+    [property: JsonPropertyName("backingFileReadable")] bool BackingFileReadable = false,
+    [property: JsonPropertyName("runtimeSha256")] string? RuntimeSha256 = null,
+    [property: JsonPropertyName("verificationMethod")] string VerificationMethod = "none");
 
 public sealed record GenericCandidateLoadEvidence(
     [property: JsonPropertyName("targetLoaded")] bool TargetLoaded,
@@ -171,6 +178,25 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     metadataCode ?? "PROJECT_METADATA_MISSING",
                     metadataError ?? "The candidate project metadata could not be materialized.");
             }
+            string? expectedAssembly = materialization.Descriptor.ExpectedAssembly;
+            ReadyToTestCandidatePackageEntry? assemblyEntry = !string.IsNullOrWhiteSpace(expectedAssembly)
+                ? verified.Package.FirstOrDefault(entry =>
+                    string.Equals(entry.TargetPath, materialization.Descriptor.DeploymentTarget,
+                        StringComparison.OrdinalIgnoreCase))
+                : null;
+            string? expectedAssemblyHash = assemblyEntry?.Sha256;
+            string? expectedMvid = null;
+            if (!string.IsNullOrWhiteSpace(expectedAssembly))
+            {
+                if (assemblyEntry is null ||
+                    !AssemblyMetadataIdentity.TryReadModuleMvid(assemblyEntry.SourcePath, out expectedMvid))
+                {
+                    return FailureFor(manifest, "CANDIDATE_INPUT_FAILURE",
+                        "TARGET_ASSEMBLY_MVID_UNAVAILABLE",
+                        "The exact SHA-verified candidate assembly did not expose readable PE metadata for its module MVID.");
+                }
+            }
+
             RequiredRimBridgeProcessTransport runtimeTransport = new(transport);
             RimBridgeRequirementResult rimBridge = await EnsureRequiredRimBridgeAsync(
                     runtimeTransport,
@@ -215,28 +241,11 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 RuntimeRestored: managed.Status.IsSuccess,
                 Outcome: managed.Status.IsSuccess ? "released" : "bounded-failure",
                 ErrorCode: managed.Status.IsSuccess ? null : managed.Status.ErrorCode);
-            if (managed.Status.Outcome != DevBridgeOutcomeKind.Success || managed.Success != true)
-            {
-                return FailureFor(
-                    manifest,
-                    ClassifyManagedFailure(managed.Status.ErrorCode, managed.Status.Outcome),
-                    managed.Status.ErrorCode ?? "MANAGED_CANDIDATE_RUNTIME_FAILED",
-                    managed.Status.Error ?? "The managed candidate runtime transaction failed.",
-                    managed,
-                    cleanup);
-            }
-
-            ReadyToTestCandidatePackageEntry? assemblyEntry = verified.Package.FirstOrDefault(
-                entry => string.Equals(entry.TargetPath, materialization!.Descriptor.DeploymentTarget,
-                    StringComparison.OrdinalIgnoreCase));
-            string? expectedAssemblyHash = !string.IsNullOrWhiteSpace(materialization.Descriptor.ExpectedAssembly) &&
-                assemblyEntry is not null
-                ? assemblyEntry.Sha256
-                : null;
             GenericCandidateLoadEvidence generic = await ReadGenericLoadEvidenceAsync(
                     runtimeTransport,
-                    materialization.Descriptor.ExpectedAssembly,
+                    expectedAssembly,
                     expectedAssemblyHash,
+                    expectedMvid,
                     manifest.PackageId ?? manifest.CanonicalProjectId,
                     managed.Generation,
                     cancellationToken)
@@ -262,8 +271,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
             bool defsValid = targetLoaded && generic.DefsValid && targetErrors.Count == 0;
             bool dependenciesReady = DependenciesPresent(status, manifest.RequiredRuntimeDependencies);
             bool assemblyProof = expectedAssemblyHash is null ||
-                string.Equals(generic.AssemblyLoadState, "loaded-and-matched",
-                    StringComparison.OrdinalIgnoreCase);
+                generic.AssemblyLoadState is "loaded-and-hash-matched" or "loaded-and-mvid-matched";
             bool success = hashMatches && targetConfigured && targetLoaded && defsValid &&
                 dependenciesReady && assemblyProof;
             string outcome = success
@@ -331,6 +339,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         RequiredRimBridgeProcessTransport runtimeTransport,
         string? expectedAssembly,
         string? expectedAssemblyHash,
+        string? expectedMvid,
         string packageId,
         int? expectedGeneration,
         CancellationToken cancellationToken)
@@ -356,6 +365,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     lease.LeaseId!,
                     expectedAssembly,
                     expectedAssemblyHash,
+                    expectedMvid,
                     packageId,
                     expectedGeneration,
                     cancellationToken)
@@ -381,6 +391,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         string leaseId,
         string? expectedAssembly,
         string? expectedAssemblyHash,
+        string? expectedMvid,
         string packageId,
         int? expectedGeneration,
         CancellationToken cancellationToken)
@@ -467,6 +478,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         leaseId,
                         expectedAssembly!,
                         expectedAssemblyHash,
+                        expectedMvid,
                         cancellationToken)
                     .ConfigureAwait(false);
                 assemblyLoadState = AssemblyLoadState(assemblyEvidence);
@@ -524,6 +536,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         string leaseId,
         string expectedAssembly,
         string expectedAssemblyHash,
+        string? expectedMvid,
         CancellationToken cancellationToken)
     {
         GenericCandidateAssemblyEvidence failure(string code, string message) =>
@@ -539,7 +552,8 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         JsonSerializer.Serialize(new
                         {
                             assemblyName = expectedAssembly,
-                            expectedSha256 = expectedAssemblyHash
+                            expectedSha256 = expectedAssemblyHash,
+                            expectedMvid
                         }),
                         "--lease", leaseId, "--json"],
                     options.Timeout,
@@ -590,23 +604,35 @@ public sealed class ManagedReadyToTestCandidateConsumer
             bool loaded = TryGetBoolean(result, "loaded", out bool loadedValue) && loadedValue;
             bool uniqueMatch = TryGetBoolean(result, "uniqueMatch", out bool uniqueValue) && uniqueValue;
             string? reportedExpectedHash = StringValue(result, "expectedSha256");
-            string? sha256 = StringValue(result, "sha256");
+            string? sha256 = StringValue(result, "runtimeSha256") ?? StringValue(result, "sha256");
+            bool backingFileReadable = TryGetBoolean(result, "backingFileReadable", out bool readableValue) &&
+                readableValue;
             bool hashMatches = TryGetBoolean(result, "hashMatches", out bool hashValue) && hashValue;
+            string? loadedMvid = StringValue(result, "loadedMvid") ?? StringValue(result, "mvid");
+            string? reportedExpectedMvid = StringValue(result, "expectedMvid");
+            bool mvidMatches = TryGetBoolean(result, "mvidMatches", out bool mvidValue) && mvidValue;
             string? errorCode = StringValue(result, "errorCode");
             string? error = StringValue(result, "error");
-            bool exact = reportedSuccess && loaded && uniqueMatch && hashMatches &&
+            bool hashProof = backingFileReadable && hashMatches &&
                 string.Equals(reportedExpectedHash, expectedAssemblyHash,
                     StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(sha256, expectedAssemblyHash,
                     StringComparison.OrdinalIgnoreCase);
+            bool mvidProof = loadedMvid is not null && mvidMatches &&
+                string.Equals(reportedExpectedMvid, expectedMvid,
+                    StringComparison.OrdinalIgnoreCase);
+            bool exact = reportedSuccess && loaded && uniqueMatch &&
+                (backingFileReadable ? hashProof && mvidProof : mvidProof);
             if (!exact && errorCode is null)
             {
                 errorCode = !loaded
                     ? "TARGET_ASSEMBLY_NOT_LOADED"
                     : !uniqueMatch
                         ? "TARGET_ASSEMBLY_AMBIGUOUS"
-                        : "TARGET_ASSEMBLY_IDENTITY_MISMATCH";
-                error ??= "The loaded target assembly did not match the candidate assembly hash.";
+                        : backingFileReadable && !hashProof || loadedMvid is not null && !mvidProof
+                            ? "TARGET_ASSEMBLY_IDENTITY_MISMATCH"
+                            : "TARGET_ASSEMBLY_EVIDENCE_UNAVAILABLE";
+                error ??= "The loaded target assembly did not match the candidate SHA-256 and module MVID identity.";
             }
             return new GenericCandidateAssemblyEvidence(
                 exact,
@@ -619,9 +645,16 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 sha256,
                 reportedExpectedHash ?? expectedAssemblyHash,
                 hashMatches,
-                StringValue(result, "mvid"),
+                loadedMvid,
                 exact ? null : errorCode,
-                exact ? null : error);
+                exact ? null : error,
+                StringValue(result, "moduleName"),
+                loadedMvid,
+                reportedExpectedMvid ?? expectedMvid,
+                mvidMatches,
+                backingFileReadable,
+                sha256,
+                StringValue(result, "verificationMethod") ?? "none");
         }
         catch (JsonException exception)
         {
@@ -632,13 +665,17 @@ public sealed class ManagedReadyToTestCandidateConsumer
 
     private static string AssemblyLoadState(GenericCandidateAssemblyEvidence evidence)
     {
-        if (evidence.Success && evidence.Loaded && evidence.UniqueMatch && evidence.HashMatches)
-            return "loaded-and-matched";
+        if (evidence.Success && evidence.Loaded && evidence.UniqueMatch)
+        {
+            return evidence.VerificationMethod == "mvid"
+                ? "loaded-and-mvid-matched"
+                : "loaded-and-hash-matched";
+        }
         return evidence.ErrorCode switch
         {
             "TARGET_ASSEMBLY_NOT_LOADED" => "not-loaded",
             "TARGET_ASSEMBLY_AMBIGUOUS" => "ambiguous",
-            "TARGET_ASSEMBLY_HASH_UNAVAILABLE" => "hash-unavailable",
+            "TARGET_ASSEMBLY_EVIDENCE_UNAVAILABLE" => "evidence-unavailable",
             "TARGET_ASSEMBLY_VERIFICATION_UNAVAILABLE" => "unavailable",
             "TARGET_ASSEMBLY_VERIFICATION_TIMEOUT" => "timeout",
             _ => evidence.Loaded && evidence.UniqueMatch ? "identity-mismatch" : "not-verified"

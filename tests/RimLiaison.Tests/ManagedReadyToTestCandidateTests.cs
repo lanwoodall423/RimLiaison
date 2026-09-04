@@ -130,11 +130,57 @@ internal static class ManagedReadyToTestCandidateTests
         ManagedReadyToTestCandidateResult result = fixture.Consumer(
                 new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
         GenericCandidateLoadEvidence evidence = (GenericCandidateLoadEvidence)result.ManagedLoadEvidence!;
-        Assert(result.Success && evidence.AssemblyLoadState == "loaded-and-matched" &&
+        Assert(result.Success && evidence.AssemblyLoadState == "loaded-and-hash-matched" &&
             evidence.AssemblyEvidence?.Success == true &&
             evidence.AssemblyEvidence.HashMatches &&
+            evidence.AssemblyEvidence.MvidMatches &&
+            evidence.AssemblyEvidence.VerificationMethod == "sha256+mvid" &&
             result.TargetAssemblyLoadState == evidence.AssemblyLoadState,
-            "exact assembly-load evidence was not retained");
+            "exact assembly-load hash and MVID evidence was not retained");
+    }
+    public static void GenericAssemblyEvidenceUsesMvidFallback()
+    {
+        using Fixture fixture = new() { GenericAssemblyBackingFileReadable = false };
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport)
+            .RunAsync(manifestPath).GetAwaiter().GetResult();
+        GenericCandidateAssemblyEvidence evidence = result.AssemblyEvidence!;
+        Assert(result.Success && result.TargetAssemblyLoadState == "loaded-and-mvid-matched" &&
+            evidence.BackingFileReadable == false &&
+            evidence.HashMatches == false &&
+            evidence.MvidMatches &&
+            evidence.VerificationMethod == "mvid",
+            "locationless loaded assembly fallback did not use the verified-file MVID");
+    }
+
+    public static void ExpectedMvidComesFromVerifiedCandidateFile()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        string expectedMvid = fixture.ExpectedCandidateMvid();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport)
+            .RunAsync(manifestPath).GetAwaiter().GetResult();
+        DevBridgeProcessRequest request = transport.Requests.Single(request =>
+            request.Arguments.Contains("devbridge/verify_loaded_assembly"));
+        Assert(result.Success &&
+            request.Arguments.Any(argument => argument.Contains("\"expectedMvid\":\"" + expectedMvid + "\"",
+                StringComparison.Ordinal)) &&
+            result.AssemblyEvidence?.ExpectedMvid == expectedMvid,
+            "expected MVID was not extracted from the exact SHA-verified staged assembly");
+    }
+
+    public static void WrongLoadedMvidPreventsCandidatePass()
+    {
+        using Fixture fixture = new() { GenericAssemblyMvidMismatch = true };
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(fixture.CreateCandidate())
+            .GetAwaiter().GetResult();
+        Assert(!result.Success &&
+            result.ErrorCode == "TARGET_ASSEMBLY_IDENTITY_MISMATCH" &&
+            result.TargetAssemblyLoadState == "identity-mismatch",
+            "a loaded assembly with a wrong MVID was accepted");
     }
 
     public static void AssemblyVerifierRunsOnlyAfterGenericTargetProof()
@@ -405,9 +451,11 @@ internal static class ManagedReadyToTestCandidateTests
         public bool GenericEnabled { get; init; } = true;
         public bool GenericLoadedInSession { get; init; } = true;
         public bool GenericMatchesLoadedSession { get; init; } = true;
+        public string InitialRimBridgeMode { get; init; } = "required";
         public bool GenericAssemblyVerification { get; init; } = true;
         public bool GenericAssemblyVerificationMismatch { get; init; }
-        public string InitialRimBridgeMode { get; init; } = "required";
+        public bool GenericAssemblyMvidMismatch { get; init; }
+        public bool GenericAssemblyBackingFileReadable { get; init; } = true;
         public bool InitialRuntimeStopped { get; init; }
         public bool StaleOwnedPid { get; init; }
         public bool UnmanagedRimWorld { get; init; }
@@ -444,7 +492,8 @@ internal static class ManagedReadyToTestCandidateTests
             Directory.CreateDirectory(Path.Combine(RuntimeRoot, "About"));
             Directory.CreateDirectory(Path.Combine(RuntimeRoot, "1.6", "Assemblies"));
             File.WriteAllText(Path.Combine(RuntimeRoot, "About", "About.xml"), "<ModMetaData><packageId>lan.fixture</packageId></ModMetaData>");
-            File.WriteAllText(Path.Combine(RuntimeRoot, "1.6", "Assemblies", "Fixture.dll"), "candidate-assembly");
+            File.Copy(typeof(ManagedReadyToTestCandidateTests).Assembly.Location,
+                Path.Combine(RuntimeRoot, "1.6", "Assemblies", "Fixture.dll"));
             var entries = Directory.EnumerateFiles(RuntimeRoot, "*", SearchOption.AllDirectories)
                 .Select(file => new ReadyToTestCandidatePackageEntry(
                     file,
@@ -489,26 +538,40 @@ internal static class ManagedReadyToTestCandidateTests
                 if (request.Arguments.Contains("devbridge/verify_loaded_assembly"))
                 {
                     string expectedHash = AssemblyHash();
+                    string expectedMvid = AssemblyMvid();
                     bool loaded = GenericAssemblyVerification;
                     bool unique = loaded;
-                    bool matches = loaded && !GenericAssemblyVerificationMismatch;
-                    string returnedHash = matches ? expectedHash : new string('0', 64);
-                    string payload = "{\"success\":" + matches.ToString().ToLowerInvariant() +
+                    bool backingFileReadable = GenericAssemblyBackingFileReadable;
+                    bool hashMatches = backingFileReadable && loaded && !GenericAssemblyVerificationMismatch;
+                    bool mvidMatches = loaded && !GenericAssemblyMvidMismatch;
+                    bool verified = loaded && (backingFileReadable ? hashMatches && mvidMatches : mvidMatches);
+                    string returnedHash = hashMatches ? expectedHash : new string('0', 64);
+                    string returnedHashJson = backingFileReadable ? "\"" + returnedHash + "\"" : "null";
+                    string errorCode = !loaded
+                        ? "\"TARGET_ASSEMBLY_NOT_LOADED\""
+                        : verified ? "null"
+                        : backingFileReadable && !hashMatches || !mvidMatches
+                            ? "\"TARGET_ASSEMBLY_IDENTITY_MISMATCH\""
+                            : "\"TARGET_ASSEMBLY_EVIDENCE_UNAVAILABLE\"";
+                    string payload = "{\"success\":" + verified.ToString().ToLowerInvariant() +
                         ",\"loaded\":" + loaded.ToString().ToLowerInvariant() +
                         ",\"uniqueMatch\":" + unique.ToString().ToLowerInvariant() +
                         ",\"assemblyName\":\"Fixture\",\"assemblyFullName\":\"Fixture, Version=1.0.0.0\"," +
-                        "\"location\":\"" + RuntimeRoot.Replace("\\", "\\\\") +
-                        "\\\\1.6\\\\Assemblies\\\\Fixture.dll\",\"fileName\":\"Fixture.dll\"," +
-                        "\"sha256\":\"" + returnedHash + "\",\"expectedSha256\":\"" + expectedHash +
-                        "\",\"hashMatches\":" + matches.ToString().ToLowerInvariant() +
-                        ",\"mvid\":null,\"errorCode\":" +
-                        (matches ? "null" : loaded
-                            ? "\"TARGET_ASSEMBLY_IDENTITY_MISMATCH\""
-                            : "\"TARGET_ASSEMBLY_NOT_LOADED\"") +
-                        ",\"error\":" +
-                        (matches ? "null" : loaded
-                            ? "\"assembly hash mismatch\""
-                            : "\"assembly was not loaded\"") + "}";
+                        "\"moduleName\":\"Fixture.dll\",\"moduleFullyQualifiedName\":\"Fixture.dll\"," +
+                        "\"location\":" + (backingFileReadable ? "\"" + RuntimeRoot.Replace("\\", "\\\\") +
+                            "\\\\1.6\\\\Assemblies\\\\Fixture.dll\"" : "null") +
+                        ",\"fileName\":" + (backingFileReadable ? "\"Fixture.dll\"" : "null") +
+                        ",\"sha256\":" + returnedHashJson + ",\"runtimeSha256\":" + returnedHashJson +
+                        ",\"expectedSha256\":\"" + expectedHash + "\"" +
+                        ",\"hashMatches\":" + hashMatches.ToString().ToLowerInvariant() +
+                        ",\"mvid\":\"" + expectedMvid + "\",\"loadedMvid\":\"" + expectedMvid +
+                        "\",\"expectedMvid\":\"" + expectedMvid + "\"" +
+                        ",\"mvidMatches\":" + mvidMatches.ToString().ToLowerInvariant() +
+                        ",\"backingFileReadable\":" + backingFileReadable.ToString().ToLowerInvariant() +
+                        ",\"verificationMethod\":" + (verified ? "\"" +
+                            (backingFileReadable ? "sha256+mvid" : "mvid") + "\"" : "\"none\"") +
+                        ",\"errorCode\":" + errorCode +
+                        ",\"error\":" + (verified ? "null" : "\"assembly identity mismatch or unavailable\"") + "}";
                     return Result(
                         "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":" +
                         payload + "},\"provenance\":{\"generation\":2}}");
@@ -573,12 +636,21 @@ internal static class ManagedReadyToTestCandidateTests
             if (request.Arguments.Contains("end")) return Result("{\"success\":true,\"exitCode\":0,\"generation\":2,\"leaseId\":\"lease-00000000000000000000000000000001\"}");
             return Result("{\"success\":true}");
         }
+
         private string AssemblyHash()
         {
             byte[] bytes = File.ReadAllBytes(Path.Combine(
                 RuntimeRoot, "1.6", "Assemblies", "Fixture.dll"));
             return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
         }
+
+        private string AssemblyMvid() =>
+            AssemblyMetadataIdentity.TryReadModuleMvid(
+                Path.Combine(RuntimeRoot, "1.6", "Assemblies", "Fixture.dll"),
+                out string? mvid)
+                ? mvid!
+                : throw new InvalidOperationException("fixture assembly MVID unavailable");
+        public string ExpectedCandidateMvid() => AssemblyMvid();
 
         public void Dispose()
         {

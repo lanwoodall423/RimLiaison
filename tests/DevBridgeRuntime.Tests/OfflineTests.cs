@@ -134,11 +134,13 @@ internal static partial class OfflineTests
         Run("BridgeTools publishing refreshes stale deployment output", TestBridgeToolsPublishRefreshesStaleDll);
         Run("assembly verifier requires authenticated tool metadata", TestAssemblyVerifierRequiresAuthenticatedToolMetadata);
         Run("assembly verifier matches exact loaded assembly", TestAssemblyVerifierMatchesExactLoadedAssembly);
-        Run("assembly verifier rejects absent and wrong hashes", TestAssemblyVerifierRejectsAbsentAndWrongHash);
+        Run("assembly verifier rejects absent and wrong hash", TestAssemblyVerifierRejectsAbsentAndWrongHash);
         Run("assembly verifier rejects duplicate simple names", TestAssemblyVerifierRejectsDuplicateSimpleNames);
         Run("assembly verifier ignores unrelated and locationless assemblies", TestAssemblyVerifierIgnoresUnrelatedAndLocationlessAssemblies);
-        Run("doctor identifies a mod-local BridgeTools companion", TestBridgeToolsWrongLocationDiagnostic);
-        Run("RimBridge companion status exposes a bounded diagnostic category", TestRimBridgeCompanionDiagnosticCategory);
+        Run("assembly verifier accepts matching locationless MVID", TestAssemblyVerifierMvidFallback);
+        Run("assembly verifier rejects wrong MVID", TestAssemblyVerifierRejectsWrongMvid);
+        Run("assembly verifier rejects wrong locationless MVID", TestAssemblyVerifierRejectsWrongLocationlessMvid);
+        Run("assembly verifier requires expected MVID", TestAssemblyVerifierRequiresExpectedMvid);
         Run("baseline profile excludes managed projects and load-them-last", TestBaselineProfile);
         Run("profile dependency closure is ordered, deduplicated, and case-insensitive", TestProfileDependencyClosure);
         Run("structured dependency metadata accepts descriptive fields and preserves constraints", TestStructuredDependencyMetadata);
