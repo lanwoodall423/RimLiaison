@@ -121,19 +121,49 @@ internal static partial class OfflineTests
             nullableErrorResponseJson.RootElement, "call-fixture");
         Assert(nullableErrorResponse.Result.HasValue && nullableErrorResponse.Error == null,
             "a successful response with a nullable error field must remain valid");
+        using JsonDocument gabpErrorJson = JsonDocument.Parse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"result\":null,\"error\":{\"code\":-31002,\"message\":\"Tool not found\",\"data\":null}}");
+        GabpResponseEnvelope gabpError = RimBridgeProtocolContract.ParseResponse(
+            gabpErrorJson.RootElement, "call-fixture");
+        Assert(gabpError.Result is null && gabpError.Error?.Code == RimBridgeProtocolContract.ToolNotFound,
+            "Lib.GAB error responses with result:null must remain typed errors");
 
-        try
+        using JsonDocument omittedResultErrorJson = JsonDocument.Parse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"error\":{\"code\":-31002,\"message\":\"Tool not found\",\"data\":null}}");
+        GabpResponseEnvelope omittedResultError = RimBridgeProtocolContract.ParseResponse(
+            omittedResultErrorJson.RootElement, "call-fixture");
+        Assert(omittedResultError.Result is null &&
+               omittedResultError.Error?.Code == RimBridgeProtocolContract.ToolNotFound,
+            "error responses without a result property must remain typed errors");
+
+        AssertInvalidResponse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"result\":{\"ok\":true},\"error\":{\"code\":-31002,\"message\":\"Tool not found\"}}",
+            "both non-null result and error must be rejected");
+        AssertInvalidResponse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"result\":null,\"error\":null}",
+            "null result and null error must be rejected");
+        AssertInvalidResponse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"error\":null}",
+            "absent result and null error must be rejected");
+        AssertInvalidResponse(
+            "{\"v\":\"gabp/1\",\"id\":\"call-fixture\",\"type\":\"response\",\"result\":{\"ok\":true},\"error\":\"not-an-object\"}",
+            "non-object errors must be rejected");
+
+        static void AssertInvalidResponse(string json, string message)
         {
-            using JsonDocument invalid = JsonDocument.Parse(
-                "{\"v\":\"gabp/1\",\"type\":\"response\",\"id\":\"call-fixture\"}");
-            RimBridgeProtocolContract.ParseResponse(invalid.RootElement, "call-fixture");
-            throw new InvalidOperationException("invalid response was accepted");
+            using JsonDocument invalid = JsonDocument.Parse(json);
+            try
+            {
+                RimBridgeProtocolContract.ParseResponse(invalid.RootElement, "call-fixture");
+                throw new InvalidOperationException("invalid response was accepted");
+            }
+            catch (RimBridgeProtocolException exception)
+            {
+                Assert(exception.Code == RimBridgeProtocolContract.InvalidResponseCode, message);
+            }
         }
-        catch (RimBridgeProtocolException exception)
-        {
-            Assert(exception.Code == RimBridgeProtocolContract.InvalidResponseCode,
-                "invalid typed response must have a stable protocol error code");
-        }
+
+
     }
 
     private static void TestRimBridgeProtocolWireFixtures()
@@ -200,6 +230,30 @@ internal static partial class OfflineTests
         Assert(call.Success && call.Payload.HasValue &&
                call.Payload.Value.GetProperty("state").GetString() == "ready",
             "tools/call must accept the canonical result envelope");
+        RimBridgeWireResult toolNotFound = RunWireCase((stream, helloId) =>
+        {
+            WriteTestFrame(stream, new
+            {
+                v = RimBridgeProtocolContract.EnvelopeVersion,
+                type = RimBridgeProtocolContract.ResponseType,
+                id = helloId,
+                result = new { agentId = "fixture-agent" }
+            });
+            using JsonDocument request = JsonDocument.Parse(ReadTestFrame(stream));
+            string id = request.RootElement.GetProperty("id").GetString();
+            WriteTestFrame(stream, new
+            {
+                v = RimBridgeProtocolContract.EnvelopeVersion,
+                id,
+                type = RimBridgeProtocolContract.ResponseType,
+                result = (object)null,
+                error = new { code = RimBridgeProtocolContract.ToolNotFound, message = "Tool not found", data = (object)null }
+            });
+        }, TimeSpan.FromSeconds(2), call: true);
+        Assert(toolNotFound.ErrorCode == "RIMBRIDGE_TOOL_NOT_FOUND" &&
+               toolNotFound.Error != "RIMBRIDGE_INVALID_RESPONSE",
+            "Lib.GAB tool errors must reach existing tool-not-found translation");
+
 
         RimBridgeWireResult invalid = RunWireCase((stream, helloId) =>
         {

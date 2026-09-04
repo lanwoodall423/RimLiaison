@@ -93,11 +93,12 @@ internal static class RimBridgeProtocolContract
             throw new RimBridgeProtocolException(ResponseIdMismatchCode,
                 "RimBridge returned a response for a different request.");
 
-        bool hasResult = root.TryGetProperty("result", out _);
+        bool hasResultProperty = root.TryGetProperty("result", out JsonElement result);
+        bool hasResult = hasResultProperty && result.ValueKind != JsonValueKind.Null;
         bool hasErrorProperty = root.TryGetProperty("error", out JsonElement error);
-        // RimBridgeServer 2.1 emits an explicit `error: null` alongside successful
-        // results. Treat that as an absent error while continuing to reject every
-        // other non-object error value.
+        // Lib.GAB serializes the null counterpart of a response envelope member.
+        // Presence is therefore semantic: null result/error values are absent,
+        // while a real object error remains an error response.
         bool hasError = hasErrorProperty && error.ValueKind != JsonValueKind.Null;
         if (hasError && error.ValueKind != JsonValueKind.Object)
             throw new RimBridgeProtocolException(InvalidResponseCode,

@@ -64,7 +64,9 @@ internal sealed class RimBridgeClient : IRimBridgeClient
             return new RimBridgeWireResult
             {
                 ErrorCode = exception.Code,
-                Error = RimBridgeRouteSecurity.RedactText(exception.Message, endpoint?.Token),
+                Error = RimBridgeRouteSecurity.RedactText(
+                    "RimBridge " + method + " failed: " + exception.Message,
+                    endpoint?.Token),
                 AuthenticationFailure = exception.AuthenticationFailure
             };
         }
