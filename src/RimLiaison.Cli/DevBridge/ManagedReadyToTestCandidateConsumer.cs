@@ -32,6 +32,7 @@ public sealed record ManagedReadyToTestCandidateResult
     [JsonPropertyName("sourceFingerprint")] public string? SourceFingerprint { get; init; }
     [JsonPropertyName("candidatePackageSha256")] public string? CandidatePackageSha256 { get; init; }
     [JsonPropertyName("deployedPackageSha256")] public string? DeployedPackageSha256 { get; init; }
+    [JsonPropertyName("deploymentRoot")] public string? DeploymentRoot { get; init; }
     [JsonPropertyName("generation")] public int? Generation { get; init; }
     [JsonPropertyName("rimBridgeMode")] public string? RimBridgeMode { get; init; }
     [JsonPropertyName("rimBridgePackageId")] public string? RimBridgePackageId { get; init; }
@@ -311,6 +312,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 SourceFingerprint = manifest.SourceFingerprint,
                 CandidatePackageSha256 = manifest.PackageSha256,
                 DeployedPackageSha256 = deployedHash,
+                DeploymentRoot = runtimeRoot,
                 Generation = managed.Generation,
                 TargetConfigured = targetConfigured,
                 TargetLoaded = targetLoaded,

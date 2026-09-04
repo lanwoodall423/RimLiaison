@@ -360,8 +360,9 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 JsonElement? previous = ReadJson(manifestPath);
                 EnsureOwnership(targetRoot, previous);
                 changed = NeedsDeployment(targetRoot, package, previous, packageHash);
+                if (verifiedCandidate is not null)
+                    changed = true;
                 bool candidateBootstrap = verifiedCandidate is not null && changed;
-
                 DevBridgeLeaseAdapter leaseAdapter = new(transport, ToBridgeOptions());
                 DevBridgeLeaseResult lease = string.IsNullOrWhiteSpace(executionContext?.LeaseId)
                     ? await leaseAdapter.BeginLeaseAsync(workflowId, cancellationToken).ConfigureAwait(false)
