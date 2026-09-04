@@ -285,10 +285,10 @@ public sealed class ManagedReadyToTestCandidateConsumer
             {
                 Success = success,
                 Outcome = outcome,
-                ErrorCode = success ? null : generic.ErrorCode ??
+                ErrorCode = success ? null : managed.Status.ErrorCode ?? generic.ErrorCode ??
                     (targetErrors.Count > 0 ? "CANDIDATE_TARGET_LOAD_FAILED" :
                         hashMatches ? "CANDIDATE_TARGET_NOT_PROVEN" : "CANDIDATE_DEPLOYED_HASH_MISMATCH"),
-                Error = success ? null : generic.Error ??
+                Error = success ? null : managed.Status.Error ?? generic.Error ??
                     (targetErrors.Count > 0 ? targetErrors[0] :
                         hashMatches ? "Generic runtime evidence did not prove candidate load." :
                         "The deployed package hash did not match the candidate package hash."),
