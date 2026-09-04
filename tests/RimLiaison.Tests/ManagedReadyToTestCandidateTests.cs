@@ -88,15 +88,68 @@ internal static class ManagedReadyToTestCandidateTests
             "candidate evidence did not prove the intended target/dependency profile");
     }
 
-    public static void ReadyWithoutTargetRecipeCannotPass()
+    public static void ConfiguredTargetWithoutLiveRuntimeEvidenceCannotPass()
     {
-        using Fixture fixture = new() { TargetRecipePasses = false };
+        using Fixture fixture = new() { GenericTargetLoaded = false };
         string manifestPath = fixture.CreateCandidate();
         ManagedReadyToTestCandidateResult result = fixture.Consumer(
                 new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
-        Assert(!result.Success && result.Outcome == "MOD_FAILURE" && result.TargetLoaded == false,
-            $"generic READY state incorrectly counted as target success: success={result.Success}, outcome={result.Outcome}, targetLoaded={result.TargetLoaded}, error={result.ErrorCode} {result.Error}");
+        Assert(!result.Success && result.TargetConfigured == true &&
+            result.TargetLoaded == false && result.DefsValid == false &&
+            result.ErrorCode == "CANDIDATE_TARGET_NOT_PROVEN",
+            $"configured target was accepted without live load evidence: success={result.Success}, error={result.ErrorCode}");
     }
+
+    public static void CandidateDoesNotSynthesizeCustomSuite()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(result.Success && result.RecipeEvidence is null &&
+            !transport.Requests.Any(request =>
+                request.Arguments.Any(argument => argument.Contains("run_suite", StringComparison.OrdinalIgnoreCase))),
+            "managed candidate load validation synthesized or executed a project-specific suite");
+    }
+
+    public static void AttributableTargetLoadErrorPreventsPass()
+    {
+        using Fixture fixture = new() { GenericTargetLoadError = true };
+        string manifestPath = fixture.CreateCandidate();
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(!result.Success && result.TargetLoaded == true && result.DefsValid == false &&
+            result.AttributableTargetErrors.Any(error => error.Contains("Def load failed", StringComparison.Ordinal)),
+            "an attributable target load error was not retained as a managed candidate failure");
+    }
+
+    public static void GenericAssemblyEvidenceIsRetained()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
+        GenericCandidateLoadEvidence evidence = (GenericCandidateLoadEvidence)result.ManagedLoadEvidence!;
+        Assert(result.Success && evidence.AssemblyLoadState == "loaded-by-rimbridge-list-mods" &&
+            result.TargetAssemblyLoadState == evidence.AssemblyLoadState,
+            "generic assembly-load evidence was not retained");
+    }
+    public static void ExplicitRecipeMissingToolRemainsFailure()
+    {
+        using Fixture fixture = new();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeRecipeAdapter adapter = new(transport, new DevBridgeAdapterOptions
+        {
+            CommandPath = Path.Combine(fixture.RepositoryRoot, "DevBridge.cmd"),
+            RootPath = fixture.RepositoryRoot,
+            SourceRootPath = fixture.RepositoryRoot
+        });
+        DevBridgeRecipeRunResult result = adapter.RunAsync("fixture").GetAwaiter().GetResult();
+        Assert(!result.Status.IsSuccess && result.Status.ErrorCode == "RIMBRIDGE_TOOL_NOT_FOUND",
+            "an explicitly requested missing custom suite was not preserved as a tool-not-found failure");
+    }
+
+
 
     public static void ManagedCandidateCleanupRunsAfterSuccess()
     {
@@ -210,7 +263,9 @@ internal static class ManagedReadyToTestCandidateTests
         public string ManagedModsRoot { get; } = Path.Combine(Path.GetTempPath(), "rimliaison-managed-mods-" + Guid.NewGuid().ToString("N"));
         public string SourceFingerprint { get; } = new('a', 64);
         public ReadyToTestCandidateManifest? Manifest { get; private set; }
-        public bool TargetRecipePasses { get; init; } = true;
+        public bool GenericTargetLoaded { get; init; } = true;
+        public bool GenericTargetLoadError { get; init; }
+        public bool GenericAssemblyEvidence { get; init; } = true;
         public string InitialRimBridgeMode { get; init; } = "required";
         public string? ActiveLeaseId { get; init; }
         public int CoordinatorShutdownCalls { get; private set; }
@@ -286,16 +341,26 @@ internal static class ManagedReadyToTestCandidateTests
 
         public DevBridgeProcessResult RuntimeHandler(DevBridgeProcessRequest request, CancellationToken _)
         {
+            if (request.Arguments.Contains("bridge") && request.Arguments.Contains("call"))
+            {
+                string packageId = GenericTargetLoaded ? "lan.fixture" : "lan.other";
+                string assembly = GenericAssemblyEvidence
+                    ? ",\"assemblies\":[{\"name\":\"Fixture.dll\",\"loaded\":true}]"
+                    : string.Empty;
+                string errors = GenericTargetLoadError
+                    ? ",\"errors\":[{\"packageId\":\"lan.fixture\",\"message\":\"Def load failed\"}]"
+                    : string.Empty;
+                return Result(
+                    "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":{\"mods\":[{\"packageId\":\"" +
+                    packageId + "\"" + assembly + errors +
+                    "}]},\"provenance\":{\"generation\":2}}}");
+            }
             if (request.Arguments.Contains("recipe") && request.Arguments.Contains("show"))
                 return Result("{\"schemaVersion\":\"devbridge-test-recipe-show/v1\",\"recipe\":{\"schemaVersion\":\"devbridge-test-recipe/v1\",\"id\":\"fixture\",\"projects\":[\"fixture\"]},\"errorCode\":null,\"error\":null}");
             if (request.Arguments.Contains("recipe") && request.Arguments.Contains("plan"))
                 return Result("{\"schemaVersion\":\"devbridge-test-recipe-plan/v1\",\"recipe\":\"fixture\",\"alreadySatisfied\":false,\"estimatedRimWorldLaunches\":1,\"nextAction\":\"run\",\"blockedBy\":[],\"steps\":[]}");
             if (request.Arguments.Contains("recipe") && request.Arguments.Contains("run"))
-            {
-                string passed = TargetRecipePasses ? "true" : "false";
-                string error = TargetRecipePasses ? "null" : "\"MOD_DEF_ERROR\"";
-                return Result($"{{\"schemaVersion\":\"devbridge-test-recipe-run/v1\",\"recipe\":\"fixture\",\"success\":{passed},\"errorCode\":{error},\"error\":{error},\"generation\":2,\"runId\":\"run-1\",\"leaseId\":null,\"evidence\":\"target-load\",\"evidenceId\":\"evidence-1\",\"failureFingerprint\":null,\"finalNextAction\":null,\"restartRequired\":false,\"launchesConsumed\":0,\"operations\":[],\"workflowId\":\"candidate-test\"}}");
-            }
+                return Result("{\"schemaVersion\":\"devbridge-test-recipe-run/v1\",\"recipe\":\"fixture\",\"success\":false,\"errorCode\":\"RIMBRIDGE_TOOL_NOT_FOUND\",\"error\":\"RimBridge did not find the requested tool.\",\"generation\":2,\"runId\":\"run-1\",\"leaseId\":null,\"evidence\":null,\"evidenceId\":null,\"failureFingerprint\":null,\"finalNextAction\":null,\"restartRequired\":false,\"launchesConsumed\":0,\"operations\":[],\"workflowId\":\"candidate-test\"}");
             if (request.Arguments.Contains("status"))
             {
                 string root = RepositoryRoot.Replace("\\", "\\\\");

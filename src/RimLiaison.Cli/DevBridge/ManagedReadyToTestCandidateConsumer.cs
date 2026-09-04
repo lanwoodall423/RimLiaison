@@ -50,6 +50,7 @@ public sealed record ManagedReadyToTestCandidateResult
     [JsonPropertyName("cleanup")] public ManagedCandidateCleanupEvidence Cleanup { get; init; } = new();
     [JsonPropertyName("recipeEvidence")] public object? RecipeEvidence { get; init; }
     [JsonPropertyName("managedRuntimeEvidence")] public object? ManagedRuntimeEvidence { get; init; }
+    [JsonPropertyName("managedLoadEvidence")] public GenericCandidateLoadEvidence? ManagedLoadEvidence { get; init; }
 }
 
 public sealed record ManagedCandidateCleanupEvidence(
@@ -57,6 +58,20 @@ public sealed record ManagedCandidateCleanupEvidence(
     [property: JsonPropertyName("runtimeRestored")] bool RuntimeRestored = false,
     [property: JsonPropertyName("outcome")] string Outcome = "not-established",
     [property: JsonPropertyName("errorCode")] string? ErrorCode = null);
+public sealed record GenericCandidateLoadEvidence(
+    [property: JsonPropertyName("targetLoaded")] bool TargetLoaded,
+    [property: JsonPropertyName("defsValid")] bool DefsValid,
+    [property: JsonPropertyName("assemblyLoadState")] string AssemblyLoadState,
+    [property: JsonPropertyName("generation")] int? Generation,
+    [property: JsonPropertyName("evidenceSource")] string EvidenceSource,
+    [property: JsonPropertyName("errorCode")] string? ErrorCode,
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("attributableErrors")] IReadOnlyList<string> AttributableErrors)
+{
+    public static GenericCandidateLoadEvidence Failure(string errorCode, string error) =>
+        new(false, false, "not-proven", null, "rimworld/list_mods", errorCode, error, []);
+}
+
 
 public sealed class ManagedReadyToTestCandidateConsumer
 {
@@ -183,38 +198,37 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     cleanup);
             }
 
-            DevBridgeAdapterOptions targetOptions = options.BridgeOptions with
-            {
-                RecipeFilePath = materialization!.Descriptor.ResolvedRecipePath ??
-                    materialization.Descriptor.TestRecipePath
-            };
-            DevBridgeRecipeAdapter recipe = new(runtimeTransport, targetOptions);
-            DevBridgeRecipeRunResult target = await recipe.RunAsync(
-                    materialization!.Descriptor.TestRecipe,
-                    options.WorkflowId,
-                    new DevBridgeRecipeExecutionContext(SourceFingerprint: manifest.SourceFingerprint),
+            GenericCandidateLoadEvidence generic = await ReadGenericLoadEvidenceAsync(
+                    runtimeTransport,
+                    materialization!.Descriptor.ExpectedAssembly,
+                    manifest.PackageId ?? manifest.CanonicalProjectId,
+                    managed.Generation,
                     cancellationToken)
                 .ConfigureAwait(false);
             RuntimeStatusEvidence status = await ReadStatusAsync(runtimeTransport, cancellationToken).ConfigureAwait(false);
             bool targetConfigured = IsTargetConfigured(status, manifest,
-                materialization!.Descriptor.CanonicalProjectId ?? manifest.CanonicalProjectId);
-            bool targetLoaded = target.Passed == true && target.Status.IsSuccess && target.Generation == managed.Generation;
+                materialization.Descriptor.CanonicalProjectId ?? manifest.CanonicalProjectId);
+            bool targetLoaded = generic.TargetLoaded &&
+                generic.Generation == managed.Generation;
             string? deployedHash = managed.Freshness?.DeployedPackageSha256;
             bool hashMatches = string.Equals(
                 deployedHash,
                 manifest.PackageSha256,
                 StringComparison.OrdinalIgnoreCase);
-            List<string> targetErrors = target.Status.ErrorCode is null
-                ? []
-                : [target.Status.ErrorCode + (string.IsNullOrWhiteSpace(target.Status.Error) ? string.Empty : ": " + target.Status.Error)];
-            if (status.Error is not null)
+            List<string> targetErrors = generic.AttributableErrors.ToList();
+            if (status.Error is not null &&
+                status.Error.Contains(manifest.PackageId ?? manifest.CanonicalProjectId,
+                    StringComparison.OrdinalIgnoreCase))
+            {
                 targetErrors.Add(status.Error);
+            }
 
+            bool defsValid = targetLoaded && generic.DefsValid && targetErrors.Count == 0;
             bool dependenciesReady = DependenciesPresent(status, manifest.RequiredRuntimeDependencies);
-            bool success = hashMatches && targetConfigured && targetLoaded && dependenciesReady;
+            bool success = hashMatches && targetConfigured && targetLoaded && defsValid && dependenciesReady;
             string outcome = success
                 ? "PASS"
-                : IsTargetModFailure(target)
+                : targetErrors.Count > 0
                     ? "MOD_FAILURE"
                     : !dependenciesReady
                         ? "DEPENDENCY_PREREQUISITE"
@@ -223,10 +237,12 @@ public sealed class ManagedReadyToTestCandidateConsumer
             {
                 Success = success,
                 Outcome = outcome,
-                ErrorCode = success ? null : target.Status.ErrorCode ??
-                    (hashMatches ? "CANDIDATE_TARGET_NOT_PROVEN" : "CANDIDATE_DEPLOYED_HASH_MISMATCH"),
-                Error = success ? null : target.Status.Error ??
-                    (hashMatches ? "The target-specific runtime evidence did not prove candidate success." :
+                ErrorCode = success ? null : generic.ErrorCode ??
+                    (targetErrors.Count > 0 ? "CANDIDATE_TARGET_LOAD_FAILED" :
+                        hashMatches ? "CANDIDATE_TARGET_NOT_PROVEN" : "CANDIDATE_DEPLOYED_HASH_MISMATCH"),
+                Error = success ? null : generic.Error ??
+                    (targetErrors.Count > 0 ? targetErrors[0] :
+                        hashMatches ? "Generic runtime evidence did not prove candidate load." :
                         "The deployed package hash did not match the candidate package hash."),
                 CandidateId = manifest.CandidateId,
                 CanonicalProjectId = manifest.CanonicalProjectId,
@@ -240,9 +256,9 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 Generation = managed.Generation,
                 TargetConfigured = targetConfigured,
                 TargetLoaded = targetLoaded,
-                DefsValid = targetLoaded ? true : null,
+                DefsValid = defsValid,
                 TargetAssemblyIdentity = managed.Freshness?.DeployedArtifactSha256,
-                TargetAssemblyLoadState = targetLoaded ? "loaded-by-target-recipe" : "not-proven",
+                TargetAssemblyLoadState = generic.AssemblyLoadState,
                 AttributableTargetErrors = targetErrors,
                 DependencyProfileIdentity = status.ProfileFingerprint,
                 ResolvedDependencies = status.ResolvedMods,
@@ -250,10 +266,11 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 RuntimeReadinessResult = managed.Freshness?.LoadedArtifactFreshnessProven == true &&
                     managed.Generation is > 0 ? "READY" : "NOT_PROVEN",
                 Cleanup = cleanup,
-                RecipeEvidence = target,
+                ManagedLoadEvidence = generic,
                 ManagedRuntimeEvidence = managed
             };
         }
+
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return FailureFor(manifest, "INFRASTRUCTURE_FAILURE", "RIMTEST_CANCELLED", "Managed candidate execution was cancelled.");
@@ -269,6 +286,238 @@ public sealed class ManagedReadyToTestCandidateConsumer
         }
     }
 
+    private async Task<GenericCandidateLoadEvidence> ReadGenericLoadEvidenceAsync(
+        RequiredRimBridgeProcessTransport runtimeTransport,
+        string? expectedAssembly,
+        string packageId,
+        int? expectedGeneration,
+        CancellationToken cancellationToken)
+    {
+        DevBridgeProcessResult process = await runtimeTransport.ExecuteAsync(
+                new DevBridgeProcessRequest(
+                    options.BridgeOptions.CommandPath,
+                    options.BridgeOptions.RootPath,
+                    ["--root", options.BridgeOptions.RootPath, "bridge", "call",
+                        "rimworld/list_mods", "{}", "--json"],
+                    options.Timeout,
+                    options.MaxStdoutBytes,
+                    options.MaxStderrBytes,
+                    DevBridgeProcessEnvironment.ForWorkflow(options.WorkflowId),
+                    OperationKey: "candidate-generic-load-evidence"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (process.Cancelled)
+            return GenericCandidateLoadEvidence.Failure("RIMTEST_CANCELLED",
+                "Generic candidate load evidence was cancelled.");
+        if (process.TimedOut)
+            return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_TIMEOUT",
+                "RimBridge did not return generic mod-load evidence in time.");
+        if (process.ExitCode is not 0 ||
+            !string.IsNullOrWhiteSpace(process.StartError) ||
+            string.IsNullOrWhiteSpace(process.Stdout))
+        {
+            return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_UNAVAILABLE",
+                Bound(process.StartError ?? process.Stderr ??
+                    "RimBridge returned no generic mod-load evidence."));
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(process.Stdout);
+            JsonElement envelope = Property(document.RootElement, "rimBridgeRoute");
+            if (envelope.ValueKind == JsonValueKind.Undefined)
+                envelope = document.RootElement;
+            if (envelope.ValueKind != JsonValueKind.Object ||
+                !TryGetBoolean(envelope, "success", out bool success))
+            {
+                return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_INVALID",
+                    "RimBridge returned an invalid generic mod-load evidence envelope.");
+            }
+            if (!success)
+            {
+                return GenericCandidateLoadEvidence.Failure(
+                    StringValue(envelope, "errorCode") ?? "RIMBRIDGE_LOAD_EVIDENCE_FAILED",
+                    StringValue(envelope, "error") ??
+                    "RimBridge rejected generic mod-load evidence.");
+            }
+            JsonElement result = Property(envelope, "result");
+            if (result.ValueKind is not JsonValueKind.Object and not JsonValueKind.Array)
+            {
+                return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_INVALID",
+                    "RimBridge returned no structured generic mod-load evidence.");
+            }
+            List<string> errors = CollectTargetLoadErrors(result, packageId);
+            bool targetLoaded = ContainsPackage(result, packageId);
+            bool assemblyLoaded = !string.IsNullOrWhiteSpace(expectedAssembly) &&
+                ContainsLoadedAssembly(result, expectedAssembly!);
+            int? generation = ReadGeneration(envelope);
+            return new GenericCandidateLoadEvidence(
+                targetLoaded,
+                targetLoaded && errors.Count == 0,
+                assemblyLoaded ? "loaded-by-rimbridge-list-mods" : "not-reported",
+                generation,
+                "rimworld/list_mods",
+                null,
+                null,
+                errors);
+        }
+        catch (JsonException exception)
+        {
+            return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_INVALID",
+                Bound("RimBridge returned malformed generic mod-load evidence: " + exception.Message));
+        }
+    }
+
+    private static bool ContainsPackage(JsonElement value, string packageId)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty property in value.EnumerateObject())
+            {
+                if (property.Name.Equals("packageId", StringComparison.OrdinalIgnoreCase) &&
+                    property.Value.ValueKind == JsonValueKind.String &&
+                    string.Equals(property.Value.GetString(), packageId, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (ContainsPackage(property.Value, packageId))
+                    return true;
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in value.EnumerateArray())
+                if (ContainsPackage(item, packageId))
+                    return true;
+        }
+        return false;
+    }
+
+    private static bool ContainsLoadedAssembly(JsonElement value, string expectedAssembly)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            bool loaded = !value.TryGetProperty("loaded", out JsonElement loadedValue) ||
+                loadedValue.ValueKind != JsonValueKind.False;
+            foreach (JsonProperty property in value.EnumerateObject())
+            {
+                if (property.Name.Equals("name", StringComparison.OrdinalIgnoreCase) ||
+                    property.Name.Equals("assembly", StringComparison.OrdinalIgnoreCase) ||
+                    property.Name.Equals("path", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (loaded && property.Value.ValueKind == JsonValueKind.String &&
+                        string.Equals(Path.GetFileName(property.Value.GetString()), expectedAssembly,
+                            StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                if (ContainsLoadedAssembly(property.Value, expectedAssembly))
+                    return true;
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in value.EnumerateArray())
+                if (ContainsLoadedAssembly(item, expectedAssembly))
+                    return true;
+        }
+        return false;
+    }
+
+    private static List<string> CollectTargetLoadErrors(JsonElement value, string packageId)
+    {
+        List<string> errors = [];
+        CollectTargetLoadErrors(value, packageId, errors);
+        return errors;
+    }
+
+    private static void CollectTargetLoadErrors(JsonElement value, string packageId, List<string> errors)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            string? objectPackage = StringValue(value, "packageId");
+            foreach (JsonProperty property in value.EnumerateObject())
+            {
+                bool errorField = property.Name.Equals("error", StringComparison.OrdinalIgnoreCase) ||
+                    property.Name.Equals("errors", StringComparison.OrdinalIgnoreCase) ||
+                    property.Name.Contains("load", StringComparison.OrdinalIgnoreCase) &&
+                    property.Name.Contains("error", StringComparison.OrdinalIgnoreCase) ||
+                    property.Name.Contains("def", StringComparison.OrdinalIgnoreCase) &&
+                    property.Name.Contains("error", StringComparison.OrdinalIgnoreCase);
+                if (errorField)
+                    AddTargetLoadError(property.Value, objectPackage, packageId, errors);
+                else
+                    CollectTargetLoadErrors(property.Value, packageId, errors);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in value.EnumerateArray())
+                CollectTargetLoadErrors(item, packageId, errors);
+        }
+    }
+
+    private static void AddTargetLoadError(
+        JsonElement value,
+        string? objectPackage,
+        string packageId,
+        List<string> errors)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            string? message = value.GetString();
+            if (objectPackage is null ||
+                string.Equals(objectPackage, packageId, StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrWhiteSpace(message))
+                    errors.Add(message);
+            return;
+        }
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in value.EnumerateArray())
+                AddTargetLoadError(item, objectPackage, packageId, errors);
+            return;
+        }
+        if (value.ValueKind != JsonValueKind.Object)
+            return;
+        string? itemPackage = StringValue(value, "packageId") ?? objectPackage;
+        string? messageValue = StringValue(value, "message") ?? StringValue(value, "error");
+        if (messageValue is not null &&
+            (itemPackage is null ||
+             string.Equals(itemPackage, packageId, StringComparison.OrdinalIgnoreCase)))
+            errors.Add(messageValue);
+        else
+            CollectTargetLoadErrors(value, packageId, errors);
+    }
+
+    private static int? ReadGeneration(JsonElement envelope)
+    {
+        JsonElement provenance = Property(envelope, "provenance");
+        return TryGetInt(provenance, "generation", out int generation) ? generation :
+            TryGetInt(envelope, "generation", out generation) ? generation : null;
+    }
+
+    private static bool TryGetBoolean(JsonElement root, string name, out bool value)
+    {
+        JsonElement property = Property(root, name);
+        if (property.ValueKind == JsonValueKind.True)
+        {
+            value = true;
+            return true;
+        }
+        if (property.ValueKind == JsonValueKind.False)
+        {
+            value = false;
+            return true;
+        }
+        value = false;
+        return false;
+    }
+
+    private static bool TryGetInt(JsonElement root, string name, out int value)
+    {
+        JsonElement property = Property(root, name);
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out value))
+            return true;
+        value = 0;
+        return false;
+    }
     private async Task<RimBridgeRequirementResult> EnsureRequiredRimBridgeAsync(
         RequiredRimBridgeProcessTransport runtimeTransport,
         CancellationToken cancellationToken)
