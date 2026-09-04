@@ -358,8 +358,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         if (process.TimedOut)
             return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_TIMEOUT",
                 "RimBridge did not return generic mod-load evidence in time.");
-        if (process.ExitCode is not 0 ||
-            !string.IsNullOrWhiteSpace(process.StartError) ||
+        if (!string.IsNullOrWhiteSpace(process.StartError) ||
             string.IsNullOrWhiteSpace(process.Stdout))
         {
             return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_UNAVAILABLE",

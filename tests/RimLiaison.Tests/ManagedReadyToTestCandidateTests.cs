@@ -153,7 +153,7 @@ internal static class ManagedReadyToTestCandidateTests
 
     public static void ManagedCandidateCleanupRunsAfterSuccess()
     {
-        using Fixture fixture = new();
+        using Fixture fixture = new() { GenericBridgeExitCode = true };
         string manifestPath = fixture.CreateCandidate();
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
@@ -310,6 +310,7 @@ internal static class ManagedReadyToTestCandidateTests
         public ReadyToTestCandidateManifest? Manifest { get; private set; }
         public bool GenericTargetLoaded { get; init; } = true;
         public bool GenericTargetLoadError { get; init; }
+        public bool GenericBridgeExitCode { get; init; }
         public bool GenericAssemblyEvidence { get; init; } = true;
         public string InitialRimBridgeMode { get; init; } = "required";
         public bool InitialRuntimeStopped { get; init; }
@@ -402,7 +403,7 @@ internal static class ManagedReadyToTestCandidateTests
                 return Result(
                     "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":{\"mods\":[{\"packageId\":\"" +
                     packageId + "\"" + assembly + errors +
-                    "}]},\"provenance\":{\"generation\":2}}}");
+                    "}]},\"provenance\":{\"generation\":2}}}", GenericBridgeExitCode ? 4 : 0);
             }
             if (request.Arguments.Contains("recipe") && request.Arguments.Contains("show"))
                 return Result("{\"schemaVersion\":\"devbridge-test-recipe-show/v1\",\"recipe\":{\"schemaVersion\":\"devbridge-test-recipe/v1\",\"id\":\"fixture\",\"projects\":[\"fixture\"]},\"errorCode\":null,\"error\":null}");
@@ -451,7 +452,7 @@ internal static class ManagedReadyToTestCandidateTests
             Delete(RepositoryRoot); Delete(CandidateBase); Delete(ManagedModsRoot);
         }
 
-        private static DevBridgeProcessResult Result(string stdout) => new(0, stdout, string.Empty);
+        private static DevBridgeProcessResult Result(string stdout, int exitCode = 0) => new(exitCode, stdout, string.Empty);
         private static void Delete(string path) { if (Directory.Exists(path)) Directory.Delete(path, true); }
     }
 
