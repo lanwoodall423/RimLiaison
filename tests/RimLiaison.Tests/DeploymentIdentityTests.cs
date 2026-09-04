@@ -99,6 +99,27 @@ internal static class DeploymentIdentityTests
             if (Directory.Exists(targetRoot)) Directory.Delete(targetRoot, recursive: true);
         }
     }
+    public static void UnmanagedPathsRemainOutsideCleanupOwnership()
+    {
+        string targetRoot = Path.Combine(Path.GetTempPath(), "rimliaison-deployment-identity-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(targetRoot);
+            string unmanagedPath = Path.Combine(targetRoot, "operator-notes.txt");
+            File.WriteAllText(unmanagedPath, "keep");
+            InternalDevelopmentTransactionService.RemoveStaleOwnedFiles(
+                targetRoot,
+                [new("source.xml", "About/About.xml", new string('a', 64), 1)],
+                previous: null);
+            Assert(File.Exists(unmanagedPath),
+                "cleanup without an owned deployment manifest must not touch unmanaged paths");
+        }
+        finally
+        {
+            if (Directory.Exists(targetRoot)) Directory.Delete(targetRoot, recursive: true);
+        }
+    }
+
 
     private static string HashFile(string path) =>
         Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();

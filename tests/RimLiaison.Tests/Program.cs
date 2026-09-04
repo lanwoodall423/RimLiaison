@@ -567,6 +567,7 @@ internal static class Program
         ("candidate and deployment hashes share identity domain", DeploymentIdentityTests.PackageHashMatchesCandidateIdentityDomain),
         ("owned stale deployment files are mirrored safely", DeploymentIdentityTests.OwnedStaleFilesTriggerMirrorAndUnmanagedFilesSurviveCleanup),
         ("missing or modified deployment files force redeploy", DeploymentIdentityTests.MissingOrModifiedCandidateFilesForceDeployment),
+        ("unmanaged deployment paths remain outside cleanup", DeploymentIdentityTests.UnmanagedPathsRemainOutsideCleanupOwnership),
         ("candidate build failure does not touch runtime", ReadyToTestCandidateTests.BuildFailureDoesNotTouchRuntime),
         ("successful candidate writes READY_TO_TEST manifest", ReadyToTestCandidateTests.SuccessfulPreparationWritesReadyManifest),
         ("candidate payload excludes source-only files", ReadyToTestCandidateTests.SourceOnlyFilesNeverEnterRuntimePayload),
