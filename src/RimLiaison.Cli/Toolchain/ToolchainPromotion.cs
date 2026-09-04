@@ -862,11 +862,13 @@ public static class ToolchainPromotionService
         DirectoryInfo? activeRoot = cliDirectory?.Parent;
         if (activeRoot is null)
             throw new InvalidDataException("The active production executable has no CLI deployment root.");
-        DirectoryInfo? productionParent = activeRoot.Name.StartsWith(
-            "cli-promoted-",
-            StringComparison.OrdinalIgnoreCase)
-            ? activeRoot.Parent
-            : activeRoot;
+        DirectoryInfo? productionParent = activeRoot;
+        while (productionParent?.Name.StartsWith(
+                   "cli-promoted-",
+                   StringComparison.OrdinalIgnoreCase) == true)
+        {
+            productionParent = productionParent.Parent;
+        }
         if (productionParent is null)
             throw new InvalidDataException("The active production CLI has no stable promotion parent.");
 

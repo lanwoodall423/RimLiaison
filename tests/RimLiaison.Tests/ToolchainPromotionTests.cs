@@ -48,7 +48,7 @@ internal static class ToolchainPromotionTests
     public static void RepeatedPromotionsKeepCliDepthBounded()
     {
         string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-depth-" + Guid.NewGuid().ToString("N"));
-        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli-promoted-OLD", "cli", "rimliaison.exe");
         for (int index = 0; index < 8; index++)
         {
             string commit = new((char)('A' + index), 12);
@@ -64,7 +64,12 @@ internal static class ToolchainPromotionTests
     public static void PromotionCliPathLengthDoesNotGrowWithHistory()
     {
         string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-length-" + Guid.NewGuid().ToString("N"));
-        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        string activeExecutable = Path.Combine(
+            root,
+            "cli-promoted-AAAA",
+            "cli-promoted-OLD",
+            "cli",
+            "rimliaison.exe");
         int? expectedLength = null;
         for (int index = 0; index < 16; index++)
         {
@@ -84,7 +89,7 @@ internal static class ToolchainPromotionTests
         string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-candidate-" + Guid.NewGuid().ToString("N"));
         string artifactRoot = Path.Combine(root, "artifact");
         string executableSource = Path.Combine(artifactRoot, "cli", "rimliaison.exe");
-        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli-promoted-OLD", "cli", "rimliaison.exe");
         string stagedRoot = ToolchainPromotionService.DeriveStagedCliRoot(activeExecutable, "BBBB");
         string candidateExecutable = Path.GetFullPath(Path.Combine(
             stagedRoot,
