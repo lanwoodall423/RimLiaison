@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="RimBridgeServer.Sdk" Version="2.0.0" PrivateAssets="all" ExcludeAssets="runtime" />
     <ProjectReference Include="..\..\src\DevBridgeRuntime\Coordinator.Core\DevBridge.Coordinator.Core.csproj" />
     <ProjectReference Include="..\..\src\DevBridgeRuntime\Coordinator\DevBridge.Coordinator.csproj" />
 
@@ -25,8 +26,10 @@
          project; they are not Coordinator core implementation. -->
     <Compile Include="..\..\src\DevBridgeRuntime\BridgeTools\DevBridgeGenerationContext.cs" Link="DevBridgeGenerationContext.cs" />
     <Compile Include="..\..\src\DevBridgeRuntime\BridgeTools\DevBridgeControlPolicy.cs" Link="DevBridgeControlPolicy.cs" />
+    <Compile Include="..\..\src\DevBridgeRuntime\BridgeTools\DevBridgeAssemblyTools.cs" Link="DevBridgeAssemblyTools.cs" />
 
     <Compile Include="OfflineTests.cs" />
+    <Compile Include="BridgeToolsAssemblyTests.cs" />
     <Compile Include="ReadinessTests.cs" />
     <Compile Include="MaintenanceTests.cs" />
     <Compile Include="LeasesAndProcessTests.cs" />

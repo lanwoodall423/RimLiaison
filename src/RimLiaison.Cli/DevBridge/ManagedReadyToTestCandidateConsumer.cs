@@ -51,6 +51,7 @@ public sealed record ManagedReadyToTestCandidateResult
     [JsonPropertyName("recipeEvidence")] public object? RecipeEvidence { get; init; }
     [JsonPropertyName("managedRuntimeEvidence")] public object? ManagedRuntimeEvidence { get; init; }
     [JsonPropertyName("managedLoadEvidence")] public GenericCandidateLoadEvidence? ManagedLoadEvidence { get; init; }
+    [JsonPropertyName("assemblyEvidence")] public GenericCandidateAssemblyEvidence? AssemblyEvidence { get; init; }
 }
 
 public sealed record ManagedCandidateCleanupEvidence(
@@ -67,6 +68,21 @@ public sealed record GenericCandidateModEvidence(
     [property: JsonPropertyName("activeLoadOrder")] int? ActiveLoadOrder,
     [property: JsonPropertyName("loadedSessionOrder")] int? LoadedSessionOrder);
 
+public sealed record GenericCandidateAssemblyEvidence(
+    [property: JsonPropertyName("success")] bool Success,
+    [property: JsonPropertyName("loaded")] bool Loaded,
+    [property: JsonPropertyName("uniqueMatch")] bool UniqueMatch,
+    [property: JsonPropertyName("assemblyName")] string? AssemblyName,
+    [property: JsonPropertyName("assemblyFullName")] string? AssemblyFullName,
+    [property: JsonPropertyName("location")] string? Location,
+    [property: JsonPropertyName("fileName")] string? FileName,
+    [property: JsonPropertyName("sha256")] string? Sha256,
+    [property: JsonPropertyName("expectedSha256")] string? ExpectedSha256,
+    [property: JsonPropertyName("hashMatches")] bool HashMatches,
+    [property: JsonPropertyName("mvid")] string? Mvid,
+    [property: JsonPropertyName("errorCode")] string? ErrorCode,
+    [property: JsonPropertyName("error")] string? Error);
+
 public sealed record GenericCandidateLoadEvidence(
     [property: JsonPropertyName("targetLoaded")] bool TargetLoaded,
     [property: JsonPropertyName("defsValid")] bool DefsValid,
@@ -76,7 +92,8 @@ public sealed record GenericCandidateLoadEvidence(
     [property: JsonPropertyName("errorCode")] string? ErrorCode,
     [property: JsonPropertyName("error")] string? Error,
     [property: JsonPropertyName("attributableErrors")] IReadOnlyList<string> AttributableErrors,
-    [property: JsonPropertyName("matchedMod")] GenericCandidateModEvidence? MatchedMod = null)
+    [property: JsonPropertyName("matchedMod")] GenericCandidateModEvidence? MatchedMod = null,
+    [property: JsonPropertyName("assemblyEvidence")] GenericCandidateAssemblyEvidence? AssemblyEvidence = null)
 {
     public static GenericCandidateLoadEvidence Failure(string errorCode, string error) =>
         new(false, false, "not-proven", null, "rimworld/list_mods", errorCode, error, []);
@@ -209,9 +226,17 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     cleanup);
             }
 
+            ReadyToTestCandidatePackageEntry? assemblyEntry = verified.Package.FirstOrDefault(
+                entry => string.Equals(entry.TargetPath, materialization!.Descriptor.DeploymentTarget,
+                    StringComparison.OrdinalIgnoreCase));
+            string? expectedAssemblyHash = !string.IsNullOrWhiteSpace(materialization.Descriptor.ExpectedAssembly) &&
+                assemblyEntry is not null
+                ? assemblyEntry.Sha256
+                : null;
             GenericCandidateLoadEvidence generic = await ReadGenericLoadEvidenceAsync(
                     runtimeTransport,
-                    materialization!.Descriptor.ExpectedAssembly,
+                    materialization.Descriptor.ExpectedAssembly,
+                    expectedAssemblyHash,
                     manifest.PackageId ?? manifest.CanonicalProjectId,
                     managed.Generation,
                     cancellationToken)
@@ -236,10 +261,14 @@ public sealed class ManagedReadyToTestCandidateConsumer
 
             bool defsValid = targetLoaded && generic.DefsValid && targetErrors.Count == 0;
             bool dependenciesReady = DependenciesPresent(status, manifest.RequiredRuntimeDependencies);
-            bool success = hashMatches && targetConfigured && targetLoaded && defsValid && dependenciesReady;
+            bool assemblyProof = expectedAssemblyHash is null ||
+                string.Equals(generic.AssemblyLoadState, "loaded-and-matched",
+                    StringComparison.OrdinalIgnoreCase);
+            bool success = hashMatches && targetConfigured && targetLoaded && defsValid &&
+                dependenciesReady && assemblyProof;
             string outcome = success
                 ? "PASS"
-                : targetErrors.Count > 0
+                : targetErrors.Count > 0 || !assemblyProof
                     ? "MOD_FAILURE"
                     : !dependenciesReady
                         ? "DEPENDENCY_PREREQUISITE"
@@ -277,6 +306,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 RuntimeReadinessResult = managed.Freshness?.LoadedArtifactFreshnessProven == true &&
                     managed.Generation is > 0 ? "READY" : "NOT_PROVEN",
                 Cleanup = cleanup,
+                AssemblyEvidence = generic.AssemblyEvidence,
                 ManagedLoadEvidence = generic,
                 ManagedRuntimeEvidence = managed
             };
@@ -300,6 +330,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
     private async Task<GenericCandidateLoadEvidence> ReadGenericLoadEvidenceAsync(
         RequiredRimBridgeProcessTransport runtimeTransport,
         string? expectedAssembly,
+        string? expectedAssemblyHash,
         string packageId,
         int? expectedGeneration,
         CancellationToken cancellationToken)
@@ -324,6 +355,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     runtimeTransport,
                     lease.LeaseId!,
                     expectedAssembly,
+                    expectedAssemblyHash,
                     packageId,
                     expectedGeneration,
                     cancellationToken)
@@ -348,6 +380,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
         RequiredRimBridgeProcessTransport runtimeTransport,
         string leaseId,
         string? expectedAssembly,
+        string? expectedAssemblyHash,
         string packageId,
         int? expectedGeneration,
         CancellationToken cancellationToken)
@@ -423,19 +456,39 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 matchedMod.Enabled &&
                 matchedMod.LoadedInSession &&
                 matchedMod.MatchesLoadedSession;
-            bool assemblyLoaded = !string.IsNullOrWhiteSpace(expectedAssembly) &&
-                ContainsLoadedAssembly(result, expectedAssembly!);
+            GenericCandidateAssemblyEvidence? assemblyEvidence = null;
+            string assemblyLoadState = expectedAssemblyHash is null ? "not-required" : "not-proven";
+            string? assemblyErrorCode = null;
+            string? assemblyError = null;
+            if (targetLoaded && errors.Count == 0 && expectedAssemblyHash is not null)
+            {
+                assemblyEvidence = await ReadAssemblyVerificationCoreAsync(
+                        runtimeTransport,
+                        leaseId,
+                        expectedAssembly!,
+                        expectedAssemblyHash,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                assemblyLoadState = AssemblyLoadState(assemblyEvidence);
+                if (!assemblyEvidence.Success)
+                {
+                    assemblyErrorCode = assemblyEvidence.ErrorCode ?? "TARGET_ASSEMBLY_VERIFICATION_FAILED";
+                    assemblyError = assemblyEvidence.Error ??
+                        "The exact target assembly could not be verified.";
+                }
+            }
             int? generation = ReadGeneration(envelope);
             return new GenericCandidateLoadEvidence(
                 targetLoaded,
                 targetLoaded && errors.Count == 0,
-                assemblyLoaded ? "loaded-by-rimbridge-list-mods" : "not-reported",
+                assemblyLoadState,
                 generation,
                 "rimworld/list_mods",
-                null,
-                null,
+                assemblyErrorCode,
+                assemblyError,
                 errors,
-                matchedMod);
+                matchedMod,
+                assemblyEvidence);
         }
         catch (JsonException exception)
         {
@@ -466,35 +519,130 @@ public sealed class ManagedReadyToTestCandidateConsumer
         }
         return null;
     }
-
-    private static bool ContainsLoadedAssembly(JsonElement value, string expectedAssembly)
+    private async Task<GenericCandidateAssemblyEvidence> ReadAssemblyVerificationCoreAsync(
+        RequiredRimBridgeProcessTransport runtimeTransport,
+        string leaseId,
+        string expectedAssembly,
+        string expectedAssemblyHash,
+        CancellationToken cancellationToken)
     {
-        if (value.ValueKind == JsonValueKind.Object)
+        GenericCandidateAssemblyEvidence failure(string code, string message) =>
+            new(false, false, false, expectedAssembly, null, null, null, null,
+                expectedAssemblyHash, false, null, code, message);
+
+        DevBridgeProcessResult process = await runtimeTransport.ExecuteAsync(
+                new DevBridgeProcessRequest(
+                    options.BridgeOptions.CommandPath,
+                    options.BridgeOptions.RootPath,
+                    ["--root", options.BridgeOptions.RootPath, "bridge", "call",
+                        "devbridge/verify_loaded_assembly",
+                        JsonSerializer.Serialize(new
+                        {
+                            assemblyName = expectedAssembly,
+                            expectedSha256 = expectedAssemblyHash
+                        }),
+                        "--lease", leaseId, "--json"],
+                    options.Timeout,
+                    options.MaxStdoutBytes,
+                    options.MaxStderrBytes,
+                    DevBridgeProcessEnvironment.ForWorkflow(options.WorkflowId),
+                    OperationKey: "candidate-assembly-verification"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (process.Cancelled)
+            return failure("RIMTEST_CANCELLED", "Target assembly verification was cancelled.");
+        if (process.TimedOut)
+            return failure("TARGET_ASSEMBLY_VERIFICATION_TIMEOUT",
+                "RimBridge did not return exact target assembly evidence in time.");
+        if (!string.IsNullOrWhiteSpace(process.StartError) ||
+            string.IsNullOrWhiteSpace(process.Stdout))
         {
-            bool loaded = !value.TryGetProperty("loaded", out JsonElement loadedValue) ||
-                loadedValue.ValueKind != JsonValueKind.False;
-            foreach (JsonProperty property in value.EnumerateObject())
+            return failure("TARGET_ASSEMBLY_VERIFICATION_UNAVAILABLE",
+                Bound(process.StartError ?? process.Stderr ??
+                    "RimBridge returned no exact target assembly evidence."));
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(process.Stdout);
+            JsonElement envelope = Property(document.RootElement, "rimBridgeRoute");
+            if (envelope.ValueKind == JsonValueKind.Undefined)
+                envelope = document.RootElement;
+            if (envelope.ValueKind != JsonValueKind.Object ||
+                !TryGetBoolean(envelope, "success", out bool routeSuccess))
             {
-                if (property.Name.Equals("name", StringComparison.OrdinalIgnoreCase) ||
-                    property.Name.Equals("assembly", StringComparison.OrdinalIgnoreCase) ||
-                    property.Name.Equals("path", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (loaded && property.Value.ValueKind == JsonValueKind.String &&
-                        string.Equals(Path.GetFileName(property.Value.GetString()), expectedAssembly,
-                            StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
-                if (ContainsLoadedAssembly(property.Value, expectedAssembly))
-                    return true;
+                return failure("TARGET_ASSEMBLY_VERIFICATION_INVALID",
+                    "RimBridge returned an invalid target assembly evidence envelope.");
             }
+            if (!routeSuccess)
+            {
+                return failure(
+                    StringValue(envelope, "errorCode") ?? "TARGET_ASSEMBLY_VERIFICATION_FAILED",
+                    StringValue(envelope, "error") ??
+                    "RimBridge rejected exact target assembly evidence.");
+            }
+            JsonElement result = Property(envelope, "result");
+            if (result.ValueKind != JsonValueKind.Object)
+            {
+                return failure("TARGET_ASSEMBLY_VERIFICATION_INVALID",
+                    "RimBridge returned no target assembly evidence result.");
+            }
+            bool reportedSuccess = TryGetBoolean(result, "success", out bool success) && success;
+            bool loaded = TryGetBoolean(result, "loaded", out bool loadedValue) && loadedValue;
+            bool uniqueMatch = TryGetBoolean(result, "uniqueMatch", out bool uniqueValue) && uniqueValue;
+            string? reportedExpectedHash = StringValue(result, "expectedSha256");
+            string? sha256 = StringValue(result, "sha256");
+            bool hashMatches = TryGetBoolean(result, "hashMatches", out bool hashValue) && hashValue;
+            string? errorCode = StringValue(result, "errorCode");
+            string? error = StringValue(result, "error");
+            bool exact = reportedSuccess && loaded && uniqueMatch && hashMatches &&
+                string.Equals(reportedExpectedHash, expectedAssemblyHash,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(sha256, expectedAssemblyHash,
+                    StringComparison.OrdinalIgnoreCase);
+            if (!exact && errorCode is null)
+            {
+                errorCode = !loaded
+                    ? "TARGET_ASSEMBLY_NOT_LOADED"
+                    : !uniqueMatch
+                        ? "TARGET_ASSEMBLY_AMBIGUOUS"
+                        : "TARGET_ASSEMBLY_IDENTITY_MISMATCH";
+                error ??= "The loaded target assembly did not match the candidate assembly hash.";
+            }
+            return new GenericCandidateAssemblyEvidence(
+                exact,
+                loaded,
+                uniqueMatch,
+                StringValue(result, "assemblyName"),
+                StringValue(result, "assemblyFullName"),
+                StringValue(result, "location"),
+                StringValue(result, "fileName"),
+                sha256,
+                reportedExpectedHash ?? expectedAssemblyHash,
+                hashMatches,
+                StringValue(result, "mvid"),
+                exact ? null : errorCode,
+                exact ? null : error);
         }
-        else if (value.ValueKind == JsonValueKind.Array)
+        catch (JsonException exception)
         {
-            foreach (JsonElement item in value.EnumerateArray())
-                if (ContainsLoadedAssembly(item, expectedAssembly))
-                    return true;
+            return failure("TARGET_ASSEMBLY_VERIFICATION_INVALID",
+                Bound("RimBridge returned malformed target assembly evidence: " + exception.Message));
         }
-        return false;
+    }
+
+    private static string AssemblyLoadState(GenericCandidateAssemblyEvidence evidence)
+    {
+        if (evidence.Success && evidence.Loaded && evidence.UniqueMatch && evidence.HashMatches)
+            return "loaded-and-matched";
+        return evidence.ErrorCode switch
+        {
+            "TARGET_ASSEMBLY_NOT_LOADED" => "not-loaded",
+            "TARGET_ASSEMBLY_AMBIGUOUS" => "ambiguous",
+            "TARGET_ASSEMBLY_HASH_UNAVAILABLE" => "hash-unavailable",
+            "TARGET_ASSEMBLY_VERIFICATION_UNAVAILABLE" => "unavailable",
+            "TARGET_ASSEMBLY_VERIFICATION_TIMEOUT" => "timeout",
+            _ => evidence.Loaded && evidence.UniqueMatch ? "identity-mismatch" : "not-verified"
+        };
     }
 
     private static List<string> CollectTargetLoadErrors(JsonElement value, string packageId)

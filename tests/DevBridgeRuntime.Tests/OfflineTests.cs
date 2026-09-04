@@ -132,6 +132,11 @@ internal static partial class OfflineTests
         Run("DevBridge core mod remains SDK-free", TestCoreModRemainsSdkFree);
         Run("BridgeTools companion project and publish contract", TestBridgeToolsPublishContract);
         Run("BridgeTools publishing refreshes stale deployment output", TestBridgeToolsPublishRefreshesStaleDll);
+        Run("assembly verifier requires authenticated tool metadata", TestAssemblyVerifierRequiresAuthenticatedToolMetadata);
+        Run("assembly verifier matches exact loaded assembly", TestAssemblyVerifierMatchesExactLoadedAssembly);
+        Run("assembly verifier rejects absent and wrong hashes", TestAssemblyVerifierRejectsAbsentAndWrongHash);
+        Run("assembly verifier rejects duplicate simple names", TestAssemblyVerifierRejectsDuplicateSimpleNames);
+        Run("assembly verifier ignores unrelated and locationless assemblies", TestAssemblyVerifierIgnoresUnrelatedAndLocationlessAssemblies);
         Run("doctor identifies a mod-local BridgeTools companion", TestBridgeToolsWrongLocationDiagnostic);
         Run("RimBridge companion status exposes a bounded diagnostic category", TestRimBridgeCompanionDiagnosticCategory);
         Run("baseline profile excludes managed projects and load-them-last", TestBaselineProfile);

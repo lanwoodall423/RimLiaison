@@ -587,6 +587,8 @@ internal static class Program
         ("candidate does not synthesize custom suite", ManagedReadyToTestCandidateTests.CandidateDoesNotSynthesizeCustomSuite),
         ("attributable target load error prevents pass", ManagedReadyToTestCandidateTests.AttributableTargetLoadErrorPreventsPass),
         ("generic assembly evidence is retained", ManagedReadyToTestCandidateTests.GenericAssemblyEvidenceIsRetained),
+        ("assembly verifier follows generic target proof", ManagedReadyToTestCandidateTests.AssemblyVerifierRunsOnlyAfterGenericTargetProof),
+        ("assembly verifier failure prevents candidate pass", ManagedReadyToTestCandidateTests.AssemblyVerifierFailurePreventsCandidatePass),
         ("candidate generic evidence uses explicit active-only request", ManagedReadyToTestCandidateTests.CandidateGenericEvidenceUsesExplicitActiveOnlyRequest),
         ("oversized fallback cannot prove target load", ManagedReadyToTestCandidateTests.OutputTooLargeFallbackCannotProveTargetLoad),
         ("generic evidence requires loaded-session identity", ManagedReadyToTestCandidateTests.GenericEvidenceRequiresLoadedSessionIdentity),

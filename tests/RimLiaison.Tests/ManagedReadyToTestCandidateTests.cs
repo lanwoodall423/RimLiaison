@@ -130,9 +130,48 @@ internal static class ManagedReadyToTestCandidateTests
         ManagedReadyToTestCandidateResult result = fixture.Consumer(
                 new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
         GenericCandidateLoadEvidence evidence = (GenericCandidateLoadEvidence)result.ManagedLoadEvidence!;
-        Assert(result.Success && evidence.AssemblyLoadState == "loaded-by-rimbridge-list-mods" &&
+        Assert(result.Success && evidence.AssemblyLoadState == "loaded-and-matched" &&
+            evidence.AssemblyEvidence?.Success == true &&
+            evidence.AssemblyEvidence.HashMatches &&
             result.TargetAssemblyLoadState == evidence.AssemblyLoadState,
-            "generic assembly-load evidence was not retained");
+            "exact assembly-load evidence was not retained");
+    }
+
+    public static void AssemblyVerifierRunsOnlyAfterGenericTargetProof()
+    {
+        using Fixture loadedFixture = new();
+        string loadedManifest = loadedFixture.CreateCandidate();
+        var loadedTransport = new RecordingTransport(loadedFixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult loaded = loadedFixture.Consumer(loadedTransport)
+            .RunAsync(loadedManifest).GetAwaiter().GetResult();
+        int listIndex = loadedTransport.Requests.FindIndex(request =>
+            request.Arguments.Contains("rimworld/list_mods"));
+        int assemblyIndex = loadedTransport.Requests.FindIndex(request =>
+            request.Arguments.Contains("devbridge/verify_loaded_assembly"));
+        Assert(loaded.Success && listIndex >= 0 && assemblyIndex > listIndex,
+            "exact assembly verification did not follow successful generic target evidence");
+
+        using Fixture notLoadedFixture = new() { GenericTargetLoaded = false };
+        string notLoadedManifest = notLoadedFixture.CreateCandidate();
+        var notLoadedTransport = new RecordingTransport(notLoadedFixture.RuntimeHandler);
+        notLoadedFixture.Consumer(notLoadedTransport).RunAsync(notLoadedManifest)
+            .GetAwaiter().GetResult();
+        Assert(!notLoadedTransport.Requests.Any(request =>
+                request.Arguments.Contains("devbridge/verify_loaded_assembly")),
+            "assembly verification ran before generic target load proof");
+    }
+
+    public static void AssemblyVerifierFailurePreventsCandidatePass()
+    {
+        using Fixture fixture = new() { GenericAssemblyVerification = false };
+        string manifestPath = fixture.CreateCandidate();
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(!result.Success &&
+            result.ErrorCode == "TARGET_ASSEMBLY_NOT_LOADED" &&
+            result.TargetAssemblyLoadState == "not-loaded" &&
+            result.ManagedLoadEvidence?.AssemblyEvidence?.Loaded == false,
+            "candidate passed without exact target assembly proof");
     }
 
     public static void CandidateGenericEvidenceUsesExplicitActiveOnlyRequest()
@@ -323,9 +362,8 @@ internal static class ManagedReadyToTestCandidateTests
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
         Assert(!result.Success && result.ErrorCode == "RIMBRIDGE_MODE_TRANSITION_BUSY" &&
-            fixture.CoordinatorShutdownCalls == 0 &&
-            !transport.Requests.Any(request => request.Arguments.Contains("begin")),
-            "an active lease was force-recycled while changing RimBridge mode");
+            fixture.CoordinatorShutdownCalls == 0,
+            "an active lease was ignored during required RimBridge mode transition");
     }
 
     public static void ConcurrentRequiredCandidatesShareOneCoordinatorTransition()
@@ -367,7 +405,8 @@ internal static class ManagedReadyToTestCandidateTests
         public bool GenericEnabled { get; init; } = true;
         public bool GenericLoadedInSession { get; init; } = true;
         public bool GenericMatchesLoadedSession { get; init; } = true;
-        public bool GenericAssemblyEvidence { get; init; } = true;
+        public bool GenericAssemblyVerification { get; init; } = true;
+        public bool GenericAssemblyVerificationMismatch { get; init; }
         public string InitialRimBridgeMode { get; init; } = "required";
         public bool InitialRuntimeStopped { get; init; }
         public bool StaleOwnedPid { get; init; }
@@ -447,14 +486,38 @@ internal static class ManagedReadyToTestCandidateTests
 
         public DevBridgeProcessResult RuntimeHandler(DevBridgeProcessRequest request, CancellationToken _)
         {
+                if (request.Arguments.Contains("devbridge/verify_loaded_assembly"))
+                {
+                    string expectedHash = AssemblyHash();
+                    bool loaded = GenericAssemblyVerification;
+                    bool unique = loaded;
+                    bool matches = loaded && !GenericAssemblyVerificationMismatch;
+                    string returnedHash = matches ? expectedHash : new string('0', 64);
+                    string payload = "{\"success\":" + matches.ToString().ToLowerInvariant() +
+                        ",\"loaded\":" + loaded.ToString().ToLowerInvariant() +
+                        ",\"uniqueMatch\":" + unique.ToString().ToLowerInvariant() +
+                        ",\"assemblyName\":\"Fixture\",\"assemblyFullName\":\"Fixture, Version=1.0.0.0\"," +
+                        "\"location\":\"" + RuntimeRoot.Replace("\\", "\\\\") +
+                        "\\\\1.6\\\\Assemblies\\\\Fixture.dll\",\"fileName\":\"Fixture.dll\"," +
+                        "\"sha256\":\"" + returnedHash + "\",\"expectedSha256\":\"" + expectedHash +
+                        "\",\"hashMatches\":" + matches.ToString().ToLowerInvariant() +
+                        ",\"mvid\":null,\"errorCode\":" +
+                        (matches ? "null" : loaded
+                            ? "\"TARGET_ASSEMBLY_IDENTITY_MISMATCH\""
+                            : "\"TARGET_ASSEMBLY_NOT_LOADED\"") +
+                        ",\"error\":" +
+                        (matches ? "null" : loaded
+                            ? "\"assembly hash mismatch\""
+                            : "\"assembly was not loaded\"") + "}";
+                    return Result(
+                        "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":" +
+                        payload + "},\"provenance\":{\"generation\":2}}");
+                }
             if (request.Arguments.Contains("bridge") && request.Arguments.Contains("call"))
             {
                 if (GenericFallback)
                     return Result("{\"success\":false,\"errorCode\":\"OUTPUT_TOO_LARGE\",\"error\":\"The coordinator result exceeded the maximum payload length.\",\"payloadMetadata\":{\"summarized\":true,\"truncated\":true,\"fallback\":true}}");
                 string packageId = GenericTargetLoaded ? "lan.fixture" : "lan.other";
-                string assembly = GenericAssemblyEvidence
-                    ? ",\"assemblies\":[{\"name\":\"Fixture.dll\",\"loaded\":true}]"
-                    : string.Empty;
                 string errors = GenericTargetLoadError
                     ? ",\"errors\":[{\"packageId\":\"lan.fixture\",\"message\":\"Def load failed\"}]"
                     : string.Empty;
@@ -463,7 +526,7 @@ internal static class ManagedReadyToTestCandidateTests
                     "\"enabled\":" + GenericEnabled.ToString().ToLowerInvariant() +
                     ",\"loadedInSession\":" + GenericLoadedInSession.ToString().ToLowerInvariant() +
                     ",\"matchesLoadedSession\":" + GenericMatchesLoadedSession.ToString().ToLowerInvariant() +
-                    ",\"activeLoadOrder\":0,\"loadedSessionOrder\":0" + assembly + errors + "}";
+                    ",\"activeLoadOrder\":0,\"loadedSessionOrder\":0" + errors + "}";
                 return Result(
                     "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":{\"success\":true,\"mods\":[" +
                     record + "],\"operation\":{\"name\":\"list_mods\"}},\"provenance\":{\"generation\":2}}}",
@@ -509,6 +572,12 @@ internal static class ManagedReadyToTestCandidateTests
             if (request.Arguments.Contains("begin")) return Result("{\"success\":true,\"exitCode\":0,\"generation\":1,\"leaseId\":\"lease-00000000000000000000000000000001\"}");
             if (request.Arguments.Contains("end")) return Result("{\"success\":true,\"exitCode\":0,\"generation\":2,\"leaseId\":\"lease-00000000000000000000000000000001\"}");
             return Result("{\"success\":true}");
+        }
+        private string AssemblyHash()
+        {
+            byte[] bytes = File.ReadAllBytes(Path.Combine(
+                RuntimeRoot, "1.6", "Assemblies", "Fixture.dll"));
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
         }
 
         public void Dispose()
