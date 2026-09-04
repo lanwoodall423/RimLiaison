@@ -151,21 +151,31 @@ public sealed class ManagedReadyToTestCandidateConsumer
             string? runtimeRoot = string.IsNullOrWhiteSpace(options.DeploymentRoot)
                 ? null
                 : Path.GetFullPath(options.DeploymentRoot);
-            if (runtimeRoot is null)
+            ProjectRuntimeBindingResult binding = ProjectRuntimeBindingResolver.Resolve(
+                sourceRoot,
+                stack.Manifest,
+                enroll: false);
+            if (!binding.Succeeded || string.IsNullOrWhiteSpace(binding.RuntimeRoot))
             {
-                ProjectRuntimeBindingResult binding = ProjectRuntimeBindingResolver.Resolve(
-                    sourceRoot,
-                    stack.Manifest,
-                    enroll: false);
-                if (!binding.Succeeded || string.IsNullOrWhiteSpace(binding.RuntimeRoot))
+                if (runtimeRoot is null)
                 {
                     return FailureFor(manifest, "DEPENDENCY_PREREQUISITE",
                         binding.ErrorCode ?? "PROJECT_RUNTIME_ROOT_MISSING",
                         binding.Error ?? "The candidate project runtime binding is not ready.");
                 }
+            }
+            else if (string.IsNullOrWhiteSpace(binding.RimWorldRoot) ||
+                runtimeRoot is null ||
+                !IsPathWithin(Path.Combine(binding.RimWorldRoot, "Mods"), runtimeRoot))
+            {
                 runtimeRoot = ResolveCanonicalCandidateRuntimeRoot(sourceRoot, stack.Manifest, binding);
             }
-
+            if (runtimeRoot is null)
+            {
+                return FailureFor(manifest, "DEPENDENCY_PREREQUISITE",
+                    "PROJECT_RUNTIME_ROOT_MISSING",
+                    "The candidate project runtime binding is not ready.");
+            }
             materialization = ProjectOwnedDescriptorMaterializer.Materialize(
                 manifest.CanonicalProjectId,
                 sourceRoot,
@@ -872,10 +882,19 @@ public sealed class ManagedReadyToTestCandidateConsumer
             StringValue(rimBridge, "configuredMode"),
             StringValue(root, "leaseId"),
             StringValue(rimBridge, "packageId"),
+
             StringValue(rimBridge, "version"),
             StringValue(rimBridge, "lifecycleState"),
             StringValue(root, "state"),
             StringValue(root, "errorCode"));
+    }
+
+    private static bool IsPathWithin(string root, string candidate)
+    {
+        string fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        string fullCandidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate));
+        return string.Equals(fullRoot, fullCandidate, StringComparison.OrdinalIgnoreCase) ||
+            fullCandidate.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveCanonicalCandidateRuntimeRoot(
