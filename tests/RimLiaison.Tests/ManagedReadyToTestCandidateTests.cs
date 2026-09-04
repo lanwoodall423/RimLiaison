@@ -158,7 +158,7 @@ internal static class ManagedReadyToTestCandidateTests
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
         Assert(result.Success && result.Cleanup.LeaseReleased && result.Cleanup.RuntimeRestored &&
-            transport.Requests.Any(request => request.Arguments.Contains("end")) &&
+            transport.Requests.Count(request => request.Arguments.Contains("end")) >= 2 &&
             transport.Requests.Any(request => request.Arguments.Contains("release") && request.Arguments.Contains("project")),
             "managed candidate cleanup was not proven after success");
     }

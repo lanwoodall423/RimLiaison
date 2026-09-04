@@ -293,6 +293,52 @@ public sealed class ManagedReadyToTestCandidateConsumer
         int? expectedGeneration,
         CancellationToken cancellationToken)
     {
+        DevBridgeLeaseAdapter leaseAdapter = new(runtimeTransport, options.BridgeOptions);
+        DevBridgeLeaseResult lease = await leaseAdapter.BeginLeaseAsync(
+                options.WorkflowId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!lease.IsUsable)
+        {
+            return GenericCandidateLoadEvidence.Failure(
+                lease.Status.ErrorCode ?? "RIMBRIDGE_LOAD_EVIDENCE_LEASE_UNAVAILABLE",
+                lease.Status.Error ?? "DevBridge did not grant a lease for generic load evidence.");
+        }
+
+        GenericCandidateLoadEvidence evidence;
+        DevBridgeLeaseResult released;
+        try
+        {
+            evidence = await ReadGenericLoadEvidenceCoreAsync(
+                    runtimeTransport,
+                    expectedAssembly,
+                    packageId,
+                    expectedGeneration,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            released = await leaseAdapter.EndLeaseAsync(
+                    lease.LeaseId!,
+                    options.WorkflowId,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        return released.Status.IsSuccess
+            ? evidence
+            : GenericCandidateLoadEvidence.Failure(
+                "RIMBRIDGE_LOAD_EVIDENCE_LEASE_RELEASE_FAILED",
+                released.Status.Error ?? "DevBridge did not prove generic-evidence lease release.");
+    }
+
+    private async Task<GenericCandidateLoadEvidence> ReadGenericLoadEvidenceCoreAsync(
+        RequiredRimBridgeProcessTransport runtimeTransport,
+        string? expectedAssembly,
+        string packageId,
+        int? expectedGeneration,
+        CancellationToken cancellationToken)
+    {
         DevBridgeProcessResult process = await runtimeTransport.ExecuteAsync(
                 new DevBridgeProcessRequest(
                     options.BridgeOptions.CommandPath,
