@@ -164,7 +164,12 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     cleanup);
             }
 
-            DevBridgeRecipeAdapter recipe = new(transport, options.BridgeOptions);
+            DevBridgeAdapterOptions targetOptions = options.BridgeOptions with
+            {
+                RecipeFilePath = materialization!.Descriptor.ResolvedRecipePath ??
+                    materialization.Descriptor.TestRecipePath
+            };
+            DevBridgeRecipeAdapter recipe = new(transport, targetOptions);
             DevBridgeRecipeRunResult target = await recipe.RunAsync(
                     materialization!.Descriptor.TestRecipe,
                     options.WorkflowId,
