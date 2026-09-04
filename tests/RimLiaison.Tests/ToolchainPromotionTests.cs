@@ -44,6 +44,21 @@ internal static class ToolchainPromotionTests
                 StringComparison.OrdinalIgnoreCase),
             "promotion generations must be sibling roots");
     }
+    public static void HistoricalPromotionRootsCollapseToStableParent()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-history-" + Guid.NewGuid().ToString("N"));
+        string activeExecutable = Path.Combine(
+            root,
+            "cli-promoted-AAAA",
+            "cli-promoted-BBBB",
+            "cli-promoted-CCCC",
+            "cli",
+            "rimliaison.exe");
+        string staged = ToolchainPromotionService.DeriveStagedCliRoot(activeExecutable, "DDDD");
+        Assert(
+            string.Equals(staged, Path.Combine(root, "cli-promoted-DDDD"), StringComparison.OrdinalIgnoreCase),
+            "historically nested promotions did not collapse to the stable production parent");
+    }
 
     public static void RepeatedPromotionsKeepCliDepthBounded()
     {

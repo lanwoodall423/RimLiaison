@@ -84,6 +84,7 @@ internal static class Program
         ("malformed promotion package fails closed", ToolchainPromotionTests.MalformedPromotionPackageFailsClosed),
         ("static promotion path does not acquire lease", ToolchainPromotionTests.StaticPromotionPathDoesNotAcquireLease),
         ("promotion derives sibling CLI root", ToolchainPromotionTests.PromotionDerivesSiblingCliRoot),
+        ("historical promotion roots collapse to stable parent", ToolchainPromotionTests.HistoricalPromotionRootsCollapseToStableParent),
         ("repeated promotions keep CLI depth bounded", ToolchainPromotionTests.RepeatedPromotionsKeepCliDepthBounded),
         ("promotion CLI path length is history independent", ToolchainPromotionTests.PromotionCliPathLengthDoesNotGrowWithHistory),
         ("promotion candidate executable stays staged", ToolchainPromotionTests.PromotionCandidateExecutableStaysInsideStagedRoot),
