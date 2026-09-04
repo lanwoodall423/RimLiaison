@@ -32,6 +32,25 @@ internal static class ManagedReadyToTestCandidateTests
         Assert(result.Success == true && transport.Requests.All(request => request.FileName != "dotnet"),
             $"managed candidate execution rebuilt source: {result.Status.ErrorCode} {result.Status.Error}; requests={string.Join("|", transport.Requests.Select(request => string.Join(",", request.Arguments)))}");
     }
+    public static void CandidateBootstrapRescansBeforeProfileRegistration()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeModDevelopmentResult result = fixture.Transaction(transport).RunAsync(
+                "fixture", fixture.RepositoryRoot, fixture.SourceFingerprint, "candidate-test",
+                new DevBridgeModDevelopmentExecutionContext(
+                    Candidate: fixture.Manifest!, CandidateManifestPath: manifestPath))
+            .GetAwaiter().GetResult();
+        int shutdown = transport.Requests.FindIndex(request =>
+            request.Arguments.SequenceEqual(["coordinator", "shutdown", "--json"]));
+        int register = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("register", StringComparer.OrdinalIgnoreCase) &&
+            request.Arguments.Contains("project", StringComparer.OrdinalIgnoreCase));
+        Assert(result.Success == true && shutdown >= 0 && register > shutdown,
+            "a missing candidate target must be deployed and rescanned before profile registration");
+    }
+
 
 
     public static void CandidatePackageHashPreservedThroughDeploymentEvidence()

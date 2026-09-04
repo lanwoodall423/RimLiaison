@@ -360,9 +360,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 JsonElement? previous = ReadJson(manifestPath);
                 EnsureOwnership(targetRoot, previous);
                 changed = NeedsDeployment(targetRoot, package, previous, packageHash);
-                bool candidateBootstrap = verifiedCandidate is not null &&
-                    changed &&
-                    !File.Exists(Path.Combine(targetRoot, "About", "About.xml"));
+                bool candidateBootstrap = verifiedCandidate is not null && changed;
 
                 DevBridgeLeaseAdapter leaseAdapter = new(transport, ToBridgeOptions());
                 DevBridgeLeaseResult lease = string.IsNullOrWhiteSpace(executionContext?.LeaseId)
@@ -409,6 +407,14 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         }
                     }
                     RemoveStaleOwnedFiles(targetRoot, package, previous);
+                    if (candidateBootstrap)
+                    {
+                        await RequireCoordinatorSuccess(
+                            ["coordinator", "shutdown", "--json"],
+                            "DEVBRIDGE_COORDINATOR_SHUTDOWN_FAILED",
+                            workflowId,
+                            cancellationToken).ConfigureAwait(false);
+                    }
                     if (!registered)
                     {
                         DevBridgeProcessResult register = await InvokeAsync(["project", "register", project, "--id", "rimliaison-" + transactionId, "--json"], options.Timeout, workflowId, cancellationToken).ConfigureAwait(false);

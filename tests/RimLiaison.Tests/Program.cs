@@ -577,6 +577,7 @@ internal static class Program
         ("candidate identity needs no external DevBridge checkout", ReadyToTestCandidateTests.ExternalDevBridgeCheckoutIsNotCandidateIdentity),
         ("mutated candidate rejected before lease", ManagedReadyToTestCandidateTests.MutatedCandidateRejectedBeforeLease),
         ("managed candidate never rebuilds source", ManagedReadyToTestCandidateTests.CandidateManagedExecutionNeverBuildsSource),
+        ("candidate bootstrap rescans before profile registration", ManagedReadyToTestCandidateTests.CandidateBootstrapRescansBeforeProfileRegistration),
         ("candidate package hash preserved through deployment", ManagedReadyToTestCandidateTests.CandidatePackageHashPreservedThroughDeploymentEvidence),
         ("forbidden candidate content rejected", ManagedReadyToTestCandidateTests.ForbiddenCandidateContentRejected),
         ("existing dependency resolver reused", ManagedReadyToTestCandidateTests.ExistingDependencyResolverPathIsReused),
