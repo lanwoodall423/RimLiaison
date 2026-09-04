@@ -9,9 +9,10 @@ using RimLiaison.Observability;
 namespace RimLiaison.DevBridge;
 
 /// <summary>
-/// Internal production transaction boundary.  It owns build, package, deployment,
-/// generation, readiness, lease, and cleanup orchestration without delegating to
-/// the legacy PowerShell transaction consumer.
+/// Existing managed-runtime transaction consumer. This compatibility boundary owns shared runtime
+/// mutation: deployment, generation, readiness, lease, registration, and cleanup.
+/// Candidate preparation is intentionally implemented by
+/// <see cref="ReadyToTestCandidatePreparationService"/> and never enters this boundary.
 /// </summary>
 public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelopmentAdapter
 {
@@ -125,11 +126,6 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     "The resolved validation recipe changed after metadata materialization.");
             }
 
-            string transactionRoot = Path.Combine(Path.GetTempPath(), "RimLiaison-development-" + transactionId);
-            string stagingRoot = Path.Combine(transactionRoot, "staging");
-            string intermediateRoot = Path.Combine(transactionRoot, "obj");
-            Directory.CreateDirectory(stagingRoot);
-            Directory.CreateDirectory(intermediateRoot);
 
             DevBridgeRecipeAdapter recipeAdapter = new(transport, ToBridgeOptions(recipeResolution.Recipe.Path));
             DevBridgeRecipeShowResult show = await recipeAdapter.ShowAsync(descriptor.TestRecipe, cancellationToken).ConfigureAwait(false);
@@ -153,69 +149,199 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     plan.Status.Error ?? "The declared development recipe could not be planned.", plan.Status.Outcome);
             }
 
-            DevBridgeProcessResult statusBeforeBuild = await InvokeAsync(["status", "--json"], options.Timeout, workflowId, cancellationToken).ConfigureAwait(false);
+            VerifiedReadyToTestCandidate? verifiedCandidate = null;
+            string candidateErrorCode = "RIMTEST_CANDIDATE_INVALID";
+            string candidateError = "The candidate manifest is invalid.";
+            if (executionContext?.Candidate is not null)
+            {
+                if (string.IsNullOrWhiteSpace(executionContext.CandidateManifestPath) ||
+                    !ReadyToTestCandidateVerifier.TryVerify(
+                        executionContext.CandidateManifestPath,
+                        out verifiedCandidate,
+                        out candidateErrorCode,
+                        out candidateError))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        candidateErrorCode ?? "RIMTEST_CANDIDATE_INVALID",
+                        candidateError,
+                        DevBridgeOutcomeKind.TestFailure);
+                }
+                if (!string.Equals(
+                        verifiedCandidate!.Manifest.CandidateId,
+                        executionContext.Candidate.CandidateId,
+                        StringComparison.Ordinal) ||
+                    !string.Equals(
+                        verifiedCandidate.Manifest.PackageSha256,
+                        executionContext.Candidate.PackageSha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_IDENTITY_CHANGED",
+                        "The candidate changed between verification and managed execution.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
+            }
+            DevBridgeProcessResult statusBeforeBuild = await InvokeAsync(
+                ["status", "--json"],
+                options.Timeout,
+                workflowId,
+                cancellationToken).ConfigureAwait(false);
             if (!TrySuccess(statusBeforeBuild, out JsonElement statusRoot, out DevBridgeAdapterStatus? statusFailure))
             {
-                return Failure(project, workflowId, transactionId,
+                return Failure(
+                    project,
+                    workflowId,
+                    transactionId,
                     statusFailure!.ErrorCode ?? "DEVBRIDGE_STATUS_FAILED",
-                    statusFailure.Error ?? "DevBridge status was unavailable.", statusFailure.Outcome);
+                    statusFailure.Error ?? "DevBridge status was unavailable.",
+                    statusFailure.Outcome);
             }
-            string? rimWorldRoot = GetString(statusRoot, "rimworldRoot") ?? GetString(statusRoot, "rimWorldRoot");
+            string? rimWorldRoot = GetString(statusRoot, "rimworldRoot") ??
+                GetString(statusRoot, "rimWorldRoot");
             if (string.IsNullOrWhiteSpace(rimWorldRoot) || !Directory.Exists(rimWorldRoot))
             {
-                return Failure(project, workflowId, transactionId,
+                return Failure(
+                    project,
+                    workflowId,
+                    transactionId,
                     "RIMWORLD_DIR_UNRESOLVED",
                     "DevBridge did not resolve an existing RimWorld installation root.");
             }
-            string expectedArtifact = SafeCombine(stagingRoot, descriptor.ExpectedAssembly);
-            string buildProject = Path.GetFullPath(Path.Combine(sourceRoot, descriptor.SourceProject));
-            string buildWorkingDirectory = Path.GetDirectoryName(buildProject) ?? sourceRoot;
-            string[] buildArguments =
-            [
-                "build", buildProject,
-                "--configuration", descriptor.Configuration,
-                "--output", stagingRoot,
-                "--nologo",
-                "-p:BaseIntermediateOutputPath=" + Path.Combine(intermediateRoot, "base") + Path.DirectorySeparatorChar,
-                "-p:IntermediateOutputPath=" + Path.Combine(intermediateRoot, "intermediate") + Path.DirectorySeparatorChar,
-                "-p:MSBuildProjectExtensionsPath=" + Path.Combine(intermediateRoot, "extensions") + Path.DirectorySeparatorChar,
-                "-p:OutputPath=" + stagingRoot + Path.DirectorySeparatorChar,
-                "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot),
-                "-p:RIMWORLD_ROOT=" + Path.GetFullPath(rimWorldRoot)
-            ];
-            DevBridgeProcessResult build = await transport.ExecuteAsync(
-                new DevBridgeProcessRequest(
-                    "dotnet",
-                    buildWorkingDirectory,
-                    buildArguments,
-                    options.Timeout,
-                    options.MaxStdoutBytes,
-                    options.MaxStderrBytes,
-                    DevBridgeProcessEnvironment.ForWorkflow(workflowId),
-                    "build:" + project), cancellationToken).ConfigureAwait(false);
-            if (build.Cancelled)
+
+
+            DevBridgeBuildDiagnostics? buildDiagnostics = null;
+            string stagingRoot;
+            string expectedArtifact;
+            List<PackageEntry> package;
+            string packageHash;
+            string buildProject = string.Empty;
+            if (verifiedCandidate is not null)
             {
-                return Failure(project, workflowId, transactionId, "RIMTEST_CANCELLED", "The development build was cancelled.", DevBridgeOutcomeKind.Cancelled);
+                stagingRoot = verifiedCandidate.Manifest.StagedRuntimeRoot;
+                buildProject = Path.Combine(sourceRoot, descriptor.SourceProject);
+                expectedArtifact = verifiedCandidate.Package
+                    .Where(entry => string.Equals(
+                        entry.TargetPath,
+                        descriptor.DeploymentTarget,
+                        StringComparison.OrdinalIgnoreCase))
+                    .Select(entry => entry.SourcePath)
+                    .FirstOrDefault() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(expectedArtifact))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_TARGET_MISSING",
+                        "The verified candidate package does not contain the declared deployment target.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
+                package = verifiedCandidate.Package
+                    .Select(entry => new PackageEntry(
+                        entry.SourcePath,
+                        entry.TargetPath,
+                        entry.Sha256,
+                        entry.Size))
+                    .ToList();
+                packageHash = ReadyToTestCandidateVerifier.ComputePackageHash(verifiedCandidate.Package);
+                if (!string.Equals(
+                        packageHash,
+                        verifiedCandidate.Manifest.PackageSha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_PACKAGE_MUTATED",
+                        "The verified candidate package changed before deployment.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
             }
-            if (build.TimedOut)
+            else
             {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout.", DevBridgeOutcomeKind.InfrastructureFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout."));
-            }
-            if (build.ExitCode is not 0 || build.StartError is not null)
-            {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed."));
-            }
-            if (!File.Exists(expectedArtifact))
-            {
-                return Failure(project, workflowId, transactionId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly.", DevBridgeOutcomeKind.TestFailure, BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly."));
+                string transactionRoot = Path.Combine(Path.GetTempPath(), "RimLiaison-development-" + transactionId);
+                stagingRoot = Path.Combine(transactionRoot, "staging");
+                string intermediateRoot = Path.Combine(transactionRoot, "obj");
+                Directory.CreateDirectory(stagingRoot);
+                Directory.CreateDirectory(intermediateRoot);
+                buildProject = Path.GetFullPath(Path.Combine(sourceRoot, descriptor.SourceProject));
+                string buildWorkingDirectory = Path.GetDirectoryName(buildProject) ?? sourceRoot;
+                string[] buildArguments =
+                [
+                    "build", buildProject,
+                    "--configuration", descriptor.Configuration,
+                    "--output", stagingRoot,
+                    "--nologo",
+                    "-p:BaseIntermediateOutputPath=" + Path.Combine(intermediateRoot, "base") + Path.DirectorySeparatorChar,
+                    "-p:IntermediateOutputPath=" + Path.Combine(intermediateRoot, "intermediate") + Path.DirectorySeparatorChar,
+                    "-p:MSBuildProjectExtensionsPath=" + Path.Combine(intermediateRoot, "extensions") + Path.DirectorySeparatorChar,
+                    "-p:OutputPath=" + stagingRoot + Path.DirectorySeparatorChar,
+                    "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot),
+                    "-p:RIMWORLD_ROOT=" + Path.GetFullPath(rimWorldRoot)
+                ];
+                DevBridgeProcessResult build = await transport.ExecuteAsync(
+                    new DevBridgeProcessRequest(
+                        "dotnet",
+                        buildWorkingDirectory,
+                        buildArguments,
+                        options.Timeout,
+                        options.MaxStdoutBytes,
+                        options.MaxStderrBytes,
+                        DevBridgeProcessEnvironment.ForWorkflow(workflowId),
+                        "build:" + project),
+                    cancellationToken).ConfigureAwait(false);
+                buildDiagnostics = BuildDiagnostics(
+                    build,
+                    project,
+                    sourceRoot,
+                    buildProject,
+                    stagingRoot,
+                    transactionId,
+                    workflowId,
+                    build.ExitCode is 0 && build.StartError is null && !build.TimedOut && !build.Cancelled
+                        ? null
+                        : "DEVELOPMENT_BUILD_FAILED");
+                expectedArtifact = SafeCombine(stagingRoot, descriptor.ExpectedAssembly);
+                if (build.Cancelled)
+                {
+                    return Failure(project, workflowId, transactionId, "RIMTEST_CANCELLED", "The development build was cancelled.", DevBridgeOutcomeKind.Cancelled);
+                }
+                if (build.TimedOut)
+                {
+                    return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_TIMEOUT", "The development build exceeded its bounded timeout.", DevBridgeOutcomeKind.InfrastructureFailure, buildDiagnostics);
+                }
+                if (build.ExitCode is not 0 || build.StartError is not null)
+                {
+                    return Failure(project, workflowId, transactionId, "DEVELOPMENT_BUILD_FAILED", "The declared project build failed.", DevBridgeOutcomeKind.TestFailure, buildDiagnostics);
+                }
+                if (!File.Exists(expectedArtifact))
+                {
+                    return Failure(project, workflowId, transactionId, "DEVELOPMENT_ARTIFACT_MISSING", "The build did not produce the expected assembly.", DevBridgeOutcomeKind.TestFailure, buildDiagnostics);
+                }
+                string stagedAssemblyRelative = NormalizeRelative(Path.GetRelativePath(stagingRoot, expectedArtifact));
+                package = BuildPackage(sourceRoot, stagingRoot, expectedArtifact, descriptor.RuntimePackage, stagedAssemblyRelative);
+                packageHash = ComputePackageHash(package);
             }
 
             string targetRoot = Path.GetFullPath(options.DeploymentRoot!);
             Directory.CreateDirectory(targetRoot);
             string targetAssembly = SafeCombine(targetRoot, descriptor.DeploymentTarget);
             string assemblyRelative = NormalizeRelative(Path.GetRelativePath(targetRoot, targetAssembly));
-            List<PackageEntry> package = BuildPackage(sourceRoot, stagingRoot, expectedArtifact, descriptor.RuntimePackage, assemblyRelative);
-            string packageHash = ComputePackageHash(package);
+            if (verifiedCandidate is null)
+            {
+                package.RemoveAll(entry =>
+                    string.Equals(entry.TargetPath, Path.GetRelativePath(stagingRoot, expectedArtifact).Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                package.Add(new PackageEntry(expectedArtifact, assemblyRelative, HashFile(expectedArtifact)!, new FileInfo(expectedArtifact).Length));
+                package = package.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).ToList();
+                packageHash = ComputePackageHash(package);
+            }
             string manifestPath = DeploymentManifestPath(options.RootPath, project, targetRoot);
 
             using Mutex deploymentLock = new(false, "Global\\RimLiaison-DevBridge-Deployment-" + HashText(targetRoot)[..24]);
@@ -333,7 +459,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         RecipeSource: recipeResolution.Recipe.Source,
                         RecipeSha256: recipeResolution.Recipe.Sha256,
                         RecipeSchemaVersion: recipeResolution.Recipe.SchemaVersion),
-                    BuildDiagnostics(build, project, sourceRoot, buildProject, stagingRoot, transactionId, workflowId),
+                    buildDiagnostics,
                     []);
             }
             finally

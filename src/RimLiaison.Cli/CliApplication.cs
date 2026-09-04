@@ -786,6 +786,76 @@ public static class CliApplication
                 return exitCode;
             }
 
+            if (request.Command == CliCommand.CandidateRun)
+            {
+                ManagedReadyToTestCandidateResult managedCandidate =
+                    await RunManagedCandidateAsync(
+                            request,
+                            productionBinding,
+                            processTransport,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                WriteJson(stdout, managedCandidate);
+                exitCode = managedCandidate.Success
+                    ? CliExitCodes.Success
+                    : managedCandidate.Outcome == "MOD_FAILURE"
+                        ? CliExitCodes.TestFailure
+                        : CliExitCodes.ConservativeSelection;
+                return exitCode;
+            }
+
+            if (request.Command == CliCommand.Candidate)
+            {
+                string? project = request.Id ??
+                    request.DevBridgeProject ??
+                    request.StackManifest.Manifest?.DevBridgeProject ??
+                    request.StackManifest.Manifest?.Project;
+                if (request.StackManifest.Manifest is null || string.IsNullOrWhiteSpace(project))
+                {
+                    WriteJson(stdout, ReadyToTestCandidateResult.Failure(
+                        "PROJECT_METADATA_MISSING",
+                        "A valid project-owned .rimdev/stack.json is required before candidate preparation."));
+                    exitCode = CliExitCodes.ConservativeSelection;
+                    return exitCode;
+                }
+
+                IReadOnlyList<string> sourcePaths = request.ChangedPaths.Count > 0
+                    ? request.ChangedPaths
+                    : CandidateSourcePaths(request.StackManifest.RepositoryRoot);
+                if (!WorktreeFingerprint.TryCompute(
+                        request.StackManifest.RepositoryRoot,
+                        sourcePaths,
+                        out string sourceFingerprint,
+                        out string? fingerprintError))
+                {
+                    WriteJson(stdout, ReadyToTestCandidateResult.Failure(
+                        "RIMTEST_SOURCE_FINGERPRINT_UNAVAILABLE",
+                        fingerprintError ?? "The candidate source fingerprint could not be established."));
+                    exitCode = CliExitCodes.ConservativeSelection;
+                    return exitCode;
+                }
+
+                ReadyToTestCandidatePreparationOptions candidateOptions = new()
+                {
+                    CandidateStagingRoot = Environment.GetEnvironmentVariable(
+                        "RIMLIAISON_CANDIDATE_ROOT")
+                };
+                ReadyToTestCandidateResult candidate = await new ReadyToTestCandidatePreparationService(
+                        processTransport ?? new SystemDevBridgeProcessTransport(),
+                        candidateOptions)
+                    .PrepareAsync(
+                        project,
+                        request.StackManifest.RepositoryRoot,
+                        sourceFingerprint,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                WriteJson(stdout, candidate);
+                exitCode = candidate.Success
+                    ? CliExitCodes.Success
+                    : CliExitCodes.TestFailure;
+                return exitCode;
+            }
+
             if (request.Command == CliCommand.Init)
             {
                 exitCode = await ProfilerActivity.ObserveAsync(
@@ -4803,6 +4873,7 @@ public static class CliApplication
     {
         return outcome switch
         {
+            DevBridgeOutcomeKind.Success => "success",
             DevBridgeOutcomeKind.TestFailure => "testFailure",
             DevBridgeOutcomeKind.DevBridgeRefusal => "devBridgeRefusal",
             DevBridgeOutcomeKind.InfrastructureFailure => "infrastructureFailure",
@@ -4810,10 +4881,29 @@ public static class CliApplication
             DevBridgeOutcomeKind.Cancelled => "cancelled",
             DevBridgeOutcomeKind.MalformedResponse => "malformedResponse",
             DevBridgeOutcomeKind.IncompatibleSchema => "incompatibleSchema",
-            _ => "success"
+            _ => "unknown"
         };
     }
 
+    private static bool RequiresProductionToolchainBinding(CliRequest request) =>
+        request.Command is CliCommand.RecipeRun or
+            CliCommand.RunTest or
+            CliCommand.SuiteRun or
+            CliCommand.GoldenPath or
+            CliCommand.Preflight or
+            CliCommand.CandidateRun ||
+        (request.Command == CliCommand.Doctor &&
+         string.IsNullOrWhiteSpace(request.DevBridgeRootPath)) ||
+        request.Command == CliCommand.Affected && request.RunSelected;
+
+    private static bool RequiresProjectBinding(CliRequest request) =>
+        string.Equals(
+            request.StackManifest.Manifest?.Workload,
+            "production",
+            StringComparison.OrdinalIgnoreCase) &&
+        request.Command != CliCommand.CandidateRun &&
+        (RequiresProductionToolchainBinding(request) ||
+         request.Command == CliCommand.Preflight);
     private static bool IsFailureLifecycleEvent(AgentEvent eventRecord) =>
         eventRecord.Type is AgentEventTypes.ToolFailed or AgentEventTypes.ToolException or
             AgentEventTypes.CommandFailed or AgentEventTypes.CommandTimeout or
@@ -4821,23 +4911,6 @@ public static class CliApplication
             AgentEventTypes.AgentFailed or AgentEventTypes.IntegrationFailed ||
         AgentObservabilityData.GetString(eventRecord.Data, "outcome") is
             "failure" or "timeout" or "cancelled";
-
-    private static bool RequiresProductionToolchainBinding(CliRequest request) =>
-        request.Command is CliCommand.RecipeRun or
-            CliCommand.RunTest or
-            CliCommand.SuiteRun or
-            CliCommand.GoldenPath or
-            CliCommand.Preflight ||
-        (request.Command == CliCommand.Doctor &&
-         string.IsNullOrWhiteSpace(request.DevBridgeRootPath)) ||
-        request.Command == CliCommand.Affected && request.RunSelected;
-    private static bool RequiresProjectBinding(CliRequest request) =>
-        string.Equals(
-            request.StackManifest.Manifest?.Workload,
-            "production",
-            StringComparison.OrdinalIgnoreCase) &&
-        (RequiresProductionToolchainBinding(request) ||
-         request.Command == CliCommand.Preflight);
 
     private static ProjectRuntimeBindingResult ResolveProjectBinding(CliRequest request)
     {
@@ -4892,6 +4965,73 @@ public static class CliApplication
             SourceCommit = source.State?.HeadSha,
             QualifiedArtifactHashes = hashes
         };
+    }
+
+    private static async Task<ManagedReadyToTestCandidateResult> RunManagedCandidateAsync(
+        CliRequest request,
+        ProductionToolchainBinding? productionBinding,
+        IDevBridgeProcessTransport? processTransport,
+        CancellationToken cancellationToken)
+    {
+        if (!ReadyToTestCandidateVerifier.TryVerify(
+                request.Id!,
+                out VerifiedReadyToTestCandidate? verified,
+                out string candidateErrorCode,
+                out string candidateError))
+        {
+            return new ManagedReadyToTestCandidateResult
+            {
+                Success = false,
+                Outcome = "CANDIDATE_INPUT_FAILURE",
+                ErrorCode = candidateErrorCode,
+                Error = candidateError
+            };
+        }
+
+        string? explicitCommand = request.DevBridgePath ??
+            Environment.GetEnvironmentVariable("RIMTEST_DEVBRIDGE_CMD") ??
+            Environment.GetEnvironmentVariable("DEVBRIDGE_CMD");
+        productionBinding ??= ProductionToolchainBindingResolver.Resolve(
+                verified!.Manifest.SourceRepositoryRoot,
+                request.DevBridgePath,
+                request.DevBridgeRootPath)
+            .Binding;
+        if (productionBinding is null && string.IsNullOrWhiteSpace(explicitCommand))
+        {
+            return new ManagedReadyToTestCandidateResult
+            {
+                Success = false,
+                Outcome = "INFRASTRUCTURE_FAILURE",
+                ErrorCode = "RIMLIAISON_PRODUCTION_RUNTIME_UNBOUND",
+                Error = "The managed candidate command requires the promoted RimLiaison runtime binding or an explicit runtime command."
+            };
+        }
+
+        DevBridgeAdapterOptions bridgeOptions = productionBinding is not null
+            ? DevBridgeAdapterOptions.Discover(
+                productionBinding.DevBridgeCommandPath,
+                Path.GetDirectoryName(productionBinding.DevBridgeCommandPath))
+            : DevBridgeAdapterOptions.Discover(explicitCommand, request.DevBridgeRootPath);
+        return await new ManagedReadyToTestCandidateConsumer(
+                processTransport ?? new SystemDevBridgeProcessTransport(),
+                new ManagedReadyToTestCandidateOptions
+                {
+                    BridgeOptions = bridgeOptions,
+                    DeploymentRoot = null,
+                    WorkflowId = "candidate:" + verified!.Manifest.CandidateId
+                })
+            .RunAsync(request.Id!, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static IReadOnlyList<string> CandidateSourcePaths(string repositoryRoot)
+    {
+        string fullRoot = Path.GetFullPath(repositoryRoot);
+        return Directory.EnumerateFiles(fullRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(fullRoot, path).Replace('\\', '/'))
+            .Where(path => !RepositoryChangeClassificationPolicy.Classify(path).IsGenerated)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static string? ResolveLogicalAgentId()

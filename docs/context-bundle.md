@@ -45,8 +45,8 @@ The top-level fields are:
 | `repository` | Git identity, branch, revisions, divergence, source fingerprint, meaningful changes, and generated changes. |
 | `relatedRepositories` | Read-only Git snapshots for explicitly configured companion roots, when available. |
 | `environment` | OS/runtime/tool/configuration facts with `secretsExcluded: true`. |
-| `deployment` | DevBridge2 build/deployment identity and artifact correspondence, when evidenced. |
-| `runtime` | DevBridge2/RimBridgeServer process, generation, bridge, game, map, lease, and bounded runtime-identity facts. |
+| `deployment` | RimLiaison-owned runtime build/deployment identity and artifact correspondence, when evidenced. |
+| `runtime` | RimLiaison.Runtime/RimBridgeServer process, generation, bridge, game, map, lease, and bounded runtime-identity facts. |
 | `testing` | Catalog coverage, selection policy, evidence, cache/invalidation, benchmark summary, and validation need. |
 | `recentExecutions` | Bounded recent build, test, command, retry, and recovery activity. |
 | `failures` | Bounded failure signatures, recommended next actions, and reviewed knowledge matches when justified. |
@@ -86,11 +86,8 @@ not a replacement database:
 | Fact | Owner | Bundle role |
 | --- | --- | --- |
 | Repository state | Git | Read-only branch, revision, status, and generated-file classification. |
-| Static source/dependency context | RimContext | Typed topology/static context and affected-impact inputs. |
-| Test selection and evidence reuse | RimTest/RimLiaison | Selection decisions, cache state, invalidation, and validation policy. |
-| Build/deployment/freshness | RimLiaison.Runtime | Existing transaction, artifact, generation, and proof evidence. |
+| Build/deployment/freshness | RimLiaison.Runtime | Existing candidate, transaction, artifact, generation, and proof evidence. |
 | Live runtime and leases | RimLiaison.Runtime/RimBridgeServer | Read-only doctor/bridge state; no game launch from `context`. |
-| Failure classification | RimError/RimLiaison | Existing bounded issues and recovery references. |
 | Orchestration | RimLiaison | Cross-owner correlation and compact execution projection. |
 
 The context command does not edit `ModsConfig.xml`, launch RimWorld, create a daemon, or write a

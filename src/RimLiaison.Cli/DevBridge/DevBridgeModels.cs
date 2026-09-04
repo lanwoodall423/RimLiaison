@@ -251,6 +251,8 @@ public sealed record DevBridgeAdapterOptions
         };
     }
 
+    // Unbound discovery is retained only for explicit compatibility/parity workflows.
+    // Production commands resolve the single RimLiaison-owned runtime binding first.
     private static string ResolveCommandPath(
         string? explicitPath,
         string? configuredRoot)

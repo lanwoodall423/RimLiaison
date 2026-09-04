@@ -23,6 +23,8 @@ if not exist "%RIMLIAISON_EXE%" (
 "%RIMLIAISON_EXE%" %*
 exit /b %ERRORLEVEL%
 
+:: Explicit qualification/parity mode only. The sibling DevBridge2 checkout is never
+:: the production lifecycle owner; production resolves RimLiaison's promoted runtime manifest.
 :run_experimental
 set "RIMLIAISON_ROOT=%~dp0"
 if not defined RIMTEST_ROOT set "RIMTEST_ROOT=%RIMLIAISON_ROOT%"

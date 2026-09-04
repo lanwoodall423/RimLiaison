@@ -255,14 +255,14 @@ worktree. In the Issues view, checked issues directly enable `Export diagnostic
 bundle`; the action rebuilds the current selection before opening the Save
 dialog, and the UI reports complete versus incomplete evidence afterward.
 
-DevBridge2 owns raw build execution and bounded compiler/MSBuild capture. Its
-`scripts/mod-test.ps1` `devbridge-mod-development/v1` response carries the
-bounded build command, source project, staging path, configuration, exit code,
-timeout state, compiler output, explicit `outputTruncated` state, and
-transaction/workflow IDs. The nested failure projection repeats the stage,
-command, exit code, error code/message, output, and truncation state so older
-consumers can still diagnose a failed build. The pinned cross-stack fixture
-executes this real owner serializer with an intentionally failing C# project.
+RimLiaison owns build orchestration and its internal runtime boundary. The transitional DevBridge2
+parity workflow retains raw build execution and bounded compiler/MSBuild capture for compatibility
+coverage. Its `scripts/mod-test.ps1` `devbridge-mod-development/v1` response carries the bounded
+build command, source project, staging path, configuration, exit code, timeout state, compiler
+output, and explicit `outputTruncated` state. The response also carries bounded transaction/workflow
+IDs. Its nested failure projection repeats the stage, command, exit code, error code/message, output,
+and truncation state so older consumers can still diagnose a failed build. The pinned cross-stack
+fixture executes this transitional compatibility serializer with an intentionally failing C# project.
 
 RimLiaison's adapter parses and persists those fields as canonical,
 identity-safe evidence. Event records retain only small excerpts and structured

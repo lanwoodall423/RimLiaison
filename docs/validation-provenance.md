@@ -72,8 +72,8 @@ The validation-cost contract is:
 | --- | --- | --- | --- | --- | --- |
 | RimContext index/impact | changed or missing static index | relevant source, Defs, project, dependency, or index configuration | yes, as static selection input | RimContext | indirectly selects affected tests |
 | static validation | affected source/data/dependency change | relevant content/dependencies/tool/configuration | yes, with matching evidence | RimTest/RimLiaison | reuse when required static kinds match |
-| build/deployment | runtime-required validation or stale artifact | source/build inputs, artifact, deployment target | build/deploy evidence is reusable only through DevBridge2 freshness | DevBridge2 | never inferred from Git alone |
-| Quicktest/runtime | runtime/UI behavior or current artifact required | runtime generation, loaded artifact, source, environment, or deployment mismatch | yes only with matching generation and artifact correspondence | DevBridge2/RimBridgeServer via RimTest | reuse only when publication gate proves correspondence |
+| build/deployment | runtime-required validation or stale artifact | source/build inputs, staged candidate, artifact, deployment target | build/deploy evidence is reusable only through RimLiaison.Runtime freshness | RimLiaison.Runtime | never inferred from Git alone |
+| Quicktest/runtime | runtime/UI behavior or current artifact required | runtime generation, loaded artifact, source, environment, or deployment mismatch | yes only with matching generation and artifact correspondence | RimLiaison.Runtime/RimBridgeServer via RimTest | reuse only when publication gate proves correspondence |
 | publication check | commit/merge/push readiness | current relevant inputs or missing evidence | read-only decision; it does not rerun tests | RimLiaison | reuses valid evidence or returns a bounded block |
 
 Infrastructure failures remain a separate retry/block dimension and do not become

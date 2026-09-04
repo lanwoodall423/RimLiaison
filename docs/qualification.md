@@ -58,7 +58,8 @@ Both commands emit machine-readable aggregate JSON and write:
 
 The production lifecycle is candidate-first:
 
-1. RimLiaison asks the pinned DevBridge2 owner workflow to build an isolated runtime candidate.
+1. RimLiaison asks the pinned external DevBridge2 parity workflow to build an isolated
+   RimLiaison.Runtime candidate.
 2. Qualification binds the exact candidate CLI, assembly, transaction consumer, runtime manifest,
    component source revision, and file hashes.
 3. RimLiaison emits one immutable promotion package from those candidate files.

@@ -94,7 +94,9 @@ public sealed record DevBridgeModDevelopmentResult(
     IReadOnlyList<DevBridgeBuildOutputEvidence>? BuildOutputs = null);
 
 public sealed record DevBridgeModDevelopmentExecutionContext(
-    string? LeaseId = null);
+    string? LeaseId = null,
+    ReadyToTestCandidateManifest? Candidate = null,
+    string? CandidateManifestPath = null);
 
 public interface IDevBridgeModDevelopmentAdapter
 {

@@ -7,10 +7,9 @@ using RimLiaison.Recovery;
 namespace RimLiaison.DevBridge;
 
 /// <summary>
-/// The descriptor is an input to DevBridge2, but its project identity comes
-/// from the repository and the catalog.  This reconciler repairs only the
-/// narrow, missing/stale prerequisite that RimLiaison can prove safely.
-/// DevBridge2 remains the authoritative validator and transaction owner.
+/// Project-owned development descriptor inputs and narrow prerequisite reconciliation.
+/// RimLiaison remains the production transaction owner; external DevBridge2 is only a
+/// transitional parity/reference source for compatibility workflows.
 /// </summary>
 public sealed record DevBridgeDevelopmentDescriptor(
     string SchemaVersion,

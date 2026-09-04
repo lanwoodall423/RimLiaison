@@ -37,11 +37,12 @@ The deterministic coverage is in `tests/RimLiaison.Tests/ManagedRuntimeEscalatio
 `tests/RimLiaison.Tests/PromotedToolchainRecoveryTests.cs`. Doctor invokes the service from
 `RimTestDoctorRunner`; affected and release artifact workflows invoke it through
 `ArtifactFreshnessTransaction`.
-- **Candidate-first production bootstrap:** qualification materializes an isolated DevBridge2
-  runtime candidate before packaging; the absent or corrupt active runtime is not a candidate
-  source and does not block package creation.
-- **Candidate provenance:** qualification records the pinned DevBridge2 source revision, release
-  manifest, runtime manifest, coordinator hash, consumer hash, and exact RimLiaison payload hashes.
+- **Candidate-first production bootstrap:** qualification materializes the isolated, RimLiaison-owned
+  runtime candidate before packaging; the absent or corrupt active runtime is not a candidate source
+  and does not block package creation.
+- **Candidate provenance:** qualification records the pinned transitional DevBridge2 parity source
+  revision, release manifest, runtime manifest, coordinator hash, consumer hash, and exact RimLiaison
+  payload hashes.
 - **Promotion atomicity:** promotion health-checks the staged candidate runtime before commit;
   failure preserves the active manifest and runtime, while recovery restores only the promoted
   package payload.

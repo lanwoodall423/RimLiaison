@@ -79,6 +79,8 @@ record, but workflow identity alone never correlates an operation. Explicit work
 mismatches fail closed, and ambiguous nearby operations remain unassigned. Older envelopes that
 omit the field remain valid. The field is not an input to failure fingerprints.
 
-DevBridge2 remains the authority for lifecycle, leases, generations, and profiles. RimBridgeServer
-remains the authority for live operations and logs. No durable show-run index is created; callers
-use the owning DevBridge evidence/generation commands and rimerror show <id> for drill-down.
+RimLiaison owns the production lifecycle, leases, generations, and profiles through its internal
+`RimLiaison.Runtime` subsystem under `src/DevBridgeRuntime`. External DevBridge2 is a transitional
+parity/reference oracle only. RimBridgeServer remains the separate authority for live in-game
+operations and logs. No durable show-run index is created; callers use the owning RimLiaison
+evidence/generation commands and `rimerror show <id>` for drill-down.

@@ -29,10 +29,22 @@ For multi-project workspaces, `dev-check` builds one unambiguous production root
 paths are excluded unless a production project references them. Multiple unreferenced production
 roots fail closed as `STATIC_FAIL`; the validator never guesses which assembly is the mod.
 
-RimLiaison and DevBridge2 are not part of this ordinary inner loop. Do not invoke them merely for
-affected selection, static validation, C# builds, routine RimWorld load validation, diagnosis, or
-development-loop evidence. Do not launch RimWorld outside `dev-check`, edit the normal user
-`ModsConfig`, or scrape `Player.log`.
+External DevBridge2 is not part of this ordinary inner loop; it is a transitional parity/reference
+oracle only. RimLiaison's `candidate` command may prepare a staged `READY_TO_TEST` payload, but it
+does not acquire a runtime lease, register a project, launch or stop RimWorld, edit the normal user
+`ModsConfig`, mutate canonical `Mods`, or scrape `Player.log`. Routine runtime testing remains a
+separate managed consumer operation.
+
+`rimliaison candidate [<project> [<changed-path> ...]]` writes a candidate under
+`%TEMP%\RimLiaison\candidates\<canonical-project-id>\<candidate-id>\`, with the runtime payload
+in `runtime\` and the machine-readable manifest in `candidate.json`. The candidate contract is
+`rimliaison-ready-to-test-candidate/v1` and ends in `state: READY_TO_TEST`. Its preparation is
+source/build/package work only; the next managed-runtime operation consumes it and owns shared
+RimWorld mutation.
+
+Changing a mod does not require RimLiaison qualification or promotion. Promotion is required only
+when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
+production toolchain.
 
 ## Explicit release and qualification workflows
 

@@ -21,9 +21,11 @@ RimContext owns:
 
 RimContext does not own runtime game control, process lifecycle, readiness, save/debug automation, test
 execution, build orchestration, deployment, assembly loading, package restore, MSBuild execution,
-network access, UI automation, or live IPC. DevBridge2 remains the lifecycle/test authority and
-RimBridgeServer remains the live-game observation/control authority. RimContext has no dependency on
-either project and does not launch RimWorld.
+network access, UI automation, or live IPC. RimLiaison owns the production lifecycle and test
+orchestration through its internal `RimLiaison.Runtime` subsystem under `src/DevBridgeRuntime`.
+External DevBridge2 is a transitional parity/reference oracle only; RimBridgeServer remains the
+separate live-game observation/control integration. RimContext has no dependency on either runtime
+and does not launch RimWorld.
 
 RimLiaison uses `RimContext.Core` in-process for normal affected selection. The typed Core API
 returns bounded domain results directly, so the normal path does not spawn `rimctx` or serialize a
@@ -68,9 +70,11 @@ runtime, testing, execution, failure, efficiency, decision, and extension fields
 has an availability/freshness status, so an absent lower-layer answer remains `unknown` or
 `unavailable` instead of being guessed.
 
-RimContext owns aggregation and static facts, while Git, RimTest/RimLiaison, DevBridge2,
-RimBridgeServer, and RimError retain their existing authority for repository, selection, deployment,
-runtime, and failure state. RimLiaison's provider reads those owner surfaces and the canonical
+RimContext owns aggregation and static facts. Git owns repository state, RimTest owns selection,
+RimLiaison owns orchestration and production deployment/runtime state through
+`RimLiaison.Runtime`, and RimError owns failure state. External DevBridge2 and RimBridgeServer
+remain separately integrated compatibility/live-game surfaces; neither is a competing production
+lifecycle authority. RimLiaison's provider reads those owner surfaces and the canonical
 observability store; it does not create a second state database. `context` is read-only, does not
 launch RimWorld, and never writes generated state into the repository. See
 [docs/context-bundle.md](context-bundle.md) for the schema, provenance, provider, and compatibility
@@ -79,15 +83,16 @@ contract.
 The maintained provider also projects the latest structured affected-selection and suite-completion
 events: selected/executed/reused/skipped suites and tests, evidence/cache invalidation, transaction
 and generation identity, fingerprints, bounded durations, and infrastructure/test failure taxonomy.
-DevBridge2 state comes from read-only `doctor --json` plus `agent snapshot --json`; absent or stale
-runtime identity remains explicit. The compact `agentSummary` is derived from those sections, while
-the full canonical arrays remain available for diagnostics. Repository-local generated state is
-audited separately from meaningful `.rimdev/stack.json` configuration; unclassified transaction,
-report, cache, temp, or diagnostic paths are surfaced for owner review rather than blindly ignored.
+RimLiaison.Runtime state is read through the compatible `doctor --json` and `agent snapshot --json`
+surfaces; absent or stale runtime identity remains explicit. The compact `agentSummary` is derived
+from those sections, while the full canonical arrays remain available for diagnostics. Repository-
+local generated state is audited separately from meaningful `.rimdev/stack.json` configuration;
+unclassified transaction, report, cache, temp, or diagnostic paths are surfaced for owner review
+rather than blindly ignored.
 
-DevBridge's `runtimeIdentity` projection is the authoritative identity record for live gates. It
-keeps the source checkout, installed `Mods\DevBridge2` runtime, optional pinned worktree, RimWorld
-root, and executable distinct. The provider preserves that bounded projection in
+RimLiaison.Runtime's `runtimeIdentity` projection is the authoritative identity record for live
+gates. It keeps the source checkout, installed `Mods\DevBridge2` component, optional pinned parity
+worktree, RimWorld root, and executable distinct. The provider preserves that bounded projection in
 `runtime.runtimeIdentity`; it never derives a game executable from the current directory or
 repository path. Source-only build, sync, and context operations remain usable when the live
 identity is unavailable, which is reported as `unknown` or `unavailable` with the owner error code
@@ -134,9 +139,18 @@ RimLiaison/
 
 ## Direct CLI contract
 
-The following commands are the direct RimContext drill-down surface. The normal agent-facing
-entrypoint is `rimliaison affected --run --json`, which uses the Core API in-process before it
-coordinates external DevBridge2 work.
+The normal agent-facing entrypoint is `rimliaison affected --run --json`, which uses the Core API
+in-process and then invokes the RimLiaison-owned runtime boundary. External DevBridge2 is used only
+by explicitly scoped parity and compatibility workflows.
+
+### READY_TO_TEST candidate boundary
+
+`rimliaison candidate` resolves project-owned metadata, builds the declared project, validates and
+packages runtime content, and stages it under `%TEMP%/RimLiaison/candidates/<canonical-project-id>/<candidate-id>/runtime`.
+It writes `candidate.json` beside that directory with schema
+`rimliaison-ready-to-test-candidate/v1` and `state: READY_TO_TEST`. Candidate preparation has no
+lease, active project registration, RimWorld process, ModsConfig, canonical Mods, generation, or
+readiness dependency. The managed runtime consumer remains the separate owner of those mutations.
 
 The implemented commands are:
 

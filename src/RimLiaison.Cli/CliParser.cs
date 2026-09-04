@@ -16,6 +16,8 @@ internal enum CliCommand
     RecipeShow,
     RecipePlan,
     RecipeRun,
+    Candidate,
+    CandidateRun,
     Affected,
     GoldenPath,
     Capabilities,
@@ -454,6 +456,16 @@ internal static class CliParser
                 command = CliCommand.RunTest;
                 id = positionals[1];
                 break;
+            case "candidate" when positionals.Count >= 2 &&
+                string.Equals(positionals[1], "run", StringComparison.Ordinal) &&
+                positionals.Count == 3:
+                command = CliCommand.CandidateRun;
+                id = positionals[2];
+                break;
+            case "candidate" when positionals.Count >= 1:
+                command = CliCommand.Candidate;
+                id = positionals.Count == 1 ? null : positionals[1];
+                break;
             case "affected" when positionals.Count >= 1:
                 command = CliCommand.Affected;
                 break;
@@ -551,6 +563,8 @@ internal static class CliParser
             case "list":
             case "show":
             case "suites":
+            case "candidate":
+                throw new CliParseException("The command arguments are invalid.");
             case "suite":
             case "validate":
             case "run":
@@ -829,7 +843,11 @@ internal static class CliParser
             contextVerbose,
             workspaceAudit,
             affectedBase,
-            positionals.Skip(1).ToArray(),
+            command == CliCommand.CandidateRun
+                ? positionals.Skip(3).ToArray()
+                : command == CliCommand.Candidate
+                    ? positionals.Skip(2).ToArray()
+                    : positionals.Skip(1).ToArray(),
             dependencyFingerprints,
             runSelected,
             failFast,
@@ -857,7 +875,7 @@ internal static class CliParser
         var help = new
         {
             progressiveDisclosure =
-                "Canonical mod path: rimliaison preflight, edit, rimliaison golden-path --json. Supporting-tool details remain in structured diagnostics.",
+                "Canonical mod path: rimliaison preflight, edit, rimliaison candidate, then the managed test consumer.",
             commands = new[]
             {
                 "list",
@@ -867,6 +885,8 @@ internal static class CliParser
                 "suite run <suite>",
                 "validate",
                 "run <test>",
+                "candidate [<project> [<changed-path> ...]]",
+                "candidate run <candidate.json>",
                 "affected [<changed-path> ...]",
                 "golden-path (or develop)",
                 "self-check",
