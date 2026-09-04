@@ -163,7 +163,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         binding.ErrorCode ?? "PROJECT_RUNTIME_ROOT_MISSING",
                         binding.Error ?? "The candidate project runtime binding is not ready.");
                 }
-                runtimeRoot = binding.RuntimeRoot!;
+                runtimeRoot = ResolveCanonicalCandidateRuntimeRoot(sourceRoot, stack.Manifest, binding);
             }
 
             materialization = ProjectOwnedDescriptorMaterializer.Materialize(
@@ -876,6 +876,40 @@ public sealed class ManagedReadyToTestCandidateConsumer
             StringValue(rimBridge, "lifecycleState"),
             StringValue(root, "state"),
             StringValue(root, "errorCode"));
+    }
+
+    private static string ResolveCanonicalCandidateRuntimeRoot(
+        string sourceRoot,
+        RimDevStackManifest manifest,
+        ProjectRuntimeBindingResult binding)
+    {
+        if (string.IsNullOrWhiteSpace(binding.RimWorldRoot))
+            return binding.RuntimeRoot!;
+
+        string modsRoot = Path.GetFullPath(Path.Combine(binding.RimWorldRoot, "Mods"));
+        ProjectIdentity identity = ProjectIdentityResolver.Resolve(manifest, sourceRoot);
+        string runtimeFolder = identity.RuntimeFolder;
+        RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, sourceRoot);
+        IReadOnlyDictionary<string, string>? mappings = workspace.Configuration?.PackageMappings;
+        if (mappings is not null)
+        {
+            string? mappedFolder = mappings
+                .Where(entry => identity.Aliases.Contains(entry.Key, StringComparer.OrdinalIgnoreCase))
+                .Select(entry => entry.Value)
+                .FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(mappedFolder))
+                runtimeFolder = mappedFolder;
+        }
+
+        string candidate = Path.GetFullPath(Path.Combine(modsRoot, runtimeFolder));
+        string relative = Path.GetRelativePath(modsRoot, candidate);
+        if (Path.IsPathRooted(relative) ||
+            relative == ".." ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("PROJECT_RUNTIME_ROOT_OUTSIDE_MODS: candidate runtime mapping escapes canonical Mods.");
+        }
+        return candidate;
     }
 
     private static bool IsTargetConfigured(
