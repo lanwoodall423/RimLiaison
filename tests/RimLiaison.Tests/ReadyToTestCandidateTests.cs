@@ -51,12 +51,21 @@ internal static class ReadyToTestCandidateTests
         Assert(files.Any(path => path == "About/About.xml" || path == "1.6/Defs/Thing.xml"),
             "runtime payload omitted runtime content");
         Assert(!files.Any(path => path.StartsWith(".git/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/.git/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith("Source/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/Source/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith("bin/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/bin/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith("obj/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/obj/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith("tests/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/tests/", StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith("TestResults/", StringComparison.OrdinalIgnoreCase) ||
-            path.StartsWith("DevCheckRuntime/", StringComparison.OrdinalIgnoreCase)),
+            path.Contains("/TestResults/", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("DevCheckRuntime/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/DevCheckRuntime/", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(".rimdev/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/.rimdev/", StringComparison.OrdinalIgnoreCase)),
             "source, build, test, or DevCheckRuntime content entered runtime payload");
     }
 
@@ -159,7 +168,7 @@ internal static class ReadyToTestCandidateTests
                 }
                 """);
             File.WriteAllText(Path.Combine(RepositoryRoot, "catalog.json"), "{}");
-            foreach (string path in new[] { ".git/config", "bin/old.dll", "obj/old.cache", "tests/result.xml", "TestResults/result.trx", "DevCheckRuntime/obj/generated.cache" })
+            foreach (string path in new[] { ".git/config", "bin/old.dll", "obj/old.cache", "tests/result.xml", "TestResults/result.trx", "DevCheckRuntime/obj/generated.cache", "1.6/.rimdev/profiles/stale.json" })
             {
                 string full = Path.Combine(RepositoryRoot, path.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);

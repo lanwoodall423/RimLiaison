@@ -290,9 +290,13 @@ public sealed class ReadyToTestCandidatePreparationService
         // broad glob. Candidate payloads must be runtime-only and cannot copy themselves.
         string[] mandatoryExcludes =
         [
-            ".git/**", "Source/**", "src/**", "bin/**", "obj/**", "**/bin/**", "**/obj/**",
-            "tests/**", "Tests/**", "TestResults/**", "test-results/**", "DevCheckRuntime/**",
-            ".rimdev/**", ".rimctx/**", ".rimerror/**", "**/*.user", "**/*.suo"
+            ".git/**", "**/.git/**", "Source/**", "**/Source/**", "src/**", "**/src/**",
+            "bin/**", "**/bin/**", "obj/**", "**/obj/**",
+            "tests/**", "Tests/**", "**/tests/**", "**/Tests/**",
+            "TestResults/**", "test-results/**", "**/TestResults/**", "**/test-results/**",
+            "DevCheckRuntime/**", "**/DevCheckRuntime/**",
+            ".rimdev/**", "**/.rimdev/**", ".rimctx/**", "**/.rimctx/**",
+            ".rimerror/**", "**/.rimerror/**", "**/*.user", "**/*.suo"
         ];
         excludes = mandatoryExcludes.Concat(excludes).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         foreach (string file in Directory.EnumerateFiles(packageRoot, "*", SearchOption.AllDirectories))
