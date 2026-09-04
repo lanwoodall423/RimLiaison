@@ -16,7 +16,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RimBridgeSdkPath Condition="'$(RimBridgeSdkPath)' == ''"></RimBridgeSdkPath>
-    <OutputPath>$(DevBridgeRuntimePackageRoot)BridgeTools\</OutputPath>
+    <OutputPath>$(DevBridgeRuntimePackageRoot)1.6\BridgeTools\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="RimBridgeServer.Sdk" Condition="'$(RimBridgeSdkPath)' != '' and Exists('$(RimBridgeSdkPath)')">

@@ -199,7 +199,8 @@ internal static class UnifiedRuntimeOwnershipTests
                 Assert(File.Exists(Path.Combine(packageRoot, "About", "About.xml")) &&
                     File.Exists(Path.Combine(packageRoot, "CHANGELOG.md")) &&
                     File.Exists(Path.Combine(packageRoot, "Coordinator", "DevBridge.Coordinator.exe")) &&
-                    File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+                    File.Exists(Path.Combine(packageRoot, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+                    !File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
                     File.Exists(Path.Combine(packageRoot, "1.6", "Assemblies", "DevBridge2.dll")),
                     "isolated runtime package omitted static or generated product content");
                 Assert(packageRoot.StartsWith(Path.Combine(root, "candidate-"),

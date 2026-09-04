@@ -15,6 +15,8 @@ internal static partial class OfflineTests
             "DevBridge2.BridgeTools.csproj"));
         string companionTools = File.ReadAllText(Path.Combine(component, "BridgeTools",
             "DevBridgeGenerationTools.cs"));
+        string verifierTools = File.ReadAllText(Path.Combine(component, "BridgeTools",
+            "DevBridgeAssemblyTools.cs"));
         string coreProject = File.ReadAllText(Path.Combine(component, "Mod", "DevBridge2.csproj"));
         string coreSource = string.Join("\n", Directory.EnumerateFiles(
             Path.Combine(component, "Mod"), "*.cs", SearchOption.TopDirectoryOnly)
@@ -25,25 +27,31 @@ internal static partial class OfflineTests
         Assert(companionProject.Contains("RimBridgeServer.Sdk", StringComparison.Ordinal) &&
                companionProject.Contains("PrivateAssets=\"all\"", StringComparison.Ordinal) &&
                companionProject.Contains("ExcludeAssets=\"runtime\"", StringComparison.Ordinal) &&
+               companionProject.Contains("$(DevBridgeRuntimePackageRoot)1.6\\BridgeTools\\",
+                   StringComparison.Ordinal) &&
                !coreProject.Contains("RimBridgeServer.Sdk", StringComparison.OrdinalIgnoreCase) &&
                !coreSource.Contains("RimBridgeServer", StringComparison.OrdinalIgnoreCase),
-            "the companion must keep its SDK reference compile-time-only and the core mod must remain SDK-free");
+            "the companion must use the active 1.6 load folder and keep its SDK reference compile-time-only");
         Assert(companionTools.Contains("public sealed class DevBridgeGenerationTools", StringComparison.Ordinal) &&
                companionTools.Contains("public DevBridgeGenerationContextPayload GetGenerationContext()", StringComparison.Ordinal) &&
-               companionTools.Contains("public DevBridgeControlPolicyPayload GetControlPolicy()", StringComparison.Ordinal),
-            "the companion tool class must be public, parameterless, and instantiable by RimBridgeServer");
+               companionTools.Contains("public DevBridgeControlPolicyPayload GetControlPolicy()", StringComparison.Ordinal) &&
+               verifierTools.Contains("[Tool(\"devbridge/verify_loaded_assembly\"", StringComparison.Ordinal) &&
+               verifierTools.Contains("RequiresAuth = true", StringComparison.Ordinal),
+            "the companion tools must retain the existing owned tools and exact verifier registration");
         Assert(provenance.Contains("312bc12123ea86723909586b80253fd1a63253c4", StringComparison.Ordinal) &&
                File.Exists(Path.Combine(packageRoot, "DevBridge.cmd")) &&
                File.Exists(Path.Combine(packageRoot, "About", "About.xml")),
             "the package must retain the imported source identity and runtime entrypoint");
 
-        string releaseOutput = Path.Combine(packageRoot, "BridgeTools");
+        string releaseOutput = Path.Combine(packageRoot, "1.6", "BridgeTools");
         string companionDll = Path.Combine(releaseOutput, "DevBridge2.BridgeTools.dll");
-        Assert(File.Exists(companionDll),
-            "the Release companion build must produce DevBridge2.BridgeTools.dll");
-        Assert(!Directory.EnumerateFiles(releaseOutput, "RimBridgeServer.Sdk.dll",
-                SearchOption.AllDirectories).Any(),
-            "the companion build output must not contain RimBridgeServer.Sdk.dll");
+        Assert(File.Exists(companionDll) &&
+               !File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+               !Directory.EnumerateFiles(releaseOutput, "RimBridgeServer.Sdk.dll",
+                   SearchOption.AllDirectories).Any() &&
+               !Directory.EnumerateFiles(packageRoot, "RimBridgeServer.Sdk.dll",
+                   SearchOption.AllDirectories).Any(),
+            "the package must place BridgeTools below 1.6 and exclude a private SDK runtime copy");
     }
 
     private static void TestBridgeToolsPublishRefreshesStaleDll()
@@ -57,18 +65,20 @@ internal static partial class OfflineTests
         [
             "DevBridge.cmd",
             Path.Combine("About", "About.xml"),
-            Path.Combine("BridgeTools", "DevBridge2.BridgeTools.dll"),
+            Path.Combine("1.6", "BridgeTools", "DevBridge2.BridgeTools.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.exe"),
-            Path.Combine("Coordinator", "DevBridge.Coordinator.dll")
+            Path.Combine("Coordinator", "DevBridge.Coordinator.dll"),
+            Path.Combine("1.6", "Assemblies", "DevBridge2.dll")
         ];
 
         foreach (string relativePath in requiredFiles)
             Assert(File.Exists(Path.Combine(packageRoot, relativePath)),
                 "the RimLiaison-owned runtime package must contain " + relativePath);
 
-        Assert(!Directory.Exists(Path.Combine(packageRoot, "BridgeTools", "Source")) &&
+        Assert(!File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+               !Directory.Exists(Path.Combine(packageRoot, "BridgeTools", "Source")) &&
                !File.Exists(Path.Combine(packageRoot, "RimBridgeServer.Sdk.dll")),
-            "the owned package must not contain source or a copied host SDK");
+            "the owned package must retain normal runtime assets without obsolete or private SDK output");
     }
 
     private static void TestBridgeToolsWrongLocationDiagnostic()
@@ -85,7 +95,7 @@ internal static partial class OfflineTests
 
         JsonCommandResponse response = RunDoctor(fixture, out _, out _);
         Assert(response.Findings.Any(value => value.Code == "BRIDGETOOLS_WRONG_LOCATION"),
-            "doctor must identify a companion deployed inside the mod instead of the sibling global bundle");
+            "doctor must identify root-level companion output outside the active 1.6 load folder");
     }
 
     private static void TestRimBridgeCompanionDiagnosticCategory()

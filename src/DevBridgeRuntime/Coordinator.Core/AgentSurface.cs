@@ -1327,14 +1327,7 @@ internal sealed partial class CoordinatorState
 
     private string ExpectedBridgeToolsPathLocked()
     {
-        DirectoryInfo modRoot = new(root);
-        DirectoryInfo modsRoot = modRoot.Parent;
-        DirectoryInfo rimWorldRoot = modsRoot?.Parent;
-        if (modsRoot == null || rimWorldRoot == null ||
-            !string.Equals(modsRoot.Name, "Mods", StringComparison.OrdinalIgnoreCase))
-            return null;
-        return Path.Combine(rimWorldRoot.FullName, "BridgeTools", modRoot.Name,
-            "DevBridge2.BridgeTools.dll");
+        return Path.Combine(root, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll");
     }
 
     private static bool? BuildMatches(DevBridgeBuildIdentity published,

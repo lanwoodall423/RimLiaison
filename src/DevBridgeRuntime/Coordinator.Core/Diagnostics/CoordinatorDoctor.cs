@@ -256,7 +256,7 @@ internal sealed partial class CoordinatorState
             if (modLocalBridgeToolsPath != null)
             {
                 report.AddFinding(DoctorSeverities.Warning, "BRIDGETOOLS_WRONG_LOCATION",
-                    "The BridgeTools companion is nested inside the mod; RimBridgeServer discovers the sibling global BridgeTools bundle.",
+                    "The BridgeTools companion is outside the active 1.6 load folder; RimBridgeServer discovers mod-local loaded-folder companions.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath(),
@@ -266,7 +266,7 @@ internal sealed partial class CoordinatorState
             else if (sourceBridgeToolsPath != null)
             {
                 report.AddFinding(DoctorSeverities.Warning, "BRIDGETOOLS_WRONG_LOCATION",
-                    "The BridgeTools companion exists only in a source build output; RimBridgeServer discovers the sibling global BridgeTools bundle.",
+                    "The BridgeTools companion exists only in a source build output; RimBridgeServer discovers the active 1.6 load-folder companion.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath(),
@@ -276,7 +276,7 @@ internal sealed partial class CoordinatorState
             else
             {
                 report.AddFinding(DoctorSeverities.Info, "BRIDGETOOLS_ASSEMBLY_NOT_DISCOVERED",
-                    "The optional BridgeTools companion assembly was not found in the sibling global BridgeTools bundle.",
+                    "The optional BridgeTools companion assembly was not found in the active 1.6 load folder.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath()
@@ -1366,23 +1366,7 @@ internal sealed partial class CoordinatorState
 
     private string ExpectedBridgeToolsAssemblyPath()
     {
-        string configuredRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
-        if (!string.IsNullOrWhiteSpace(configuredRimWorldRoot))
-        {
-            return Path.Combine(
-                Path.GetFullPath(configuredRimWorldRoot),
-                "BridgeTools",
-                Path.GetFileName(root),
-                "DevBridge2.BridgeTools.dll");
-        }
-
-        DirectoryInfo modRoot = new(root);
-        DirectoryInfo modsRoot = modRoot.Parent;
-        DirectoryInfo rimWorldRoot = modsRoot?.Parent;
-        if (rimWorldRoot == null || !string.Equals(modsRoot.Name, "Mods", StringComparison.OrdinalIgnoreCase))
-            return Path.Combine(root, "..", "..", "BridgeTools", modRoot.Name, "DevBridge2.BridgeTools.dll");
-
-        return Path.Combine(rimWorldRoot.FullName, "BridgeTools", modRoot.Name, "DevBridge2.BridgeTools.dll");
+        return Path.Combine(root, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll");
     }
 
     private string FindSourceBridgeToolsAssembly()

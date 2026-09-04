@@ -583,7 +583,7 @@ internal static class ToolchainCandidateMaterializer
     {
         if (!Directory.Exists(sourcePackageRoot))
             throw new DirectoryNotFoundException("Runtime package source is missing: " + sourcePackageRoot);
-        string[] generatedDirectories = ["Coordinator", "BridgeTools", "1.6"];
+        string[] generatedDirectories = ["Coordinator", "1.6"];
         foreach (string sourceFile in Directory.EnumerateFiles(sourcePackageRoot, "*", SearchOption.AllDirectories))
         {
             string relativePath = Path.GetRelativePath(sourcePackageRoot, sourceFile);
@@ -664,20 +664,19 @@ internal static class ToolchainCandidateMaterializer
             Path.Combine("About", "About.xml"),
             "LoadFolders.xml",
             "RimBridgeProtocolCompatibility.json",
-            Path.Combine("BridgeTools", "DevBridge2.BridgeTools.dll"),
+            Path.Combine("1.6", "BridgeTools", "DevBridge2.BridgeTools.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.exe"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.Core.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.runtimeconfig.json"),
             Path.Combine("1.6", "Assemblies", "DevBridge2.dll")
         ];
-        foreach (string relativePath in requiredFiles)
+        string obsoleteRoot = Path.Combine(packageRoot, "BridgeTools");
+        if (Directory.Exists(obsoleteRoot) &&
+            Directory.EnumerateFiles(obsoleteRoot, "*", SearchOption.AllDirectories).Any())
         {
-            if (!File.Exists(Path.Combine(packageRoot, relativePath)))
-            {
-                error = "Required runtime package file is missing: " + relativePath;
-                return false;
-            }
+            error = "Obsolete root-level BridgeTools output is not allowed: BridgeTools/DevBridge2.BridgeTools.dll.";
+            return false;
         }
 
         try
