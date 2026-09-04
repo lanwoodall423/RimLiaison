@@ -359,10 +359,9 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             {
                 JsonElement? previous = ReadJson(manifestPath);
                 EnsureOwnership(targetRoot, previous);
-                changed = NeedsDeployment(targetRoot, package, previous, packageHash);
-                if (verifiedCandidate is not null)
-                    changed = true;
-                bool candidateBootstrap = verifiedCandidate is not null && changed;
+                changed = executionContext?.Candidate is not null ||
+                    NeedsDeployment(targetRoot, package, previous, packageHash);
+                bool candidateBootstrap = executionContext?.Candidate is not null;
                 DevBridgeLeaseAdapter leaseAdapter = new(transport, ToBridgeOptions());
                 DevBridgeLeaseResult lease = string.IsNullOrWhiteSpace(executionContext?.LeaseId)
                     ? await leaseAdapter.BeginLeaseAsync(workflowId, cancellationToken).ConfigureAwait(false)

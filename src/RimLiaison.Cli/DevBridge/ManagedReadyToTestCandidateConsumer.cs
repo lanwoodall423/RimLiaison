@@ -197,6 +197,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 : null;
             string? expectedAssemblyHash = assemblyEntry?.Sha256;
             string? expectedMvid = null;
+            BootstrapCandidatePackage(verified.Package, runtimeRoot);
             if (!string.IsNullOrWhiteSpace(expectedAssembly))
             {
                 if (assemblyEntry is null ||
@@ -885,10 +886,31 @@ public sealed class ManagedReadyToTestCandidateConsumer
             StringValue(root, "leaseId"),
             StringValue(rimBridge, "packageId"),
 
+
             StringValue(rimBridge, "version"),
             StringValue(rimBridge, "lifecycleState"),
             StringValue(root, "state"),
             StringValue(root, "errorCode"));
+    }
+    private static void BootstrapCandidatePackage(
+        IReadOnlyList<ReadyToTestCandidatePackageEntry> package,
+        string runtimeRoot)
+    {
+        foreach (ReadyToTestCandidatePackageEntry entry in package)
+        {
+            string target = Path.GetFullPath(Path.Combine(
+                runtimeRoot,
+                entry.TargetPath.Replace('/', Path.DirectorySeparatorChar)));
+            string relative = Path.GetRelativePath(runtimeRoot, target);
+            if (Path.IsPathRooted(relative) ||
+                relative == ".." ||
+                relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("RIMTEST_CANDIDATE_TARGET_INVALID: candidate package path escapes the canonical runtime root.");
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(entry.SourcePath, target, overwrite: true);
+        }
     }
 
     private static bool IsPathWithin(string root, string candidate)
