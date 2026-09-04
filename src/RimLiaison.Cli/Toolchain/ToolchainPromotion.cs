@@ -849,6 +849,32 @@ public static class ToolchainPromotionService
         !string.IsNullOrWhiteSpace(expected) &&
         string.Equals(ToolchainFileHash.Sha256(path), expected, StringComparison.OrdinalIgnoreCase);
 
+    internal static string DeriveStagedCliRoot(
+        string activeExecutablePath,
+        string sourceCommit)
+    {
+        if (string.IsNullOrWhiteSpace(activeExecutablePath))
+            throw new ArgumentException("An active production executable path is required.", nameof(activeExecutablePath));
+        if (string.IsNullOrWhiteSpace(sourceCommit))
+            throw new ArgumentException("A source commit is required.", nameof(sourceCommit));
+
+        DirectoryInfo? cliDirectory = Directory.GetParent(Path.GetFullPath(activeExecutablePath));
+        DirectoryInfo? activeRoot = cliDirectory?.Parent;
+        if (activeRoot is null)
+            throw new InvalidDataException("The active production executable has no CLI deployment root.");
+        DirectoryInfo? productionParent = activeRoot.Name.StartsWith(
+            "cli-promoted-",
+            StringComparison.OrdinalIgnoreCase)
+            ? activeRoot.Parent
+            : activeRoot;
+        if (productionParent is null)
+            throw new InvalidDataException("The active production CLI has no stable promotion parent.");
+
+        string promotedRootName = "cli-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];
+        return Path.Combine(productionParent.FullName, promotedRootName);
+    }
+
+
     public static async Task<ToolchainPromotionResult> PromoteAsync(
         string sourceRoot,
         string? packagePath,
@@ -1195,10 +1221,9 @@ public static class ToolchainPromotionService
 
             string coordinatorHash = package.DevBridgeCoordinatorSha256!;
 
-            string productionCliDirectory = Path.GetDirectoryName(Path.GetFullPath(previous.RimLiaisonExecutablePath!))!;
-            string productionParent = Directory.GetParent(productionCliDirectory)!.FullName;
-            string promotedRootName = "cli-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];
-            stagedRoot = Path.Combine(productionParent, promotedRootName);
+            stagedRoot = DeriveStagedCliRoot(
+                previous.RimLiaisonExecutablePath!,
+                sourceCommit);
             string runtimeParent = Directory.GetParent(previous.DevBridgeRuntimeRoot!)?.FullName ??
                 throw new InvalidDataException("The production runtime destination has no parent directory.");
             string runtimePromotedRootName = "runtime-promoted-" + sourceCommit[..Math.Min(12, sourceCommit.Length)];

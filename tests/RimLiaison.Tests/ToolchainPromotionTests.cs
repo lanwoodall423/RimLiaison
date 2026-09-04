@@ -33,6 +33,107 @@ internal static class ToolchainPromotionTests
                orchestrator.Calls == 0,
             "static promotion preflight unexpectedly acquired a live lease");
     }
+    public static void PromotionDerivesSiblingCliRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-root-" + Guid.NewGuid().ToString("N"));
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        string staged = ToolchainPromotionService.DeriveStagedCliRoot(activeExecutable, "BBBB");
+        string expected = Path.Combine(root, "cli-promoted-BBBB");
+        Assert(string.Equals(staged, expected, StringComparison.OrdinalIgnoreCase) &&
+            !staged.StartsWith(Path.Combine(root, "cli-promoted-AAAA") + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase),
+            "promotion generations must be sibling roots");
+    }
+
+    public static void RepeatedPromotionsKeepCliDepthBounded()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-depth-" + Guid.NewGuid().ToString("N"));
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        for (int index = 0; index < 8; index++)
+        {
+            string commit = new((char)('A' + index), 12);
+            string staged = ToolchainPromotionService.DeriveStagedCliRoot(activeExecutable, commit);
+            Assert(Count(staged, "cli-promoted-") == 1 &&
+                string.Equals(Directory.GetParent(staged)!.FullName, root,
+                    StringComparison.OrdinalIgnoreCase),
+                "repeated simulated promotions increased CLI directory depth");
+            activeExecutable = Path.Combine(staged, "cli", "rimliaison.exe");
+        }
+    }
+
+    public static void PromotionCliPathLengthDoesNotGrowWithHistory()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-length-" + Guid.NewGuid().ToString("N"));
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        int? expectedLength = null;
+        for (int index = 0; index < 16; index++)
+        {
+            string staged = ToolchainPromotionService.DeriveStagedCliRoot(
+                activeExecutable,
+                new string((char)('A' + index % 26), 12));
+            string executable = Path.Combine(staged, "cli", "rimliaison.exe");
+            expectedLength ??= executable.Length;
+            Assert(executable.Length == expectedLength,
+                "promotion executable path length grew with promotion history");
+            activeExecutable = executable;
+        }
+    }
+
+    public static void PromotionCandidateExecutableStaysInsideStagedRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimliaison-promotion-candidate-" + Guid.NewGuid().ToString("N"));
+        string artifactRoot = Path.Combine(root, "artifact");
+        string executableSource = Path.Combine(artifactRoot, "cli", "rimliaison.exe");
+        string activeExecutable = Path.Combine(root, "cli-promoted-AAAA", "cli", "rimliaison.exe");
+        string stagedRoot = ToolchainPromotionService.DeriveStagedCliRoot(activeExecutable, "BBBB");
+        string candidateExecutable = Path.GetFullPath(Path.Combine(
+            stagedRoot,
+            Path.GetRelativePath(artifactRoot, executableSource)));
+        Assert(candidateExecutable.StartsWith(
+                Path.GetFullPath(stagedRoot) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase) &&
+            !candidateExecutable.StartsWith(
+                Path.GetFullPath(Path.Combine(root, "cli-promoted-AAAA")) + Path.DirectorySeparatorChar +
+                "cli-promoted-",
+                StringComparison.OrdinalIgnoreCase),
+            "candidate executable escaped or nested the new staged root");
+    }
+
+    public static void PromotionIdentityHashVerificationIsUnchanged()
+    {
+        string first = ToolchainPromotionService.ComputePromotedFingerprint(
+            "source", "executable", "assembly", "coordinator", "devbridge", "consumer",
+            ToolchainPromotionSchemas.RuntimeProtocolContract, ToolchainPromotionSchemas.OwnerProduct,
+            ToolchainPromotionSchemas.RuntimeSubsystem, "mod", "runtime", "cli-manifest", "cli-package");
+        string second = ToolchainPromotionService.ComputePromotedFingerprint(
+            "source", "executable", "assembly", "coordinator", "devbridge", "consumer",
+            ToolchainPromotionSchemas.RuntimeProtocolContract, ToolchainPromotionSchemas.OwnerProduct,
+            ToolchainPromotionSchemas.RuntimeSubsystem, "mod", "runtime", "cli-manifest", "cli-package");
+        Assert(first == second && first.StartsWith("tc-", StringComparison.Ordinal) &&
+            first.Length == 67,
+            "promotion identity/hash semantics changed while correcting root derivation");
+    }
+
+    public static void PreviousPromotedRootRemainsUntouchedBeforeCommit()
+    {
+        string root = CreateRoot();
+        try
+        {
+            string previousRoot = Path.Combine(root, "cli-promoted-AAAA");
+            Directory.CreateDirectory(Path.Combine(previousRoot, "cli"));
+            string sentinel = Path.Combine(previousRoot, "cli", "sentinel.txt");
+            File.WriteAllText(sentinel, "previous-production");
+            string stagedRoot = ToolchainPromotionService.DeriveStagedCliRoot(
+                Path.Combine(previousRoot, "cli", "rimliaison.exe"), "BBBB");
+            Assert(File.ReadAllText(sentinel) == "previous-production" &&
+                !Directory.Exists(stagedRoot),
+                "root derivation mutated or pre-created the previous production root");
+        }
+        finally
+        {
+            Delete(root);
+        }
+    }
 
 
     public static void MalformedPromotionPackageFailsClosed()
@@ -454,6 +555,7 @@ internal static class ToolchainPromotionTests
             try
             {
                 ToolchainPromotionService.WriteQualifiedPromotionPackage(
+
                     qualification,
                     qualificationPath,
                     Path.Combine(root, "substituted-runtime.json"),
@@ -472,6 +574,18 @@ internal static class ToolchainPromotionTests
                 previousManifest);
             Delete(root);
         }
+    }
+
+    private static int Count(string value, string text)
+    {
+        int count = 0;
+        int index = 0;
+        while ((index = value.IndexOf(text, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            count++;
+            index += text.Length;
+        }
+        return count;
     }
 
     private static string WritePackage(string root, string qualificationPath, string sourceCommit, string qualificationHash)
