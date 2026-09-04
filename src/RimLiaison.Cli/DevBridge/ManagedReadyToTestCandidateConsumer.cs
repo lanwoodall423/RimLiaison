@@ -58,6 +58,15 @@ public sealed record ManagedCandidateCleanupEvidence(
     [property: JsonPropertyName("runtimeRestored")] bool RuntimeRestored = false,
     [property: JsonPropertyName("outcome")] string Outcome = "not-established",
     [property: JsonPropertyName("errorCode")] string? ErrorCode = null);
+public sealed record GenericCandidateModEvidence(
+    [property: JsonPropertyName("packageId")] string PackageId,
+    [property: JsonPropertyName("modId")] string? ModId,
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("loadedInSession")] bool LoadedInSession,
+    [property: JsonPropertyName("matchesLoadedSession")] bool MatchesLoadedSession,
+    [property: JsonPropertyName("activeLoadOrder")] int? ActiveLoadOrder,
+    [property: JsonPropertyName("loadedSessionOrder")] int? LoadedSessionOrder);
+
 public sealed record GenericCandidateLoadEvidence(
     [property: JsonPropertyName("targetLoaded")] bool TargetLoaded,
     [property: JsonPropertyName("defsValid")] bool DefsValid,
@@ -66,7 +75,8 @@ public sealed record GenericCandidateLoadEvidence(
     [property: JsonPropertyName("evidenceSource")] string EvidenceSource,
     [property: JsonPropertyName("errorCode")] string? ErrorCode,
     [property: JsonPropertyName("error")] string? Error,
-    [property: JsonPropertyName("attributableErrors")] IReadOnlyList<string> AttributableErrors)
+    [property: JsonPropertyName("attributableErrors")] IReadOnlyList<string> AttributableErrors,
+    [property: JsonPropertyName("matchedMod")] GenericCandidateModEvidence? MatchedMod = null)
 {
     public static GenericCandidateLoadEvidence Failure(string errorCode, string error) =>
         new(false, false, "not-proven", null, "rimworld/list_mods", errorCode, error, []);
@@ -76,6 +86,7 @@ public sealed record GenericCandidateLoadEvidence(
 public sealed class ManagedReadyToTestCandidateConsumer
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ModeGates = [];
+    private const string ActiveModsArguments = "{\"includeInactive\":false}";
     private readonly IDevBridgeProcessTransport transport;
     private readonly ManagedReadyToTestCandidateOptions options;
 
@@ -346,7 +357,7 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     options.BridgeOptions.CommandPath,
                     options.BridgeOptions.RootPath,
                     ["--root", options.BridgeOptions.RootPath, "bridge", "call",
-                        "rimworld/list_mods", "{}", "--lease", leaseId, "--json"],
+                        "rimworld/list_mods", ActiveModsArguments, "--lease", leaseId, "--json"],
                     options.Timeout,
                     options.MaxStdoutBytes,
                     options.MaxStderrBytes,
@@ -387,13 +398,31 @@ public sealed class ManagedReadyToTestCandidateConsumer
                     "RimBridge rejected generic mod-load evidence.");
             }
             JsonElement result = Property(envelope, "result");
-            if (result.ValueKind is not JsonValueKind.Object and not JsonValueKind.Array)
+            if (result.ValueKind != JsonValueKind.Object ||
+                !TryGetBoolean(result, "success", out bool resultSuccess))
             {
                 return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_INVALID",
-                    "RimBridge returned no structured generic mod-load evidence.");
+                    "RimBridge returned no canonical generic mod-load result.");
             }
+            if (!resultSuccess)
+            {
+                return GenericCandidateLoadEvidence.Failure(
+                    StringValue(result, "errorCode") ?? "RIMBRIDGE_LOAD_EVIDENCE_FAILED",
+                    StringValue(result, "error") ??
+                    "RimBridge rejected canonical generic mod-load evidence.");
+            }
+            JsonElement mods = Property(result, "mods");
+            if (mods.ValueKind != JsonValueKind.Array)
+            {
+                return GenericCandidateLoadEvidence.Failure("RIMBRIDGE_LOAD_EVIDENCE_INVALID",
+                    "RimBridge returned no canonical generic mod list.");
+            }
+            GenericCandidateModEvidence? matchedMod = FindTargetMod(mods, packageId);
             List<string> errors = CollectTargetLoadErrors(result, packageId);
-            bool targetLoaded = ContainsPackage(result, packageId);
+            bool targetLoaded = matchedMod is not null &&
+                matchedMod.Enabled &&
+                matchedMod.LoadedInSession &&
+                matchedMod.MatchesLoadedSession;
             bool assemblyLoaded = !string.IsNullOrWhiteSpace(expectedAssembly) &&
                 ContainsLoadedAssembly(result, expectedAssembly!);
             int? generation = ReadGeneration(envelope);
@@ -405,7 +434,8 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 "rimworld/list_mods",
                 null,
                 null,
-                errors);
+                errors,
+                matchedMod);
         }
         catch (JsonException exception)
         {
@@ -414,27 +444,27 @@ public sealed class ManagedReadyToTestCandidateConsumer
         }
     }
 
-    private static bool ContainsPackage(JsonElement value, string packageId)
+
+    private static GenericCandidateModEvidence? FindTargetMod(
+        JsonElement mods,
+        string packageId)
     {
-        if (value.ValueKind == JsonValueKind.Object)
+        foreach (JsonElement mod in mods.EnumerateArray())
         {
-            foreach (JsonProperty property in value.EnumerateObject())
-            {
-                if (property.Name.Equals("packageId", StringComparison.OrdinalIgnoreCase) &&
-                    property.Value.ValueKind == JsonValueKind.String &&
-                    string.Equals(property.Value.GetString(), packageId, StringComparison.OrdinalIgnoreCase))
-                    return true;
-                if (ContainsPackage(property.Value, packageId))
-                    return true;
-            }
+            if (mod.ValueKind != JsonValueKind.Object ||
+                !string.Equals(StringValue(mod, "packageId"), packageId,
+                    StringComparison.OrdinalIgnoreCase))
+                continue;
+            return new GenericCandidateModEvidence(
+                packageId,
+                StringValue(mod, "modId"),
+                TryGetBoolean(mod, "enabled", out bool enabled) && enabled,
+                TryGetBoolean(mod, "loadedInSession", out bool loadedInSession) && loadedInSession,
+                TryGetBoolean(mod, "matchesLoadedSession", out bool matchesLoadedSession) && matchesLoadedSession,
+                TryGetInt(mod, "activeLoadOrder", out int activeLoadOrder) ? activeLoadOrder : null,
+                TryGetInt(mod, "loadedSessionOrder", out int loadedSessionOrder) ? loadedSessionOrder : null);
         }
-        else if (value.ValueKind == JsonValueKind.Array)
-        {
-            foreach (JsonElement item in value.EnumerateArray())
-                if (ContainsPackage(item, packageId))
-                    return true;
-        }
-        return false;
+        return null;
     }
 
     private static bool ContainsLoadedAssembly(JsonElement value, string expectedAssembly)

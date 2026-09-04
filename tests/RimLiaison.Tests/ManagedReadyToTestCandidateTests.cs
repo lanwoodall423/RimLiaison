@@ -134,6 +134,56 @@ internal static class ManagedReadyToTestCandidateTests
             result.TargetAssemblyLoadState == evidence.AssemblyLoadState,
             "generic assembly-load evidence was not retained");
     }
+
+    public static void CandidateGenericEvidenceUsesExplicitActiveOnlyRequest()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
+        DevBridgeProcessRequest request = transport.Requests.Single(request =>
+            request.OperationKey == "candidate-generic-load-evidence");
+        Assert(result.Success &&
+            request.Arguments.Contains("{\"includeInactive\":false}") &&
+            !request.Arguments.Contains("{}"),
+            "candidate generic load evidence did not use the explicit active-only request");
+    }
+
+    public static void OutputTooLargeFallbackCannotProveTargetLoad()
+    {
+        using Fixture fixture = new() { GenericFallback = true };
+        string manifestPath = fixture.CreateCandidate();
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(!result.Success && result.TargetLoaded == false &&
+            result.ErrorCode == "OUTPUT_TOO_LARGE",
+            "a summarized coordinator fallback established generic target load");
+    }
+
+    public static void GenericEvidenceRequiresLoadedSessionIdentity()
+    {
+        static ManagedReadyToTestCandidateResult Run(bool loadedInSession, bool matchesLoadedSession)
+        {
+            using Fixture fixture = new()
+            {
+                GenericLoadedInSession = loadedInSession,
+                GenericMatchesLoadedSession = matchesLoadedSession
+            };
+            return fixture.Consumer(new RecordingTransport(fixture.RuntimeHandler))
+                .RunAsync(fixture.CreateCandidate()).GetAwaiter().GetResult();
+        }
+
+        ManagedReadyToTestCandidateResult notLoaded = Run(false, true);
+        ManagedReadyToTestCandidateResult mismatched = Run(true, false);
+        ManagedReadyToTestCandidateResult loaded = Run(true, true);
+        Assert(!notLoaded.Success && notLoaded.TargetLoaded == false &&
+            !mismatched.Success && mismatched.TargetLoaded == false &&
+            loaded.Success && loaded.TargetLoaded == true &&
+            loaded.ManagedLoadEvidence?.MatchedMod?.Enabled == true &&
+            loaded.ManagedLoadEvidence.MatchedMod.LoadedInSession == true &&
+            loaded.ManagedLoadEvidence.MatchedMod.MatchesLoadedSession == true,
+            "generic load evidence did not require the complete loaded-session identity");
+    }
     public static void ExplicitRecipeMissingToolRemainsFailure()
     {
         using Fixture fixture = new();
@@ -313,6 +363,10 @@ internal static class ManagedReadyToTestCandidateTests
         public bool GenericTargetLoaded { get; init; } = true;
         public bool GenericTargetLoadError { get; init; }
         public bool GenericBridgeExitCode { get; init; }
+        public bool GenericFallback { get; init; }
+        public bool GenericEnabled { get; init; } = true;
+        public bool GenericLoadedInSession { get; init; } = true;
+        public bool GenericMatchesLoadedSession { get; init; } = true;
         public bool GenericAssemblyEvidence { get; init; } = true;
         public string InitialRimBridgeMode { get; init; } = "required";
         public bool InitialRuntimeStopped { get; init; }
@@ -395,6 +449,8 @@ internal static class ManagedReadyToTestCandidateTests
         {
             if (request.Arguments.Contains("bridge") && request.Arguments.Contains("call"))
             {
+                if (GenericFallback)
+                    return Result("{\"success\":false,\"errorCode\":\"OUTPUT_TOO_LARGE\",\"error\":\"The coordinator result exceeded the maximum payload length.\",\"payloadMetadata\":{\"summarized\":true,\"truncated\":true,\"fallback\":true}}");
                 string packageId = GenericTargetLoaded ? "lan.fixture" : "lan.other";
                 string assembly = GenericAssemblyEvidence
                     ? ",\"assemblies\":[{\"name\":\"Fixture.dll\",\"loaded\":true}]"
@@ -402,10 +458,16 @@ internal static class ManagedReadyToTestCandidateTests
                 string errors = GenericTargetLoadError
                     ? ",\"errors\":[{\"packageId\":\"lan.fixture\",\"message\":\"Def load failed\"}]"
                     : string.Empty;
+                string record = "{\"packageId\":\"" + packageId +
+                    "\",\"modId\":\"mod-config:" + packageId + ":fixture\"," +
+                    "\"enabled\":" + GenericEnabled.ToString().ToLowerInvariant() +
+                    ",\"loadedInSession\":" + GenericLoadedInSession.ToString().ToLowerInvariant() +
+                    ",\"matchesLoadedSession\":" + GenericMatchesLoadedSession.ToString().ToLowerInvariant() +
+                    ",\"activeLoadOrder\":0,\"loadedSessionOrder\":0" + assembly + errors + "}";
                 return Result(
-                    "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":{\"mods\":[{\"packageId\":\"" +
-                    packageId + "\"" + assembly + errors +
-                    "}]},\"provenance\":{\"generation\":2}}}", GenericBridgeExitCode ? 4 : 0);
+                    "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":{\"success\":true,\"mods\":[" +
+                    record + "],\"operation\":{\"name\":\"list_mods\"}},\"provenance\":{\"generation\":2}}}",
+                    GenericBridgeExitCode ? 4 : 0);
             }
             if (request.Arguments.Contains("recipe") && request.Arguments.Contains("show"))
                 return Result("{\"schemaVersion\":\"devbridge-test-recipe-show/v1\",\"recipe\":{\"schemaVersion\":\"devbridge-test-recipe/v1\",\"id\":\"fixture\",\"projects\":[\"fixture\"]},\"errorCode\":null,\"error\":null}");
