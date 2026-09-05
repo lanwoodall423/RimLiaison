@@ -42,7 +42,7 @@ internal static class RimBridgeModePreparationTests
         {
             Requests.Add(request);
             string output = request.Arguments.Contains("status", StringComparer.Ordinal)
-                ? "{\"state\":\"READY\",\"rimBridge\":{\"configuredMode\":\"off\"},\"leases\":[]}"
+                ? "{\"state\":\"STOPPED\",\"rimBridge\":{\"configuredMode\":\"off\"},\"leases\":[]}"
                 : "{\"success\":true}";
             return Task.FromResult(new DevBridgeProcessResult(0, output, string.Empty));
         }

@@ -77,28 +77,29 @@ public static class RimBridgeModePreparation
                 error);
         }
 
-        if (!string.Equals(state, "STOPPED", StringComparison.OrdinalIgnoreCase))
+        // STOPPED is a lazy-launch boundary, not proof that the coordinator
+        // process has exited. An off coordinator can still accept the next
+        // request, so it must cross the shutdown boundary before required
+        // mode is used.
+        DevBridgeProcessResult shutdown = await required.ExecuteAsync(
+                new DevBridgeProcessRequest(
+                    options.CommandPath,
+                    options.RootPath,
+                    ["--root", options.RootPath, "coordinator", "shutdown", "--json"],
+                    options.ShowPlanTimeout,
+                    options.MaxStdoutBytes,
+                    options.MaxStderrBytes,
+                    OperationKey: "rimbridge-mode-transition"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (shutdown.ExitCode is not 0 || shutdown.TimedOut || shutdown.Cancelled ||
+            !string.IsNullOrWhiteSpace(shutdown.StartError))
         {
-            DevBridgeProcessResult shutdown = await required.ExecuteAsync(
-                    new DevBridgeProcessRequest(
-                        options.CommandPath,
-                        options.RootPath,
-                        ["--root", options.RootPath, "coordinator", "shutdown", "--json"],
-                        options.ShowPlanTimeout,
-                        options.MaxStdoutBytes,
-                        options.MaxStderrBytes,
-                        OperationKey: "rimbridge-mode-transition"),
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (shutdown.ExitCode is not 0 || shutdown.TimedOut || shutdown.Cancelled ||
-                !string.IsNullOrWhiteSpace(shutdown.StartError))
-            {
-                return RimBridgeModePreparationResult.Failure(
-                    required,
-                    "RIMBRIDGE_MODE_TRANSITION_FAILED",
-                    shutdown.StartError ?? shutdown.Stderr ??
-                    "The DevBridge coordinator did not accept the required RimBridge mode transition.");
-            }
+            return RimBridgeModePreparationResult.Failure(
+                required,
+                "RIMBRIDGE_MODE_TRANSITION_FAILED",
+                shutdown.StartError ?? shutdown.Stderr ??
+                "The DevBridge coordinator did not accept the required RimBridge mode transition.");
         }
 
         return RimBridgeModePreparationResult.Success(required);
