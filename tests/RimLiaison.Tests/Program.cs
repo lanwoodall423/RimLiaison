@@ -40,6 +40,7 @@ internal static class Program
         ("shared bounded payloads", SharedContractsTests.PayloadsAndEventsAreBounded),
         ("shared dependency direction", SharedContractsTests.SharedAssemblyHasNoToolDependencies),
         ("valid catalog", ValidCatalogLoads),
+        ("off RimBridge suite mode transitions safely", RimBridgeModePreparationTests.OffCoordinatorTransitionsToRequiredMode),
         ("production manifest validates owner metadata", ProjectMetadataOwnershipTests.ProductionManifestValidatesOwnerMetadata),
         ("missing production metadata fails closed", ProjectMetadataOwnershipTests.MissingProductionMetadataFailsClosed),
         ("contradictory production metadata fails closed", ProjectMetadataOwnershipTests.ContradictoryProductionMetadataFailsClosed),

@@ -3734,6 +3734,37 @@ public static class CliApplication
         IDevBridgeProcessTransport? bridgeTransport = needsBridgeTransport
             ? processTransport ?? new SystemDevBridgeProcessTransport()
             : null;
+        if (ownsRecipeAdapter &&
+            string.Equals(
+                request.StackManifest.Manifest?.RimBridge,
+                "via-devbridge",
+                StringComparison.Ordinal) &&
+            bridgeOptions is not null &&
+            bridgeTransport is not null)
+        {
+            RimBridgeModePreparationResult bridgePreparation =
+                await RimBridgeModePreparation.EnsureRequiredAsync(
+                        bridgeOptions,
+                        bridgeTransport,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (!bridgePreparation.Succeeded)
+            {
+                RimTestSuiteResult bridgeModeResult = RimTestSuiteResultFactory.FromSelectionFailure(
+                    suiteId,
+                    "infrastructure",
+                    bridgePreparation.ErrorCode ?? "RIMBRIDGE_MODE_PREPARATION_FAILED",
+                    bridgePreparation.Error,
+                    "Inspect the DevBridge RimBridge mode transition.",
+                    ElapsedMilliseconds(started),
+                    workflowId);
+                WriteJson(stdout, bridgeModeResult);
+                return SuiteExitCodeFor(bridgeModeResult.Status);
+            }
+
+            bridgeTransport = bridgePreparation.Transport;
+        }
+
         IDevBridgeRecipeAdapter adapter = CreateAdapter(
             request,
             recipeAdapter,
