@@ -1957,6 +1957,20 @@ try {
         }
         $script:Report.runtime.acceptedProfileFingerprint = [string]$recipeResponse.profileFingerprint
         $script:Report.runtime.requestedProjects = @($recipeResponse.requestedProjects)
+        $recipeGeneration = [int]$recipeResponse.generation
+        if ($recipeGeneration -gt $generationAfter) {
+            $generationAfter = $recipeGeneration
+            $script:Report.runtime.generationAfter = $generationAfter
+            $script:Report.runtime.generation = $generationAfter
+            $script:Report.artifactFreshness.generationAfter = $generationAfter
+            $script:Report.artifactFreshness.generation = $generationAfter
+            $script:Report.artifactFreshness.loadedArtifactFreshnessProven = $true
+            $script:Report.artifactFreshness.proof = 'package-manifest-plus-new-owned-generation'
+            Write-DeploymentManifest $manifestPath $packageFiles $packageHash $generationAfter `
+                $ownershipProvenance $legacyClassification
+            Write-ArtifactState $generationAfter ([string]$script:Report.deployment.deployedSha256After) `
+                $packageHash $manifestPath
+        }
     }
     $script:Report.artifactFreshness.transactionId = $transactionId
     $script:Report.artifactFreshness.workflowId = $WorkflowId
