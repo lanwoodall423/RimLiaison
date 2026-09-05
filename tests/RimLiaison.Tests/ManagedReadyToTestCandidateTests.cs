@@ -53,6 +53,28 @@ internal static class ManagedReadyToTestCandidateTests
 
 
 
+    public static void UnchangedCandidateSkipsDeploymentMutation()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var firstTransport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeModDevelopmentResult first = fixture.Transaction(firstTransport).RunAsync(
+                "fixture", fixture.RepositoryRoot, fixture.SourceFingerprint, "candidate-test",
+                new DevBridgeModDevelopmentExecutionContext(
+                    Candidate: fixture.Manifest!, CandidateManifestPath: manifestPath))
+            .GetAwaiter().GetResult();
+        fixture.ResetRuntimeStatus();
+        var secondTransport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeModDevelopmentResult second = fixture.Transaction(secondTransport).RunAsync(
+                "fixture", fixture.RepositoryRoot, fixture.SourceFingerprint, "candidate-test",
+                new DevBridgeModDevelopmentExecutionContext(
+                    Candidate: fixture.Manifest!, CandidateManifestPath: manifestPath))
+            .GetAwaiter().GetResult();
+        Assert(first.Success == true && second.Success == true &&
+            !secondTransport.Requests.Any(request => request.Arguments.Contains("stop")),
+            "an unchanged candidate rewrote a still-loaded deployment");
+    }
+
     public static void CandidatePackageHashPreservedThroughDeploymentEvidence()
     {
         using Fixture fixture = new();
@@ -670,6 +692,11 @@ internal static class ManagedReadyToTestCandidateTests
                 ? mvid!
                 : throw new InvalidOperationException("fixture assembly MVID unavailable");
         public string ExpectedCandidateMvid() => AssemblyMvid();
+        public void ResetRuntimeStatus()
+        {
+            statusCalls = 0;
+            candidateStatusCalls = 0;
+        }
 
         public void Dispose()
         {

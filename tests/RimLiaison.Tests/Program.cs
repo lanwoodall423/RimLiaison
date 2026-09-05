@@ -578,6 +578,7 @@ internal static class Program
         ("mutated candidate rejected before lease", ManagedReadyToTestCandidateTests.MutatedCandidateRejectedBeforeLease),
         ("managed candidate never rebuilds source", ManagedReadyToTestCandidateTests.CandidateManagedExecutionNeverBuildsSource),
         ("candidate bootstrap rescans before profile registration", ManagedReadyToTestCandidateTests.CandidateBootstrapRescansBeforeProfileRegistration),
+        ("unchanged candidate skips deployment mutation", ManagedReadyToTestCandidateTests.UnchangedCandidateSkipsDeploymentMutation),
         ("candidate package hash preserved through deployment", ManagedReadyToTestCandidateTests.CandidatePackageHashPreservedThroughDeploymentEvidence),
         ("forbidden candidate content rejected", ManagedReadyToTestCandidateTests.ForbiddenCandidateContentRejected),
         ("existing dependency resolver reused", ManagedReadyToTestCandidateTests.ExistingDependencyResolverPathIsReused),

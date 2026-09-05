@@ -197,7 +197,8 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 : null;
             string? expectedAssemblyHash = assemblyEntry?.Sha256;
             string? expectedMvid = null;
-            BootstrapCandidatePackage(verified.Package, runtimeRoot);
+            if (!PackageMatchesAtRoot(runtimeRoot, verified.Package))
+                BootstrapCandidatePackage(verified.Package, runtimeRoot);
             if (!string.IsNullOrWhiteSpace(expectedAssembly))
             {
                 if (assemblyEntry is null ||
@@ -208,8 +209,36 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         "The exact SHA-verified candidate assembly did not expose readable PE metadata for its module MVID.");
                 }
             }
-
             RequiredRimBridgeProcessTransport runtimeTransport = new(transport);
+            IReadOnlyList<string> dependencyOverlayRoots =
+                BootstrapReadyDependencyCandidates(
+                    manifest,
+                    manifestPath,
+                    runtimeRoot);
+            if (dependencyOverlayRoots.Count > 0)
+            {
+                DevBridgeProcessResult shutdown = await runtimeTransport.ExecuteAsync(
+                        new DevBridgeProcessRequest(
+                            options.BridgeOptions.CommandPath,
+                            options.BridgeOptions.RootPath,
+                            ["--root", options.BridgeOptions.RootPath, "coordinator", "shutdown", "--json"],
+                            options.Timeout,
+                            options.MaxStdoutBytes,
+                            options.MaxStderrBytes,
+                            DevBridgeProcessEnvironment.ForWorkflow(options.WorkflowId),
+                            OperationKey: "candidate-dependency-overlay-rescan"),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (shutdown.ExitCode is not 0)
+                {
+                    return FailureFor(
+                        manifest,
+                        "DEPENDENCY_PREREQUISITE",
+                        "CANDIDATE_DEPENDENCY_RESCAN_FAILED",
+                        shutdown.StartError ?? shutdown.Stderr ??
+                        "The managed coordinator could not rescan the candidate dependency overlay.");
+                }
+            }
             RimBridgeRequirementResult rimBridge = await EnsureRequiredRimBridgeAsync(
                     runtimeTransport,
                     cancellationToken)
@@ -912,6 +941,97 @@ public sealed class ManagedReadyToTestCandidateConsumer
             File.Copy(entry.SourcePath, target, overwrite: true);
         }
     }
+    private static IReadOnlyList<string> BootstrapReadyDependencyCandidates(
+        ReadyToTestCandidateManifest target,
+        string manifestPath,
+        string targetRoot)
+    {
+        string? candidatesRoot = Directory.GetParent(
+            Directory.GetParent(
+                Directory.GetParent(Path.GetFullPath(manifestPath))?.FullName ?? string.Empty)?.FullName ?? string.Empty)?.FullName;
+        if (string.IsNullOrWhiteSpace(candidatesRoot) || !Directory.Exists(candidatesRoot))
+            return [];
+
+        var roots = new List<string>();
+        foreach (string dependency in target.RequiredRuntimeDependencies ?? [])
+        {
+            VerifiedReadyToTestCandidate[] matches = Directory.EnumerateFiles(
+                    candidatesRoot,
+                    "candidate.json",
+                    SearchOption.AllDirectories)
+                .Select(path => ReadyToTestCandidateVerifier.TryVerify(
+                    path,
+                    out VerifiedReadyToTestCandidate? verified,
+                    out _,
+                    out _)
+                    ? verified
+                    : null)
+                .Where(verified => verified?.Manifest.PackageId is not null &&
+                    string.Equals(verified.Manifest.PackageId, dependency, StringComparison.OrdinalIgnoreCase))
+                .ToArray()!;
+            if (matches.Length == 0)
+                continue;
+            if (matches.Length > 1)
+                throw new InvalidOperationException(
+                    $"DEPENDENCY_CANDIDATE_AMBIGUOUS: more than one READY candidate supplies {dependency}.");
+
+            VerifiedReadyToTestCandidate selected = matches[0];
+            StackManifestResolution stack = StackManifestResolver.Discover(
+                selected.Manifest.SourceRepositoryRoot);
+            string folder = Path.GetFileName(
+                Path.TrimEndingDirectorySeparator(selected.Manifest.SourceRepositoryRoot));
+            if (stack.Manifest is not null)
+                folder = ProjectIdentityResolver.Resolve(
+                    stack.Manifest,
+                    selected.Manifest.SourceRepositoryRoot).RuntimeFolder;
+            string dependencyRoot = Path.GetFullPath(Path.Combine(
+                Directory.GetParent(targetRoot)!.FullName,
+                folder));
+            if (Directory.Exists(dependencyRoot))
+            {
+                if (PackageMatchesAtRoot(dependencyRoot, selected.Package))
+                {
+                    roots.Add(dependencyRoot);
+                    continue;
+                }
+                if (ActivePackagePresent(
+                        Directory.GetParent(targetRoot)!.FullName,
+                        dependency))
+                {
+                    continue;
+                }
+                throw new InvalidOperationException(
+                    $"DEPENDENCY_CANDIDATE_TARGET_CONFLICT: managed package destination already exists for {dependency}.");
+            }
+            BootstrapCandidatePackage(selected.Package, dependencyRoot);
+            roots.Add(dependencyRoot);
+        }
+        return roots;
+    }
+
+    private static bool PackageMatchesAtRoot(
+        string root,
+        IReadOnlyList<ReadyToTestCandidatePackageEntry> package) =>
+        package.All(entry =>
+        {
+            string path = Path.Combine(
+                root,
+                entry.TargetPath.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(path))
+                return false;
+            string hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)))
+                .ToLowerInvariant();
+            return string.Equals(hash, entry.Sha256, StringComparison.OrdinalIgnoreCase);
+        });
+    private static bool ActivePackagePresent(string modsRoot, string packageId) =>
+        Directory.Exists(modsRoot) &&
+        Directory.EnumerateDirectories(modsRoot)
+            .Select(directory => Path.Combine(directory, "About", "About.xml"))
+            .Where(File.Exists)
+            .Any(path => File.ReadAllText(path).Contains(
+                "<packageId>" + packageId + "</packageId>",
+                StringComparison.OrdinalIgnoreCase));
 
     private static bool IsPathWithin(string root, string candidate)
     {
