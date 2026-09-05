@@ -4142,7 +4142,7 @@ public static class CliApplication
     {
         RimDevStackManifest? manifest = request.StackManifest.Manifest;
         if (manifest is null ||
-            string.IsNullOrWhiteSpace(manifest.TestRecipePath) ||
+            string.IsNullOrWhiteSpace(manifest.DevBridgeProject) ||
             string.IsNullOrWhiteSpace(manifest.TestRecipe) ||
             recipeIds.Count != 1 ||
             !string.Equals(recipeIds[0], manifest.TestRecipe, StringComparison.Ordinal))
@@ -4150,10 +4150,13 @@ public static class CliApplication
             return null;
         }
 
-        string path = Path.GetFullPath(Path.Combine(
+        ValidationRecipeResolutionResult resolution = ValidationRecipeResolver.Resolve(
+            manifest.DevBridgeProject,
+            manifest.TestRecipe!,
             request.StackManifest.RepositoryRoot,
-            manifest.TestRecipePath.Replace('/', Path.DirectorySeparatorChar)));
-        return File.Exists(path) ? path : null;
+            manifest.TestRecipePath,
+            null);
+        return resolution.IsSuccess ? resolution.Recipe!.Path : null;
     }
 
     private static void RecordSuiteCompletion(

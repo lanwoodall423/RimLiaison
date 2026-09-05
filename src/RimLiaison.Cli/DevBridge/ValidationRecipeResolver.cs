@@ -89,7 +89,7 @@ public static class ValidationRecipeResolver
         string? centralPath = ExactCentralPath(toolchainRoot, recipeId);
         if (centralPath is null)
             return Failure("PROJECT_RECIPE_NOT_FOUND",
-                $"The project-owned recipe '{recipeId}' was not found at the canonical project path.");
+                $"Project '{ownerProject}' requested recipe '{recipeId}' but it was not found at project path '{projectConventionPath}', and no central catalog path was configured.");
         return ReadAndValidate(centralPath, ownerProject, recipeId, "LEGACY_CENTRAL_PROJECT_RECIPE");
     }
 
@@ -108,7 +108,8 @@ public static class ValidationRecipeResolver
         string source)
     {
         if (!File.Exists(path))
-            return Failure("PROJECT_RECIPE_NOT_FOUND", $"Validation recipe '{recipeId}' was not found at the resolved path.");
+            return Failure("PROJECT_RECIPE_NOT_FOUND",
+                $"Project '{ownerProject}' requested recipe '{recipeId}' but it was not found at '{path}'.");
 
         try
         {

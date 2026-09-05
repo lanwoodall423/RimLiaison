@@ -180,6 +180,13 @@ internal static class ProjectMetadataOwnershipTests
                 Assert(contract.RootElement.GetProperty("metadataSource").GetString() ==
                     Path.Combine(root, ".rimdev", "stack.json"),
                     "metadata source must remain the project-owned manifest");
+                string resolvedRecipePath = contract.RootElement.GetProperty("resolvedRecipePath").GetString()!;
+                Assert(resolvedRecipePath.Equals(
+                        Path.Combine(root, ".rimdev", "recipes", "mod-development-smoke.json"),
+                        StringComparison.OrdinalIgnoreCase),
+                    "the materialized contract must retain the project-owned recipe path");
+                Assert(contract.RootElement.GetProperty("recipeSource").GetString() == "PROJECT_OWNED",
+                    "the materialized contract must identify project-owned recipe provenance");
                 Assert(contract.RootElement.GetProperty("contractProducer").GetString() == "RimLiaison",
                     "contract producer must remain RimLiaison");
                 Assert(contract.RootElement.GetProperty("materializedContractPath").GetString() ==

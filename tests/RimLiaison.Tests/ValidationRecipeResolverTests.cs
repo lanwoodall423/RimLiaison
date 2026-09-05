@@ -42,7 +42,12 @@ internal static class ValidationRecipeResolverTests
         using TempRepo repo = TempRepo.Create("missing");
         ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
             "demo", "missing-smoke", repo.Root, ".rimdev/recipes/missing-smoke.json", null);
-        Assert(result.ErrorCode == "PROJECT_RECIPE_NOT_FOUND", "missing project recipe must return a structured code");
+        Assert(result.ErrorCode == "PROJECT_RECIPE_NOT_FOUND" &&
+               result.Error!.Contains("demo", StringComparison.Ordinal) &&
+               result.Error.Contains("missing-smoke", StringComparison.Ordinal) &&
+               result.Error.Contains(Path.Combine(repo.Root, ".rimdev", "recipes", "missing-smoke.json"),
+                   StringComparison.OrdinalIgnoreCase),
+            "missing project recipe must return bounded project, recipe, and path diagnostics");
     }
 
     public static void ProjectRecipeDoesNotRequireCentralRuntime()
@@ -123,6 +128,7 @@ internal static class ValidationRecipeResolverTests
         AssertResolveByConvention("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke");
         AssertResolveByConvention("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke");
         AssertResolveByConvention("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite");
+        AssertResolveByConvention("C:\\RimDev\\Repos\\KnowledgeFramework", "knowledge-framework", "knowledge-framework-release-runtime");
     }
 
     private static void AssertResolveByConvention(string root, string project, string id)

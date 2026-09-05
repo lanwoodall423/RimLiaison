@@ -351,7 +351,9 @@ function Read-Descriptor {
     try { $value = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json -Depth 16 }
     catch { throw "descriptor is not bounded valid JSON: $($_.Exception.Message)" }
     $allowed = @('schemaVersion', 'entityType', 'productionEligible', 'project', 'sourceProject', 'configuration', 'expectedAssembly',
-        'deploymentTarget', 'testRecipe', 'testRecipePath', 'buildProperties', 'runtimePackage', 'deploymentRole')
+        'deploymentTarget', 'testRecipe', 'testRecipePath', 'canonicalProjectId', 'metadataOwner', 'metadataSource',
+        'contractProducer', 'materializedContractPath', 'resolvedRecipePath', 'recipeSource', 'recipeSha256',
+        'recipeSchemaVersion', 'buildProperties', 'runtimePackage', 'deploymentRole')
     foreach ($property in $value.PSObject.Properties.Name) {
         if ($property -notin $allowed) { throw "descriptor field is not allowed: $property" }
     }
@@ -395,6 +397,27 @@ function Read-Descriptor {
 
 function Get-RecipeArguments {
     param([Parameter(Mandatory = $true)]$Descriptor)
+    $resolved = [string]$Descriptor.resolvedRecipePath
+    if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+        try { $recipePath = [IO.Path]::GetFullPath($resolved) }
+        catch { throw "Project '$Project' requested recipe '$($Descriptor.testRecipe)' but its resolved recipe path is invalid: $resolved" }
+        if ([IO.Path]::GetExtension($recipePath) -ine '.json' -or
+            -not (Test-Path -LiteralPath $recipePath -PathType Leaf)) {
+            $expected = Join-Path $developmentRoots[0] ('.rimdev\recipes\' + [string]$Descriptor.testRecipe + '.json')
+            throw "Project '$Project' requested recipe '$($Descriptor.testRecipe)' but resolved project recipe '$recipePath' was not found. Source root: $($developmentRoots[0]); expected recipe: $expected; coordinator catalog: $(Join-Path $coordinatorRoot ('TestRecipes\' + [string]$Descriptor.testRecipe + '.json'))"
+        }
+        if (-not ($developmentRoots | Where-Object { Test-PathWithin $recipePath $_ })) {
+            throw "Project '$Project' requested recipe '$($Descriptor.testRecipe)' resolved outside configured source roots. Recipe: $recipePath; source roots: $($developmentRoots -join '; ')"
+        }
+        Assert-NoReparsePath $recipePath
+        if (-not [string]::IsNullOrWhiteSpace([string]$Descriptor.recipeSha256)) {
+            $actualHash = (Get-FileHash -LiteralPath $recipePath -Algorithm SHA256).Hash
+            if (-not $actualHash.Equals([string]$Descriptor.recipeSha256, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Project '$Project' requested recipe '$($Descriptor.testRecipe)' but resolved recipe hash mismatched. Recipe: $recipePath; expected: $($Descriptor.recipeSha256); actual: $actualHash"
+            }
+        }
+        return @('--recipe-file', $recipePath)
+    }
     if ([string]::IsNullOrWhiteSpace([string]$Descriptor.testRecipePath)) {
         return @()
     }
