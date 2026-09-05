@@ -197,8 +197,6 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 : null;
             string? expectedAssemblyHash = assemblyEntry?.Sha256;
             string? expectedMvid = null;
-            if (!PackageMatchesAtRoot(runtimeRoot, verified.Package))
-                BootstrapCandidatePackage(verified.Package, runtimeRoot);
             if (!string.IsNullOrWhiteSpace(expectedAssembly))
             {
                 if (assemblyEntry is null ||
@@ -969,8 +967,25 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 .Where(verified => verified?.Manifest.PackageId is not null &&
                     string.Equals(verified.Manifest.PackageId, dependency, StringComparison.OrdinalIgnoreCase))
                 .ToArray()!;
-            if (matches.Length == 0)
-                continue;
+            if (matches.Length > 1)
+            {
+                string modsRoot = Directory.GetParent(targetRoot)!.FullName;
+                VerifiedReadyToTestCandidate[] exactMatches = matches.Where(candidate =>
+                {
+                    StackManifestResolution candidateStack = StackManifestResolver.Discover(
+                        candidate.Manifest.SourceRepositoryRoot);
+                    string candidateFolder = Path.GetFileName(
+                        Path.TrimEndingDirectorySeparator(candidate.Manifest.SourceRepositoryRoot));
+                    if (candidateStack.Manifest is not null)
+                        candidateFolder = ProjectIdentityResolver.Resolve(
+                            candidateStack.Manifest,
+                            candidate.Manifest.SourceRepositoryRoot).RuntimeFolder;
+                    string candidateRoot = Path.Combine(modsRoot, candidateFolder);
+                    return PackageMatchesAtRoot(candidateRoot, candidate.Package);
+                }).ToArray();
+                if (exactMatches.Length == 1)
+                    matches = exactMatches;
+            }
             if (matches.Length > 1)
                 throw new InvalidOperationException(
                     $"DEPENDENCY_CANDIDATE_AMBIGUOUS: more than one READY candidate supplies {dependency}.");

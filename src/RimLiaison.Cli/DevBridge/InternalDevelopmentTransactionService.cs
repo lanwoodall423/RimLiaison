@@ -395,6 +395,12 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         return Failure(project, workflowId, transactionId, stopFailure?.ErrorCode ?? "DEVELOPMENT_MAINTENANCE_NOT_CONFIRMED", stopFailure?.Error ?? "DevBridge did not prove stopped maintenance state.", DevBridgeOutcomeKind.InfrastructureFailure, leaseId: leaseId, generation: generationBefore);
                     }
 
+                    await WaitForDeploymentFilesAsync(
+                            targetRoot,
+                            package,
+                            options.Timeout,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     foreach (PackageEntry entry in package)
                     {
                         string target = SafeCombine(targetRoot, entry.TargetPath);
@@ -659,6 +665,44 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 throw new InvalidOperationException("DEVBRIDGE_DEPLOYMENT_OWNERSHIP_AMBIGUOUS: managed deployment content changed outside the transaction.");
             }
         }
+    }
+
+    private static async Task WaitForDeploymentFilesAsync(
+        string targetRoot,
+        IReadOnlyList<PackageEntry> package,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            bool locked = false;
+            try
+            {
+                foreach (PackageEntry entry in package)
+                {
+                    string target = SafeCombine(targetRoot, entry.TargetPath);
+                    if (File.Exists(target))
+                    {
+                        using FileStream stream = new(
+                            target,
+                            FileMode.Open,
+                            FileAccess.ReadWrite,
+                            FileShare.None);
+                    }
+                }
+            }
+            catch (IOException)
+            {
+                locked = true;
+            }
+            if (!locked)
+                return;
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        throw new InvalidOperationException(
+            "DEVELOPMENT_DEPLOYMENT_FILES_LOCKED: managed runtime did not release the existing package before deployment.");
     }
 
     internal static void RemoveStaleOwnedFiles(
