@@ -205,6 +205,7 @@ internal static class Program
         ("promotion reports lease evidence", PromotionLeaseOrchestrationTests.ReportsLeaseGenerationAndStage),
         ("missing project runtime root fails closed", ProjectMetadataOwnershipTests.MissingRuntimeRootFailsClosed),
         ("production binding requires exact installed identity", ProjectMetadataOwnershipTests.ProductionBindingRequiresExactInstalledIdentity),
+        ("capabilities use production toolchain binding", ProjectMetadataOwnershipTests.CapabilitiesUseProductionToolchainBinding),
         ("healthy promoted installation needs no repair", PromotedToolchainRecoveryTests.HealthyInstallationDoesNotRepair),
         ("missing promoted artifact repairs", PromotedToolchainRecoveryTests.MissingArtifactRepairsAndPreservesIdentity),
         ("restoration ignores current source divergence", PromotedToolchainRecoveryTests.RecoveryIgnoresCurrentSourceDivergence),

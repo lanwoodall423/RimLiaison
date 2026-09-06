@@ -4919,8 +4919,9 @@ public static class CliApplication
         };
     }
 
-    private static bool RequiresProductionToolchainBinding(CliRequest request) =>
-        request.Command is CliCommand.RecipeRun or
+    internal static bool RequiresProductionToolchainBinding(CliRequest request) =>
+        request.Command is CliCommand.Capabilities or
+            CliCommand.RecipeRun or
             CliCommand.RunTest or
             CliCommand.SuiteRun or
             CliCommand.GoldenPath or

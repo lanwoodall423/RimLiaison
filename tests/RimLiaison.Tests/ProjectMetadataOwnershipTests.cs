@@ -4,6 +4,8 @@ using RimLiaison.DevBridge;
 using RimLiaison.Stack;
 using RimLiaison.Toolchain;
 
+using RimLiaison;
+
 namespace RimLiaison.Tests;
 
 internal static class ProjectMetadataOwnershipTests
@@ -342,6 +344,19 @@ internal static class ProjectMetadataOwnershipTests
             Environment.SetEnvironmentVariable("DEVBRIDGE_SOURCE_ROOT", priorSource);
             Delete(root);
         }
+    }
+
+    public static void CapabilitiesUseProductionToolchainBinding()
+    {
+        CliRequest capabilities = CliParser.Parse(["capabilities", "--json"]);
+        CliRequest doctor = CliParser.Parse(["doctor", "--json"]);
+
+        Assert(
+            CliApplication.RequiresProductionToolchainBinding(capabilities),
+            "standalone capability discovery must resolve the promoted production runtime");
+        Assert(
+            CliApplication.RequiresProductionToolchainBinding(doctor),
+            "doctor must continue resolving the promoted production runtime");
     }
 
 
