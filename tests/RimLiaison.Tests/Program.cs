@@ -584,6 +584,7 @@ internal static class Program
         ("candidate package hash preserved through deployment", ManagedReadyToTestCandidateTests.CandidatePackageHashPreservedThroughDeploymentEvidence),
         ("forbidden candidate content rejected", ManagedReadyToTestCandidateTests.ForbiddenCandidateContentRejected),
         ("existing dependency resolver reused", ManagedReadyToTestCandidateTests.ExistingDependencyResolverPathIsReused),
+        ("missing dependency candidate remains bounded", ManagedReadyToTestCandidateTests.MissingDependencyCandidateDoesNotThrow),
         ("ModsConfig profile proves target dependencies", ManagedReadyToTestCandidateTests.ModsConfigEvidenceRequiresTargetDependencyProfile),
         ("configured target without live evidence cannot pass", ManagedReadyToTestCandidateTests.ConfiguredTargetWithoutLiveRuntimeEvidenceCannotPass),
         ("managed candidate cleanup runs after success", ManagedReadyToTestCandidateTests.ManagedCandidateCleanupRunsAfterSuccess),
@@ -2874,6 +2875,11 @@ internal static class Program
     {
         var transport = new FakeTransport((request, _) =>
         {
+            if (request.Arguments.Contains("status", StringComparer.OrdinalIgnoreCase))
+            {
+                return ProcessResult(
+                    "{\"success\":true,\"state\":\"READY\",\"rimBridge\":{\"configuredMode\":\"required\"},\"leases\":[]}");
+            }
             if (request.Arguments.Contains("begin", StringComparer.OrdinalIgnoreCase))
             {
                 return ProcessResult(

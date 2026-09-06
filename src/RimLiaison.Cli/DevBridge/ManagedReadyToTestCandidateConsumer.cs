@@ -274,6 +274,15 @@ public sealed class ManagedReadyToTestCandidateConsumer
                         CandidateManifestPath: Path.GetFullPath(manifestPath)),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (!managed.Status.IsSuccess)
+            {
+                return FailureFor(
+                    manifest,
+                    ClassifyManagedFailure(managed.Status.ErrorCode, managed.Status.Outcome),
+                    managed.Status.ErrorCode ?? "MANAGED_CANDIDATE_EXECUTION_FAILED",
+                    managed.Status.Error ?? "Managed candidate execution failed.",
+                    managed);
+            }
 
             ManagedCandidateCleanupEvidence cleanup = new(
                 LeaseReleased: managed.LeaseId is null,
@@ -986,9 +995,13 @@ public sealed class ManagedReadyToTestCandidateConsumer
                 if (exactMatches.Length == 1)
                     matches = exactMatches;
             }
+            if (matches.Length == 0)
+                continue;
             if (matches.Length > 1)
+            {
                 throw new InvalidOperationException(
                     $"DEPENDENCY_CANDIDATE_AMBIGUOUS: more than one READY candidate supplies {dependency}.");
+            }
 
             VerifiedReadyToTestCandidate selected = matches[0];
             StackManifestResolution stack = StackManifestResolver.Discover(

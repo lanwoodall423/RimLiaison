@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RimContext.Core;
 using RimLiaison.DevBridge;
 using RimLiaison.Observability;
 
@@ -163,6 +164,7 @@ internal static class FailureHandlingTests
             Environment.SetEnvironmentVariable("RIMWORLD_MODS_ROOT", activeModsRoot);
             File.Copy(repositoryCatalog, catalog);
             Environment.CurrentDirectory = root;
+            new RimContextService().Index(new RimContextIndexRequest(root));
             using var output = new StringWriter();
             using var errors = new StringWriter();
             string devBridgeRoot = Path.GetFullPath(Path.Combine(oldDirectory, "..", "DevBridge2"));
@@ -176,8 +178,8 @@ internal static class FailureHandlingTests
                         "--fallback-suite", "smoke",
                         "--devbridge-root", devBridgeRoot,
                         "--devbridge-project", "frontier",
-                        "--rimcontext-root", oldDirectory,
-                        "--rimcontext-store", Path.Combine(oldDirectory, ".rimctx", "index.sqlite"),
+                        "--rimcontext-root", root,
+                        "--rimcontext-store", Path.Combine(root, ".rimctx", "index.sqlite"),
                         "--rimerror-log", Path.Combine(root, "rimerror.log"),
                         "--rimerror-store", Path.Combine(root, "rimerror-store.json"),
                     ],

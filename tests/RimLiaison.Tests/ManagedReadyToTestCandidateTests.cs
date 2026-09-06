@@ -117,6 +117,16 @@ internal static class ManagedReadyToTestCandidateTests
             transport.Requests.Any(request => request.Arguments.Contains("register") && request.Arguments.Contains("project")),
             "managed candidate bypassed the existing recipe/dependency resolver path");
     }
+    public static void MissingDependencyCandidateDoesNotThrow()
+    {
+        using Fixture fixture = new() { CoreDependencyResolved = false };
+        string manifestPath = fixture.CreateCandidate();
+        ManagedReadyToTestCandidateResult result = fixture.Consumer(
+                new RecordingTransport(fixture.RuntimeHandler)).RunAsync(manifestPath).GetAwaiter().GetResult();
+        Assert(!result.Success && result.Outcome == "DEPENDENCY_PREREQUISITE",
+            $"missing dependency candidate was not bounded: success={result.Success}, outcome={result.Outcome}, error={result.ErrorCode}");
+    }
+
 
     public static void ModsConfigEvidenceRequiresTargetDependencyProfile()
     {
@@ -374,7 +384,7 @@ internal static class ManagedReadyToTestCandidateTests
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
         Assert(result.Success && result.RimBridgeMode == "required" &&
-            fixture.CoordinatorShutdownCalls == 1 &&
+            fixture.CoordinatorShutdownCalls == 2 &&
             transport.Requests.Any(request => request.Arguments.Contains("begin")) &&
             transport.Requests.All(request =>
                 request.EnvironmentVariables is not null &&
@@ -418,10 +428,11 @@ internal static class ManagedReadyToTestCandidateTests
         string manifestPath = fixture.CreateCandidate();
         var transport = new RecordingTransport(fixture.RuntimeHandler);
         ManagedReadyToTestCandidateResult result = fixture.Consumer(transport).RunAsync(manifestPath).GetAwaiter().GetResult();
-        Assert(result.Success && fixture.CoordinatorShutdownCalls == 0 &&
-            !transport.Requests.Any(request => request.Arguments.Contains("coordinator") &&
-                request.Arguments.Contains("shutdown")),
-            "an already-required coordinator was unnecessarily recycled");
+        int begin = transport.Requests.FindIndex(request => request.Arguments.Contains("begin"));
+        int shutdown = transport.Requests.FindIndex(request =>
+            request.Arguments.Contains("coordinator") && request.Arguments.Contains("shutdown"));
+        Assert(result.Success && fixture.CoordinatorShutdownCalls == 1 && shutdown > begin,
+            "an already-required coordinator was unnecessarily recycled before the candidate lease");
     }
 
     public static void OffRimBridgeCoordinatorTransitionsWithoutStoppingRimWorld()
@@ -433,7 +444,7 @@ internal static class ManagedReadyToTestCandidateTests
         int shutdown = transport.Requests.FindIndex(request =>
             request.Arguments.Contains("coordinator") && request.Arguments.Contains("shutdown"));
         int begin = transport.Requests.FindIndex(request => request.Arguments.Contains("begin"));
-        Assert(result.Success && fixture.CoordinatorShutdownCalls == 1 && shutdown >= 0 && begin > shutdown &&
+        Assert(result.Success && fixture.CoordinatorShutdownCalls == 2 && shutdown >= 0 && begin > shutdown &&
             !transport.Requests.Take(begin).Any(request => request.Arguments.Contains("restart")),
             "off-mode transition did not use one safe coordinator shutdown before the lease");
     }
@@ -464,7 +475,7 @@ internal static class ManagedReadyToTestCandidateTests
                 consumer.RunAsync(firstManifest),
                 consumer.RunAsync(secondManifest))
             .GetAwaiter().GetResult();
-        Assert(fixture.CoordinatorShutdownCalls == 1 &&
+        Assert(fixture.CoordinatorShutdownCalls == 2 &&
             transport.Requests.All(request =>
                 request.EnvironmentVariables is not null &&
                 request.EnvironmentVariables.TryGetValue("DEVBRIDGE_RIMBRIDGE_MODE", out string? mode) &&
@@ -488,6 +499,8 @@ internal static class ManagedReadyToTestCandidateTests
         public bool GenericTargetLoaded { get; init; } = true;
         public bool GenericTargetLoadError { get; init; }
         public bool GenericBridgeExitCode { get; init; }
+        public bool GenericAssemblyBackingFileReadable { get; init; } = true;
+        public bool CoreDependencyResolved { get; init; } = true;
         public bool GenericFallback { get; init; }
         public bool GenericEnabled { get; init; } = true;
         public bool GenericLoadedInSession { get; init; } = true;
@@ -496,7 +509,6 @@ internal static class ManagedReadyToTestCandidateTests
         public bool GenericAssemblyVerification { get; init; } = true;
         public bool GenericAssemblyVerificationMismatch { get; init; }
         public bool GenericAssemblyMvidMismatch { get; init; }
-        public bool GenericAssemblyBackingFileReadable { get; init; } = true;
         public bool InitialRuntimeStopped { get; init; }
         public bool StaleOwnedPid { get; init; }
         public bool UnmanagedRimWorld { get; init; }
@@ -647,6 +659,9 @@ internal static class ManagedReadyToTestCandidateTests
                 string root = RepositoryRoot.Replace("\\", "\\\\");
                 string mode = CoordinatorShutdownCalls > 0 ? "required" : InitialRimBridgeMode;
                 string lease = ActiveLeaseId is null ? "null" : $"\"{ActiveLeaseId}\"";
+                string resolvedMods = CoreDependencyResolved
+                    ? "[\"lan.fixture\",\"Core\"]"
+                    : "[\"lan.fixture\"]";
                 if (request.OperationKey == "candidate-runtime-status")
                 {
                     candidateStatusCalls++;
@@ -657,14 +672,14 @@ internal static class ManagedReadyToTestCandidateTests
                             : "\"errorCode\":null,\"error\":null";
                         return Result($"{{\"success\":true,\"state\":\"STOPPED\",{stale},\"generation\":2,\"profileFingerprint\":null,\"resolvedMods\":[],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"STALE\"}}}}");
                     }
-                    return Result($"{{\"success\":true,\"state\":\"READY\",\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"],\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
+                    return Result($"{{\"success\":true,\"state\":\"READY\",\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":{resolvedMods},\"leaseId\":{lease},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
                 }
                 statusCalls++;
                 if (UnmanagedRimWorld && statusCalls == 1)
                     return Result("{\"success\":false,\"errorCode\":\"PROCESS_OWNERSHIP_AMBIGUOUS\",\"error\":\"An unmanaged RimWorld process is running.\"}");
                 return statusCalls == 1
                     ? Result($"{{\"success\":true,\"generation\":1,\"rimworldRoot\":\"{root}\",\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}")
-                    : Result($"{{\"success\":true,\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":[\"lan.fixture\",\"Core\"],\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
+                    : Result($"{{\"success\":true,\"generation\":2,\"profileFingerprint\":\"profile-fixture\",\"resolvedMods\":{resolvedMods},\"rimBridge\":{{\"ConfiguredMode\":\"{mode}\",\"PackageId\":\"brrainz.rimbridgeserver\",\"Version\":\"2.1.0\",\"LifecycleState\":\"READY\"}}}}");
             }
             if (request.Arguments.Contains("coordinator") && request.Arguments.Contains("shutdown"))
             {
