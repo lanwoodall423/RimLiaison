@@ -49,6 +49,98 @@ public static class DevBridgeProcessEnvironment
             ["DEVBRIDGE_AGENT"] = agent
         };
     }
+    public static IReadOnlyDictionary<string, string> ForBuild(
+        string? workflowId,
+        string rimWorldRoot)
+    {
+        var environment = new Dictionary<string, string>(
+            ForWorkflow(workflowId),
+            StringComparer.OrdinalIgnoreCase);
+
+        string? root = ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_ROOT")) ??
+            ExistingDirectory(rimWorldRoot);
+        if (root is null)
+            return environment;
+
+        environment["RIMWORLD_ROOT"] = root;
+        environment["RIMWORLD_DIR"] = root;
+
+        string? managed = ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_PATH")) ??
+            ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_ASSEMBLIES")) ??
+            ExistingDirectory(Path.Combine(root, "RimWorldWin64_Data", "Managed"));
+        if (managed is not null)
+        {
+            environment["RIMWORLD_MANAGED_PATH"] = managed;
+            environment["RIMWORLD_MANAGED_ASSEMBLIES"] = managed;
+        }
+
+        string? harmonyAssembly = ExistingFile(Environment.GetEnvironmentVariable("RIMWORLD_HARMONY_ASSEMBLY"));
+        if (harmonyAssembly is null)
+        {
+            string? harmonyPath = Environment.GetEnvironmentVariable("RIMWORLD_HARMONY_PATH");
+            harmonyAssembly = ExistingFile(harmonyPath) ??
+                (ExistingDirectory(harmonyPath) is string directory
+                    ? ExistingFile(Path.Combine(directory, "0Harmony.dll"))
+                    : null);
+        }
+        harmonyAssembly ??= FindHarmonyAssembly(root);
+        if (harmonyAssembly is not null)
+        {
+            environment["RIMWORLD_HARMONY_ASSEMBLY"] = harmonyAssembly;
+            environment["RIMWORLD_HARMONY_PATH"] = Path.GetDirectoryName(harmonyAssembly)!;
+        }
+
+        return environment;
+    }
+
+    private static string? ExistingDirectory(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && Directory.Exists(path)
+            ? Path.GetFullPath(path)
+            : null;
+
+    private static string? ExistingFile(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && File.Exists(path)
+            ? Path.GetFullPath(path)
+            : null;
+
+    private static string? FindHarmonyAssembly(string rimWorldRoot)
+    {
+        var roots = new List<string> { Path.Combine(rimWorldRoot, "Mods") };
+        DirectoryInfo? steamApps = Directory.GetParent(rimWorldRoot)?.Parent;
+        if (steamApps is not null)
+        {
+            roots.Add(Path.Combine(steamApps.FullName, "workshop", "content", "294100"));
+        }
+
+        foreach (string root in roots.Where(Directory.Exists))
+        {
+            try
+            {
+                string? current = Directory.EnumerateFiles(root, "0Harmony.dll", SearchOption.AllDirectories)
+                    .Where(path => path.Replace('\\', '/')
+                        .Contains("/Current/Assemblies/", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+                if (current is not null)
+                    return Path.GetFullPath(current);
+
+                string? fallback = Directory.EnumerateFiles(root, "0Harmony.dll", SearchOption.AllDirectories)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+                if (fallback is not null)
+                    return Path.GetFullPath(fallback);
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        return null;
+    }
+
 
     private static string StableSuffix(string value)
     {

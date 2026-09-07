@@ -286,6 +286,8 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot),
                     "-p:RIMWORLD_ROOT=" + Path.GetFullPath(rimWorldRoot)
                 ];
+                IReadOnlyDictionary<string, string> buildEnvironment =
+                    DevBridgeProcessEnvironment.ForBuild(workflowId, rimWorldRoot);
                 DevBridgeProcessResult build = await transport.ExecuteAsync(
                     new DevBridgeProcessRequest(
                         "dotnet",
@@ -294,7 +296,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         options.Timeout,
                         options.MaxStdoutBytes,
                         options.MaxStderrBytes,
-                        DevBridgeProcessEnvironment.ForWorkflow(workflowId),
+                        buildEnvironment,
                         "build:" + project),
                     cancellationToken).ConfigureAwait(false);
                 buildDiagnostics = BuildDiagnostics(
@@ -303,6 +305,9 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     sourceRoot,
                     buildProject,
                     stagingRoot,
+                    descriptor.Configuration,
+                    buildArguments,
+                    buildEnvironment,
                     transactionId,
                     workflowId,
                     build.ExitCode is 0 && build.StartError is null && !build.TimedOut && !build.Cancelled
@@ -836,6 +841,9 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         string sourceRoot,
         string sourceProject,
         string staging,
+        string configuration,
+        IReadOnlyList<string> buildArguments,
+        IReadOnlyDictionary<string, string> buildEnvironment,
         string transactionId,
         string? workflowId,
         string? errorCode = null,
@@ -844,7 +852,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         string buildTarget = NormalizeRelative(Path.GetRelativePath(sourceRoot, sourceProject));
         string owner = ProjectOwnerName(sourceRoot, project);
         return new(
-            Command: "dotnet build",
+            Command: FormatCommand(buildArguments),
             ExitCode: process.ExitCode,
             Output: Bound(process.Stdout),
             SourceProject: sourceProject,
@@ -853,7 +861,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             BuiltSha256: null,
             DiagnosticOutput: Bound(process.Stderr),
             ErrorOutput: Bound(process.Stderr),
-            Configuration: null,
+            Configuration: configuration,
             FailureMessage: failureMessage,
             TransactionId: transactionId,
             WorkflowId: workflowId,
@@ -878,8 +886,17 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             BuildSourceRoot: sourceRoot,
             BuildCommandIdentity: "dotnet build",
             BuildEvidenceId: "build:" + project,
-            BuildDurationMilliseconds: process.Evidence?.DurationMilliseconds);
+            BuildDurationMilliseconds: process.Evidence?.DurationMilliseconds,
+            EnvironmentVariables: buildEnvironment);
     }
+
+    private static string FormatCommand(IReadOnlyList<string> arguments) =>
+        "dotnet " + string.Join(
+            " ",
+            arguments.Select(argument =>
+                argument.IndexOfAny([' ', '\t', '"']) >= 0
+                    ? "\"" + argument.Replace("\"", "\\\"", StringComparison.Ordinal) + "\""
+                    : argument));
 
     private static string ProjectOwnerName(string sourceRoot, string project)
     {

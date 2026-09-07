@@ -611,6 +611,7 @@ internal static class Program
         ("active lease prevents unsafe RimBridge transition", ManagedReadyToTestCandidateTests.ActiveLeasePreventsUnsafeRimBridgeTransition),
         ("concurrent candidates share one RimBridge transition", ManagedReadyToTestCandidateTests.ConcurrentRequiredCandidatesShareOneCoordinatorTransition),
         ("mod-development adapter uses the source script root", ModDevelopmentAdapterUsesSourceScriptRoot),
+        ("internal build receives configured dependencies and deploys output", DevelopmentBuildEnvironmentTests.InternalBuildReceivesDiscoveredDependenciesAndDeploysOutput),
         ("mod-development source root ignores whitespace override", ModDevelopmentSourceRootIgnoresWhitespaceOverride),
         ("mod-development owner manifest uses runtime deployment root", ModDevelopmentOwnerManifestUsesRuntimeDeploymentRoot),
         ("mod-development response contract matrix is deterministic", ModDevelopmentResponseContractMatrix),

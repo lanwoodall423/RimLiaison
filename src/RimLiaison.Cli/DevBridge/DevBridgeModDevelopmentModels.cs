@@ -74,7 +74,8 @@ public sealed record DevBridgeBuildDiagnostics(
     string? BuildSourceRoot = null,
     string? BuildCommandIdentity = null,
     string? BuildEvidenceId = null,
-    long? BuildDurationMilliseconds = null);
+    long? BuildDurationMilliseconds = null,
+    IReadOnlyDictionary<string, string>? EnvironmentVariables = null);
 
 public sealed record DevBridgeBuildOutputEvidence(
     string RepositoryPath,
