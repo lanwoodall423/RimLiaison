@@ -350,7 +350,16 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
             string manifestPath = DeploymentManifestPath(options.RootPath, project, targetRoot);
 
             using Mutex deploymentLock = new(false, "Global\\RimLiaison-DevBridge-Deployment-" + HashText(targetRoot)[..24]);
-            bool deploymentLockHeld = deploymentLock.WaitOne(options.Timeout);
+            bool deploymentLockHeld;
+            try
+            {
+                deploymentLockHeld = deploymentLock.WaitOne(options.Timeout);
+            }
+            catch (AbandonedMutexException)
+            {
+                // The abandoned owner is gone; this transaction now owns the lock.
+                deploymentLockHeld = true;
+            }
             if (!deploymentLockHeld)
             {
                 return Failure(project, workflowId, transactionId, "DEVBRIDGE_DEPLOYMENT_LOCK_TIMEOUT", "The production deployment boundary was busy.");

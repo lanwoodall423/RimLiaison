@@ -1,5 +1,5 @@
 using System.Security.Cryptography;
-using System.Text.Json;
+using System.Text;
 using RimLiaison.DevBridge;
 
 namespace RimLiaison.Tests;
@@ -77,6 +77,19 @@ internal static class DevelopmentBuildEnvironmentTests
                     return Result("{\"success\":true,\"gameState\":\"STOPPED\"}", request);
                 return Result("{\"success\":true,\"exitCode\":0}", request);
             });
+            string deploymentLockName = "Global\\RimLiaison-DevBridge-Deployment-" +
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(deploymentRoot))))
+                    .ToLowerInvariant()[..24];
+            using ManualResetEventSlim lockAcquired = new(false);
+            Thread abandonedOwner = new(() =>
+            {
+                using Mutex mutex = new(false, deploymentLockName);
+                mutex.WaitOne();
+                lockAcquired.Set();
+            });
+            abandonedOwner.Start();
+            Assert(lockAcquired.Wait(TimeSpan.FromSeconds(2)), "test must acquire deployment mutex");
+            abandonedOwner.Join();
 
             var service = new InternalDevelopmentTransactionService(
                 transport,
@@ -93,7 +106,7 @@ internal static class DevelopmentBuildEnvironmentTests
                 .GetAwaiter()
                 .GetResult();
 
-            Assert(result.Success == true, $"internal canonical build transaction must succeed: {result.Status.ErrorCode} {result.Status.Error} {result.Build?.Output} {result.Build?.DiagnosticOutput}");
+            Assert(result.Success == true, $"internal canonical build transaction must recover an abandoned deployment mutex: {result.Status.ErrorCode} {result.Status.Error} {result.Build?.Output} {result.Build?.DiagnosticOutput}");
             DevBridgeProcessRequest build = transport.Requests.Single(request =>
                 request.FileName.Equals("dotnet", StringComparison.OrdinalIgnoreCase));
             Assert(build.EnvironmentVariables is not null, "build environment must be present");
@@ -119,7 +132,6 @@ internal static class DevelopmentBuildEnvironmentTests
     }
 
     private static string Escape(string value) => value.Replace("\\", "\\\\", StringComparison.Ordinal);
-
     private static DevBridgeProcessResult Result(string stdout, DevBridgeProcessRequest request) =>
         new(0, stdout, string.Empty);
 
