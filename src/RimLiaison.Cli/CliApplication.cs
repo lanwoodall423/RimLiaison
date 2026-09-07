@@ -1310,10 +1310,17 @@ public static class CliApplication
                         return CliExitCodes.NotFound;
                     }
 
+                    IReadOnlyList<string> suiteTestIds = CatalogNavigator.ResolvedTestIds(loaded.Catalog, suite.Id);
+                    ArtifactFreshnessTransactionRequest? freshnessRequest =
+                        CreateSuiteArtifactFreshnessRequest(
+                            request,
+                            loaded.Catalog,
+                            suiteTestIds,
+                            workflowId);
                     return await RunSuiteAsync(
                             loaded.Catalog,
                             suite.Id,
-                            CatalogNavigator.ResolvedTestIds(loaded.Catalog, suite.Id),
+                            suiteTestIds,
                             request,
                             stdout,
                             recipeAdapter,
@@ -1323,6 +1330,11 @@ public static class CliApplication
                             started,
                             cancellationToken,
                             workflowId: workflowId,
+                            developmentAdapter: developmentAdapter,
+                            freshnessRequest: freshnessRequest,
+                            validationChangedPaths: freshnessRequest?.ChangedPaths,
+                            protectRepositoryWorktree: freshnessRequest is not null,
+                            freshGenerationRecoveryAdapter: freshGenerationRecoveryAdapter,
                             providedCapabilityAdapter: capabilityAdapter,
                             transactionConsumerPath: productionBinding?.TransactionConsumerPath)
                         .ConfigureAwait(false);
@@ -4327,14 +4339,41 @@ public static class CliApplication
             });
     }
 
+    private static ArtifactFreshnessTransactionRequest? CreateSuiteArtifactFreshnessRequest(
+        CliRequest request,
+        CatalogDocument catalog,
+        IReadOnlyList<string> selectedTestIds,
+        string? workflowId)
+    {
+        bool hasAnchor = selectedTestIds
+            .Select(testId => CatalogNavigator.FindTest(catalog, testId))
+            .Any(static test => test?.ArtifactFreshnessAnchor == true);
+        if (!hasAnchor)
+        {
+            return null;
+        }
+
+        IReadOnlyList<string> sourcePaths = request.ChangedPaths.Count > 0
+            ? request.ChangedPaths
+            : CandidateSourcePaths(AffectedGitRoot(request));
+        return CreateArtifactFreshnessRequest(
+            request,
+            catalog,
+            selectedTestIds,
+            sourcePaths,
+            workflowId,
+            requireAnchor: true);
+    }
+
     private static ArtifactFreshnessTransactionRequest? CreateArtifactFreshnessRequest(
         CliRequest request,
         CatalogDocument catalog,
         IReadOnlyList<string> selectedTestIds,
         IReadOnlyList<string> changedPaths,
-        string? workflowId)
+        string? workflowId,
+        bool requireAnchor = false)
     {
-        if (!SourceChangeClassifier.IsBuildRelevant(changedPaths) ||
+        if ((!requireAnchor && !SourceChangeClassifier.IsBuildRelevant(changedPaths)) ||
             IsRimLiaisonRepository(request))
         {
             return null;

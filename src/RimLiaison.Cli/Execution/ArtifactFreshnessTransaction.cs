@@ -1556,8 +1556,14 @@ internal sealed record WorktreeIntegritySnapshot(
             {
                 foreach (GitRepositoryChange change in repository.Changes)
                 {
+                    if (RepositoryChangeClassificationPolicy.IsGeneratedPath(change.Path))
+                    {
+                        continue;
+                    }
+
                     AddStatus(statuses, change.Path, change.Status);
-                    if (!string.IsNullOrWhiteSpace(change.OriginalPath))
+                    if (!string.IsNullOrWhiteSpace(change.OriginalPath) &&
+                        !RepositoryChangeClassificationPolicy.IsGeneratedPath(change.OriginalPath!))
                     {
                         AddStatus(statuses, change.OriginalPath!, change.Status);
                     }

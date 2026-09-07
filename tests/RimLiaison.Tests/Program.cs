@@ -566,6 +566,8 @@ internal static class Program
         ("mod-development adapter parses bounded freshness response", ModDevelopmentAdapterParsesBoundedFreshnessResponse),
         ("mod-development adapter uses packaged transaction consumer", ModDevelopmentAdapterUsesPackagedTransactionConsumer),
         ("internal transaction service avoids PowerShell boundary", InternalTransactionServiceAvoidsPowerShellBoundary),
+        ("stale freshness anchor blocks recipe execution", ArtifactFreshnessAnchorTests.StaleAnchorBlocksRecipeExecution),
+        ("freshness anchor runs without redeployment", ArtifactFreshnessAnchorTests.FreshAnchorAvoidsUnnecessaryRedeploymentAndRunsRecipe),
         ("candidate and deployment hashes share identity domain", DeploymentIdentityTests.PackageHashMatchesCandidateIdentityDomain),
         ("owned stale deployment files are mirrored safely", DeploymentIdentityTests.OwnedStaleFilesTriggerMirrorAndUnmanagedFilesSurviveCleanup),
         ("missing or modified deployment files force redeploy", DeploymentIdentityTests.MissingOrModifiedCandidateFilesForceDeployment),
