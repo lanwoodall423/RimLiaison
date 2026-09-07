@@ -528,7 +528,12 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
         }
         catch (Exception exception)
         {
-            return Failure(project, workflowId, transactionId, "DEVBRIDGE_INTERNAL_TRANSACTION_FAILED", Bound(exception.Message));
+            return Failure(
+                project,
+                workflowId,
+                transactionId,
+                "DEVBRIDGE_INTERNAL_TRANSACTION_FAILED",
+                DescribeException(exception));
         }
         finally
         {
@@ -843,6 +848,17 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
     private static int? GetInt(JsonElement root, string name) => root.TryGetProperty(name, out JsonElement property) && property.TryGetInt32(out int value) ? value : null;
     private static string[] GetStringArray(JsonElement root, string name) => root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [];
     private static string Bound(string? value) => string.IsNullOrWhiteSpace(value) ? "The internal development transaction failed." : value.Length <= 4096 ? value : value[..4096];
+    private static string DescribeException(Exception exception)
+    {
+        List<string> chain = [];
+        Exception? current = exception;
+        for (int depth = 0; current is not null && depth < 4; depth++, current = current.InnerException)
+        {
+            chain.Add(current.GetType().FullName + ": " + Bound(current.Message));
+        }
+
+        return Bound(string.Join(" -> ", chain));
+    }
 
     private static DevBridgeBuildDiagnostics BuildDiagnostics(
         DevBridgeProcessResult process,
