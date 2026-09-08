@@ -502,39 +502,117 @@ public static class CliApplication
                 string candidateRoot = Path.Combine(
                     qualificationDirectory,
                     "candidate-" + sourceCommit + "-" + qualificationId);
+                QualificationAggregate BlockedAggregate(string code, string error) =>
+                    new(
+                        QualificationSchemas.Aggregate,
+                        profile,
+                        "qualification",
+                        "experimental",
+                        request.QualificationRuns,
+                        0,
+                        1,
+                        0,
+                        0,
+                        0,
+                        new Dictionary<string, int>(StringComparer.Ordinal),
+                        [],
+                        DateTimeOffset.UtcNow,
+                        DateTimeOffset.UtcNow,
+                        sourceCommit)
+                    {
+                        CandidateComplete = false,
+                        CandidateFailureCode = code,
+                        CandidateFailure = error,
+                        QualificationArtifactPath = Path.GetFullPath(qualificationArtifactPath),
+                        QualifiedPromotionPackagePath = Path.GetFullPath(packagePath)
+                    };
+
+                QualificationSourceGateResult sourceGate =
+                    await QualificationSourceIdentityGate.CaptureAsync(
+                            request.StackManifest.RepositoryRoot,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 ToolchainCandidateMaterializationResult candidateResult;
-                string manifestPath = Environment.GetEnvironmentVariable(
-                        "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST") ??
-                    "C:/RimDev/.rimdev/production-toolchain.json";
-                if (!ToolchainPromotionService.TryReadPromotionDestination(
-                        manifestPath,
-                        out string? runtimeRoot,
-                        out string runtimeProtocolContract,
-                        out string? destinationError))
+                QualificationAggregate aggregate;
+                if (!sourceGate.Succeeded)
                 {
                     candidateResult = ToolchainCandidateMaterializationResult.Failure(
-                        "PROMOTION_PRODUCTION_MANIFEST_INVALID",
-                        destinationError ?? "The production runtime destination is unavailable.",
-                        "Repair the project-owned production manifest, then retry qualification.");
+                        sourceGate.ErrorCode!,
+                        sourceGate.Error!,
+                        "Commit or isolate the source checkout, then retry qualification.");
+                    aggregate = BlockedAggregate(sourceGate.ErrorCode!, sourceGate.Error!);
                 }
                 else
                 {
-                    candidateResult = await ToolchainCandidateMaterializer.MaterializeAsync(
-                            request.StackManifest.RepositoryRoot,
-                            candidateRoot,
-                            Path.GetDirectoryName(typeof(CliApplication).Assembly.Location)!,
-                            runtimeRoot!,
-                            runtimeProtocolContract,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
+                    string manifestPath = Environment.GetEnvironmentVariable(
+                            "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST") ??
+                        "C:/RimDev/.rimdev/production-toolchain.json";
+                    if (!ToolchainPromotionService.TryReadPromotionDestination(
+                            manifestPath,
+                            out string? runtimeRoot,
+                            out string runtimeProtocolContract,
+                            out string? destinationError))
+                    {
+                        candidateResult = ToolchainCandidateMaterializationResult.Failure(
+                            "PROMOTION_PRODUCTION_MANIFEST_INVALID",
+                            destinationError ?? "The production runtime destination is unavailable.",
+                            "Repair the project-owned production manifest, then retry qualification.");
+                    }
+                    else
+                    {
+                        candidateResult = await ToolchainCandidateMaterializer.MaterializeAsync(
+                                request.StackManifest.RepositoryRoot,
+                                candidateRoot,
+                                Path.GetDirectoryName(typeof(CliApplication).Assembly.Location)!,
+                                runtimeRoot!,
+                                runtimeProtocolContract,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
 
-                QualificationProfiles.ValidateRunCount(profile, request.QualificationRuns);
-                QualificationAggregate aggregate = new QualificationHarness().Run(
-                    request.QualificationRuns,
-                    profile,
-                    eventStore,
-                    toolchainState: "experimental");
+                    QualificationSourceGateResult beforeBurnIn =
+                        sourceGate.Checkpoint is null
+                            ? sourceGate
+                            : await QualificationSourceIdentityGate.RecheckAsync(
+                                    sourceGate.Checkpoint,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                    if (!beforeBurnIn.Succeeded)
+                    {
+                        candidateResult = ToolchainCandidateMaterializationResult.Failure(
+                            beforeBurnIn.ErrorCode!,
+                            beforeBurnIn.Error!,
+                            "Retry qualification from the same immutable source checkout.");
+                        aggregate = BlockedAggregate(beforeBurnIn.ErrorCode!, beforeBurnIn.Error!);
+                    }
+                    else
+                    {
+                        QualificationProfiles.ValidateRunCount(profile, request.QualificationRuns);
+                        aggregate = new QualificationHarness().Run(
+                            request.QualificationRuns,
+                            profile,
+                            eventStore,
+                            toolchainState: "experimental");
+                        QualificationSourceGateResult afterBurnIn =
+                            await QualificationSourceIdentityGate.RecheckAsync(
+                                    sourceGate.Checkpoint!,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        if (!afterBurnIn.Succeeded)
+                        {
+                            candidateResult = ToolchainCandidateMaterializationResult.Failure(
+                                afterBurnIn.ErrorCode!,
+                                afterBurnIn.Error!,
+                                "Discard the qualification evidence and retry from an immutable source checkout.");
+                            aggregate = aggregate with
+                            {
+                                CandidateComplete = false,
+                                CandidateFailureCode = afterBurnIn.ErrorCode,
+                                CandidateFailure = afterBurnIn.Error
+                            };
+                        }
+                    }
+                }
                 aggregate = await AttachQualificationProvenanceAsync(
                         aggregate,
                         request.StackManifest.RepositoryRoot,
