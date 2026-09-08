@@ -207,21 +207,22 @@ internal static class ToolchainCandidateTests
     public static void CliMaterializerIsolatesReferencedProjectIntermediates()
     {
         using CliSourceEnvironment environment = CliSourceEnvironment.Create(projectGraph: true);
+        environment.SeedStaleOutputs();
         ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
         Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "project graph CLI publish failed");
-
         HashSet<string> intermediateRoots = new(StringComparer.OrdinalIgnoreCase);
         string candidateBuildRoot = Path.Combine(Path.GetDirectoryName(result.StagingPath)!, "cli-build");
         foreach ((string projectName, string projectPath) in environment.ProjectFiles)
         {
-            using JsonDocument properties = RunMsbuild(
+            using JsonDocument inspection = RunMsbuild(
                 environment.Root,
                 projectPath,
-                "-getProperty:MSBuildProjectName,BaseIntermediateOutputPath,MSBuildProjectExtensionsPath,BaseOutputPath",
-                result.IsolationPropertiesPath);
-            JsonElement values = properties.RootElement.GetProperty("Properties");
-            Assert(values.GetProperty("MSBuildProjectName").GetString() == projectName,
-                "evaluated project name did not match the project graph");
+                result.IsolationPropertiesPath,
+                "-getProperty:MSBuildProjectName,BaseIntermediateOutputPath,MSBuildProjectExtensionsPath,BaseOutputPath,RimLiaisonTestRepositoryProperty",
+                "-getItem:Compile");
+            JsonElement values = inspection.RootElement.GetProperty("Properties");
+            Assert(values.GetProperty("RimLiaisonTestRepositoryProperty").GetString() == "active",
+                "repository Directory.Build.props did not remain active");
             string intermediate = Path.GetFullPath(values.GetProperty("BaseIntermediateOutputPath").GetString()!);
             string extensions = Path.GetFullPath(values.GetProperty("MSBuildProjectExtensionsPath").GetString()!);
             string output = Path.GetFullPath(values.GetProperty("BaseOutputPath").GetString()!);
@@ -238,28 +239,32 @@ internal static class ToolchainCandidateTests
                     StringComparison.OrdinalIgnoreCase),
                 "project output root escaped candidate-owned bin");
 
-            using JsonDocument compileItems = RunMsbuild(
-                environment.Root,
-                projectPath,
-                "-getItem:Compile",
-                result.IsolationPropertiesPath);
-            Assert(!compileItems.RootElement.GetRawText().Contains(
-                    Path.Combine(candidateBuildRoot, "obj"),
+            string compileText = inspection.RootElement.GetProperty("Items").GetProperty("Compile").GetRawText();
+            Assert(!compileText.Contains(
+                    candidateBuildRoot,
                     StringComparison.OrdinalIgnoreCase),
                 "a project Compile item consumed another project's generated intermediate files");
+            Assert(!compileText.Contains(
+                    Path.Combine(Path.GetDirectoryName(projectPath)!, "obj"),
+                    StringComparison.OrdinalIgnoreCase),
+                "a project Compile item consumed stale source-tree obj files");
         }
 
         Assert(intermediateRoots.Count == environment.ProjectFiles.Count,
             "the project graph did not receive one intermediate root per project");
         Assert(Directory.EnumerateFiles(result.IntermediateRoot, "*AssemblyInfo.cs", SearchOption.AllDirectories).Any(),
             "the isolated build did not emit generated assembly metadata");
+        Assert(File.ReadAllText(environment.StaleBinaryPath) == "stale-source-bin",
+            "the isolated build modified the stale source-tree bin artifact");
+        Assert(File.ReadAllText(Path.Combine(result.StagingPath, "RimDev.Contracts.dll")) != "stale-source-bin",
+            "the isolated publish consumed the stale source-tree bin artifact");
     }
 
     private static JsonDocument RunMsbuild(
         string workingDirectory,
         string projectPath,
-        string inspectionArgument,
-        string isolationPropertiesPath)
+        string isolationPropertiesPath,
+        params string[] inspectionArguments)
     {
         using Process process = new()
         {
@@ -273,22 +278,24 @@ internal static class ToolchainCandidateTests
                 CreateNoWindow = true
             }
         };
-        foreach (string argument in new[]
+        foreach (string argument in new[] { "msbuild", projectPath, "-nologo" }
+                     .Concat(inspectionArguments)
+                     .Append("-p:CustomBeforeDirectoryBuildProps=" + isolationPropertiesPath))
         {
-            "msbuild",
-            projectPath,
-            inspectionArgument,
-            "-p:CustomBeforeDirectoryBuildProps=" + isolationPropertiesPath
-        })
             process.StartInfo.ArgumentList.Add(argument);
+        }
         Assert(process.Start(), "MSBuild inspection process could not start");
-        string stdout = process.StandardOutput.ReadToEnd();
-        string stderr = process.StandardError.ReadToEnd();
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
         Assert(process.ExitCode == 0, "MSBuild isolation inspection failed: " + stderr + stdout);
+        Assert(!stderr.Contains("MSB4011", StringComparison.OrdinalIgnoreCase) &&
+               !stdout.Contains("MSB4011", StringComparison.OrdinalIgnoreCase),
+            "MSBuild isolation inspection repeated Directory.Build.props");
         return JsonDocument.Parse(stdout);
     }
-
 
     private sealed class CliSourceEnvironment : IDisposable
     {
@@ -299,11 +306,20 @@ internal static class ToolchainCandidateTests
             Root = root;
             Destination = Path.Combine(root, "candidate", "cli");
             ProjectFiles = projectFiles;
+            StaleBinaryPath = Path.Combine(
+                root,
+                "src",
+                "RimDev.Contracts",
+                "bin",
+                "Release",
+                "net8.0",
+                "RimDev.Contracts.dll");
         }
 
         public string Root { get; }
         public string Destination { get; }
         public IReadOnlyDictionary<string, string> ProjectFiles { get; }
+        public string StaleBinaryPath { get; }
 
         public static CliSourceEnvironment Create(bool projectGraph = false)
         {
@@ -322,6 +338,15 @@ internal static class ToolchainCandidateTests
                     "allowPrerelease": false
                   }
                 }
+                """);
+            File.WriteAllText(
+                Path.Combine(root, "Directory.Build.props"),
+                """
+                <Project>
+                  <PropertyGroup>
+                    <RimLiaisonTestRepositoryProperty>active</RimLiaisonTestRepositoryProperty>
+                  </PropertyGroup>
+                </Project>
                 """);
             string references = projectGraph
                 ? """
@@ -403,6 +428,21 @@ internal static class ToolchainCandidateTests
             }
             return new(root, projectFiles);
         }
+        public void SeedStaleOutputs()
+        {
+            string contractsRoot = Path.Combine(Root, "src", "RimDev.Contracts");
+            string sourceObj = Path.Combine(contractsRoot, "obj", "Release", "net8.0");
+            Directory.CreateDirectory(sourceObj);
+            File.WriteAllText(
+                Path.Combine(sourceObj, ".NETCoreApp,Version=v8.0.AssemblyAttributes.cs"),
+                "[assembly: System.Runtime.Versioning.TargetFramework(\".NETCoreApp,Version=v8.0\")]");
+            File.WriteAllText(
+                Path.Combine(sourceObj, "RimDev.Contracts.AssemblyInfo.cs"),
+                "[assembly: System.Reflection.AssemblyCompany(\"stale-source-obj\")]");
+            Directory.CreateDirectory(Path.GetDirectoryName(StaleBinaryPath)!);
+            File.WriteAllText(StaleBinaryPath, "stale-source-bin");
+        }
+
 
         public ToolchainCandidateMaterializer.CliPublishResult Publish() =>
             ToolchainCandidateMaterializer.PublishCliAsync(

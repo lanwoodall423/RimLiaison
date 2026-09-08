@@ -364,7 +364,7 @@ internal static class ToolchainCandidateMaterializer
         Directory.CreateDirectory(cliBuildRoot);
         try
         {
-            WriteCliIsolationProps(fullSourceRoot, isolationPropertiesPath, cliBuildRoot);
+            WriteCliIsolationProps(isolationPropertiesPath, cliBuildRoot);
         }
         catch (IOException exception)
         {
@@ -464,25 +464,19 @@ internal static class ToolchainCandidateMaterializer
     }
 
     private static void WriteCliIsolationProps(
-        string sourceRoot,
         string propertiesPath,
         string cliBuildRoot)
     {
-        string sourceProps = Path.Combine(Path.GetFullPath(sourceRoot), "Directory.Build.props");
-        string escapedSourceProps = SecurityElement.Escape(sourceProps) ?? sourceProps;
         string root = EnsureTrailingSeparator(Path.GetFullPath(cliBuildRoot));
         string escapedRoot = SecurityElement.Escape(root) ?? root;
-        string import = File.Exists(sourceProps)
-            ? $"  <Import Project=\"{escapedSourceProps}\" />{Environment.NewLine}"
-            : string.Empty;
         File.WriteAllText(
             propertiesPath,
             "<Project>" + Environment.NewLine +
-            import +
             "  <PropertyGroup>" + Environment.NewLine +
             $"    <BaseIntermediateOutputPath>{escapedRoot}obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>{Environment.NewLine}" +
             $"    <MSBuildProjectExtensionsPath>{escapedRoot}obj/$(MSBuildProjectName)/</MSBuildProjectExtensionsPath>{Environment.NewLine}" +
             $"    <BaseOutputPath>{escapedRoot}bin/$(MSBuildProjectName)/</BaseOutputPath>{Environment.NewLine}" +
+            "    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\\obj\\**;$(MSBuildProjectDirectory)\\bin\\**</DefaultItemExcludes>" + Environment.NewLine +
             "  </PropertyGroup>" + Environment.NewLine +
             "</Project>" + Environment.NewLine);
     }
