@@ -57,6 +57,10 @@ public static class ReadyToTestCandidateVerifier
 
             ReadyToTestCandidateManifest? manifest = JsonSerializer.Deserialize<ReadyToTestCandidateManifest>(
                 document.RootElement.GetRawText());
+            bool rehydrated = string.Equals(
+                manifest?.Provenance,
+                "rehydrated-frozen-candidate",
+                StringComparison.Ordinal);
             if (manifest is null ||
                 string.IsNullOrWhiteSpace(manifest.CandidateId) ||
                 string.IsNullOrWhiteSpace(manifest.Project) ||
@@ -68,10 +72,32 @@ public static class ReadyToTestCandidateVerifier
                 string.IsNullOrWhiteSpace(manifest.BuildEvidenceIdentity) ||
                 string.IsNullOrWhiteSpace(manifest.StaticValidationIdentity) ||
                 !string.Equals(manifest.State, "READY_TO_TEST", StringComparison.Ordinal) ||
-                !string.Equals(manifest.BuildStatus, "PASS", StringComparison.Ordinal) ||
+                (!rehydrated && !string.Equals(manifest.BuildStatus, "PASS", StringComparison.Ordinal)) ||
+                (rehydrated && !string.Equals(manifest.BuildStatus, "NOT_PERFORMED", StringComparison.Ordinal)) ||
                 !string.Equals(manifest.StaticValidationStatus, "PASS", StringComparison.Ordinal))
             {
                 error = "The candidate manifest is missing required READY_TO_TEST identity or status fields.";
+                return false;
+            }
+            if (rehydrated &&
+                (manifest.BuildPerformed != false ||
+                 manifest.ArtifactIdentityVerified != true ||
+                 !Regex.IsMatch(manifest.ArtifactSha256 ?? string.Empty, "^[0-9a-fA-F]{64}$", RegexOptions.CultureInvariant) ||
+                 !Regex.IsMatch(manifest.SourceCommit ?? string.Empty, "^[0-9a-fA-F]{40}$", RegexOptions.CultureInvariant) ||
+                 string.IsNullOrWhiteSpace(manifest.RehydrationEvidenceId) ||
+                 string.IsNullOrWhiteSpace(manifest.RehydrationProof) ||
+                 !string.Equals(
+                     manifest.RehydrationProof,
+                     ComputeRehydrationProof(
+                         manifest.CandidateId,
+                         manifest.PackageSha256,
+                         manifest.ArtifactSha256!,
+                         manifest.SourceCommit!,
+                         manifest.SourceFingerprint),
+                     StringComparison.OrdinalIgnoreCase)))
+            {
+                errorCode = "FROZEN_CANDIDATE_REHYDRATION_INVALID";
+                error = "The rehydrated frozen candidate provenance proof is invalid.";
                 return false;
             }
 
@@ -126,6 +152,16 @@ public static class ReadyToTestCandidateVerifier
                 error = "The staged candidate package hash does not match candidate.json.";
                 return false;
             }
+            if (rehydrated &&
+                !package.Any(entry => string.Equals(
+                    entry.Sha256,
+                    manifest.ArtifactSha256,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                errorCode = "FROZEN_CANDIDATE_ARTIFACT_MISSING";
+                error = "The rehydrated candidate does not contain the verified frozen artifact.";
+                return false;
+            }
 
             verified = new VerifiedReadyToTestCandidate(fullManifest, manifest, package);
             return true;
@@ -141,11 +177,18 @@ public static class ReadyToTestCandidateVerifier
             return false;
         }
     }
-
     public static string ComputePackageHash(IEnumerable<ReadyToTestCandidatePackageEntry> package) =>
         HashText(string.Join('\n', package
             .OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase)
             .Select(entry => NormalizeRelative(entry.TargetPath) + '\0' + entry.Sha256 + '\0' + entry.Size)));
+
+    public static string ComputeRehydrationProof(
+        string candidateId,
+        string packageSha256,
+        string artifactSha256,
+        string sourceCommit,
+        string sourceFingerprint) =>
+        HashText(string.Join('\0', candidateId, packageSha256, artifactSha256, sourceCommit, sourceFingerprint));
 
     private static bool IsForbidden(string relative)
     {

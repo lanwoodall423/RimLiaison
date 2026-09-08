@@ -805,6 +805,41 @@ public static class CliApplication
                 return exitCode;
             }
 
+            if (request.Command == CliCommand.CandidateRehydrate)
+            {
+                string? project = request.Id ??
+                    request.DevBridgeProject ??
+                    request.StackManifest.Manifest?.DevBridgeProject ??
+                    request.StackManifest.Manifest?.Project;
+                if (request.StackManifest.Manifest is null || string.IsNullOrWhiteSpace(project))
+                {
+                    WriteJson(stdout, ReadyToTestCandidateResult.Failure(
+                        "PROJECT_METADATA_MISSING",
+                        "A valid project-owned .rimdev/stack.json is required before candidate rehydration."));
+                    exitCode = CliExitCodes.ConservativeSelection;
+                    return exitCode;
+                }
+
+                ReadyToTestCandidateResult candidate = await new ReadyToTestCandidateRehydrationService()
+                    .RehydrateAsync(
+                        project,
+                        request.StackManifest.RepositoryRoot,
+                        new ReadyToTestCandidateRehydrationOptions
+                        {
+                            CandidateId = request.CandidateId!,
+                            PackageSha256 = request.CandidatePackageSha256!,
+                            ArtifactPath = request.CandidateArtifactPath!,
+                            ArtifactSha256 = request.CandidateArtifactSha256!,
+                            SourceCommit = request.CandidateSourceCommit!,
+                            CandidateStoreRoot = request.CandidateStorePath
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                WriteJson(stdout, candidate);
+                exitCode = candidate.Success ? CliExitCodes.Success : CliExitCodes.ConservativeSelection;
+                return exitCode;
+            }
+
             if (request.Command == CliCommand.Candidate)
             {
                 string? project = request.Id ??
@@ -1322,7 +1357,23 @@ public static class CliApplication
                             request,
                             loaded.Catalog,
                             suiteTestIds,
-                            workflowId);
+                            workflowId,
+                            out string? candidateErrorCode,
+                            out string? candidateError);
+                    if (candidateErrorCode is not null)
+                    {
+                        RimTestSuiteResult candidateResult =
+                            RimTestSuiteResultFactory.FromSelectionFailure(
+                                suite.Id,
+                                "infrastructure",
+                                candidateErrorCode,
+                                candidateError,
+                                candidateError ?? "Provide an explicitly verified candidate.json for the selected repository.",
+                                ElapsedMilliseconds(started),
+                                workflowId);
+                        WriteJson(stdout, candidateResult);
+                        return SuiteExitCodeFor(candidateResult.Status);
+                    }
                     return await RunSuiteAsync(
                             loaded.Catalog,
                             suite.Id,
@@ -3918,6 +3969,33 @@ public static class CliApplication
                         durationMs = promotedRecovery.ElapsedRecoveryMilliseconds
                     });
             }
+            if (request.FreshnessOnly)
+            {
+                RimTestSuiteResult freshnessResult = new()
+                {
+                    Status = freshnessTransaction.Success ? "pass" : "infrastructure",
+                    Suite = suiteId,
+                    WorkflowId = workflowId,
+                    ArtifactFreshness = freshnessTransaction.Freshness,
+                    Passed = freshnessTransaction.Success ? 1 : 0,
+                    Failed = 0,
+                    SelectedTests = testIds,
+                    ExecutedTests = [],
+                    SelectedTestCount = testIds.Count,
+                    ExecutedTestCount = 0,
+                    DurationMs = ElapsedMilliseconds(started),
+                    SelectionStatus = "freshness-only",
+                    SelectionErrorCode = freshnessTransaction.Success
+                        ? null
+                        : freshnessTransaction.Status.ErrorCode,
+                    NextAction = freshnessTransaction.Success
+                        ? null
+                        : "Inspect artifact freshness evidence before running the release suite.",
+                };
+                WriteJson(stdout, freshnessResult);
+                return SuiteExitCodeFor(freshnessResult.Status);
+            }
+
             execution = freshnessTransaction.Success
                 ? await ProfilerActivity.ObserveAsync(
                         "test-suite",
@@ -4286,6 +4364,12 @@ public static class CliApplication
                         sourceFingerprint = freshness.SourceFingerprint,
                         builtArtifactSha256 = freshness.BuiltArtifactSha256,
                         deployedArtifactSha256 = freshness.DeployedArtifactSha256,
+                        builtPackageSha256 = freshness.BuiltPackageSha256,
+                        deployedPackageSha256 = freshness.DeployedPackageSha256,
+                        buildSource = freshness.BuildSource,
+                        buildAction = freshness.BuildAction,
+                        candidateId = freshness.CandidateId,
+                        buildInvocationCount = freshness.BuildInvocationCount,
                         deploymentDecision = freshness.DeploymentDecision,
                         evaluationStatus = freshness.EvaluationStatus,
                         generation = freshness.Generation,
@@ -4349,28 +4433,123 @@ public static class CliApplication
         CliRequest request,
         CatalogDocument catalog,
         IReadOnlyList<string> selectedTestIds,
-        string? workflowId)
+        string? workflowId,
+        out string? candidateErrorCode,
+        out string? candidateError)
     {
+        candidateErrorCode = null;
+        candidateError = null;
         bool hasAnchor = selectedTestIds
             .Select(testId => CatalogNavigator.FindTest(catalog, testId))
             .Any(static test => test?.ArtifactFreshnessAnchor == true);
         if (!hasAnchor)
         {
+            if (request.CandidateManifestPath is not null)
+            {
+                candidateErrorCode = "RIMTEST_CANDIDATE_ANCHOR_REQUIRED";
+                candidateError = "An explicit candidate requires an artifact-freshness anchor.";
+            }
+
             return null;
         }
 
         IReadOnlyList<string> sourcePaths = request.ChangedPaths.Count > 0
             ? request.ChangedPaths
             : CandidateSourcePaths(AffectedGitRoot(request));
-        return CreateArtifactFreshnessRequest(
-            request,
-            catalog,
-            selectedTestIds,
-            sourcePaths,
-            workflowId,
-            requireAnchor: true);
-    }
+        string sourceFingerprint;
+        if (!WorktreeFingerprint.TryCompute(
+                AffectedGitRoot(request),
+                sourcePaths,
+                out sourceFingerprint,
+                out string? fingerprintError))
+        {
+            candidateErrorCode = "RIMTEST_SOURCE_FINGERPRINT_UNAVAILABLE";
+            candidateError = fingerprintError ??
+                "The current repository source fingerprint could not be established.";
+            return null;
+        }
 
+        ReadyToTestCandidateManifest? candidate = null;
+        if (request.CandidateManifestPath is not null)
+        {
+            if (!ReadyToTestCandidateVerifier.TryVerify(
+                    request.CandidateManifestPath,
+                    out VerifiedReadyToTestCandidate? verified,
+                    out candidateErrorCode,
+                    out candidateError))
+            {
+                return null;
+            }
+            candidateErrorCode = null;
+            candidateError = null;
+
+            candidate = verified!.Manifest;
+            string repositoryRoot = AffectedGitRoot(request);
+            try
+            {
+                if (!PathsEqual(candidate.SourceRepositoryRoot, repositoryRoot))
+                {
+                    candidateErrorCode = "RIMTEST_CANDIDATE_SOURCE_MISMATCH";
+                    candidateError = "The candidate source repository does not match the selected repository.";
+                    return null;
+                }
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+            {
+                candidateErrorCode = "RIMTEST_CANDIDATE_SOURCE_MISMATCH";
+                candidateError = "The candidate source repository path is invalid.";
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(request.DevBridgeProject) ||
+                !string.Equals(
+                    candidate.CanonicalProjectId,
+                    request.DevBridgeProject,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                candidateErrorCode = "RIMTEST_CANDIDATE_PROJECT_MISMATCH";
+                candidateError = "The candidate project identity does not match the selected project.";
+                return null;
+            }
+
+            if (!string.Equals(
+                    candidate.SourceFingerprint,
+                    sourceFingerprint,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                candidateErrorCode = "RIMTEST_CANDIDATE_SOURCE_FINGERPRINT_MISMATCH";
+                candidateError = $"The candidate source fingerprint does not match the current frozen repository (candidate={candidate.SourceFingerprint}, current={sourceFingerprint}).";
+                return null;
+            }
+
+            string? deploymentTarget = request.StackManifest.Manifest?.DeploymentTarget;
+            if (!string.IsNullOrWhiteSpace(deploymentTarget) &&
+                !verified.Package.Any(entry => string.Equals(
+                    entry.TargetPath,
+                    deploymentTarget,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                candidateErrorCode = "RIMTEST_CANDIDATE_TARGET_MISSING";
+                candidateError = "The verified candidate package does not contain the declared deployment target.";
+                return null;
+            }
+        }
+
+        return new ArtifactFreshnessTransactionRequest(
+            request.DevBridgeProject ?? string.Empty,
+            AffectedGitRoot(request),
+            sourcePaths,
+            sourceFingerprint,
+            workflowId,
+            TestRecipe: SelectDevelopmentRecipe(catalog, selectedTestIds),
+            Candidate: candidate,
+            CandidateManifestPath: request.CandidateManifestPath);
+    }
+    private static bool PathsEqual(string left, string right) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
+            StringComparison.OrdinalIgnoreCase);
     private static ArtifactFreshnessTransactionRequest? CreateArtifactFreshnessRequest(
         CliRequest request,
         CatalogDocument catalog,

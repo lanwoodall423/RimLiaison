@@ -186,6 +186,46 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         "The candidate changed between verification and managed execution.",
                         DevBridgeOutcomeKind.TestFailure);
                 }
+                if (!string.Equals(
+                        verifiedCandidate.Manifest.CanonicalProjectId,
+                        project,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_PROJECT_MISMATCH",
+                        "The verified candidate project does not match the managed transaction project.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
+                if (!string.Equals(
+                        Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+                            verifiedCandidate.Manifest.SourceRepositoryRoot)),
+                        Path.TrimEndingDirectorySeparator(sourceRoot),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_SOURCE_MISMATCH",
+                        "The verified candidate source repository does not match the managed transaction repository.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
+                if (!string.Equals(
+                        verifiedCandidate.Manifest.SourceFingerprint,
+                        sourceFingerprint,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return Failure(
+                        project,
+                        workflowId,
+                        transactionId,
+                        "RIMTEST_CANDIDATE_SOURCE_FINGERPRINT_MISMATCH",
+                        "The verified candidate source fingerprint does not match the managed transaction source fingerprint.",
+                        DevBridgeOutcomeKind.TestFailure);
+                }
             }
             DevBridgeProcessResult statusBeforeBuild = await InvokeAsync(
                 ["status", "--json"],
@@ -502,7 +542,11 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                         RecipeOwner: recipeResolution.Recipe.OwnerProject,
                         RecipeSource: recipeResolution.Recipe.Source,
                         RecipeSha256: recipeResolution.Recipe.Sha256,
-                        RecipeSchemaVersion: recipeResolution.Recipe.SchemaVersion),
+                        RecipeSchemaVersion: recipeResolution.Recipe.SchemaVersion,
+                        BuildSource: verifiedCandidate is null ? "source" : "verified-candidate",
+                        BuildAction: verifiedCandidate is null ? "built" : "reused",
+                        CandidateId: verifiedCandidate?.Manifest.CandidateId,
+                        BuildInvocationCount: verifiedCandidate is null ? 1 : 0),
                     buildDiagnostics,
                     []);
             }

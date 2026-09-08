@@ -28,7 +28,11 @@ public sealed record DevBridgeArtifactFreshness(
     string? RecipeOwner = null,
     string? RecipeSource = null,
     string? RecipeSha256 = null,
-    string? RecipeSchemaVersion = null);
+    string? RecipeSchemaVersion = null,
+    string? BuildSource = null,
+    string? BuildAction = null,
+    string? CandidateId = null,
+    int BuildInvocationCount = 0);
 
 /// <summary>
 /// Structured diagnostics returned by the DevBridge2 mod-development

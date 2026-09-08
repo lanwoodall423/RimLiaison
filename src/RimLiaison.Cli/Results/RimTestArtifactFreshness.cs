@@ -39,6 +39,20 @@ public sealed record RimTestArtifactFreshness
     [JsonPropertyName("deployedPackageSha256")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DeployedPackageSha256 { get; init; }
+    [JsonPropertyName("buildSource")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildSource { get; init; }
+
+    [JsonPropertyName("buildAction")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BuildAction { get; init; }
+
+    [JsonPropertyName("candidateId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CandidateId { get; init; }
+
+    [JsonPropertyName("buildInvocationCount")]
+    public int BuildInvocationCount { get; init; }
 
     [JsonPropertyName("deploymentManifestPath")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -186,6 +200,10 @@ public sealed record RimTestArtifactFreshness
             DeployedArtifactSha256 = result.Freshness?.DeployedArtifactSha256,
             BuiltPackageSha256 = result.Freshness?.BuiltPackageSha256,
             DeployedPackageSha256 = result.Freshness?.DeployedPackageSha256,
+            BuildSource = result.Freshness?.BuildSource,
+            BuildAction = result.Freshness?.BuildAction,
+            CandidateId = result.Freshness?.CandidateId,
+            BuildInvocationCount = result.Freshness?.BuildInvocationCount ?? 0,
             DeploymentManifestPath = result.Freshness?.DeploymentManifestPath,
             DeploymentDecision = result.Freshness?.DeploymentDecision,
             EvaluationStatus = result.Freshness is null

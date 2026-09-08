@@ -32,6 +32,45 @@ internal static class ManagedReadyToTestCandidateTests
         Assert(result.Success == true && transport.Requests.All(request => request.FileName != "dotnet"),
             $"managed candidate execution rebuilt source: {result.Status.ErrorCode} {result.Status.Error}; requests={string.Join("|", transport.Requests.Select(request => string.Join(",", request.Arguments)))}");
     }
+    public static void CandidateSourceFingerprintMismatchFailsBeforeBuild()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeModDevelopmentResult result = fixture.Transaction(transport).RunAsync(
+                "fixture", fixture.RepositoryRoot, new('b', 64), "candidate-test",
+                new DevBridgeModDevelopmentExecutionContext(
+                    Candidate: fixture.Manifest!, CandidateManifestPath: manifestPath))
+            .GetAwaiter().GetResult();
+        Assert(result.Success != true &&
+            result.Status.ErrorCode == "RIMTEST_CANDIDATE_SOURCE_FINGERPRINT_MISMATCH" &&
+            !transport.Requests.Any(request => request.FileName == "dotnet"),
+            "a candidate source fingerprint mismatch did not fail closed before build");
+    }
+
+    public static void WrongCandidateProjectFailsBeforeBuild()
+    {
+        using Fixture fixture = new();
+        string manifestPath = fixture.CreateCandidate();
+        ReadyToTestCandidateManifest wrong = fixture.Manifest! with
+        {
+            Project = "other",
+            CanonicalProjectId = "other"
+        };
+        File.WriteAllText(manifestPath, JsonSerializer.Serialize(wrong));
+        var transport = new RecordingTransport(fixture.RuntimeHandler);
+        DevBridgeModDevelopmentResult result = fixture.Transaction(transport).RunAsync(
+                "fixture", fixture.RepositoryRoot, fixture.SourceFingerprint, "candidate-test",
+                new DevBridgeModDevelopmentExecutionContext(
+                    Candidate: wrong, CandidateManifestPath: manifestPath))
+            .GetAwaiter().GetResult();
+        Assert(result.Success != true &&
+            result.Status.ErrorCode == "RIMTEST_CANDIDATE_PROJECT_MISMATCH" &&
+            !transport.Requests.Any(request => request.FileName == "dotnet"),
+            "a wrong-project candidate did not fail closed before build");
+    }
+
+
     public static void CandidateBootstrapRescansBeforeProfileRegistration()
     {
         using Fixture fixture = new();
@@ -71,6 +110,9 @@ internal static class ManagedReadyToTestCandidateTests
                     Candidate: fixture.Manifest!, CandidateManifestPath: manifestPath))
             .GetAwaiter().GetResult();
         Assert(first.Success == true && second.Success == true &&
+            second.Freshness?.DeploymentDecision == "unchanged" &&
+            second.Freshness.BuildInvocationCount == 0 &&
+            second.Freshness.BuildSource == "verified-candidate" &&
             !secondTransport.Requests.Any(request => request.Arguments.Contains("stop")),
             "an unchanged candidate rewrote a still-loaded deployment");
     }

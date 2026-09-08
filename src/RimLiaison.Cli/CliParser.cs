@@ -18,6 +18,7 @@ internal enum CliCommand
     RecipeRun,
     Candidate,
     CandidateRun,
+    CandidateRehydrate,
     Affected,
     GoldenPath,
     Capabilities,
@@ -94,7 +95,15 @@ internal sealed record CliRequest(
     string? ContentKind,
     string? ContentRole,
     string? ContentReuseSource,
-    int ContentMaxBytes);
+    int ContentMaxBytes,
+    string? CandidateManifestPath = null,
+    bool FreshnessOnly = false,
+    string? CandidateId = null,
+    string? CandidatePackageSha256 = null,
+    string? CandidateArtifactPath = null,
+    string? CandidateArtifactSha256 = null,
+    string? CandidateSourceCommit = null,
+    string? CandidateStorePath = null);
 
 internal sealed class CliParseException : Exception
 {
@@ -167,6 +176,14 @@ internal static class CliParser
         string? contentRole = null;
         string? contentReuseSource = null;
         int contentMaxBytes = 65_536;
+        string? candidateManifestPath = null;
+        bool freshnessOnly = false;
+        string? candidateId = null;
+        string? candidatePackageSha256 = null;
+        string? candidateArtifactPath = null;
+        string? candidateArtifactSha256 = null;
+        string? candidateSourceCommit = null;
+        string? candidateStorePath = null;
         bool experimentalToolchain = false;
         var positionals = new List<string>();
 
@@ -274,6 +291,30 @@ internal static class CliParser
                     break;
                 case "--content-reuse-source":
                     contentReuseSource = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--candidate-manifest":
+                    candidateManifestPath = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--freshness-only":
+                    freshnessOnly = true;
+                    break;
+                case "--candidate-id":
+                    candidateId = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--package-sha256":
+                    candidatePackageSha256 = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--artifact":
+                    candidateArtifactPath = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--artifact-sha256":
+                    candidateArtifactSha256 = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--source-commit":
+                    candidateSourceCommit = ReadOptionValue(args, ref index, argument);
+                    break;
+                case "--candidate-store":
+                    candidateStorePath = ReadOptionValue(args, ref index, argument);
                     break;
                 case "--workspace":
                     workspaceAudit = true;
@@ -427,7 +468,15 @@ internal static class CliParser
                 contentKind,
                 contentRole,
                 contentReuseSource,
-                contentMaxBytes);
+                contentMaxBytes,
+                candidateManifestPath,
+                freshnessOnly,
+                candidateId,
+                candidatePackageSha256,
+                candidateArtifactPath,
+                candidateArtifactSha256,
+                candidateSourceCommit,
+                candidateStorePath);
         }
 
         if (positionals.Count == 0)
@@ -461,6 +510,12 @@ internal static class CliParser
                 positionals.Count == 3:
                 command = CliCommand.CandidateRun;
                 id = positionals[2];
+                break;
+            case "candidate" when positionals.Count >= 2 &&
+                string.Equals(positionals[1], "rehydrate", StringComparison.Ordinal) &&
+                positionals.Count is 2 or 3:
+                command = CliCommand.CandidateRehydrate;
+                id = positionals.Count == 3 ? positionals[2] : null;
                 break;
             case "candidate" when positionals.Count >= 1:
                 command = CliCommand.Candidate;
@@ -580,13 +635,36 @@ internal static class CliParser
             case "publish":
             case "content":
             case "dev-check":
-                throw new CliParseException("The command arguments are invalid.");
-            case "ui":
-            case "init":
-            case "qualification":
-                throw new CliParseException("The command arguments are invalid.");
             default:
-                throw new CliParseException($"Unknown command: {positionals[0]}.");
+                throw new CliParseException($"Unknown or invalid command arguments: {positionals[0]}.");
+        }
+        if (candidateManifestPath is not null && command != CliCommand.SuiteRun)
+        {
+            throw new CliParseException("--candidate-manifest is only valid with suite run.");
+        }
+        if (freshnessOnly && command != CliCommand.SuiteRun)
+        {
+            throw new CliParseException("--freshness-only is only valid with suite run.");
+        }
+        bool rehydrateOptionProvided = candidateId is not null ||
+            candidatePackageSha256 is not null ||
+            candidateArtifactPath is not null ||
+            candidateArtifactSha256 is not null ||
+            candidateSourceCommit is not null ||
+            candidateStorePath is not null;
+        if (rehydrateOptionProvided && command != CliCommand.CandidateRehydrate)
+        {
+            throw new CliParseException("Candidate rehydration options are only valid with candidate rehydrate.");
+        }
+        if (command == CliCommand.CandidateRehydrate &&
+            (string.IsNullOrWhiteSpace(candidateId) ||
+             string.IsNullOrWhiteSpace(candidatePackageSha256) ||
+             string.IsNullOrWhiteSpace(candidateArtifactPath) ||
+             string.IsNullOrWhiteSpace(candidateArtifactSha256) ||
+             string.IsNullOrWhiteSpace(candidateSourceCommit)))
+        {
+            throw new CliParseException(
+                "candidate rehydrate requires --candidate-id, --package-sha256, --artifact, --artifact-sha256, and --source-commit.");
         }
         if (bootstrap && command != CliCommand.ToolchainPromotion)
         {
@@ -843,7 +921,7 @@ internal static class CliParser
             contextVerbose,
             workspaceAudit,
             affectedBase,
-            command == CliCommand.CandidateRun
+            command == CliCommand.CandidateRun || command == CliCommand.SuiteRun || command == CliCommand.CandidateRehydrate
                 ? positionals.Skip(3).ToArray()
                 : command == CliCommand.Candidate
                     ? positionals.Skip(2).ToArray()
@@ -867,7 +945,15 @@ internal static class CliParser
             contentKind,
             contentRole,
             contentReuseSource,
-            contentMaxBytes);
+            contentMaxBytes,
+            candidateManifestPath,
+            freshnessOnly,
+            candidateId,
+            candidatePackageSha256,
+            candidateArtifactPath,
+            candidateArtifactSha256,
+            candidateSourceCommit,
+            candidateStorePath);
     }
 
     public static void WriteHelp(TextWriter stdout)
@@ -886,8 +972,8 @@ internal static class CliParser
                 "validate",
                 "run <test>",
                 "candidate [<project> [<changed-path> ...]]",
+                "candidate rehydrate [<project>]",
                 "candidate run <candidate.json>",
-                "affected [<changed-path> ...]",
                 "golden-path (or develop)",
                 "self-check",
                 "preflight",
@@ -950,6 +1036,14 @@ internal static class CliParser
                 "--fail-fast (with affected --run or suite run)",
                 "--force/--update (with init)",
                 "--manifest-only (with init)",
+                "--candidate-manifest <candidate.json> (with suite run)",
+                "--candidate-id <id> (with candidate rehydrate)",
+                "--package-sha256 <sha256> (with candidate rehydrate)",
+                "--artifact <path> (with candidate rehydrate)",
+                "--artifact-sha256 <sha256> (with candidate rehydrate)",
+                "--source-commit <sha> (with candidate rehydrate)",
+                "--candidate-store <path> (with candidate rehydrate)",
+                "--freshness-only (with suite run; prepare artifact freshness without tests)",
                 "--root <workspace-root> (with rimdev)",
                 "--yes/--confirm (with rimdev merge)"
             }

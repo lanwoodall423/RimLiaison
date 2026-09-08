@@ -16,7 +16,9 @@ public sealed record ArtifactFreshnessTransactionRequest(
     string SourceFingerprint,
     string? WorkflowId,
     string? TestRecipe = null,
-    string? LeaseId = null);
+    string? LeaseId = null,
+    ReadyToTestCandidateManifest? Candidate = null,
+    string? CandidateManifestPath = null);
 
 public sealed record ArtifactFreshnessTransactionResult(
     bool Success,
@@ -59,6 +61,16 @@ public sealed class ArtifactFreshnessTransaction
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if ((request.Candidate is null) !=
+            string.IsNullOrWhiteSpace(request.CandidateManifestPath))
+        {
+            return Failure(
+                request,
+                new DevBridgeAdapterStatus(
+                    DevBridgeOutcomeKind.TestFailure,
+                    "RIMTEST_CANDIDATE_INVALID",
+                    "Explicit candidate execution requires both a verified manifest and its candidate.json path."));
+        }
 
         if (string.IsNullOrWhiteSpace(request.Project))
         {
@@ -126,9 +138,7 @@ public sealed class ArtifactFreshnessTransaction
                     request.RepositoryRoot,
                     request.SourceFingerprint,
                     request.WorkflowId,
-                    string.IsNullOrWhiteSpace(request.LeaseId)
-                        ? null
-                        : new DevBridgeModDevelopmentExecutionContext(request.LeaseId),
+                    CreateExecutionContext(request),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -244,7 +254,7 @@ public sealed class ArtifactFreshnessTransaction
                             request.RepositoryRoot,
                             request.SourceFingerprint,
                             request.WorkflowId,
-                            executionContext: null,
+                            CreateExecutionContext(request),
                             cancellationToken: cancellationToken)
                         .ConfigureAwait(false);
                 }
@@ -379,7 +389,7 @@ public sealed class ArtifactFreshnessTransaction
                         request.RepositoryRoot,
                         request.SourceFingerprint,
                         request.WorkflowId,
-                        executionContext: null,
+                        CreateExecutionContext(request),
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -585,7 +595,7 @@ public sealed class ArtifactFreshnessTransaction
                         request.RepositoryRoot,
                         request.SourceFingerprint,
                         request.WorkflowId,
-                        executionContext: null,
+                        CreateExecutionContext(request),
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -810,7 +820,7 @@ public sealed class ArtifactFreshnessTransaction
                         request.RepositoryRoot,
                         request.SourceFingerprint,
                         request.WorkflowId,
-                        new DevBridgeModDevelopmentExecutionContext(lease.LeaseId),
+                        CreateExecutionContext(request, lease.LeaseId),
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -1033,6 +1043,24 @@ public sealed class ArtifactFreshnessTransaction
             Cleanup: cleanup);
     }
 
+    private static DevBridgeModDevelopmentExecutionContext? CreateExecutionContext(
+        ArtifactFreshnessTransactionRequest request,
+        string? leaseId = null)
+    {
+        string? effectiveLeaseId = leaseId ?? request.LeaseId;
+        if (request.Candidate is null &&
+            string.IsNullOrWhiteSpace(request.CandidateManifestPath) &&
+            string.IsNullOrWhiteSpace(effectiveLeaseId))
+        {
+            return null;
+        }
+
+        return new DevBridgeModDevelopmentExecutionContext(
+            effectiveLeaseId,
+            request.Candidate,
+            request.CandidateManifestPath);
+    }
+
     private async Task<IdentityRecoveryResult> RecoverIdentityMismatchAsync(
         ArtifactFreshnessTransactionRequest request,
         DevBridgeModDevelopmentResult initial,
@@ -1222,7 +1250,7 @@ public sealed class ArtifactFreshnessTransaction
                         request.RepositoryRoot,
                         request.SourceFingerprint,
                         request.WorkflowId,
-                        executionContext: null,
+                        CreateExecutionContext(request),
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
             }

@@ -31,6 +31,13 @@ public sealed record ReadyToTestCandidateManifest
     [JsonPropertyName("staticValidationStatus")] public required string StaticValidationStatus { get; init; }
     [JsonPropertyName("createdUtc")] public required string CreatedUtc { get; init; }
     [JsonPropertyName("state")] public string State { get; init; } = "READY_TO_TEST";
+    [JsonPropertyName("provenance")] public string? Provenance { get; init; }
+    [JsonPropertyName("buildPerformed")] public bool? BuildPerformed { get; init; }
+    [JsonPropertyName("artifactIdentityVerified")] public bool? ArtifactIdentityVerified { get; init; }
+    [JsonPropertyName("artifactSha256")] public string? ArtifactSha256 { get; init; }
+    [JsonPropertyName("sourceCommit")] public string? SourceCommit { get; init; }
+    [JsonPropertyName("rehydrationEvidenceId")] public string? RehydrationEvidenceId { get; init; }
+    [JsonPropertyName("rehydrationProof")] public string? RehydrationProof { get; init; }
 }
 
 public sealed record ReadyToTestCandidateResult(
@@ -269,7 +276,7 @@ public sealed class ReadyToTestCandidatePreparationService
         }
     }
 
-    private static List<PackageEntry> BuildPackage(
+    internal static List<PackageEntry> BuildPackage(
         string sourceRoot,
         string runtimeRoot,
         string expectedArtifact,
@@ -399,9 +406,9 @@ public sealed class ReadyToTestCandidatePreparationService
         !value.Replace('\\', '/').Split('/').Contains("..");
 
     private static string NormalizeRelative(string value) => value.Replace('\\', '/').TrimStart('/');
-    private static string? HashFile(string path) => File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant() : null;
-    private static string HashText(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
-    private static string ComputePackageHash(IEnumerable<PackageEntry> entries) => HashText(string.Join('\n', entries.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).Select(entry => NormalizeRelative(entry.TargetPath) + '\0' + entry.Sha256 + '\0' + entry.Size)));
+    internal static string? HashFile(string path) => File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant() : null;
+    internal static string HashText(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    internal static string ComputePackageHash(IEnumerable<PackageEntry> entries) => HashText(string.Join('\n', entries.OrderBy(entry => entry.TargetPath, StringComparer.OrdinalIgnoreCase).Select(entry => NormalizeRelative(entry.TargetPath) + '\0' + entry.Sha256 + '\0' + entry.Size)));
     private static string? GetString(JsonElement root, string name) => root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static string[] GetStringArray(JsonElement root, string name) => root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [];
     private static string Bound(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Length <= 4096 ? value : value[..4096];
@@ -422,5 +429,5 @@ public sealed class ReadyToTestCandidatePreparationService
         File.Move(temporary, path, true);
     }
 
-    private sealed record PackageEntry(string SourcePath, string TargetPath, string Sha256, long Size);
+    internal sealed record PackageEntry(string SourcePath, string TargetPath, string Sha256, long Size);
 }
