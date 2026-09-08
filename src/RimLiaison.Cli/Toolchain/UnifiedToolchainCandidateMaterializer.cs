@@ -17,6 +17,16 @@ internal static class ToolchainCandidateMaterializer
     private const string RuntimePackageId = "lan.devbridge2";
     private const string ConsumerRelativePath = "transaction-components/mod-test.ps1";
     private const int MaximumBuildOutputCharacters = 16 * 1024;
+    private static readonly string[] RequiredRepositoryRecipeFiles =
+    [
+        "quicktest-smoke.json",
+        "knowledge-framework-development-smoke.json",
+        "live-stack-smoke.json",
+        "live-stack-diagnostic.json",
+        "aquaculture-development-smoke.json",
+        "horticulture-in-game-suite.json",
+        "wildlife-in-game-suite.json"
+    ];
 
     public static async Task<ToolchainCandidateMaterializationResult> MaterializeAsync(
         string sourceRoot,
@@ -583,6 +593,16 @@ internal static class ToolchainCandidateMaterializer
     {
         if (!Directory.Exists(sourcePackageRoot))
             throw new DirectoryNotFoundException("Runtime package source is missing: " + sourcePackageRoot);
+        string recipeRoot = Path.Combine(sourcePackageRoot, "TestRecipes");
+        if (!Directory.Exists(recipeRoot))
+            throw new DirectoryNotFoundException("Runtime package TestRecipes source is missing: " + recipeRoot);
+        foreach (string requiredRecipe in RequiredRepositoryRecipeFiles)
+        {
+            if (!File.Exists(Path.Combine(recipeRoot, requiredRecipe)))
+                throw new FileNotFoundException(
+                    "Runtime package builtin recipe source is missing: " + requiredRecipe,
+                    Path.Combine(recipeRoot, requiredRecipe));
+        }
         string[] generatedDirectories = ["Coordinator", "1.6"];
         foreach (string sourceFile in Directory.EnumerateFiles(sourcePackageRoot, "*", SearchOption.AllDirectories))
         {
@@ -669,7 +689,8 @@ internal static class ToolchainCandidateMaterializer
             Path.Combine("Coordinator", "DevBridge.Coordinator.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.Core.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.runtimeconfig.json"),
-            Path.Combine("1.6", "Assemblies", "DevBridge2.dll")
+            Path.Combine("1.6", "Assemblies", "DevBridge2.dll"),
+            ..RequiredRepositoryRecipeFiles.Select(file => Path.Combine("TestRecipes", file))
         ];
         string obsoleteRoot = Path.Combine(packageRoot, "BridgeTools");
         if (Directory.Exists(obsoleteRoot) &&
@@ -678,9 +699,16 @@ internal static class ToolchainCandidateMaterializer
             error = "Obsolete root-level BridgeTools output is not allowed: BridgeTools/DevBridge2.BridgeTools.dll.";
             return false;
         }
-
         try
         {
+            foreach (string requiredFile in requiredFiles)
+            {
+                if (!File.Exists(Path.Combine(packageRoot, requiredFile)))
+                {
+                    error = "Runtime package is missing required file: " + requiredFile;
+                    return false;
+                }
+            }
             string about = File.ReadAllText(Path.Combine(packageRoot, "About", "About.xml"));
             Match packageId = Regex.Match(about, "<packageId>([^<]+)</packageId>", RegexOptions.CultureInvariant);
             if (!packageId.Success || !string.Equals(packageId.Groups[1].Value.Trim(), RuntimePackageId,

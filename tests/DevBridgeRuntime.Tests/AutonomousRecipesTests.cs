@@ -117,6 +117,18 @@ internal static partial class OfflineTests
                     ", error=" + (show is RecipeShowResponse showError ? showError.Error :
                         show is RecipeListResponse listError ? listError.Error : null) +
                     ", output=" + string.Join("|", output) + ")");
+            BridgeRequest fallbackRequest = Request("test", "recipe-agent", 991,
+                "recipe", "show", "quicktest-smoke");
+            fallbackRequest.Json = true;
+            List<string> fallbackOutput = new();
+            int fallbackExitCode = fixture.State.Execute(
+                fallbackRequest, fallbackOutput.Add, () => true);
+            RecipeResponse fallback = fixture.State.CreateRecipeJsonResponse(
+                fallbackRequest, fallbackExitCode);
+            Assert(fallback is RecipeShowResponse fallbackResponse &&
+                   fallbackResponse.ExitCode != 0 &&
+                   fallbackResponse.ErrorCode == "TEST_RECIPE_DIRECTORY_MISSING",
+                "without an explicit recipe file, missing central catalog must fail closed");
         }
         finally
         {

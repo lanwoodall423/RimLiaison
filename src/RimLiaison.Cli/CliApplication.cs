@@ -613,6 +613,7 @@ public static class CliApplication
                             request,
                             stdout,
                             recipeAdapter,
+                            processTransport,
                             cancellationToken,
                             workflowId),
                         AnnotateExit,
@@ -1140,10 +1141,15 @@ public static class CliApplication
         CliRequest request,
         TextWriter stdout,
         IDevBridgeRecipeAdapter? recipeAdapter,
+        IDevBridgeProcessTransport? processTransport,
         CancellationToken cancellationToken,
         string? workflowId)
     {
-        IDevBridgeRecipeAdapter adapter = CreateAdapter(request, recipeAdapter);
+        IDevBridgeRecipeAdapter adapter = CreateAdapter(
+            request,
+            recipeAdapter,
+            processTransport,
+            ProjectRecipeFilePath(request, [request.Id!]));
         switch (request.Command)
         {
             case CliCommand.RecipeShow:
