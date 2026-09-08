@@ -142,6 +142,7 @@ internal static class Program
         ("CLI materializer ignores stale source output", ToolchainCandidateTests.CliMaterializerIgnoresStaleSourceOutput),
         ("CLI materializer fails closed on build failure", ToolchainCandidateTests.CliMaterializerFailsClosedOnBuildFailure),
         ("CLI materializer records complete closure identity", ToolchainCandidateTests.CliMaterializerRecordsCompleteClosureIdentity),
+        ("CLI materializer isolates referenced project intermediates", ToolchainCandidateTests.CliMaterializerIsolatesReferencedProjectIntermediates),
         ("owned runtime source changes are meaningful", UnifiedRuntimeOwnershipTests.DirtySourcePathsAreMeaningful),
         ("promoted fingerprint includes runtime hashes", UnifiedRuntimeOwnershipTests.PromotedFingerprintIncludesRuntimeHashes),
         ("qualified identity includes runtime hashes", UnifiedRuntimeOwnershipTests.QualifiedIdentityIncludesRuntimeHashes),

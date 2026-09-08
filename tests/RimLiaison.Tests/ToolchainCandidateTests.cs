@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using RimLiaison.RimDev;
 using RimLiaison.Stack;
@@ -203,19 +204,108 @@ internal static class ToolchainCandidateTests
         Assert(manifest.Files.Any(file => file.Path == "rimliaison.deps.json"),
             "CLI deployment identity omitted the dependency closure");
     }
+    public static void CliMaterializerIsolatesReferencedProjectIntermediates()
+    {
+        using CliSourceEnvironment environment = CliSourceEnvironment.Create(projectGraph: true);
+        ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "project graph CLI publish failed");
+
+        HashSet<string> intermediateRoots = new(StringComparer.OrdinalIgnoreCase);
+        string candidateBuildRoot = Path.Combine(Path.GetDirectoryName(result.StagingPath)!, "cli-build");
+        foreach ((string projectName, string projectPath) in environment.ProjectFiles)
+        {
+            using JsonDocument properties = RunMsbuild(
+                environment.Root,
+                projectPath,
+                "-getProperty:MSBuildProjectName,BaseIntermediateOutputPath,MSBuildProjectExtensionsPath,BaseOutputPath",
+                result.IsolationPropertiesPath);
+            JsonElement values = properties.RootElement.GetProperty("Properties");
+            Assert(values.GetProperty("MSBuildProjectName").GetString() == projectName,
+                "evaluated project name did not match the project graph");
+            string intermediate = Path.GetFullPath(values.GetProperty("BaseIntermediateOutputPath").GetString()!);
+            string extensions = Path.GetFullPath(values.GetProperty("MSBuildProjectExtensionsPath").GetString()!);
+            string output = Path.GetFullPath(values.GetProperty("BaseOutputPath").GetString()!);
+            Assert(intermediateRoots.Add(intermediate),
+                "referenced projects share an evaluated intermediate root");
+            Assert(intermediate.StartsWith(
+                    Path.Combine(candidateBuildRoot, "obj") + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "project intermediate root escaped candidate-owned obj");
+            Assert(extensions == intermediate,
+                "project extension path does not follow its isolated intermediate root");
+            Assert(output.StartsWith(
+                    Path.Combine(candidateBuildRoot, "bin") + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase),
+                "project output root escaped candidate-owned bin");
+
+            using JsonDocument compileItems = RunMsbuild(
+                environment.Root,
+                projectPath,
+                "-getItem:Compile",
+                result.IsolationPropertiesPath);
+            Assert(!compileItems.RootElement.GetRawText().Contains(
+                    Path.Combine(candidateBuildRoot, "obj"),
+                    StringComparison.OrdinalIgnoreCase),
+                "a project Compile item consumed another project's generated intermediate files");
+        }
+
+        Assert(intermediateRoots.Count == environment.ProjectFiles.Count,
+            "the project graph did not receive one intermediate root per project");
+        Assert(Directory.EnumerateFiles(result.IntermediateRoot, "*AssemblyInfo.cs", SearchOption.AllDirectories).Any(),
+            "the isolated build did not emit generated assembly metadata");
+    }
+
+    private static JsonDocument RunMsbuild(
+        string workingDirectory,
+        string projectPath,
+        string inspectionArgument,
+        string isolationPropertiesPath)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+        foreach (string argument in new[]
+        {
+            "msbuild",
+            projectPath,
+            inspectionArgument,
+            "-p:CustomBeforeDirectoryBuildProps=" + isolationPropertiesPath
+        })
+            process.StartInfo.ArgumentList.Add(argument);
+        Assert(process.Start(), "MSBuild inspection process could not start");
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert(process.ExitCode == 0, "MSBuild isolation inspection failed: " + stderr + stdout);
+        return JsonDocument.Parse(stdout);
+    }
+
 
     private sealed class CliSourceEnvironment : IDisposable
     {
-        private CliSourceEnvironment(string root)
+        private CliSourceEnvironment(
+            string root,
+            IReadOnlyDictionary<string, string> projectFiles)
         {
             Root = root;
             Destination = Path.Combine(root, "candidate", "cli");
+            ProjectFiles = projectFiles;
         }
 
         public string Root { get; }
         public string Destination { get; }
+        public IReadOnlyDictionary<string, string> ProjectFiles { get; }
 
-        public static CliSourceEnvironment Create()
+        public static CliSourceEnvironment Create(bool projectGraph = false)
         {
             string root = Path.Combine(
                 Path.GetTempPath(),
@@ -233,9 +323,18 @@ internal static class ToolchainCandidateTests
                   }
                 }
                 """);
+            string references = projectGraph
+                ? """
+                  <ItemGroup>
+                    <ProjectReference Include="..\RimContext.Core\RimContext.Core.csproj" />
+                    <ProjectReference Include="..\RimError.Core\RimError.Core.csproj" />
+                    <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
+                  </ItemGroup>
+                """
+                : string.Empty;
             File.WriteAllText(
                 Path.Combine(cliRoot, "RimLiaison.Cli.csproj"),
-                """
+                $"""
                 <Project Sdk="Microsoft.NET.Sdk">
                   <PropertyGroup>
                     <OutputType>Exe</OutputType>
@@ -243,12 +342,66 @@ internal static class ToolchainCandidateTests
                     <ImplicitUsings>enable</ImplicitUsings>
                     <AssemblyName>rimliaison</AssemblyName>
                   </PropertyGroup>
+                {references}
                 </Project>
                 """);
             File.WriteAllText(
                 Path.Combine(cliRoot, "Program.cs"),
                 "Console.WriteLine(\"source-built-cli\");");
-            return new(root);
+
+            Dictionary<string, string> projectFiles = new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["RimLiaison.Cli"] = Path.Combine(cliRoot, "RimLiaison.Cli.csproj")
+            };
+            if (projectGraph)
+            {
+                string contextRoot = Path.Combine(root, "src", "RimContext.Core");
+                string errorRoot = Path.Combine(root, "src", "RimError.Core");
+                string contractsRoot = Path.Combine(root, "src", "RimDev.Contracts");
+                Directory.CreateDirectory(contextRoot);
+                Directory.CreateDirectory(errorRoot);
+                Directory.CreateDirectory(contractsRoot);
+                File.WriteAllText(
+                    Path.Combine(contextRoot, "RimContext.Core.csproj"),
+                    """
+                    <Project Sdk="Microsoft.NET.Sdk">
+                      <PropertyGroup>
+                        <TargetFramework>net8.0</TargetFramework>
+                        <AssemblyName>RimContext.Core</AssemblyName>
+                      </PropertyGroup>
+                      <ItemGroup>
+                        <ProjectReference Include="..\RimDev.Contracts\RimDev.Contracts.csproj" />
+                      </ItemGroup>
+                    </Project>
+                    """);
+                File.WriteAllText(
+                    Path.Combine(errorRoot, "RimError.Core.csproj"),
+                    """
+                    <Project Sdk="Microsoft.NET.Sdk">
+                      <PropertyGroup>
+                        <TargetFramework>net8.0</TargetFramework>
+                        <AssemblyName>RimError.Core</AssemblyName>
+                      </PropertyGroup>
+                    </Project>
+                    """);
+                File.WriteAllText(
+                    Path.Combine(contractsRoot, "RimDev.Contracts.csproj"),
+                    """
+                    <Project Sdk="Microsoft.NET.Sdk">
+                      <PropertyGroup>
+                        <TargetFramework>net8.0</TargetFramework>
+                        <AssemblyName>RimDev.Contracts</AssemblyName>
+                      </PropertyGroup>
+                    </Project>
+                    """);
+                File.WriteAllText(Path.Combine(contextRoot, "Context.cs"), "public sealed class ContextType {}");
+                File.WriteAllText(Path.Combine(errorRoot, "Error.cs"), "public sealed class ErrorType {}");
+                File.WriteAllText(Path.Combine(contractsRoot, "Contract.cs"), "public sealed class ContractType {}");
+                projectFiles["RimContext.Core"] = Path.Combine(contextRoot, "RimContext.Core.csproj");
+                projectFiles["RimError.Core"] = Path.Combine(errorRoot, "RimError.Core.csproj");
+                projectFiles["RimDev.Contracts"] = Path.Combine(contractsRoot, "RimDev.Contracts.csproj");
+            }
+            return new(root, projectFiles);
         }
 
         public ToolchainCandidateMaterializer.CliPublishResult Publish() =>
