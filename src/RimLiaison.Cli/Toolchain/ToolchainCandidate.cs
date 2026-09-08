@@ -233,6 +233,8 @@ internal sealed record ToolchainCandidateMaterializationResult(
 
     public object? RuntimeBuildEvidence { get; init; }
 
+    public object? CliBuildEvidence { get; init; }
+
     public bool Succeeded => Candidate is not null;
 
     public static ToolchainCandidateMaterializationResult Failure(

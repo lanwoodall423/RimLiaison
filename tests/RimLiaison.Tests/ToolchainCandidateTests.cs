@@ -112,6 +112,161 @@ internal static class ToolchainCandidateTests
         Assert(evidence.Contains("\"projectImplicated\":false", StringComparison.Ordinal), "prerequisite evidence must not implicate the project");
         Assert(evidence.Contains("\"owner\":\"RimLiaison\"", StringComparison.Ordinal), "prerequisite evidence must identify its owner");
     }
+    public static void CliMaterializerBuildsCleanSourceOnlyCheckout()
+    {
+        using CliSourceEnvironment environment = CliSourceEnvironment.Create();
+        Assert(!Directory.Exists(Path.Combine(environment.Root, "src", "RimLiaison.Cli", "bin")),
+            "clean source fixture unexpectedly contains bin output");
+        Assert(!Directory.Exists(Path.Combine(environment.Root, "src", "RimLiaison.Cli", "obj")),
+            "clean source fixture unexpectedly contains obj output");
+
+        ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
+
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "source-only CLI publish failed");
+        Assert(result.SelectedSdk == "8.0.424", "CLI publish did not use the pinned SDK");
+        Assert(File.Exists(Path.Combine(result.StagingPath, "rimliaison.dll")),
+            "source-only CLI publish did not emit the assembly");
+        Assert(result.Commands.Any(command =>
+                command.Arguments.FirstOrDefault() == "publish" &&
+                !command.Arguments.Contains("--no-build") &&
+                command.Arguments.Contains("--no-restore")),
+            "CLI publish did not build from restored source");
+        Assert(result.IntermediateRoot.StartsWith(
+                Path.Combine(Path.GetDirectoryName(result.StagingPath)!, "cli-build"),
+                StringComparison.OrdinalIgnoreCase),
+            "CLI intermediate output escaped candidate-owned staging");
+    }
+
+    public static void CliMaterializerIgnoresStaleSourceOutput()
+    {
+        using CliSourceEnvironment environment = CliSourceEnvironment.Create();
+        string stalePath = Path.Combine(
+            environment.Root,
+            "src",
+            "RimLiaison.Cli",
+            "bin",
+            "Release",
+            "net8.0",
+            "rimliaison.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(stalePath)!);
+        File.WriteAllText(stalePath, "stale-invalid-cli");
+
+        ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
+
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "stale-output CLI publish failed");
+        Assert(File.ReadAllText(stalePath) == "stale-invalid-cli",
+            "source-tree stale output was modified");
+        Assert(File.ReadAllText(Path.Combine(result.StagingPath, "rimliaison.dll")) != "stale-invalid-cli",
+            "stale source output was reused as the candidate CLI");
+    }
+
+    public static void CliMaterializerFailsClosedOnBuildFailure()
+    {
+        using CliSourceEnvironment environment = CliSourceEnvironment.Create();
+        File.WriteAllText(
+            Path.Combine(environment.Root, "src", "RimLiaison.Cli", "Program.cs"),
+            "public class Broken { MissingType Value; }");
+
+        ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
+
+        Assert(!result.Succeeded, "invalid source unexpectedly produced a CLI candidate");
+        Assert(result.ErrorCode == "RIMLIAISON_CLI_BUILD_FAILED",
+            "invalid source returned the wrong structured failure code: " + result.ErrorCode);
+        Assert(!File.Exists(Path.Combine(result.StagingPath, "rimliaison.dll")),
+            "failed source build left a complete CLI assembly");
+    }
+
+    public static void CliMaterializerRecordsCompleteClosureIdentity()
+    {
+        using CliSourceEnvironment environment = CliSourceEnvironment.Create();
+        ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "identity CLI publish failed");
+
+        CliDeploymentManifest manifest = CliDeploymentManifestService.Write(
+            result.StagingPath,
+            result.SourceRevision,
+            "net8.0");
+        string manifestPath = Path.Combine(result.StagingPath, CliDeploymentManifestService.FileName);
+        bool verified = CliDeploymentManifestService.Verify(
+            result.StagingPath,
+            manifestPath,
+            ToolchainFileHash.Sha256(manifestPath),
+            manifest.PackageSha256,
+            out _,
+            out string? error);
+
+        Assert(verified, error ?? "source-built CLI closure identity did not verify");
+        Assert(manifest.SourceCommit == result.SourceRevision,
+            "CLI deployment identity did not record the source revision");
+        Assert(manifest.Files.Any(file => file.Path == "rimliaison.dll"),
+            "CLI deployment identity omitted the assembly");
+        Assert(manifest.Files.Any(file => file.Path == "rimliaison.deps.json"),
+            "CLI deployment identity omitted the dependency closure");
+    }
+
+    private sealed class CliSourceEnvironment : IDisposable
+    {
+        private CliSourceEnvironment(string root)
+        {
+            Root = root;
+            Destination = Path.Combine(root, "candidate", "cli");
+        }
+
+        public string Root { get; }
+        public string Destination { get; }
+
+        public static CliSourceEnvironment Create()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "rimliaison-cli-source-" + Guid.NewGuid().ToString("N"));
+            string cliRoot = Path.Combine(root, "src", "RimLiaison.Cli");
+            Directory.CreateDirectory(cliRoot);
+            File.WriteAllText(
+                Path.Combine(root, "global.json"),
+                """
+                {
+                  "sdk": {
+                    "version": "8.0.424",
+                    "rollForward": "disable",
+                    "allowPrerelease": false
+                  }
+                }
+                """);
+            File.WriteAllText(
+                Path.Combine(cliRoot, "RimLiaison.Cli.csproj"),
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <ImplicitUsings>enable</ImplicitUsings>
+                    <AssemblyName>rimliaison</AssemblyName>
+                  </PropertyGroup>
+                </Project>
+                """);
+            File.WriteAllText(
+                Path.Combine(cliRoot, "Program.cs"),
+                "Console.WriteLine(\"source-built-cli\");");
+            return new(root);
+        }
+
+        public ToolchainCandidateMaterializer.CliPublishResult Publish() =>
+            ToolchainCandidateMaterializer.PublishCliAsync(
+                    Root,
+                    Destination,
+                    "test-source-revision",
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Root))
+                Directory.Delete(Root, recursive: true);
+        }
+    }
+
 
     private static void Assert(bool condition, string message)
     {
