@@ -114,6 +114,11 @@ internal static class DevelopmentBuildEnvironmentTests
             AssertEqual(managed, build.EnvironmentVariables["RIMWORLD_MANAGED_ASSEMBLIES"], "managed assemblies propagation");
             AssertEqual(harmonyAssembly, build.EnvironmentVariables["RIMWORLD_HARMONY_ASSEMBLY"], "Harmony assembly propagation");
             AssertEqual(Path.GetDirectoryName(harmonyAssembly)!, build.EnvironmentVariables["RIMWORLD_HARMONY_PATH"], "Harmony path propagation");
+            Assert(
+                build.Arguments.Any(argument =>
+                    argument.StartsWith("-p:DefaultItemExcludes=", StringComparison.Ordinal) &&
+                    argument.Contains(Path.Combine("Source", "obj", "**"), StringComparison.OrdinalIgnoreCase)),
+                "isolated builds must retain the source project's obj exclusion");
 
             string deployed = Path.Combine(deploymentRoot, "1.6", "Assemblies", "Fixture.dll");
             string expectedHash = Convert.ToHexString(SHA256.HashData(builtBytes)).ToLowerInvariant();

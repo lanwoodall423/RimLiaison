@@ -273,6 +273,8 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                 Directory.CreateDirectory(intermediateRoot);
                 buildProject = Path.GetFullPath(Path.Combine(sourceRoot, descriptor.SourceProject));
                 string buildWorkingDirectory = Path.GetDirectoryName(buildProject) ?? sourceRoot;
+                string sourceObjectExclusion =
+                    Path.Combine(buildWorkingDirectory, "obj", "**");
                 string[] buildArguments =
                 [
                     "build", buildProject,
@@ -283,6 +285,7 @@ public sealed class InternalDevelopmentTransactionService : IDevBridgeModDevelop
                     "-p:IntermediateOutputPath=" + Path.Combine(intermediateRoot, "intermediate") + Path.DirectorySeparatorChar,
                     "-p:MSBuildProjectExtensionsPath=" + Path.Combine(intermediateRoot, "extensions") + Path.DirectorySeparatorChar,
                     "-p:OutputPath=" + stagingRoot + Path.DirectorySeparatorChar,
+                    "-p:DefaultItemExcludes=" + sourceObjectExclusion,
                     "-p:RIMWORLD_DIR=" + Path.GetFullPath(rimWorldRoot),
                     "-p:RIMWORLD_ROOT=" + Path.GetFullPath(rimWorldRoot)
                 ];
