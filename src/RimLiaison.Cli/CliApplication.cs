@@ -4966,6 +4966,8 @@ public static class CliApplication
 
     internal static bool RequiresProductionToolchainBinding(CliRequest request) =>
         request.Command is CliCommand.Capabilities or
+            CliCommand.RecipeShow or
+            CliCommand.RecipePlan or
             CliCommand.RecipeRun or
             CliCommand.RunTest or
             CliCommand.SuiteRun or

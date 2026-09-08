@@ -350,6 +350,10 @@ internal static class ProjectMetadataOwnershipTests
     {
         CliRequest capabilities = CliParser.Parse(["capabilities", "--json"]);
         CliRequest doctor = CliParser.Parse(["doctor", "--json"]);
+        CliRequest recipeShow = CliParser.Parse(
+            ["recipe", "show", "knowledge-framework-release-runtime", "--json"]);
+        CliRequest recipePlan = CliParser.Parse(
+            ["recipe", "plan", "knowledge-framework-release-runtime", "--json"]);
 
         Assert(
             CliApplication.RequiresProductionToolchainBinding(capabilities),
@@ -357,6 +361,10 @@ internal static class ProjectMetadataOwnershipTests
         Assert(
             CliApplication.RequiresProductionToolchainBinding(doctor),
             "doctor must continue resolving the promoted production runtime");
+        Assert(
+            CliApplication.RequiresProductionToolchainBinding(recipeShow) &&
+            CliApplication.RequiresProductionToolchainBinding(recipePlan),
+            "recipe show and plan must resolve the promoted production runtime");
     }
 
 
