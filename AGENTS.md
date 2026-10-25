@@ -129,6 +129,8 @@ workflows. The tooling-repository CI selector above remains authoritative for ch
 
 Workspace layout:
 
-- Edit source only under `C:\RimDev\Repos`; `RimWorld\Mods` is a runtime destination.
+- Edit RimDev-managed RimWorld mod source only under `C:\RimDev\Repos`; `RimWorld\Mods` is a runtime destination.
+- For the RimLiaison tooling repository itself, an explicitly registered ProjectNexus checkout such as `C:\Projects\RimLiaison` may be used only as a source reference; scoped edits belong in ProjectNexus-owned isolated Git task worktrees and require exact candidate validation and developer review before integration. This exception does not change where RimDev-managed mod sources or live game files may be edited.
+- `.projectnexus/project.json` declares local Windows `.NET` development-confidence checks for ProjectNexus. The declarations grant no execution trust: local developer approval remains required, and these checks do not replace the change-aware repository validation plan, live RimWorld proof, or tooling qualification/promotion.
 - Use `C:\RimDev\.rimdev\workspace.json` for managed repository discovery and `C:\RimDev\Staging` for deployment staging.
 - `RIMTEST_ROOT` and `RIMTEST_DEVBRIDGE_ROOT` identify RimLiaison/RimTest and DevBridge2; pinned compatibility revisions use isolated worktrees.

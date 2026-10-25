@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "projectId": "rimliaison",
+  "displayName": "RimLiaison",
+  "capabilities": {
+    "checks": [
+      {
+        "capabilityId": "validation.build",
+        "title": "RimLiaison Windows solution build",
+        "tier": "development-confidence",
+        "taskCheckName": "RimLiaison Windows solution build",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "build",
+            "RimLiaison.sln",
+            "--configuration",
+            "Release",
+            "--nologo"
+          ],
+          "cwd": "."
+        },
+        "requirements": {
+          "platform": "win32"
+        },
+        "maxAttempts": 1,
+        "reuse": {
+          "mode": "exact-candidate"
+        },
+        "concurrency": {
+          "mode": "serial",
+          "exclusiveResources": []
+        }
+      },
+      {
+        "capabilityId": "validation.rimcontext",
+        "title": "RimContext regression tests",
+        "tier": "development-confidence",
+        "taskCheckName": "RimContext regression tests",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "run",
+            "--project",
+            "tests/RimContext.Tests/RimContext.Tests.csproj",
+            "--configuration",
+            "Release",
+            "--no-build",
+            "--no-restore"
+          ],
+          "cwd": "."
+        },
+        "requirements": {
+          "platform": "win32"
+        },
+        "maxAttempts": 1,
+        "reuse": {
+          "mode": "exact-candidate"
+        },
+        "concurrency": {
+          "mode": "serial",
+          "exclusiveResources": []
+        }
+      },
+      {
+        "capabilityId": "validation.rimerror",
+        "title": "RimError regression tests",
+        "tier": "development-confidence",
+        "taskCheckName": "RimError regression tests",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "test",
+            "tests/RimError.Core.Tests/RimError.Core.Tests.csproj",
+            "--configuration",
+            "Release",
+            "--no-build",
+            "--no-restore",
+            "--nologo"
+          ],
+          "cwd": "."
+        },
+        "requirements": {
+          "platform": "win32"
+        },
+        "maxAttempts": 1,
+        "reuse": {
+          "mode": "exact-candidate"
+        },
+        "concurrency": {
+          "mode": "serial",
+          "exclusiveResources": []
+        }
+      },
+      {
+        "capabilityId": "validation.rimliaison",
+        "title": "RimLiaison regression tests",
+        "tier": "development-confidence",
+        "taskCheckName": "RimLiaison regression tests",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "run",
+            "--project",
+            "tests/RimLiaison.Tests/RimLiaison.Tests.csproj",
+            "--configuration",
+            "Release",
+            "--no-build",
+            "--no-restore"
+          ],
+          "cwd": "."
+        },
+        "requirements": {
+          "platform": "win32"
+        },
+        "maxAttempts": 1,
+        "reuse": {
+          "mode": "exact-candidate"
+        },
+        "concurrency": {
+          "mode": "serial",
+          "exclusiveResources": []
+        }
+      },
+      {
+        "capabilityId": "validation.format",
+        "title": "RimLiaison formatting verification",
+        "tier": "development-confidence",
+        "taskCheckName": "RimLiaison formatting verification",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "format",
+            "RimLiaison.sln",
+            "--verify-no-changes",
+            "--no-restore"
+          ],
+          "cwd": "."
+        },
+        "requirements": {
+          "platform": "win32"
+        },
+        "maxAttempts": 1,
+        "reuse": {
+          "mode": "exact-candidate"
+        },
+        "concurrency": {
+          "mode": "serial",
+          "exclusiveResources": []
+        }
+      }
+    ],
+    "transforms": []
+  }
+}
