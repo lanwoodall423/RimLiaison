@@ -80,6 +80,37 @@ all internal suites.
 
 ## Offline validation
 
+### ProjectNexus Windows tooling confidence
+
+The version-controlled [`RimLiaison.Offline.slnf`](RimLiaison.Offline.slnf) selects
+all 14 non-game solution projects, including the CLI, Windows desktop, RimContext,
+RimError, coordinator, BridgeTools SDK integration, and offline tests. It excludes
+only `src/DevBridgeRuntime/Mod/DevBridge2.csproj`, whose real RimWorld/Unity managed
+assembly references cannot be resolved from source-only checkouts. The separate,
+non-solution `src/RimLiaison.Cli/DevCheckRuntime/DirectValidationRuntimeSignal.csproj`
+also references real game assemblies and is not built by this offline profile.
+For a source-only Windows confidence build, use:
+
+```text
+dotnet build RimLiaison.Offline.slnf --configuration Release
+```
+
+ProjectNexus's declared `validation.build` targets this offline filter. The
+existing named task-check label remains unchanged for already-materialized
+ProjectNexus tasks; the exact command and capability title identify the bounded
+offline build. Subsequent declared regression checks use `--no-build` only
+after this build.
+A new definition requires developer-local exact trust; an offline PASS does not
+qualify the in-game mod or an installed/live RimWorld runtime. The full solution
+build (`dotnet build RimLiaison.sln --configuration Release`) additionally requires
+a verified installed RimWorld `RimWorldWin64_Data/Managed` directory containing
+real `Assembly-CSharp.dll` and `UnityEngine.CoreModule.dll`, supplied through
+trusted environment/workspace configuration. Managed runtime integration requires
+separate RimLiaison-owned game lifecycle and validation; never launch RimWorld
+manually or change user ModsConfig to satisfy an offline check.
+
+### Change-aware repository validation
+
 For repository changes, calculate the change-aware plan first and run only the selected components;
 see [docs/ci-validation.md](docs/ci-validation.md). The proof-aware executor reuses only complete
 successful deterministic validation when its content fingerprint is unchanged; see
