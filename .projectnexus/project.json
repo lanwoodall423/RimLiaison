@@ -6,14 +6,14 @@
     "checks": [
       {
         "capabilityId": "validation.build",
-        "title": "RimLiaison Windows solution build",
+        "title": "RimLiaison Windows offline tooling build",
         "tier": "development-confidence",
         "taskCheckName": "RimLiaison Windows solution build",
         "command": {
           "executable": "dotnet",
           "args": [
             "build",
-            "RimLiaison.sln",
+            "RimLiaison.Offline.slnf",
             "--configuration",
             "Release",
             "--nologo"

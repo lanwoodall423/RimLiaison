@@ -15,10 +15,13 @@
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
     <RimBridgeSdkPath Condition="'$(RimBridgeSdkPath)' == ''"></RimBridgeSdkPath>
     <OutputPath>$(DevBridgeRuntimePackageRoot)1.6\BridgeTools\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Keep the net472 reference pack in the exact cross-platform restore graph. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="RimBridgeServer.Sdk" Condition="'$(RimBridgeSdkPath)' != '' and Exists('$(RimBridgeSdkPath)')">
       <HintPath>$(RimBridgeSdkPath)</HintPath>
       <Private>false</Private>
