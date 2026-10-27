@@ -578,10 +578,10 @@ public static partial class DevBridgeCapabilityRecovery
         }
         catch (JsonException)
         {
-            foreach (string line in output.Split(
+            foreach (string line in System.Linq.Enumerable.Reverse(output.Split(
                          '\n',
                          StringSplitOptions.RemoveEmptyEntries |
-                         StringSplitOptions.TrimEntries).Reverse())
+                         StringSplitOptions.TrimEntries)))
             {
                 try
                 {

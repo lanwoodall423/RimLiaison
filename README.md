@@ -88,12 +88,20 @@ executor. The complete command sequence below is the conservative fallback for s
 renamed, deleted, or otherwise high-risk changes, not a default requirement for every edit.
 
 ```text
-dotnet build RimLiaison.sln --configuration Release
+dotnet build RimLiaison.Offline.slnf --configuration Release --nologo
 dotnet run --project tests/RimContext.Tests/RimContext.Tests.csproj --configuration Release --no-build --no-restore
 dotnet test tests/RimError.Core.Tests/RimError.Core.Tests.csproj --configuration Release --no-build --no-restore
 dotnet run --project tests/RimLiaison.Tests/RimLiaison.Tests.csproj --configuration Release --no-build --no-restore
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\cross-stack-contract.tests.ps1 -Json
 ```
+
+The offline solution filter deliberately omits only the RimWorld-dependent DevBridge2 Mod
+project. It still builds the CLI, Desktop, RimContext, RimError, DevBridge coordinator,
+BridgeTools and offline tests. The full `RimLiaison.sln` and direct DevBridge2 Mod builds
+remain distinct game-backed checks requiring the matching RimWorld/Unity managed assemblies;
+neither the offline build nor these portable tests qualify a live game/runtime or production
+toolchain. A changed ProjectNexus `validation.build` command requires fresh exact-definition
+developer-local trust before the new filter may execute.
 
 The custom `RimLiaison.Tests` runner executes each test in an isolated child
 process with a bounded watchdog. Set `RIMLIAISON_TEST_TIMEOUT_SECONDS` for a
