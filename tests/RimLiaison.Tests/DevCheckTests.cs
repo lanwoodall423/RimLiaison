@@ -13,6 +13,111 @@ internal static class DevCheckTests
             throw new InvalidOperationException("dev-check did not preserve its optional workspace positional.");
     }
 
+    public static void IdentifiesUnityAndWaylithLayoutsWithoutGuessing()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "Data"));
+            Directory.CreateDirectory(Path.Combine(root, "Mods"));
+            string legacyManaged = Path.Combine(root, "RimWorldWin64_Data", "Managed");
+            Directory.CreateDirectory(legacyManaged);
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "");
+            File.WriteAllText(Path.Combine(legacyManaged, "Assembly-CSharp.dll"), "");
+            DevCheckCommand.RimWorldGameLayout unity = DevCheckCommand.DetectRimWorldGameLayout(root);
+            if (unity.IsWaylith || unity.ContentVersion != "1.6" ||
+                !unity.ExecutablePath.EndsWith("RimWorldWin64.exe", StringComparison.Ordinal))
+                throw new InvalidOperationException("Complete 1.6 layout was not recognized.");
+
+            File.Delete(Path.Combine(root, "RimWorldWin64.exe"));
+            File.Delete(Path.Combine(legacyManaged, "Assembly-CSharp.dll"));
+            foreach (string name in new[] { "RimWorld.exe", "Assembly-CSharp.dll", "Waylith.dll", "UnityStubs.dll" })
+                File.WriteAllText(Path.Combine(root, name), "");
+            DevCheckCommand.RimWorldGameLayout waylith = DevCheckCommand.DetectRimWorldGameLayout(root);
+            if (!waylith.IsWaylith || waylith.ContentVersion != "1.7" ||
+                !waylith.ExecutablePath.EndsWith("RimWorld.exe", StringComparison.Ordinal))
+                throw new InvalidOperationException("Complete 1.7 Waylith layout was not recognized.");
+
+            File.Delete(Path.Combine(root, "UnityStubs.dll"));
+            ExpectInvalidLayout(root, "partial Waylith");
+            File.WriteAllText(Path.Combine(root, "UnityStubs.dll"), "");
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "");
+            ExpectInvalidLayout(root, "mixed Unity and Waylith");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    private static void ExpectInvalidLayout(string root, string label)
+    {
+        try
+        {
+            DevCheckCommand.DetectRimWorldGameLayout(root);
+        }
+        catch (InvalidDataException)
+        {
+            return;
+        }
+        throw new InvalidOperationException("dev-check accepted " + label + " installation.");
+    }
+
+    public static void WaylithLaunchPreservesIsolatedInputs()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimtest-layout-fixture");
+        string savedata = Path.Combine(root, "savedata");
+        string log = Path.Combine(savedata, "Logs", "Player.log");
+        var waylith = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorld.exe"), "1.7");
+        ProcessStartInfo start = DevCheckCommand.CreateRuntimeStartInfo(
+            waylith, savedata, log,
+            ["ludeon.rimworld", "required.mod", "direct.validation.runtime.signal", "target.mod"]);
+        if (!string.Equals(start.FileName, waylith.ExecutablePath, StringComparison.Ordinal) ||
+            !start.ArgumentList.Contains("-savedatafolder=" + savedata) ||
+            !start.ArgumentList.Contains("-mod=required.mod;direct.validation.runtime.signal;target.mod") ||
+            !start.ArgumentList.Contains("-Headless") ||
+            !DevCheckCommand.IsWaylithTargetSelected(start, "target.mod") ||
+            DevCheckCommand.IsWaylithTargetSelected(start, "other.mod") ||
+            start.ArgumentList.Contains("-logfile") ||
+            !start.RedirectStandardOutput || !start.RedirectStandardError)
+            throw new InvalidOperationException("Waylith test launch lost isolated save/mod selection.");
+
+        var unity = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorldWin64.exe"), "1.6");
+        ProcessStartInfo legacy = DevCheckCommand.CreateRuntimeStartInfo(
+            unity, savedata, Path.Combine(savedata, "legacy.log"),
+            ["ludeon.rimworld", "direct.validation.runtime.signal", "target.mod"]);
+        if (!legacy.ArgumentList.Contains("-savedatafolder=" + savedata) ||
+            !legacy.ArgumentList.Contains("-logfile") ||
+            legacy.ArgumentList.Any(value => value.StartsWith("-mod=", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Unity 1.6 launch behavior regressed.");
+    }
+
+    public static void VersionedDefsAndAssembliesRetainTheirIdentity()
+    {
+        foreach (string path in new[]
+                 { "Defs/ThingDefs/Thing.xml", "1.6/Defs/ThingDefs/Thing.xml",
+                   "1.7/Defs/GenStepDefs/Step.xml" })
+            if (!DevCheckCommand.IsDefSourcePath(path))
+                throw new InvalidOperationException("Versioned Def path missed: " + path);
+        foreach (string path in new[]
+                 { "samples/Defs/Test.xml", "1.x/Defs/Test.xml", "DefsBroken/Thing.xml" })
+            if (DevCheckCommand.IsDefSourcePath(path))
+                throw new InvalidOperationException("Non-Def fixture misclassified: " + path);
+
+        string root = Path.Combine(Path.GetTempPath(), "rimtest-layout-fixture");
+        var game = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorld.exe"), "1.7");
+        if (DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "1.6", "Assemblies", "Legacy.dll")) != "1.6" ||
+            DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "1.7", "Assemblies", "Native.dll")) != "1.7" ||
+            DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "Source", "bin", "Release", "net10.0", "Native.dll")) != "1.7")
+            throw new InvalidOperationException("Versioned assembly staging changed identity.");
+    }
+
     public static void MissingAboutFailsClosed()
     {
         string workspace = Path.Combine(Path.GetTempPath(), "rimtest-dev-check-test-" + Guid.NewGuid().ToString("N"));

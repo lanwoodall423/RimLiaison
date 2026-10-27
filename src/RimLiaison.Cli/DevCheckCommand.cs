@@ -94,14 +94,15 @@ internal static class DevCheckCommand
                 ValidateXml(state);
                 state.StaticStatus = "STATIC_PASS";
                 state.RimContext = BuildRimContext(state);
-                string rimWorldRoot = ResolveRimWorldRoot();
+                RimWorldGameLayout game = ResolveRimWorldGameLayout();
+                state.Game = game;
                 state.HelperPackagePath = await BuildHelperAsync(
-                        rimWorldRoot,
+                        game,
                         state,
                         cancellationToken)
                     .ConfigureAwait(false);
                 state.Runtime = await RunRuntimeAsync(
-                        rimWorldRoot,
+                        game,
                         state,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -161,6 +162,12 @@ internal static class DevCheckCommand
             schemaVersion = "rimtest-dev-check/v1",
             mod = state.Mod,
             workspace = state.Workspace,
+            game = state.Game is null ? null : new
+            {
+                version = state.Game.ContentVersion,
+                engine = state.Game.IsWaylith ? "Waylith" : "Unity",
+                executable = Path.GetFileName(state.Game.ExecutablePath)
+            },
             changedFiles = state.ChangedFiles,
             projects = new
             {
@@ -411,9 +418,9 @@ internal static class DevCheckCommand
     {
         try
         {
-            return ResolveRimWorldRoot();
+            return ResolveRimWorldGameLayout().Root;
         }
-        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException)
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or InvalidDataException)
         {
             return null;
         }
@@ -465,7 +472,7 @@ internal static class DevCheckCommand
             {
                 var document = new XmlDocument { XmlResolver = null };
                 document.Load(input.AbsolutePath);
-                if (!input.RelativePath.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase))
+                if (!IsDefSourcePath(input.RelativePath))
                     continue;
                 XmlNodeList? thingNodes = document.SelectNodes("//ThingDef");
                 if (thingNodes is null)
@@ -501,6 +508,19 @@ internal static class DevCheckCommand
         }
     }
 
+    // Versioned RimWorld mods keep definitions in 1.6/Defs or 1.7/Defs.
+    // Reject similarly named paths such as samples/Defs or 1.x/Defs.
+    internal static bool IsDefSourcePath(string relativePath)
+    {
+        string normalized = relativePath.Replace('\\', '/');
+        if (normalized.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase))
+            return true;
+        string[] parts = normalized.Split('/');
+        return parts.Length >= 3 && parts[0].StartsWith("1.", StringComparison.Ordinal) &&
+            parts[0].Length > 2 && parts[0][2..].All(char.IsDigit) &&
+            parts[1].Equals("Defs", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static object BuildRimContext(State state)
     {
         long started = Stopwatch.GetTimestamp();
@@ -531,7 +551,7 @@ internal static class DevCheckCommand
         }
     }
 
-    private static async Task<string> BuildHelperAsync(string rimWorldRoot, State state, CancellationToken cancellationToken)
+    private static async Task<string> BuildHelperAsync(RimWorldGameLayout game, State state, CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
         try
@@ -547,7 +567,7 @@ internal static class DevCheckCommand
             File.Copy(about, Path.Combine(staging, "About", "About.xml"));
             ProcessResult result = await RunProcessAsync(
                     "dotnet",
-                    ["build", project, "--configuration", "Release", "--nologo", "-p:RimWorldRoot=" + rimWorldRoot, "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
+                    ["build", project, "--configuration", "Release", "--nologo", "-p:RimWorldRoot=" + game.Root, "-p:DevCheckWaylith=" + (game.IsWaylith ? "true" : "false"), "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
                     source,
                     BuildTimeout,
                     state,
@@ -555,7 +575,7 @@ internal static class DevCheckCommand
                 .ConfigureAwait(false);
             if (result.ExitCode != 0 || result.TimedOut)
                 throw new InvalidOperationException("Runtime signal helper build failed: " + Bound(result.Stdout + Environment.NewLine + result.Stderr));
-            string assembly = Path.Combine(staging, "1.6", "Assemblies", "DirectValidationRuntimeSignal.dll");
+            string assembly = Path.Combine(staging, game.ContentVersion, "Assemblies", "DirectValidationRuntimeSignal.dll");
             if (!File.Exists(assembly))
                 throw new InvalidOperationException("Runtime signal helper build produced no assembly.");
             return staging;
@@ -566,20 +586,45 @@ internal static class DevCheckCommand
         }
     }
 
-    private static string ResolveRimWorldRoot()
+    private static RimWorldGameLayout ResolveRimWorldGameLayout()
     {
         string? configured = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
         string root = string.IsNullOrWhiteSpace(configured)
             ? @"C:\Games\Steam\steamapps\common\RimWorld"
             : configured;
+        return DetectRimWorldGameLayout(root);
+    }
+
+    // Fail closed for mixed/partial engine installations rather than guessing
+    // that any existing RimWorld directory is safe for isolated launch.
+    internal static RimWorldGameLayout DetectRimWorldGameLayout(string root)
+    {
         string full = Path.GetFullPath(root);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64.exe")))
-            throw new DirectoryNotFoundException("RimWorld executable is missing: " + full);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64_Data", "Managed", "Assembly-CSharp.dll")))
-            throw new FileNotFoundException("RimWorld Assembly-CSharp.dll is missing.");
-        if (!Directory.Exists(Path.Combine(full, "Mods")))
-            throw new DirectoryNotFoundException("RimWorld Mods directory is missing: " + full);
-        return full;
+        if (!Directory.Exists(full) || !Directory.Exists(Path.Combine(full, "Data")) ||
+            !Directory.Exists(Path.Combine(full, "Mods")))
+            throw new DirectoryNotFoundException("RimWorld installation, Data or Mods directory is missing: " + full);
+
+        string unityExecutable = Path.Combine(full, "RimWorldWin64.exe");
+        string unityManaged = Path.Combine(full, "RimWorldWin64_Data", "Managed");
+        string waylithExecutable = Path.Combine(full, "RimWorld.exe");
+        bool unityExe = File.Exists(unityExecutable);
+        bool unityAssembly = File.Exists(Path.Combine(unityManaged, "Assembly-CSharp.dll"));
+        bool waylithExe = File.Exists(waylithExecutable);
+        bool waylithAssembly = File.Exists(Path.Combine(full, "Assembly-CSharp.dll"));
+        bool waylithEngine = File.Exists(Path.Combine(full, "Waylith.dll"));
+        bool unityStubs = File.Exists(Path.Combine(full, "UnityStubs.dll"));
+        bool anyUnity = unityExe || unityAssembly;
+        bool anyWaylith = waylithExe || waylithAssembly || waylithEngine || unityStubs;
+
+        if (anyUnity && anyWaylith)
+            throw new InvalidDataException("Ambiguous RimWorld Unity/Waylith installation: " + full);
+        if (unityExe && unityAssembly)
+            return new RimWorldGameLayout(full, unityExecutable, "1.6");
+        if (waylithExe && waylithAssembly && waylithEngine && unityStubs)
+            return new RimWorldGameLayout(full, waylithExecutable, "1.7");
+        throw new InvalidDataException(
+            "Incomplete RimWorld game layout. Expected 1.6 RimWorldWin64.exe and Managed/Assembly-CSharp.dll, " +
+            "or 1.7 RimWorld.exe and root Assembly-CSharp.dll, Waylith.dll and UnityStubs.dll: " + full);
     }
 
     private static string? ResolveTargetAssembly(string workspace, string project)
@@ -599,6 +644,8 @@ internal static class DevCheckCommand
         string[] candidates =
         [
             Path.Combine(workspace, "1.6", "Assemblies", assemblyName + ".dll"),
+            Path.Combine(workspace, "1.7", "Assemblies", assemblyName + ".dll"),
+            Path.Combine(projectDirectory, "bin", "Release", "net10.0", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "net472", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "net48", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "netstandard2.0", assemblyName + ".dll"),
@@ -607,12 +654,66 @@ internal static class DevCheckCommand
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    internal static string TargetAssemblyContentVersion(RimWorldGameLayout game, string workspace, string assembly)
+    {
+        string relative = Path.GetRelativePath(workspace, assembly).Replace('\\', '/');
+        if (relative.StartsWith("1.6/Assemblies/", StringComparison.OrdinalIgnoreCase))
+            return "1.6";
+        if (relative.StartsWith("1.7/Assemblies/", StringComparison.OrdinalIgnoreCase))
+            return "1.7";
+        return game.ContentVersion;
+    }
+
+    // Build launch parameters without starting a game: tests can verify that
+    // every version uses ephemeral savedata and an explicit, bounded mod set.
+    internal static ProcessStartInfo CreateRuntimeStartInfo(
+        RimWorldGameLayout game,
+        string savedata,
+        string logPath,
+        IReadOnlyList<string> activePackages)
+    {
+        var start = new ProcessStartInfo(game.ExecutablePath)
+        {
+            WorkingDirectory = game.Root,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("-savedatafolder=" + savedata);
+        if (game.IsWaylith)
+        {
+            // Waylith's -mod= argument includes base game and installed DLCs
+            // automatically. Do not use the player's global mod selection.
+            string[] selected = activePackages
+                .Where(id => !id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (selected.Length < 2 || !selected.Contains(HelperPackageId, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidDataException("Waylith isolated launch requires the helper and a target mod.");
+            start.ArgumentList.Add("-mod=" + string.Join(";", selected));
+            start.ArgumentList.Add("-Headless");
+        }
+        else
+        {
+            start.ArgumentList.Add("-logfile");
+            start.ArgumentList.Add(logPath);
+        }
+        return start;
+    }
+
+    internal static bool IsWaylithTargetSelected(ProcessStartInfo start, string packageId) =>
+        start.ArgumentList.Where(arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(arg => arg[5..].Split(';', StringSplitOptions.RemoveEmptyEntries))
+            .Any(id => id.Equals(packageId, StringComparison.OrdinalIgnoreCase));
+
     private static async Task<RuntimeResult> RunRuntimeAsync(
-        string rimWorldRoot,
+        RimWorldGameLayout game,
         State state,
         CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
+        string rimWorldRoot = game.Root;
         string modsRoot = Path.Combine(rimWorldRoot, "Mods");
         if (IsWithin(modsRoot, state.Workspace))
             throw new InvalidDataException("The target workspace cannot be inside the active RimWorld Mods directory.");
@@ -626,9 +727,13 @@ internal static class DevCheckCommand
         try
         {
             CopyRuntimePayload(state.Workspace, deployment);
-            string targetAssemblyDirectory = Path.Combine(deployment, "1.6", "Assemblies");
             foreach (string source in state.TargetAssemblySources)
             {
+                // Keep already-versioned 1.6/1.7 content at its declared
+                // version. Only an unversioned build output adopts the
+                // installed game's version: never duplicate both versions.
+                string contentVersion = TargetAssemblyContentVersion(game, state.Workspace, source);
+                string targetAssemblyDirectory = Path.Combine(deployment, contentVersion, "Assemblies");
                 string target = Path.Combine(targetAssemblyDirectory, Path.GetFileName(source));
                 if (!File.Exists(target))
                 {
@@ -651,22 +756,14 @@ internal static class DevCheckCommand
             string configDirectory = Path.Combine(savedata, "Config");
             Directory.CreateDirectory(configDirectory);
             string configPath = Path.Combine(configDirectory, "ModsConfig.xml");
-            WriteModsConfig(configPath, BuildActiveModPackageIds(state.Mod.PackageId, dependencies));
+            IReadOnlyList<string> activePackages = BuildActiveModPackageIds(state.Mod.PackageId, dependencies);
+            WriteModsConfig(configPath, activePackages);
             string signalPath = Path.Combine(savedata, "direct-validation-signal.json");
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
-            string logPath = Path.Combine(savedata, "rimworld-direct-validation.log");
-            string executable = Path.Combine(rimWorldRoot, "RimWorldWin64.exe");
-            var start = new ProcessStartInfo(executable)
-            {
-                WorkingDirectory = rimWorldRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            start.ArgumentList.Add("-savedatafolder=" + savedata);
-            start.ArgumentList.Add("-logfile");
-            start.ArgumentList.Add(logPath);
+            string logPath = game.IsWaylith
+                ? Path.Combine(savedata, "Logs", "Player.log")
+                : Path.Combine(savedata, "rimworld-direct-validation.log");
+            ProcessStartInfo start = CreateRuntimeStartInfo(game, savedata, logPath, activePackages);
             start.Environment["DIRECT_VALIDATION_TARGET_PACKAGE"] = state.Mod.PackageId;
             start.Environment["DIRECT_VALIDATION_TARGET_DEFS"] = string.Join(';', state.ChangedDefs);
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
@@ -678,7 +775,7 @@ internal static class DevCheckCommand
             state.RuntimeProcessExitConfirmed = false;
             if (!process.Start())
                 throw new InvalidOperationException("RimWorld process did not start.");
-            state.Processes.Add("RimWorldWin64.exe");
+            state.Processes.Add(Path.GetFileName(game.ExecutablePath) ?? game.ExecutablePath);
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
             DateTime deadline = DateTime.UtcNow + RuntimeTimeout;
@@ -717,7 +814,9 @@ internal static class DevCheckCommand
             process = null;
             string log = File.Exists(logPath) ? ReadRuntimeLog(logPath) : string.Empty;
             state.RelevantErrors.AddRange(FindTargetErrors(log, state));
-            bool targetConfigured = IsTargetConfigured(configPath, state.Mod.PackageId);
+            bool targetConfigured = game.IsWaylith
+                ? IsWaylithTargetSelected(start, state.Mod.PackageId)
+                : IsTargetConfigured(configPath, state.Mod.PackageId);
             RuntimeResult result = ParseRuntime(
                 signal,
                 state,
@@ -725,6 +824,11 @@ internal static class DevCheckCommand
                 targetConfigured,
                 completed.ControlledTermination,
                 completed.ExitCode);
+            // The 1.7 log is expected inside the isolated savedata/Logs folder.
+            // A successful signal without an attributable log is not complete
+            // runtime evidence on Waylith. Never consult the user's normal log.
+            if (game.IsWaylith && !File.Exists(logPath) && result.Status == "RUNTIME_LOAD_PASS")
+                result = result with { Status = "RUNTIME_LOAD_FAIL", Reason = "ISOLATED_WAYLITH_LOG_NOT_OBSERVED" };
             return result with
             {
                 RuntimeSeconds = Math.Round(ElapsedMilliseconds(started) / 1000d, 3),
@@ -889,7 +993,7 @@ internal static class DevCheckCommand
     {
         if (string.IsNullOrWhiteSpace(log))
             yield break;
-        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(Path.GetFileName)];
+        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(path => Path.GetFileName(path) ?? string.Empty)];
         foreach (string line in log.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
         {
             bool error = line.Contains("error", StringComparison.OrdinalIgnoreCase) ||
@@ -1281,6 +1385,7 @@ internal static class DevCheckCommand
     {
         public string Workspace { get; set; } = string.Empty;
         public ModIdentity Mod { get; set; } = new("", "");
+        public RimWorldGameLayout? Game { get; set; }
         public List<string> ChangedFiles { get; } = [];
         public List<string> ChangedDefs { get; } = [];
         public List<string> TargetErrorTokens { get; } = [];
@@ -1313,6 +1418,11 @@ internal static class DevCheckCommand
         public long ElapsedMs { get; set; }
         public object? RimContext { get; set; }
         public RuntimeResult Runtime { get; set; } = RuntimeResult.NotRun("NOT_RUN");
+    }
+
+    internal sealed record RimWorldGameLayout(string Root, string ExecutablePath, string ContentVersion)
+    {
+        internal bool IsWaylith => ContentVersion == "1.7";
     }
 
     internal sealed record ProjectSelectionResult(

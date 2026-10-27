@@ -24,6 +24,40 @@ Interpret results as follows:
 - `INFRASTRUCTURE_FAIL`: distinguish environment/tooling failure from a mod failure.
 - `CLEANUP_FAIL`: do not treat validation as healthy.
 
+### Runtime layout selection (1.6 Unity / 1.7 Waylith)
+
+The direct `dev-check` source candidate can inspect two **complete, mutually
+exclusive** layouts before attempting to launch a game:
+
+- 1.6 Unity: `RimWorldWin64.exe` with
+  `RimWorldWin64_Data/Managed/Assembly-CSharp.dll`.
+- 1.7 Waylith: `RimWorld.exe` with root-level
+  `Assembly-CSharp.dll`, `Waylith.dll`, and `UnityStubs.dll`.
+
+Both require the game's `Data` and `Mods` folders. Missing/mixed layouts
+fail closed; an existing game folder is not sufficient proof. Set
+`RIMWORLD_ROOT` only when the installed game is elsewhere.
+
+On 1.7 the runtime-signal helper targets `net10.0` with installed Waylith
+references and is staged in `1.7/Assemblies`; the first build therefore
+requires a local .NET 10 SDK. An existing target mod built for 1.6 is
+left in its declared `1.6/Assemblies` folder, rather than copied as a
+supposed native 1.7 assembly. Waylith uses an isolated `-mod=` list and
+`-Headless` with a temporary `-savedatafolder`; it does not read or
+change the player's ordinary `ModsConfig.xml`. The validator reads only the
+log under that isolated save-data tree, not the normal global game logs.
+The existing 1.6 `-logfile` route is unchanged.
+
+These source changes are **not an assertion that 1.7 gameplay works**.
+The required proof remains `BUILD_PASS`, `STATIC_PASS`,
+`RUNTIME_LOAD_PASS`, `INFRASTRUCTURE_PASS` and `CLEANUP_PASS` for
+the exact installed engine, with explicit mod/def/assembly signal evidence.
+If an SDK, engine helper, or isolated log cannot be established, report
+infrastructure failure or incomplete runtime evidence, never a mod PASS.
+
+The new launch arguments and 1.7 engine/reference contract are described by
+[Ludeon's 1.7 Modder Primer](https://docs.google.com/document/d/e/2PACX-1vSykw5_DYaaw42nEznI9zmBZVT_Vgg2bxYq_v2XWvAsHC3QSKFuDK2OyiQ5WC9jvVRUcrjpFt7xLLF5/pub).
+
 For multi-project workspaces, `dev-check` builds one unambiguous production root and follows its
 `ProjectReference` graph. Projects under obvious test, tooling, sample, benchmark, or example
 paths are excluded unless a production project references them. Multiple unreferenced production
