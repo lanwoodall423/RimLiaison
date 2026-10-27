@@ -46,6 +46,29 @@ Changing a mod does not require RimLiaison qualification or promotion. Promotion
 when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
 production toolchain.
 
+## Real RimWorld assemblies for game-backed builds
+
+The `DevBridge2` game Mod project builds against real RimWorld managed DLLs. The normal
+independent .NET tooling and test projects can be built without an installed game; a
+successful tooling-only build is **not** a successful game assembly build.
+
+For a game-backed Windows build, pass `/p:RimWorldManagedDir=<real installed
+RimWorld root>\\RimWorldWin64_Data\\Managed` or configure one of the existing
+RimLiaison-managed environment values. The order is explicit MSBuild
+`RimWorldManagedDir`, `RIMWORLD_MANAGED_DIR`, `RIMWORLD_MANAGED_PATH`,
+`RIMWORLD_MANAGED_ASSEMBLIES`, `RIMWORLD_ROOT` (game root), and finally the
+legacy project-owned `.rimdev/workspace.json` game root. The final property must
+point to the genuine installed game's `Managed` directory, **not** a placeholder
+or simulated fixture.
+
+The game Mod's `ResolveReferences` preflight reports `RLW0001` when no
+directory is configured, `RLW0002` when it does not exist, `RLW0003`
+when `Assembly-CSharp.dll` is absent and `RLW0004` when
+`UnityEngine.CoreModule.dll` is absent. These are prerequisite diagnostics,
+not tests that substitute game DLLs. No game files are copied, launched or
+modified by the preflight. The 1.6/1.7 runtime selection and actual
+in-game validation remain separate evidence gates.
+
 ## Explicit release and qualification workflows
 
 RimLiaison remains available for explicitly documented release, qualification, promotion, and other
