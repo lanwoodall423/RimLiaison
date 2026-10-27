@@ -147,6 +147,30 @@ function Get-ValidationStageCommands {
     $testProject = $null
     $testMode = $null
     switch ($StageId) {
+        'offline-tooling-build' {
+            $offlineProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $Root)
+            if ($offlineProjects.Count -ne 14) {
+                throw 'OFFLINE_TOOLING_BUILD_PROJECT_COUNT_INVALID'
+            }
+            # Restore each reviewed project without expanding the solution.
+            # BridgeTools uses its locked net472 NuGet graph so restore cannot
+            # silently rewrite the checked-in direct/transitive dependency set.
+            foreach ($relative in $offlineProjects) {
+                $project = Join-Path $Root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+                $restoreArguments = @('restore', $project, '--nologo')
+                if ($relative -eq 'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj') {
+                    $restoreArguments += '--locked-mode'
+                }
+                [void]$commands.Add((New-ValidationCommand 'dotnet' $restoreArguments $Root 600000))
+            }
+            foreach ($relative in $offlineProjects) {
+                $project = Join-Path $Root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'build', $project, '--configuration', 'Release',
+                            '--no-restore', '--nologo') $Root 900000))
+            }
+            return $commands.ToArray()
+        }
         'rimcontext' {
             $testProject = Join-Path $Root 'tests/RimContext.Tests/RimContext.Tests.csproj'
             $testMode = 'run'
