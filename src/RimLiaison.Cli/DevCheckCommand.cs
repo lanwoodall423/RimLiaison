@@ -94,14 +94,15 @@ internal static class DevCheckCommand
                 ValidateXml(state);
                 state.StaticStatus = "STATIC_PASS";
                 state.RimContext = BuildRimContext(state);
-                string rimWorldRoot = ResolveRimWorldRoot();
+                RimWorldGameLayout game = ResolveRimWorldGameLayout();
+                state.Game = game;
                 state.HelperPackagePath = await BuildHelperAsync(
-                        rimWorldRoot,
+                        game,
                         state,
                         cancellationToken)
                     .ConfigureAwait(false);
                 state.Runtime = await RunRuntimeAsync(
-                        rimWorldRoot,
+                        game,
                         state,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -161,6 +162,12 @@ internal static class DevCheckCommand
             schemaVersion = "rimtest-dev-check/v1",
             mod = state.Mod,
             workspace = state.Workspace,
+            game = state.Game is null ? null : new
+            {
+                version = state.Game.ContentVersion,
+                engine = state.Game.IsWaylith ? "Waylith" : "Unity",
+                executable = Path.GetFileName(state.Game.ExecutablePath)
+            },
             changedFiles = state.ChangedFiles,
             projects = new
             {
@@ -411,9 +418,9 @@ internal static class DevCheckCommand
     {
         try
         {
-            return ResolveRimWorldRoot();
+            return ResolveRimWorldGameLayout().Root;
         }
-        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException)
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or InvalidDataException)
         {
             return null;
         }
@@ -465,33 +472,46 @@ internal static class DevCheckCommand
             {
                 var document = new XmlDocument { XmlResolver = null };
                 document.Load(input.AbsolutePath);
-                if (!input.RelativePath.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                XmlNodeList? thingNodes = document.SelectNodes("//ThingDef");
-                if (thingNodes is null)
-                    continue;
-                foreach (XmlNode thing in thingNodes)
+                if (IsDefSourcePath(input.RelativePath))
                 {
-                    string defName = thing.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(defName))
-                        throw new InvalidDataException($"ThingDef in {input.RelativePath} is missing defName.");
-                    state.ChangedDefs.Add(defName);
-                    XmlNodeList? projectileNodes = thing.SelectNodes(".//defaultProjectile");
-                    if (projectileNodes is not null)
-                        foreach (XmlNode node in projectileNodes)
+                    foreach (TypedDefExpectation expectation in ExtractTypedDefExpectations(document, input.RelativePath))
+                    {
+                        if (!state.ChangedTypedDefs.Contains(expectation))
+                            state.ChangedTypedDefs.Add(expectation);
+                        if (expectation.DefType == "ThingDef" &&
+                            !state.ChangedDefs.Contains(expectation.DefName, StringComparer.Ordinal))
+                            state.ChangedDefs.Add(expectation.DefName);
+                        state.TargetErrorTokens.Add(expectation.DefName);
+                    }
+                    XmlNodeList? thingNodes = document.SelectNodes("/Defs/ThingDef");
+                    if (thingNodes is null)
+                        continue;
+                    foreach (XmlNode thing in thingNodes)
+                    {
+                        foreach (string xpath in new[] { ".//defaultProjectile", ".//texPath" })
                         {
-                            string value = node.InnerText.Trim();
-                            if (!string.IsNullOrWhiteSpace(value))
-                                state.TargetErrorTokens.Add(value);
+                            XmlNodeList? nodes = thing.SelectNodes(xpath);
+                            if (nodes is null)
+                                continue;
+                            foreach (XmlNode node in nodes)
+                            {
+                                string value = node.InnerText.Trim();
+                                if (!string.IsNullOrWhiteSpace(value))
+                                    state.TargetErrorTokens.Add(value);
+                            }
                         }
-                    XmlNodeList? textureNodes = thing.SelectNodes(".//texPath");
-                    if (textureNodes is not null)
-                        foreach (XmlNode node in textureNodes)
-                        {
-                            string value = node.InnerText.Trim();
-                            if (!string.IsNullOrWhiteSpace(value))
-                                state.TargetErrorTokens.Add(value);
-                        }
+                    }
+                }
+                else if (IsPatchSourcePath(input.RelativePath))
+                {
+                    IReadOnlyList<BiomeGenStepExpectation> expectations =
+                        ExtractBiomeGenStepExpectations(document, input.RelativePath);
+                    foreach (BiomeGenStepExpectation expectation in expectations)
+                    {
+                        if (!state.ExpectedBiomeGenSteps.Contains(expectation))
+                            state.ExpectedBiomeGenSteps.Add(expectation);
+                        state.TargetErrorTokens.Add(expectation.GenStepDefName);
+                    }
                 }
             }
         }
@@ -500,6 +520,116 @@ internal static class DevCheckCommand
             state.StageTimes["xml"] = ElapsedMilliseconds(started);
         }
     }
+
+    // Versioned RimWorld mods keep definitions in 1.6/Defs or 1.7/Defs.
+    // Reject similarly named paths such as samples/Defs or 1.x/Defs.
+    internal static bool IsDefSourcePath(string relativePath)
+    {
+        string normalized = relativePath.Replace('\\', '/');
+        if (normalized.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase))
+            return true;
+        string[] parts = normalized.Split('/');
+        return parts.Length >= 3 && parts[0].StartsWith("1.", StringComparison.Ordinal) &&
+            parts[0].Length > 2 && parts[0][2..].All(char.IsDigit) &&
+            parts[1].Equals("Defs", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsPatchSourcePath(string relativePath)
+    {
+        string normalized = relativePath.Replace('\\', '/');
+        if (normalized.StartsWith("Patches/", StringComparison.OrdinalIgnoreCase))
+            return true;
+        string[] parts = normalized.Split('/');
+        return parts.Length >= 3 && parts[0].StartsWith("1.", StringComparison.Ordinal) &&
+            parts[0].Length > 2 && parts[0][2..].All(char.IsDigit) &&
+            parts[1].Equals("Patches", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // These are the only Def kinds the direct runtime helper currently proves.
+    // Never interpret a GenStepDef as a ThingDef or infer that the map step ran.
+    internal sealed record TypedDefExpectation(string DefType, string DefName);
+    internal sealed record BiomeGenStepExpectation(string BiomeDefName, string GenStepDefName);
+
+    internal static IReadOnlyList<TypedDefExpectation> ExtractTypedDefExpectations(
+        XmlDocument document, string relativePath)
+    {
+        if (!IsDefSourcePath(relativePath))
+            return [];
+        if (document.DocumentElement?.LocalName != "Defs")
+            throw new InvalidDataException("Def XML must have a Defs root: " + relativePath);
+        var result = new List<TypedDefExpectation>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (XmlNode element in document.DocumentElement.ChildNodes)
+        {
+            if (element.NodeType != XmlNodeType.Element ||
+                element.LocalName is not ("ThingDef" or "GenStepDef"))
+                continue;
+            string name = element.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
+            if (!IsSafeDefIdentifier(name))
+                throw new InvalidDataException(
+                    element.LocalName + " has an invalid or missing defName in " + relativePath);
+            string key = element.LocalName + "|" + name;
+            if (!seen.Add(key))
+                throw new InvalidDataException("Duplicate typed Def in " + relativePath + ": " + key);
+            result.Add(new TypedDefExpectation(element.LocalName, name));
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<BiomeGenStepExpectation> ExtractBiomeGenStepExpectations(
+        XmlDocument document, string relativePath)
+    {
+        if (!IsPatchSourcePath(relativePath))
+            return [];
+        if (document.DocumentElement?.LocalName != "Patch")
+            throw new InvalidDataException("Patch XML must have a Patch root: " + relativePath);
+        var result = new List<BiomeGenStepExpectation>();
+        XmlNodeList? operations = document.SelectNodes("/Patch/Operation");
+        if (operations is null)
+            return result;
+        foreach (XmlNode operation in operations)
+        {
+            // This verifier supports the exact two-branch conditional add
+            // used for extraGenSteps. Other patch shapes cannot be silently
+            // mistaken for evidence that a biome contains a generation step.
+            if (!operation.OuterXml.Contains("extraGenSteps", StringComparison.Ordinal))
+                continue;
+            const string prefix = "Defs/BiomeDef[defName=\"";
+            const string listSuffix = "\"]/extraGenSteps";
+            string selector = operation.SelectSingleNode("./xpath")?.InnerText.Trim() ?? string.Empty;
+            if (operation.Attributes?["Class"]?.Value != "PatchOperationConditional" ||
+                !selector.StartsWith(prefix, StringComparison.Ordinal) ||
+                !selector.EndsWith(listSuffix, StringComparison.Ordinal))
+                throw new InvalidDataException("Unsupported biome extraGenSteps patch: " + relativePath);
+            string biome = selector[prefix.Length..^listSuffix.Length];
+            if (!IsSafeDefIdentifier(biome))
+                throw new InvalidDataException("Invalid biome selector: " + relativePath);
+            string rootSelector = "Defs/BiomeDef[defName=\"" + biome + "\"]";
+            XmlNode? match = operation.SelectSingleNode("./match");
+            XmlNode? nomatch = operation.SelectSingleNode("./nomatch");
+            if (match?.Attributes?["Class"]?.Value != "PatchOperationAdd" ||
+                nomatch?.Attributes?["Class"]?.Value != "PatchOperationAdd" ||
+                match.SelectSingleNode("./xpath")?.InnerText.Trim() != selector ||
+                nomatch.SelectSingleNode("./xpath")?.InnerText.Trim() != rootSelector)
+                throw new InvalidDataException("Incomplete conditional biome patch: " + relativePath);
+
+            string[] existing = match.SelectNodes("./value/li")?.Cast<XmlNode>()
+                .Select(node => node.InnerText.Trim()).ToArray() ?? [];
+            string[] missing = nomatch.SelectNodes("./value/extraGenSteps/li")?.Cast<XmlNode>()
+                .Select(node => node.InnerText.Trim()).ToArray() ?? [];
+            if (existing.Length == 0 || existing.Any(name => !IsSafeDefIdentifier(name)) ||
+                !existing.OrderBy(name => name, StringComparer.Ordinal)
+                    .SequenceEqual(missing.OrderBy(name => name, StringComparer.Ordinal)))
+                throw new InvalidDataException("Biome patch branches disagree: " + relativePath);
+            foreach (string step in existing)
+                result.Add(new BiomeGenStepExpectation(biome, step));
+        }
+        return result;
+    }
+
+    private static bool IsSafeDefIdentifier(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.All(c => char.IsLetterOrDigit(c) || c is '_' or '-' or '.');
 
     private static object BuildRimContext(State state)
     {
@@ -531,7 +661,7 @@ internal static class DevCheckCommand
         }
     }
 
-    private static async Task<string> BuildHelperAsync(string rimWorldRoot, State state, CancellationToken cancellationToken)
+    private static async Task<string> BuildHelperAsync(RimWorldGameLayout game, State state, CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
         try
@@ -545,17 +675,21 @@ internal static class DevCheckCommand
             state.HelperStagingPath = staging;
             Directory.CreateDirectory(Path.Combine(staging, "About"));
             File.Copy(about, Path.Combine(staging, "About", "About.xml"));
+            // The CLI's repo pins .NET 8 in global.json. Waylith's net10
+            // helper must select its own SDK without changing that repo policy.
+            // The generated selector exists only in this tracked temp directory.
+            string helperWorkingDirectory = PrepareHelperBuildDirectory(game, source, staging);
             ProcessResult result = await RunProcessAsync(
                     "dotnet",
-                    ["build", project, "--configuration", "Release", "--nologo", "-p:RimWorldRoot=" + rimWorldRoot, "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
-                    source,
+                    ["build", project, "--configuration", "Release", "--nologo", "-p:RimWorldRoot=" + game.Root, "-p:DevCheckWaylith=" + (game.IsWaylith ? "true" : "false"), "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
+                    helperWorkingDirectory,
                     BuildTimeout,
                     state,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (result.ExitCode != 0 || result.TimedOut)
                 throw new InvalidOperationException("Runtime signal helper build failed: " + Bound(result.Stdout + Environment.NewLine + result.Stderr));
-            string assembly = Path.Combine(staging, "1.6", "Assemblies", "DirectValidationRuntimeSignal.dll");
+            string assembly = Path.Combine(staging, game.ContentVersion, "Assemblies", "DirectValidationRuntimeSignal.dll");
             if (!File.Exists(assembly))
                 throw new InvalidOperationException("Runtime signal helper build produced no assembly.");
             return staging;
@@ -566,20 +700,61 @@ internal static class DevCheckCommand
         }
     }
 
-    private static string ResolveRimWorldRoot()
+    internal static string PrepareHelperBuildDirectory(
+        RimWorldGameLayout game, string source, string staging)
+    {
+        if (!game.IsWaylith)
+            return source;
+        if (!Directory.Exists(staging))
+            throw new DirectoryNotFoundException("Isolated helper build directory is missing.");
+        // latestFeature stays on the .NET 10 release line, allowing 10.0.403
+        // or a later stable 10.0 SDK without pinning to the unrelated .NET 8 CLI.
+        const string selector =
+            "{\"sdk\":{\"version\":\"10.0.100\",\"rollForward\":\"latestFeature\",\"allowPrerelease\":false}}";
+        File.WriteAllText(
+            Path.Combine(staging, "global.json"), selector, new UTF8Encoding(false));
+        return staging;
+    }
+
+    private static RimWorldGameLayout ResolveRimWorldGameLayout()
     {
         string? configured = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
         string root = string.IsNullOrWhiteSpace(configured)
             ? @"C:\Games\Steam\steamapps\common\RimWorld"
             : configured;
+        return DetectRimWorldGameLayout(root);
+    }
+
+    // Fail closed for mixed/partial engine installations rather than guessing
+    // that any existing RimWorld directory is safe for isolated launch.
+    internal static RimWorldGameLayout DetectRimWorldGameLayout(string root)
+    {
         string full = Path.GetFullPath(root);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64.exe")))
-            throw new DirectoryNotFoundException("RimWorld executable is missing: " + full);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64_Data", "Managed", "Assembly-CSharp.dll")))
-            throw new FileNotFoundException("RimWorld Assembly-CSharp.dll is missing.");
-        if (!Directory.Exists(Path.Combine(full, "Mods")))
-            throw new DirectoryNotFoundException("RimWorld Mods directory is missing: " + full);
-        return full;
+        if (!Directory.Exists(full) || !Directory.Exists(Path.Combine(full, "Data")) ||
+            !Directory.Exists(Path.Combine(full, "Mods")))
+            throw new DirectoryNotFoundException("RimWorld installation, Data or Mods directory is missing: " + full);
+
+        string unityExecutable = Path.Combine(full, "RimWorldWin64.exe");
+        string unityManaged = Path.Combine(full, "RimWorldWin64_Data", "Managed");
+        string waylithExecutable = Path.Combine(full, "RimWorld.exe");
+        bool unityExe = File.Exists(unityExecutable);
+        bool unityAssembly = File.Exists(Path.Combine(unityManaged, "Assembly-CSharp.dll"));
+        bool waylithExe = File.Exists(waylithExecutable);
+        bool waylithAssembly = File.Exists(Path.Combine(full, "Assembly-CSharp.dll"));
+        bool waylithEngine = File.Exists(Path.Combine(full, "Waylith.dll"));
+        bool unityStubs = File.Exists(Path.Combine(full, "UnityStubs.dll"));
+        bool anyUnity = unityExe || unityAssembly;
+        bool anyWaylith = waylithExe || waylithAssembly || waylithEngine || unityStubs;
+
+        if (anyUnity && anyWaylith)
+            throw new InvalidDataException("Ambiguous RimWorld Unity/Waylith installation: " + full);
+        if (unityExe && unityAssembly)
+            return new RimWorldGameLayout(full, unityExecutable, "1.6");
+        if (waylithExe && waylithAssembly && waylithEngine && unityStubs)
+            return new RimWorldGameLayout(full, waylithExecutable, "1.7");
+        throw new InvalidDataException(
+            "Incomplete RimWorld game layout. Expected 1.6 RimWorldWin64.exe and Managed/Assembly-CSharp.dll, " +
+            "or 1.7 RimWorld.exe and root Assembly-CSharp.dll, Waylith.dll and UnityStubs.dll: " + full);
     }
 
     private static string? ResolveTargetAssembly(string workspace, string project)
@@ -599,6 +774,8 @@ internal static class DevCheckCommand
         string[] candidates =
         [
             Path.Combine(workspace, "1.6", "Assemblies", assemblyName + ".dll"),
+            Path.Combine(workspace, "1.7", "Assemblies", assemblyName + ".dll"),
+            Path.Combine(projectDirectory, "bin", "Release", "net10.0", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "net472", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "net48", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "netstandard2.0", assemblyName + ".dll"),
@@ -607,13 +784,258 @@ internal static class DevCheckCommand
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    internal static string TargetAssemblyContentVersion(RimWorldGameLayout game, string workspace, string assembly)
+    {
+        string relative = Path.GetRelativePath(workspace, assembly).Replace('\\', '/');
+        if (relative.StartsWith("1.6/Assemblies/", StringComparison.OrdinalIgnoreCase))
+            return "1.6";
+        if (relative.StartsWith("1.7/Assemblies/", StringComparison.OrdinalIgnoreCase))
+            return "1.7";
+        return game.ContentVersion;
+    }
+
+    // Build launch parameters without starting a game: tests can verify that
+    // every version uses ephemeral savedata and an explicit, bounded mod set.
+    internal static ProcessStartInfo CreateRuntimeStartInfo(
+        RimWorldGameLayout game,
+        string savedata,
+        string logPath,
+        IReadOnlyList<string> activePackages)
+    {
+        var start = new ProcessStartInfo(game.ExecutablePath)
+        {
+            WorkingDirectory = game.Root,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("-savedatafolder=" + savedata);
+        if (game.IsWaylith)
+        {
+            // Waylith's -mod= argument includes base game and installed DLCs
+            // automatically. Do not use the player's global mod selection.
+            string[] selected = activePackages
+                .Where(id => !id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (selected.Length < 2 || !selected.Contains(HelperPackageId, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidDataException("Waylith isolated launch requires the helper and a target mod.");
+            start.ArgumentList.Add("-mod=" + string.Join(";", selected));
+            start.ArgumentList.Add("-Headless");
+        }
+        else
+        {
+            start.ArgumentList.Add("-logfile");
+            start.ArgumentList.Add(logPath);
+        }
+        return start;
+    }
+
+    internal static bool IsWaylithTargetSelected(ProcessStartInfo start, string packageId) =>
+        start.ArgumentList.Where(arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(arg => arg[5..].Split(';', StringSplitOptions.RemoveEmptyEntries))
+            .Any(id => id.Equals(packageId, StringComparison.OrdinalIgnoreCase));
+
+    private const long MaximumWaylithLogBytes = 4L * 1024 * 1024;
+    private const int MaximumWaylithHeaderCharacters = 8_192;
+
+    internal sealed record WaylithLogSnapshot(
+        string Path, bool Existed, long Length, DateTime LastWriteUtc);
+
+    internal static string ResolveWaylithLogPath()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Waylith LocalLow log custody requires Windows.");
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(local))
+            throw new DirectoryNotFoundException("Windows LocalAppData is unavailable.");
+        string appData = Path.GetDirectoryName(Path.GetFullPath(local)) ??
+            throw new DirectoryNotFoundException("Cannot determine the Windows AppData root.");
+        return Path.Combine(appData, "LocalLow", "Ludeon Studios",
+            "RimWorld by Ludeon Studios", "Logs", "Player.log");
+    }
+
+    internal static WaylithLogSnapshot CaptureWaylithLogSnapshot(string path)
+    {
+        var info = new FileInfo(path);
+        info.Refresh();
+        return info.Exists
+            ? new WaylithLogSnapshot(path, true, info.Length, info.LastWriteTimeUtc)
+            : new WaylithLogSnapshot(path, false, 0L, DateTime.MinValue);
+    }
+
+    // Inspect the run's global Waylith log without modifying or rotating it.
+    // A matching startup signal alone does not prove that the log belongs to
+    // this child process: the game ignores -savedatafolder for Player.log.
+    internal static bool TryReadVerifiedWaylithLog(
+        WaylithLogSnapshot before,
+        RimWorldGameLayout game,
+        ProcessStartInfo start,
+        DateTimeOffset childStartedUtc,
+        DateTimeOffset childExitedUtc,
+        out string log,
+        out string reason)
+    {
+        log = string.Empty;
+        reason = "WAYLITH_LOG_MISSING";
+        try
+        {
+            var info = new FileInfo(before.Path);
+            info.Refresh();
+            if (!info.Exists)
+                return false;
+            if (info.Length <= 0 || info.Length > MaximumWaylithLogBytes)
+            {
+                reason = "WAYLITH_LOG_SIZE_UNSUPPORTED";
+                return false;
+            }
+            if (before.Existed &&
+                info.Length == before.Length &&
+                info.LastWriteTimeUtc <= before.LastWriteUtc)
+            {
+                reason = "WAYLITH_LOG_UNCHANGED";
+                return false;
+            }
+            if (info.LastWriteTimeUtc < childStartedUtc.UtcDateTime.AddSeconds(-2))
+            {
+                reason = "WAYLITH_LOG_STALE";
+                return false;
+            }
+
+            string content;
+            long readLength;
+            DateTime readLastWriteUtc = info.LastWriteTimeUtc;
+            using (var stream = new FileStream(before.Path, FileMode.Open,
+                       FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream, Encoding.UTF8,
+                       detectEncodingFromByteOrderMarks: true))
+            {
+                if (stream.Length > MaximumWaylithLogBytes)
+                {
+                    reason = "WAYLITH_LOG_SIZE_UNSUPPORTED";
+                    return false;
+                }
+                readLength = stream.Length;
+                content = reader.ReadToEnd();
+            }
+            info.Refresh();
+            if (!info.Exists || info.Length > MaximumWaylithLogBytes ||
+                info.Length != readLength || info.LastWriteTimeUtc != readLastWriteUtc)
+            {
+                // A changing log is not attributable evidence. Never modify
+                // the normal user log, even if another game starts during us.
+                reason = "WAYLITH_LOG_UNSTABLE";
+                return false;
+            }
+            if (!VerifyWaylithLogHeader(
+                    content, before.Path, game, start, childStartedUtc,
+                    childExitedUtc, out reason))
+                return false;
+            log = content;
+            reason = "WAYLITH_LOG_VERIFIED";
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            reason = "WAYLITH_LOG_UNREADABLE";
+            return false;
+        }
+    }
+
+    internal static bool VerifyWaylithLogHeader(
+        string content,
+        string logPath,
+        RimWorldGameLayout game,
+        ProcessStartInfo start,
+        DateTimeOffset childStartedUtc,
+        DateTimeOffset childExitedUtc,
+        out string reason)
+    {
+        reason = "WAYLITH_LOG_PROVENANCE_UNVERIFIED";
+        if (content.Length == 0)
+            return false;
+        string header = content[..Math.Min(content.Length, MaximumWaylithHeaderCharacters)];
+        string[] lines = header.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+        string? Value(string prefix) => lines.Select(line => line.Trim())
+            .Where(line => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .Select(line => line[prefix.Length..].Trim())
+            .FirstOrDefault();
+
+        string? started = Value("Started:");
+        string? version = Value("Version:");
+        string? loggedPath = Value("Log file:");
+        string? command = Value("Command:");
+        if (!DateTimeOffset.TryParse(started,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AllowWhiteSpaces,
+                out DateTimeOffset logStarted))
+            return false;
+        if (logStarted < childStartedUtc.AddSeconds(-2) ||
+            logStarted > childExitedUtc.AddSeconds(2) ||
+            string.IsNullOrWhiteSpace(version) ||
+            !version.StartsWith("1.7.", StringComparison.Ordinal) ||
+            !string.Equals(loggedPath, logPath, StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(command) ||
+            !command.Contains(Path.Combine(game.Root, "RimWorld.dll"),
+                StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string? savedataArg = start.ArgumentList.SingleOrDefault(
+            arg => arg.StartsWith("-savedatafolder=", StringComparison.OrdinalIgnoreCase));
+        string? modArg = start.ArgumentList.SingleOrDefault(
+            arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase));
+        if (savedataArg is null || modArg is null ||
+            !HasExactLogArgument(header, savedataArg) ||
+            !HasExactLogArgument(header, modArg) ||
+            !HasExactLogArgument(header, "-Headless"))
+            return false;
+        reason = "WAYLITH_LOG_VERIFIED";
+        return true;
+    }
+
+    private static bool HasExactLogArgument(string text, string value)
+    {
+        for (int index = text.IndexOf(value, StringComparison.OrdinalIgnoreCase);
+             index >= 0;
+             index = text.IndexOf(value, index + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            int end = index + value.Length;
+            bool before = index == 0 || char.IsWhiteSpace(text[index - 1]) ||
+                text[index - 1] == '"';
+            bool after = end == text.Length || char.IsWhiteSpace(text[end]) ||
+                text[end] == '"';
+            if (before && after)
+                return true;
+        }
+        return false;
+    }
+
     private static async Task<RuntimeResult> RunRuntimeAsync(
-        string rimWorldRoot,
+        RimWorldGameLayout game,
         State state,
         CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
+        string rimWorldRoot = game.Root;
         string modsRoot = Path.Combine(rimWorldRoot, "Mods");
+        if (game.IsWaylith)
+        {
+            // The Waylith log is global even when save-data is isolated.
+            // Refuse to race a preexisting game session for that log.
+            Process[] otherGames = Process.GetProcessesByName("RimWorld");
+            try
+            {
+                if (otherGames.Length > 0)
+                    throw new InvalidOperationException(
+                        "WAYLITH_LOG_CONCURRENT_GAME: Close RimWorld before isolated dev-check.");
+            }
+            finally
+            {
+                foreach (Process other in otherGames)
+                    other.Dispose();
+            }
+        }
         if (IsWithin(modsRoot, state.Workspace))
             throw new InvalidDataException("The target workspace cannot be inside the active RimWorld Mods directory.");
         string deployment = Path.Combine(modsRoot, ".rimtest-dev-check-" + Guid.NewGuid().ToString("N"));
@@ -626,9 +1048,13 @@ internal static class DevCheckCommand
         try
         {
             CopyRuntimePayload(state.Workspace, deployment);
-            string targetAssemblyDirectory = Path.Combine(deployment, "1.6", "Assemblies");
             foreach (string source in state.TargetAssemblySources)
             {
+                // Keep already-versioned 1.6/1.7 content at its declared
+                // version. Only an unversioned build output adopts the
+                // installed game's version: never duplicate both versions.
+                string contentVersion = TargetAssemblyContentVersion(game, state.Workspace, source);
+                string targetAssemblyDirectory = Path.Combine(deployment, contentVersion, "Assemblies");
                 string target = Path.Combine(targetAssemblyDirectory, Path.GetFileName(source));
                 if (!File.Exists(target))
                 {
@@ -651,24 +1077,23 @@ internal static class DevCheckCommand
             string configDirectory = Path.Combine(savedata, "Config");
             Directory.CreateDirectory(configDirectory);
             string configPath = Path.Combine(configDirectory, "ModsConfig.xml");
-            WriteModsConfig(configPath, BuildActiveModPackageIds(state.Mod.PackageId, dependencies));
+            IReadOnlyList<string> activePackages = BuildActiveModPackageIds(state.Mod.PackageId, dependencies);
+            WriteModsConfig(configPath, activePackages);
             string signalPath = Path.Combine(savedata, "direct-validation-signal.json");
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
-            string logPath = Path.Combine(savedata, "rimworld-direct-validation.log");
-            string executable = Path.Combine(rimWorldRoot, "RimWorldWin64.exe");
-            var start = new ProcessStartInfo(executable)
-            {
-                WorkingDirectory = rimWorldRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            start.ArgumentList.Add("-savedatafolder=" + savedata);
-            start.ArgumentList.Add("-logfile");
-            start.ArgumentList.Add(logPath);
+            string logPath = game.IsWaylith
+                ? ResolveWaylithLogPath()
+                : Path.Combine(savedata, "rimworld-direct-validation.log");
+            WaylithLogSnapshot? priorGlobalLog = game.IsWaylith
+                ? CaptureWaylithLogSnapshot(logPath)
+                : null;
+            ProcessStartInfo start = CreateRuntimeStartInfo(game, savedata, logPath, activePackages);
             start.Environment["DIRECT_VALIDATION_TARGET_PACKAGE"] = state.Mod.PackageId;
             start.Environment["DIRECT_VALIDATION_TARGET_DEFS"] = string.Join(';', state.ChangedDefs);
+            start.Environment["DIRECT_VALIDATION_TARGET_TYPED_DEFS"] = string.Join(
+                ';', state.ChangedTypedDefs.Select(def => def.DefType + "|" + def.DefName));
+            start.Environment["DIRECT_VALIDATION_EXPECTED_BIOME_GENSTEPS"] = string.Join(
+                ';', state.ExpectedBiomeGenSteps.Select(step => step.BiomeDefName + "|" + step.GenStepDefName));
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
                 ';',
                 state.TargetAssemblySources.Select(source => Path.GetFileNameWithoutExtension(source)));
@@ -676,9 +1101,10 @@ internal static class DevCheckCommand
             process = new Process { StartInfo = start };
             state.LaunchedProcess = process;
             state.RuntimeProcessExitConfirmed = false;
+            DateTimeOffset childStartedUtc = DateTimeOffset.UtcNow;
             if (!process.Start())
                 throw new InvalidOperationException("RimWorld process did not start.");
-            state.Processes.Add("RimWorldWin64.exe");
+            state.Processes.Add(Path.GetFileName(game.ExecutablePath) ?? game.ExecutablePath);
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
             DateTime deadline = DateTime.UtcNow + RuntimeTimeout;
@@ -711,13 +1137,29 @@ internal static class DevCheckCommand
                     terminateIfRunning: true,
                     cancellationToken)
                 .ConfigureAwait(false);
+            DateTimeOffset childExitedUtc = DateTimeOffset.UtcNow;
             state.RuntimeProcessExitConfirmed = true;
             state.LaunchedProcess = null;
             process.Dispose();
             process = null;
-            string log = File.Exists(logPath) ? ReadRuntimeLog(logPath) : string.Empty;
+            string log;
+            bool logVerified;
+            string logFailure = "WAYLITH_LOG_NOT_APPLICABLE";
+            if (game.IsWaylith)
+            {
+                logVerified = TryReadVerifiedWaylithLog(
+                    priorGlobalLog!, game, start, childStartedUtc, childExitedUtc,
+                    out log, out logFailure);
+            }
+            else
+            {
+                logVerified = File.Exists(logPath);
+                log = logVerified ? ReadRuntimeLog(logPath) : string.Empty;
+            }
             state.RelevantErrors.AddRange(FindTargetErrors(log, state));
-            bool targetConfigured = IsTargetConfigured(configPath, state.Mod.PackageId);
+            bool targetConfigured = game.IsWaylith
+                ? IsWaylithTargetSelected(start, state.Mod.PackageId)
+                : IsTargetConfigured(configPath, state.Mod.PackageId);
             RuntimeResult result = ParseRuntime(
                 signal,
                 state,
@@ -725,10 +1167,22 @@ internal static class DevCheckCommand
                 targetConfigured,
                 completed.ControlledTermination,
                 completed.ExitCode);
+            // On Waylith the log is global. Require exact fresh invocation
+            // custody before trusting the result; do not treat existence of
+            // a preexisting Player.log as proof of an isolated test.
+            if (game.IsWaylith && !logVerified)
+                result = result with { Status = "RUNTIME_LOAD_FAIL", Reason = logFailure };
+            if (game.IsWaylith)
+                result = result with
+                {
+                    Evidence = [.. result.Evidence,
+                        "waylithLogVerified=" + logVerified,
+                        "waylithLogStatus=" + logFailure]
+                };
             return result with
             {
                 RuntimeSeconds = Math.Round(ElapsedMilliseconds(started) / 1000d, 3),
-                LogProduced = File.Exists(logPath)
+                LogProduced = logVerified
             };
         }
         finally
@@ -782,11 +1236,68 @@ internal static class DevCheckCommand
         start.Environment["DIRECT_VALIDATION_SIGNAL_RESULT"] = signalPath;
     }
 
+    // Never accept an untyped or missing signal for a requested GenStepDef.
+    // One positive response must exist for each exact type/name pair and each
+    // biome-generation-step membership assertion.
+    internal static bool VerifyRuntimeDefinitionSignal(
+        JsonElement signal,
+        IReadOnlyList<TypedDefExpectation> expectedDefs,
+        IReadOnlyList<BiomeGenStepExpectation> expectedBiomeSteps)
+    {
+        if (signal.ValueKind != JsonValueKind.Object)
+            return false;
+        if (expectedDefs.Count > 0)
+        {
+            if (!signal.TryGetProperty("requestedDefs", out JsonElement defs) ||
+                defs.ValueKind != JsonValueKind.Array)
+                return false;
+            foreach (TypedDefExpectation expected in expectedDefs)
+            {
+                JsonElement[] matches = defs.EnumerateArray().Where(item =>
+                    item.ValueKind == JsonValueKind.Object &&
+                    item.TryGetProperty("defName", out JsonElement name) &&
+                    name.ValueKind == JsonValueKind.String &&
+                    name.GetString() == expected.DefName &&
+                    item.TryGetProperty("defType", out JsonElement type) &&
+                    type.ValueKind == JsonValueKind.String &&
+                    type.GetString() == expected.DefType).ToArray();
+                if (matches.Length != 1 ||
+                    !matches[0].TryGetProperty("exists", out JsonElement exists) ||
+                    exists.ValueKind != JsonValueKind.True)
+                    return false;
+            }
+        }
+        if (expectedBiomeSteps.Count > 0)
+        {
+            if (!signal.TryGetProperty("biomeGenSteps", out JsonElement biomeSteps) ||
+                biomeSteps.ValueKind != JsonValueKind.Array)
+                return false;
+            foreach (BiomeGenStepExpectation expected in expectedBiomeSteps)
+            {
+                JsonElement[] matches = biomeSteps.EnumerateArray().Where(item =>
+                    item.ValueKind == JsonValueKind.Object &&
+                    item.TryGetProperty("biomeDefName", out JsonElement biomeName) &&
+                    biomeName.ValueKind == JsonValueKind.String &&
+                    biomeName.GetString() == expected.BiomeDefName &&
+                    item.TryGetProperty("genStepDefName", out JsonElement genStepName) &&
+                    genStepName.ValueKind == JsonValueKind.String &&
+                    genStepName.GetString() == expected.GenStepDefName).ToArray();
+                if (matches.Length != 1 ||
+                    !matches[0].TryGetProperty("exists", out JsonElement exists) ||
+                    exists.ValueKind != JsonValueKind.True)
+                    return false;
+            }
+        }
+        return true;
+    }
+
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
     {
         bool contentLoaded = false;
         bool targetLoaded = false;
-        bool defsValid = true;
+        bool defsValid = state.ChangedTypedDefs.Count == 0 &&
+            state.ExpectedBiomeGenSteps.Count == 0;
+        bool biomeStepsValid = state.ExpectedBiomeGenSteps.Count == 0;
         bool configured = targetConfigured;
         var assemblyResults = state.TargetAssemblySources
             .Select(source => new AssemblyLoadResult(Path.GetFileNameWithoutExtension(source), false))
@@ -798,16 +1309,11 @@ internal static class DevCheckCommand
             JsonElement value = signal.Value;
             contentLoaded = value.TryGetProperty("completion", out JsonElement completion) && completion.GetString() == "content-loaded";
             targetLoaded = value.TryGetProperty("targetModLoaded", out JsonElement target) && target.GetBoolean();
-            if (value.TryGetProperty("requestedDefs", out JsonElement requestedDefs))
-            {
-                foreach (string defName in state.ChangedDefs)
-                {
-                    bool found = requestedDefs.EnumerateArray().Any(item =>
-                        item.TryGetProperty("defName", out JsonElement actual) && actual.GetString() == defName &&
-                        item.TryGetProperty("exists", out JsonElement exists) && exists.GetBoolean());
-                    defsValid &= found;
-                }
-            }
+            defsValid = VerifyRuntimeDefinitionSignal(
+                value, state.ChangedTypedDefs, state.ExpectedBiomeGenSteps);
+            if (state.ExpectedBiomeGenSteps.Count > 0)
+                biomeStepsValid = VerifyRuntimeDefinitionSignal(
+                    value, [], state.ExpectedBiomeGenSteps);
             if (value.TryGetProperty("targetAssembliesLoaded", out JsonElement loadedAssemblies))
             {
                 foreach (JsonElement loaded in loadedAssemblies.EnumerateArray())
@@ -853,6 +1359,9 @@ internal static class DevCheckCommand
             "targetModConfigured=" + configured,
             "targetModLoaded=" + targetLoaded,
             "defsValid=" + defsValid,
+            "typedDefsExpected=" + state.ChangedTypedDefs.Count,
+            "biomeGenStepsExpected=" + state.ExpectedBiomeGenSteps.Count,
+            "biomeGenStepsValid=" + biomeStepsValid,
             "targetAssembliesLoaded=" + (assemblyLoaded?.ToString() ?? "not-applicable"),
             "startupBehaviorObserved=" + (behavior is not null)
         ];
@@ -889,7 +1398,7 @@ internal static class DevCheckCommand
     {
         if (string.IsNullOrWhiteSpace(log))
             yield break;
-        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(Path.GetFileName)];
+        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(path => Path.GetFileName(path) ?? string.Empty)];
         foreach (string line in log.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
         {
             bool error = line.Contains("error", StringComparison.OrdinalIgnoreCase) ||
@@ -1281,8 +1790,11 @@ internal static class DevCheckCommand
     {
         public string Workspace { get; set; } = string.Empty;
         public ModIdentity Mod { get; set; } = new("", "");
+        public RimWorldGameLayout? Game { get; set; }
         public List<string> ChangedFiles { get; } = [];
         public List<string> ChangedDefs { get; } = [];
+        public List<TypedDefExpectation> ChangedTypedDefs { get; } = [];
+        public List<BiomeGenStepExpectation> ExpectedBiomeGenSteps { get; } = [];
         public List<string> TargetErrorTokens { get; } = [];
         public List<string> BuildErrors { get; } = [];
         public List<string> StaticErrors { get; } = [];
@@ -1313,6 +1825,11 @@ internal static class DevCheckCommand
         public long ElapsedMs { get; set; }
         public object? RimContext { get; set; }
         public RuntimeResult Runtime { get; set; } = RuntimeResult.NotRun("NOT_RUN");
+    }
+
+    internal sealed record RimWorldGameLayout(string Root, string ExecutablePath, string ContentVersion)
+    {
+        internal bool IsWaylith => ContentVersion == "1.7";
     }
 
     internal sealed record ProjectSelectionResult(
@@ -1349,3 +1866,177 @@ internal static class DevCheckCommand
             new("RUNTIME_NOT_RUN", reason, false, false, false, false, null, [], null, [], [], null, false);
     }
 }
+
+/// <summary>
+/// Pure bounded reader for mod-specific JSON evidence in a *previously verified*
+/// RimWorld log. This is NOT a game launcher or a log-provenance verifier.
+/// It never reads files, opens processes, or interprets a mod's game rules.
+/// </summary>
+internal sealed class MapQaEventReader
+{
+    internal const int MaximumLineCharacters = 8_192;
+    internal const int MaximumEvents = 128;
+    private const int MaximumRejectionCodes = 16;
+
+    private readonly string marker;
+    private readonly string expectedNonce;
+    private readonly List<MapQaEvent> events = [];
+    private readonly List<string> rejectionCodes = [];
+
+    internal MapQaEventReader(string marker, string expectedNonce)
+    {
+        if (!IsValidMarker(marker))
+            throw new ArgumentException("QA marker must be a bounded ASCII [Name] token.", nameof(marker));
+        if (!IsValidNonce(expectedNonce))
+            throw new ArgumentException("QA run nonce must be 8-40 safe ASCII characters.", nameof(expectedNonce));
+        this.marker = marker;
+        this.expectedNonce = expectedNonce;
+    }
+
+    internal IReadOnlyList<MapQaEvent> Events => events;
+    internal IReadOnlyList<string> RejectionCodes => rejectionCodes;
+    internal int RejectedCount { get; private set; }
+    internal bool HasRejectedEvents => RejectedCount > 0;
+
+    internal MapQaEventDisposition Observe(string? line)
+    {
+        if (line is null)
+            return MapQaEventDisposition.Ignored;
+
+        int start = line.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+            return MapQaEventDisposition.Ignored;
+        if (line.Length > MaximumLineCharacters)
+            return Reject("QA_LINE_TOO_LONG");
+
+        string payload = line[(start + marker.Length)..].Trim();
+        if (payload.Length < 2 || payload[0] != '{')
+            return Reject("QA_JSON_OBJECT_REQUIRED");
+        if (events.Count >= MaximumEvents)
+            return Reject("QA_EVENT_LIMIT");
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(payload, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 12
+            });
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return Reject("QA_JSON_OBJECT_REQUIRED");
+
+            int schemaFields = 0;
+            int nonceFields = 0;
+            string? schema = null;
+            string? nonce = null;
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (property.NameEquals("schemaVersion"))
+                {
+                    schemaFields++;
+                    if (property.Value.ValueKind != JsonValueKind.String)
+                        return Reject("QA_SCHEMA_INVALID");
+                    schema = property.Value.GetString();
+                }
+                else if (property.NameEquals("nonce"))
+                {
+                    nonceFields++;
+                    if (property.Value.ValueKind != JsonValueKind.String)
+                        return Reject("QA_NONCE_INVALID");
+                    nonce = property.Value.GetString();
+                }
+            }
+
+            if (schemaFields != 1 || nonceFields != 1)
+                return Reject("QA_IDENTITY_AMBIGUOUS");
+            if (!IsValidSchema(schema))
+                return Reject("QA_SCHEMA_INVALID");
+            if (!IsValidNonce(nonce))
+                return Reject("QA_NONCE_INVALID");
+            if (!string.Equals(nonce, expectedNonce, StringComparison.Ordinal))
+                return Reject("QA_FOREIGN_NONCE");
+
+            // Preserve the original bounded JSON for the owning mod's
+            // separately reviewed assertion schema; no game claim is inferred.
+            events.Add(new MapQaEvent(schema!, nonce!, payload));
+            return MapQaEventDisposition.Accepted;
+        }
+        catch (JsonException)
+        {
+            return Reject("QA_JSON_INVALID");
+        }
+    }
+
+    private MapQaEventDisposition Reject(string reason)
+    {
+        if (RejectedCount < int.MaxValue)
+            RejectedCount++;
+        if (rejectionCodes.Count < MaximumRejectionCodes)
+            rejectionCodes.Add(reason);
+        return MapQaEventDisposition.Rejected;
+    }
+
+    private static bool IsValidMarker(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 3 or > 64 ||
+            value[0] != '[' || value[^1] != ']')
+            return false;
+        for (int i = 1; i < value.Length - 1; i++)
+        {
+            if (!IsAsciiTokenCharacter(value[i]))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsValidNonce(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 8 or > 40)
+            return false;
+        foreach (char character in value)
+        {
+            if (!IsAsciiTokenCharacter(character))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsValidSchema(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 4 or > 96)
+            return false;
+        int separatorCount = 0;
+        for (int i = 0; i < value.Length; i++)
+        {
+            char character = value[i];
+            if (character == '/')
+            {
+                if (i == 0 || i == value.Length - 1)
+                    return false;
+                separatorCount++;
+            }
+            else if (!IsAsciiTokenCharacter(character) && character != '.')
+            {
+                return false;
+            }
+        }
+        return separatorCount == 1;
+    }
+
+    private static bool IsAsciiTokenCharacter(char character) =>
+        (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        character is '_' or '-';
+}
+
+internal enum MapQaEventDisposition
+{
+    Ignored,
+    Accepted,
+    Rejected
+}
+
+internal sealed record MapQaEvent(string SchemaVersion, string Nonce, string PayloadJson);
