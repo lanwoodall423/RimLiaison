@@ -206,6 +206,139 @@ try {
     Assert-ValidationTrue (-not $live.Reusable) 'live stack stage is never offline-reusable'
     Assert-ValidationTrue (-not $artifact.Reusable) 'artifact freshness stage is never offline-reusable'
 
+    # Offline build membership tests are fixture-only. No dotnet process is run.
+    $toolingStage = Get-ValidationProofStageDefinition 'offline-tooling-build'
+    $testCount++
+    Assert-ValidationTrue -Condition (-not $toolingStage.Reusable -and
+        $toolingStage.Toolchain -eq 'dotnet') -Message 'offline build must never reuse mutable output proof'
+
+    $offlineRoot = Join-Path $root 'offline-tooling-contract'
+    $solutionText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../RimLiaison.sln'))
+    Write-ProofFixtureFile -RelativePath 'offline-tooling-contract/RimLiaison.sln' -Value $solutionText
+    $solutionProjectLines = @([IO.File]::ReadAllLines((Join-Path $offlineRoot 'RimLiaison.sln')) |
+        Where-Object { $_ -match '^Project\("\{[^}]+\}"\) = "[^"]+", "[^"]+\.csproj"' })
+    foreach ($entry in $solutionProjectLines) {
+        if ($entry -match '^Project\("\{[^}]+\}"\) = "[^"]+", "([^"]+\.csproj)"') {
+            $projectRelative = $Matches[1].Replace('\', '/')
+            Write-ProofFixtureFile -RelativePath ("offline-tooling-contract/" + $projectRelative) -Value '<Project Sdk="Microsoft.NET.Sdk" />'
+        }
+    }
+
+    $offlineProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+    $testCount++
+    Assert-ValidationTrue -Condition ($offlineProjects.Count -eq 14 -and
+        -not ($offlineProjects -contains 'src/DevBridgeRuntime/Mod/DevBridge2.csproj') -and
+        ($offlineProjects -contains 'tests/RimLiaison.Tests/RimLiaison.Tests.csproj') -and
+        ($offlineProjects -contains 'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj')) -Message 'exactly fourteen tooling projects and no game Mod are selected'
+
+    function Assert-OfflineToolingRefusal {
+        param([Parameter(Mandatory = $true)][string]$ExpectedCode)
+        $reason = $null
+        try {
+            [void]@(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+        }
+        catch {
+            $reason = $_.Exception.Message
+        }
+        Assert-ValidationTrue -Condition ($null -ne $reason -and $reason.Contains($ExpectedCode)) -Message "unexpected result for $ExpectedCode"
+    }
+
+    $contractSolution = Join-Path $offlineRoot 'RimLiaison.sln'
+    $unexpectedProject = 'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NewUnreviewed", "src\New\Unreviewed.csproj", "{11111111-1111-1111-1111-111111111111}"'
+    [IO.File]::WriteAllText($contractSolution, $solutionText + [Environment]::NewLine + $unexpectedProject, [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    [IO.File]::WriteAllText($contractSolution, $solutionText, [Text.UTF8Encoding]::new($false))
+
+    $duplicateProject = [string]$solutionProjectLines[0]
+    [IO.File]::WriteAllText(
+        $contractSolution,
+        $solutionText + [Environment]::NewLine + $duplicateProject,
+        [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_SOLUTION_DUPLICATE_PROJECT'
+    [IO.File]::WriteAllText($contractSolution, $solutionText, [Text.UTF8Encoding]::new($false))
+
+    $missingProject = Join-Path $offlineRoot 'tests/RimContext.Tests/RimContext.Tests.csproj'
+    Remove-Item -LiteralPath $missingProject
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_TOOLING_PROJECT_MISSING'
+    [IO.File]::WriteAllText($missingProject, '<Project />', [Text.UTF8Encoding]::new($false))
+
+    $consumer = Join-Path $offlineRoot 'src/RimLiaison.Cli/RimLiaison.Cli.csproj'
+    [IO.File]::WriteAllText($consumer,
+        '<Project><ItemGroup><ProjectReference Include="..\DevBridgeRuntime\Mod\DevBridge2.csproj" /></ItemGroup></Project>',
+        [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_TOOLING_REFERENCE_OUTSIDE_CLOSURE'
+    [IO.File]::WriteAllText($consumer, '<Project />', [Text.UTF8Encoding]::new($false))
+    $restoredProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+    $testCount++
+    Assert-ValidationTrue -Condition ($restoredProjects.Count -eq 14) -Message 'restored fixture returns the exact tooling closure'
+
+    # Offline build output evidence is a separate gate after 14 successful
+    # command exits. These fixtures never run dotnet or a RimWorld binary.
+    $lockRelative = 'src/DevBridgeRuntime/BridgeTools/packages.lock.json'
+    $fixtureLockRelative = 'offline-tooling-contract/' + $lockRelative
+    Write-ProofFixtureFile -RelativePath $fixtureLockRelative -Value '{"version":1}'
+    $fixtureLock = Join-Path $offlineRoot $lockRelative
+    $originalLockHash = Get-ValidationFileSha256 $fixtureLock
+    $testOutputs = @(
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.dll',
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.runtimeconfig.json',
+        'tests/RimError.Core.Tests/bin/Release/net8.0/RimError.Core.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.runtimeconfig.json'
+    )
+    foreach ($relative in $testOutputs) {
+        Write-ProofFixtureFile -RelativePath ("offline-tooling-contract/" + $relative) -Value 'compiled-fixture'
+    }
+
+    function Assert-OfflineEvidenceRefusal {
+        param(
+            [Parameter(Mandatory = $true)][string]$ExpectedCode,
+            [Parameter(Mandatory = $true)][string]$ExpectedLockSha256
+        )
+        $reason = $null
+        try {
+            [void](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $ExpectedLockSha256)
+        }
+        catch {
+            $reason = [string]$_.Exception.Message
+        }
+        Assert-ValidationTrue -Condition ($null -ne $reason -and $reason.Contains($ExpectedCode)) -Message "build evidence must fail closed on $ExpectedCode"
+    }
+
+    $testCount++
+    Assert-ValidationTrue -Condition ([bool](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $originalLockHash)) -Message 'complete three-suite outputs and unchanged locked restore allow build evidence'
+
+    foreach ($relative in $testOutputs) {
+        $output = Join-Path $offlineRoot $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        Remove-Item -LiteralPath $output
+        $testCount++
+        Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_OUTPUT_MISSING' -ExpectedLockSha256 $originalLockHash
+        [IO.File]::WriteAllText($output, 'compiled-fixture', [Text.UTF8Encoding]::new($false))
+    }
+
+    $emptyOutput = Join-Path $offlineRoot $testOutputs[0].Replace('/', [IO.Path]::DirectorySeparatorChar)
+    [IO.File]::WriteAllText($emptyOutput, '', [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_OUTPUT_INVALID' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($emptyOutput, 'compiled-fixture', [Text.UTF8Encoding]::new($false))
+
+    [IO.File]::WriteAllText($fixtureLock, '{"version":2}', [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_LOCK_CHANGED' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($fixtureLock, '{"version":1}', [Text.UTF8Encoding]::new($false))
+
+    Remove-Item -LiteralPath $fixtureLock
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_LOCK_MISSING' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($fixtureLock, '{"version":1}', [Text.UTF8Encoding]::new($false))
+
+    $testCount++
+    Assert-ValidationTrue -Condition ([bool](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $originalLockHash)) -Message 'restored output-and-lock fixtures regain evidence readiness'
+
     # Exercise bounded deterministic eviction with valid compact records.
     $boundedRoot = Join-Path $root 'bounded-cache'
     New-Item -ItemType Directory -Force -Path $boundedRoot | Out-Null

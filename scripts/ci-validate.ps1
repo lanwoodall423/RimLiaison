@@ -147,6 +147,30 @@ function Get-ValidationStageCommands {
     $testProject = $null
     $testMode = $null
     switch ($StageId) {
+        'offline-tooling-build' {
+            $offlineProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $Root)
+            if ($offlineProjects.Count -ne 14) {
+                throw 'OFFLINE_TOOLING_BUILD_PROJECT_COUNT_INVALID'
+            }
+            # Restore each reviewed project without expanding the solution.
+            # BridgeTools uses its locked net472 NuGet graph so restore cannot
+            # silently rewrite the checked-in direct/transitive dependency set.
+            foreach ($relative in $offlineProjects) {
+                $project = Join-Path $Root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+                $restoreArguments = @('restore', $project, '--nologo')
+                if ($relative -eq 'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj') {
+                    $restoreArguments += '--locked-mode'
+                }
+                [void]$commands.Add((New-ValidationCommand 'dotnet' $restoreArguments $Root 600000))
+            }
+            foreach ($relative in $offlineProjects) {
+                $project = Join-Path $Root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+                [void]$commands.Add((New-ValidationCommand 'dotnet' @(
+                            'build', $project, '--configuration', 'Release',
+                            '--no-restore', '--nologo') $Root 900000))
+            }
+            return $commands.ToArray()
+        }
         'rimcontext' {
             $testProject = Join-Path $Root 'tests/RimContext.Tests/RimContext.Tests.csproj'
             $testMode = 'run'
@@ -384,6 +408,7 @@ try {
         }
 
         $commands = @()
+        $originalToolingLockSha256 = $null
         try {
             $commands = @(Get-ValidationStageCommands `
                     -StageId $stage `
@@ -391,6 +416,13 @@ try {
                     -ExternalRoot $DevBridgeRoot `
                     -RestoreAlreadyRun:$restoreAlreadyRun `
                     -DevBridgeBinaryCacheHit:$DevBridgeBinaryCacheHit)
+            if ($stage -eq 'offline-tooling-build') {
+                $toolingLockPath = Join-Path $repositoryRoot 'src/DevBridgeRuntime/BridgeTools/packages.lock.json'
+                if (-not (Test-Path -LiteralPath $toolingLockPath -PathType Leaf)) {
+                    throw 'OFFLINE_TOOLING_LOCK_MISSING'
+                }
+                $originalToolingLockSha256 = Get-ValidationFileSha256 $toolingLockPath
+            }
         }
         catch {
             $status = 'fail'
@@ -440,6 +472,33 @@ try {
                 @($command.Arguments).Count -gt 0 -and
                 [string]$command.Arguments[0] -eq 'restore') {
                 $restoreAlreadyRun = $true
+            }
+        }
+
+        # A successful process exit alone cannot authorize --no-build tests.
+        # Validate the concrete regression outputs and immutable lock graph
+        # before the stage can report PASS or save any proof.
+        if ($stagePassed -and $stage -eq 'offline-tooling-build') {
+            try {
+                [void](Assert-OfflineToolingBuildEvidence `
+                        -RepositoryRoot $repositoryRoot `
+                        -ExpectedLockSha256 $originalToolingLockSha256)
+            }
+            catch {
+                $stagePassed = $false
+                $message = [string]$_.Exception.Message
+                $code = if ($message -match '^(OFFLINE_[A-Z0-9_]+)') {
+                    [string]$Matches[1]
+                } else {
+                    'OFFLINE_TOOLING_EVIDENCE_FAILED'
+                }
+                $stageFailure = [pscustomobject]@{
+                    stage = $stage
+                    errorCode = $code
+                    exitCode = 1
+                    command = 'post-build-evidence'
+                    error = Limit-ValidationText $message
+                }
             }
         }
 
