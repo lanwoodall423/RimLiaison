@@ -18,12 +18,122 @@ function Get-ValidationProofMaxRecordBytes {
     return $script:ValidationProofMaxRecordBytes
 }
 
+# This helper defines the exact offline tooling source-closure. It does not
+# weaken the separate mandatory RimWorld game Mod build or live runtime gates.
+# The project list matches the developer-reviewed 14-project Offline.slnf;
+# unlike a solution filter, it requires no new tracked file in the workspace.
+function Get-OfflineToolingProjectPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $solution = Join-Path $root 'RimLiaison.sln'
+    if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
+        throw 'OFFLINE_SOLUTION_MISSING'
+    }
+    if (([IO.File]::GetAttributes($solution) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'OFFLINE_SOLUTION_LINK_FORBIDDEN'
+    }
+
+    $excluded = 'src/DevBridgeRuntime/Mod/DevBridge2.csproj'
+    $included = @(
+        'src/RimLiaison.Cli/RimLiaison.Cli.csproj',
+        'src/RimLiaison.Desktop/RimLiaison.Desktop.csproj',
+        'tests/RimLiaison.Tests/RimLiaison.Tests.csproj',
+        'src/RimContext.Core/RimContext.Core.csproj',
+        'src/RimContext.Cli/RimContext.Cli.csproj',
+        'tests/RimContext.Tests/RimContext.Tests.csproj',
+        'src/RimError.Core/RimError.Core.csproj',
+        'src/RimError.Cli/RimError.Cli.csproj',
+        'tests/RimError.Core.Tests/RimError.Core.Tests.csproj',
+        'src/RimDev.Contracts/RimDev.Contracts.csproj',
+        'src/DevBridgeRuntime/Coordinator.Core/DevBridge.Coordinator.Core.csproj',
+        'src/DevBridgeRuntime/Coordinator/DevBridge.Coordinator.csproj',
+        'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj',
+        'tests/DevBridgeRuntime.Tests/DevBridgeRuntime.Tests.csproj'
+    )
+    $actual = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $solutionProjectCount = 0
+    foreach ($line in [IO.File]::ReadAllLines($solution)) {
+        if ($line -match '^Project\("\{[^}]+\}"\) = "[^"]+", "([^"]+\.csproj)", "\{[^}]+\}"') {
+            $relative = $Matches[1].Replace('\', '/')
+            $solutionProjectCount++
+            if (-not $actual.Add($relative)) {
+                throw "OFFLINE_SOLUTION_DUPLICATE_PROJECT:$relative"
+            }
+        }
+    }
+
+    # Fail closed if new projects enter the solution or the sole game Mod is
+    # removed/renamed. Never silently turn a full game build into offline PASS.
+    if ($solutionProjectCount -ne 15 -or $actual.Count -ne 15 -or
+        -not $actual.Contains($excluded)) {
+        throw 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    }
+
+    $includedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($relative in $included) {
+        if (-not $includedSet.Add($relative) -or -not $actual.Contains($relative)) {
+            throw "OFFLINE_SOLUTION_MEMBERSHIP_DRIFT:$relative"
+        }
+        $projectPath = Join-Path $root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
+            throw "OFFLINE_TOOLING_PROJECT_MISSING:$relative"
+        }
+        if (([IO.File]::GetAttributes($projectPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "OFFLINE_TOOLING_PROJECT_LINK_FORBIDDEN:$relative"
+        }
+
+        # Even an included project's indirect ProjectReference must not bring
+        # the excluded RimWorld/Unity game project back into the tooling build.
+        [xml]$xml = [IO.File]::ReadAllText($projectPath)
+        $references = @($xml.SelectNodes('//*[local-name()="ProjectReference"]'))
+        foreach ($reference in $references) {
+            $include = [string]$reference.GetAttribute('Include')
+            if ([string]::IsNullOrWhiteSpace($include) -or $include.Contains('$(')) {
+                throw "OFFLINE_TOOLING_REFERENCE_UNRESOLVED:$relative"
+            }
+            $target = [IO.Path]::GetFullPath(
+                (Join-Path (Split-Path -Parent $projectPath) $include))
+            $targetRelative = [IO.Path]::GetRelativePath($root, $target).Replace('\', '/')
+            if (-not $includedSet.Contains($targetRelative) -and
+                -not ($included -contains $targetRelative)) {
+                throw "OFFLINE_TOOLING_REFERENCE_OUTSIDE_CLOSURE:$relative->$targetRelative"
+            }
+        }
+    }
+
+    if ($includedSet.Count -ne 14 -or $actual.Count -ne ($includedSet.Count + 1)) {
+        throw 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    }
+    return $included
+}
+
 function Get-ValidationProofStageDefinition {
     param(
         [Parameter(Mandatory = $true)][string]$StageId
     )
 
     switch ($StageId) {
+        'offline-tooling-build' {
+            # A build must never be reused by input-hash proof: its obj/bin
+            # outputs and the checked-in NuGet lockfile are mutable state.
+            return [pscustomobject]@{
+                StageId = $StageId
+                Reusable = $false
+                Toolchain = 'dotnet'
+                SourceRoots = @('src', 'tests')
+                ExtraRoots = @()
+                RequiredFiles = @(
+                    'RimLiaison.sln',
+                    'global.json',
+                    'scripts/ci-validate.ps1',
+                    'scripts/validation-proof.ps1',
+                    'src/DevBridgeRuntime/BridgeTools/packages.lock.json')
+                NonReusableReason = 'build-artifacts-and-locked-restore'
+            }
+        }
         'rimcontext' {
             return [pscustomobject]@{
                 StageId = $StageId
