@@ -911,6 +911,7 @@ public static class ToolchainPromotionService
         bool runtimeCommitted = false;
         bool promotionCommitted = false;
         bool bootstrapRetired = false;
+        bool firstInstallBootstrap = false;
         string? bootstrapArchivePath = null;
         string promotionPhase = "lock";
         string? promotionTransactionId = null;
@@ -1039,6 +1040,53 @@ public static class ToolchainPromotionService
             }
 
             previous = ReadProductionManifest(manifestPath, out string? manifestError);
+            if (previous is null && bootstrap &&
+                !File.Exists(manifestPath) && !Directory.Exists(manifestPath))
+            {
+                if (!TryResolveInitialProductionDestination(
+                        sourceRoot, out string? initialRuntimeRoot, out string? initialError))
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_FIRST_INSTALL_DESTINATION_INVALID",
+                        initialError ?? "The first-install runtime destination could not be verified.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash,
+                        nextAction: "Configure an exact RimWorld root and canonical DevBridge2 runtime destination in the managed RimDev workspace.");
+                }
+                if (!SamePath(package.DevBridgeRuntimeRoot, initialRuntimeRoot))
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_FIRST_INSTALL_DESTINATION_MISMATCH",
+                        "The qualified package runtime destination does not match the managed first-install configuration.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash);
+                }
+                if (File.Exists(initialRuntimeRoot) || Directory.Exists(initialRuntimeRoot))
+                {
+                    return ToolchainPromotionResult.Blocked(
+                        "BOOTSTRAP_FIRST_INSTALL_DESTINATION_OCCUPIED",
+                        "First installation cannot replace an existing runtime without a verified legacy production manifest.",
+                        package.SourceCommit,
+                        artifactPath,
+                        qualificationHash);
+                }
+
+                firstInstallBootstrap = true;
+                previous = new ProductionToolchainManifest
+                {
+                    SchemaVersion = "rimliaison-production-toolchain/v1",
+                    ProductionState = "INITIAL_BOOTSTRAP",
+                    OwnerProduct = ToolchainPromotionSchemas.OwnerProduct,
+                    RuntimeSubsystem = ToolchainPromotionSchemas.RuntimeSubsystem,
+                    DevBridgeRuntimeRoot = initialRuntimeRoot,
+                    RuntimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract,
+                    RimLiaisonExecutablePath = Path.Combine(
+                        Path.GetDirectoryName(Path.GetFullPath(manifestPath))!,
+                        "toolchains", "cli", "rimliaison.exe")
+                };
+            }
             if (previous is null)
             {
                 return ToolchainPromotionResult.Blocked(
@@ -1048,7 +1096,7 @@ public static class ToolchainPromotionService
                     artifactPath,
                     qualificationHash,
                     nextAction: bootstrap
-                        ? "Restore the bounded legacy production manifest before running the one-time bootstrap."
+                        ? "Restore a verified legacy manifest or configure the explicit first-install destination."
                         : null);
             }
             if (bootstrap &&
@@ -1118,7 +1166,9 @@ public static class ToolchainPromotionService
                     "Use ordinary qualification promote for an existing modern production identity.");
             }
             string previousProductionHealth = bootstrap
-                ? "NO_PRODUCTION (legacy baseline pending bootstrap)"
+                ? firstInstallBootstrap
+                    ? "NO_PRODUCTION (first installation pending bootstrap)"
+                    : "NO_PRODUCTION (legacy baseline pending bootstrap)"
                 : DescribePreviousProductionHealth(previous);
             string previousOwnerProduct = previous.OwnerProduct ?? ToolchainPromotionSchemas.OwnerProduct;
             string previousRuntimeSubsystem = previous.RuntimeSubsystem ?? ToolchainPromotionSchemas.RuntimeSubsystem;
@@ -1474,15 +1524,37 @@ public static class ToolchainPromotionService
                 promotionPhase = "bootstrap-retire";
                 try
                 {
-                    bootstrapArchivePath = RetireLegacyManifest(manifestPath, promotionTransactionId!);
+                    if (firstInstallBootstrap)
+                    {
+                        // The absent manifest is reserved exclusively; no existing
+                        // production identity may be overwritten by a first install.
+                        var marker = new ProductionToolchainManifest
+                        {
+                            SchemaVersion = "rimliaison-production-toolchain/v1",
+                            ProductionState = "NO_PRODUCTION",
+                            BootstrapStatus = "BOOTSTRAP_IN_PROGRESS",
+                            DevBridgeRuntimeRoot = previous.DevBridgeRuntimeRoot,
+                            RuntimeProtocolContract = previous.RuntimeProtocolContract
+                        };
+                        using FileStream markerStream = new(
+                            manifestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                        byte[] markerBytes = Encoding.UTF8.GetBytes(
+                            JsonSerializer.Serialize(marker, WriteOptions));
+                        markerStream.Write(markerBytes);
+                        markerStream.Flush(flushToDisk: true);
+                    }
+                    else
+                    {
+                        bootstrapArchivePath = RetireLegacyManifest(manifestPath, promotionTransactionId!);
+                        WriteNoProductionState(
+                            manifestPath,
+                            "BOOTSTRAP_IN_PROGRESS",
+                            null,
+                            null,
+                            bootstrapArchivePath,
+                            previous);
+                    }
                     bootstrapRetired = true;
-                    WriteNoProductionState(
-                        manifestPath,
-                        "BOOTSTRAP_IN_PROGRESS",
-                        null,
-                        null,
-                        bootstrapArchivePath,
-                        previous);
                 }
                 catch (Exception exception) when (
                     exception is IOException or UnauthorizedAccessException)
@@ -1878,7 +1950,7 @@ public static class ToolchainPromotionService
                     exception.Message,
                     bootstrapArchivePath,
                     previous);
-            else
+            else if (!firstInstallBootstrap)
                 TryRestoreProductionManifest(manifestPath, previous);
             transactionEvidence ??= new(
                 promotionPhase,
@@ -2092,6 +2164,81 @@ public static class ToolchainPromotionService
         {
         }
     }
+    // Qualification may build an isolated candidate before the first product is
+    // installed. An existing (even invalid) manifest always remains authoritative.
+    internal static bool TryResolveQualificationDestination(
+        string sourceRoot,
+        string manifestPath,
+        out string? runtimeRoot,
+        out string runtimeProtocolContract,
+        out string? error)
+    {
+        if (File.Exists(manifestPath) || Directory.Exists(manifestPath))
+            return TryReadPromotionDestination(
+                manifestPath, out runtimeRoot, out runtimeProtocolContract, out error);
+
+        runtimeProtocolContract = ToolchainPromotionSchemas.RuntimeProtocolContract;
+        return TryResolveInitialProductionDestination(sourceRoot, out runtimeRoot, out error);
+    }
+
+    // Read-only discovery. Never infer a production destination from a checkout,
+    // installed mod, or unrelated game: the machine-local workspace must name
+    // both the game root and the canonical runtime destination explicitly.
+    internal static bool TryResolveInitialProductionDestination(
+        string sourceRoot,
+        out string? runtimeRoot,
+        out string? error)
+    {
+        runtimeRoot = null;
+        error = null;
+        RimDevWorkspaceDiscovery workspace = RimDevWorkspaceDiscoverer.Discover(null, sourceRoot);
+        if (!workspace.Succeeded || workspace.Configuration is null)
+        {
+            error = workspace.Error ?? "A managed .rimdev/workspace.json is required for first installation.";
+            return false;
+        }
+
+        RimDevWorkspaceConfiguration configuration = workspace.Configuration;
+        if (string.IsNullOrWhiteSpace(configuration.RimWorldRoot) ||
+            string.IsNullOrWhiteSpace(configuration.DevBridgeRuntimeRoot))
+        {
+            error = "First installation requires explicit rimWorldRoot and devBridgeRuntimeRoot in the managed workspace.";
+            return false;
+        }
+        try
+        {
+            string gameRoot = Path.GetFullPath(
+                Path.IsPathRooted(configuration.RimWorldRoot)
+                    ? configuration.RimWorldRoot
+                    : Path.Combine(workspace.RootPath, configuration.RimWorldRoot));
+            string destination = Path.GetFullPath(
+                Path.IsPathRooted(configuration.DevBridgeRuntimeRoot)
+                    ? configuration.DevBridgeRuntimeRoot
+                    : Path.Combine(workspace.RootPath, configuration.DevBridgeRuntimeRoot));
+            string modsRoot = Path.Combine(gameRoot, "Mods");
+            string canonicalRuntime = Path.GetFullPath(Path.Combine(modsRoot, "DevBridge2"));
+            if (!Directory.Exists(gameRoot) || !Directory.Exists(modsRoot))
+            {
+                error = "The configured RimWorld installation or Mods directory is missing.";
+                return false;
+            }
+            if (!string.Equals(destination, canonicalRuntime, StringComparison.OrdinalIgnoreCase) ||
+                File.Exists(destination))
+            {
+                error = "The configured first-install runtime destination is not the canonical RimWorld Mods/DevBridge2 directory.";
+                return false;
+            }
+            runtimeRoot = destination;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+                                          NotSupportedException or UnauthorizedAccessException)
+        {
+            error = "The managed first-install runtime destination is invalid: " + exception.Message;
+            return false;
+        }
+    }
+
     internal static bool TryReadPromotionDestination(
         string manifestPath,
         out string? runtimeRoot,
