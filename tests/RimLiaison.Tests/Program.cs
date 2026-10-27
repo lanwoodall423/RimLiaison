@@ -135,7 +135,7 @@ internal static class Program
         ("missing Assembly-CSharp fails before build", ToolchainCandidateTests.MissingAssemblyCSharpFailsBeforeBuild),
         ("missing Unity CoreModule fails before build", ToolchainCandidateTests.MissingUnityCoreModuleFailsBeforeBuild),
         ("wrong RimWorld root fails clearly", ToolchainCandidateTests.WrongConfiguredRootFailsClearly),
-        ("current RimWorld installation resolves managed directory", ToolchainCandidateTests.CurrentRimWorldInstallationResolvesToManagedDirectory),
+        ("configured RimWorld fixture resolves managed directory", ToolchainCandidateTests.ConfiguredRimWorldFixtureResolvesToManagedDirectory),
         ("candidate contract has no external release workflow", ToolchainCandidateTests.CandidateContractDoesNotExposeExternalReleaseWorkflow),
         ("candidate evidence leaves project unimplicated", ToolchainCandidateTests.CandidateEvidenceMarksProjectUnimplicated),
         ("CLI materializer builds clean source-only checkout", ToolchainCandidateTests.CliMaterializerBuildsCleanSourceOnlyCheckout),

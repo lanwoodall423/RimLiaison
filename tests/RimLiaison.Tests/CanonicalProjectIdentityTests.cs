@@ -138,11 +138,60 @@ internal static class CanonicalProjectIdentityTests
 
     public static void ObservabilityRecordsCanonicalIdentity()
     {
-        ObservabilityProjectIdentity identity = ObservabilityProjectIdentityResolver.Resolve(
-            "C:/RimDev/Repos/DeferredRealityFramework",
-            "DeferredRealityFramework");
-        Assert(identity.ModId == "deferred-reality", "observability did not record canonical project identity");
-        Assert(identity.ModName == "Deferred Reality Framework", "observability display name changed");
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimliaison-canonical-observability-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, ".rimdev"));
+            Directory.CreateDirectory(Path.Combine(root, "About"));
+            Directory.CreateDirectory(Path.Combine(root, "Source"));
+            File.WriteAllText(
+                Path.Combine(root, "Source", "DeferredRealityFramework.csproj"),
+                "<Project><PropertyGroup><AssemblyName>DeferredRealityFramework</AssemblyName></PropertyGroup></Project>");
+            File.WriteAllText(
+                Path.Combine(root, "About", "About.xml"),
+                "<ModMetaData><name>Deferred Reality Framework</name><packageId>lan.deferredreality.framework</packageId></ModMetaData>");
+            var stack = new RimDevStackManifest
+            {
+                Project = "DeferredRealityFramework",
+                DevBridgeProject = "deferred-reality",
+                Catalog = "TestCatalog/rimtest.catalog.json",
+                RimBridge = "disabled",
+                Workload = "production",
+                ProjectType = "rimworld-content-mod",
+                PackageId = "lan.deferredreality.framework",
+                SourceProject = "Source/DeferredRealityFramework.csproj",
+                Configuration = "Release",
+                ExpectedAssembly = "DeferredRealityFramework.dll",
+                DeploymentTarget = "1.6/Assemblies/DeferredRealityFramework.dll",
+                TestRecipe = "quicktest-smoke",
+                RuntimeFolder = "DeferredRealityFramework",
+                RuntimePackage = System.Text.Json.JsonSerializer.SerializeToElement(new
+                {
+                    sourceRoot = ".",
+                    include = new[] { "About/**", "1.*/**" },
+                    exclude = new[] { ".rimdev/**", "Source/**", "bin/**", "obj/**" }
+                })
+            };
+            File.WriteAllText(
+                Path.Combine(root, ".rimdev", "stack.json"), StackManifestResolver.Serialize(stack));
+            StackManifestResolution resolved = StackManifestResolver.Discover(root);
+            Assert(resolved.Manifest is not null,
+                "test-owned production metadata did not pass validation: " + resolved.ErrorCode);
+            ObservabilityProjectIdentity identity = ObservabilityProjectIdentityResolver.Resolve(
+                root, "DeferredRealityFramework");
+            Assert(identity.ModId == "deferred-reality",
+                "observability did not record canonical project identity");
+            Assert(identity.ModName == "Deferred Reality Framework",
+                "observability display name changed");
+            Assert(identity.Source == "stack-manifest",
+                "observability resolved canonical project identity without authoritative metadata");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
     }
 
     private static void AssertCanonical(string displayName, string slug, string expected)
