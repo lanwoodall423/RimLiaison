@@ -60,6 +60,162 @@ internal static class CliDeploymentTests
         }
     }
 
+
+    public static void NativeRimtestRunnerBindsInvocationWorkspaceOnly()
+    {
+        (string root, string runner, string workspace, string alternate) = CreateNativeRunnerFixture();
+        try
+        {
+            NativeRimtestRunner.Dispatch? implicitBinding = NativeRimtestRunner.Prepare(
+                runner, ["dev-check", "--json"], workspace);
+            Assert(implicitBinding is { Allowed: true } &&
+                   implicitBinding.Args.SequenceEqual(["dev-check", workspace, "--json"]) &&
+                   implicitBinding.SourceCommit == new string('a', 40) &&
+                   implicitBinding.CliAssemblySha256?.Length == 64 &&
+                   implicitBinding.RunnerExeSha256?.Length == 64,
+                "native runner did not bind to its invocation workspace and exact package hashes");
+
+            string relative = Path.GetRelativePath(workspace, alternate);
+            NativeRimtestRunner.Dispatch? explicitBinding = NativeRimtestRunner.Prepare(
+                runner, ["dev-check", relative, "--json"], workspace);
+            Assert(explicitBinding is { Allowed: true } &&
+                   explicitBinding.Args.SequenceEqual(["dev-check", alternate, "--json"]),
+                "native runner did not honor a deliberately explicit mod workspace");
+
+            Assert(NativeRimtestRunner.Prepare(
+                       Path.Combine(root, "rimliaison.exe"),
+                       ["qualification", "promote", "--json"], workspace) is null &&
+                   NativeRimtestRunner.Prepare(
+                       Path.Combine(root, "rimtest.cmd"),
+                       ["dev-check", "--json"], workspace) is null,
+                "ordinary production CLI or legacy batch alias was re-routed as a native runner");
+
+            foreach (string[] forbidden in new[]
+                     {
+                         new[] { "qualification", "promote", "--json" },
+                         new[] { "dev-check", "--experimental", "--json" },
+                         new[] { "dev-check", workspace, alternate, "--json" },
+                         new[] { "dev-check", "--json", "--json" },
+                         new[] { "dev-check" },
+                         new[] { "dev-check", "--json", "--help" },
+                     })
+            {
+                NativeRimtestRunner.Dispatch? blocked = NativeRimtestRunner.Prepare(
+                    runner, forbidden, workspace);
+                Assert(blocked is { Allowed: false, ErrorCode: "DEV_RUNNER_COMMAND_NOT_ALLOWED" },
+                    "native dev runner admitted a non-dev-check or ambiguous invocation");
+            }
+
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], root) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_WORKSPACE_INVALID" },
+                "runner silently selected its own package/source directory as a mod workspace");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void NativeRimtestRunnerRejectsMissingOrChangedPackage()
+    {
+        (string root, string runner, string workspace, _) = CreateNativeRunnerFixture();
+        try
+        {
+            NativeRimtestRunner.Dispatch? valid = NativeRimtestRunner.Prepare(
+                runner, ["dev-check", "--json"], workspace);
+            Assert(valid is { Allowed: true }, "controlled native package fixture did not verify");
+
+            string metadata = Path.Combine(Path.GetDirectoryName(runner)!, "rimtest-dev-runner.json");
+            string assembly = Path.Combine(Path.GetDirectoryName(runner)!, "rimliaison.dll");
+            string originalManifest = File.ReadAllText(metadata);
+            string originalExe = File.ReadAllText(runner);
+
+            File.WriteAllText(runner, "tampered native apphost");
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "changed runner executable was treated as verified");
+            File.WriteAllText(runner, originalExe);
+
+            File.WriteAllText(assembly, "tampered CLI assembly");
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "changed CLI assembly was treated as verified");
+            File.WriteAllText(assembly, "fixture CLI assembly");
+
+            File.WriteAllText(metadata, "{ malformed JSON");
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "malformed runner provenance was accepted");
+
+            File.WriteAllText(metadata, originalManifest[..^1] +
+                ",\"sourceCommit\":\"" + new string('b', 40) + "\"}");
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "duplicate manifest key was accepted");
+
+            File.WriteAllText(metadata, originalManifest.Replace(
+                new string('a', 40), new string('A', 40), StringComparison.Ordinal));
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "noncanonical claimed source commit was accepted");
+
+            File.Delete(metadata);
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: false, ErrorCode: "DEV_RUNNER_PROVENANCE_INVALID" },
+                "missing provenance sidecar was accepted");
+
+            File.WriteAllText(metadata, originalManifest);
+            Assert(NativeRimtestRunner.Prepare(runner, ["dev-check", "--json"], workspace) is
+            { Allowed: true },
+                "valid original runner package did not recover after fixture restoration");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static (string Root, string Runner, string Workspace, string Alternate)
+        CreateNativeRunnerFixture()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimtest-runner-fixture-" + Guid.NewGuid().ToString("N"));
+        string package = Path.Combine(root, "package");
+        string workspace = Path.Combine(root, "mod-a");
+        string alternate = Path.Combine(root, "mod-b");
+        Directory.CreateDirectory(package);
+        foreach (string mod in new[] { workspace, alternate })
+        {
+            Directory.CreateDirectory(Path.Combine(mod, "About"));
+            File.WriteAllText(
+                Path.Combine(mod, "About", "About.xml"),
+                "<ModMetaData><name>Fixture</name><packageId>fixture.mod</packageId></ModMetaData>");
+        }
+
+        string runner = Path.Combine(package, "rimtest.exe");
+        string assembly = Path.Combine(package, "rimliaison.dll");
+        File.WriteAllText(runner, "fixture native apphost");
+        File.WriteAllText(assembly, "fixture CLI assembly");
+
+        static string Hash(string path)
+        {
+            using FileStream input = File.OpenRead(path);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input))
+                .ToLowerInvariant();
+        }
+
+        File.WriteAllText(
+            Path.Combine(package, "rimtest-dev-runner.json"),
+            JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimtest-dev-runner/v1",
+                sourceCommit = new string('a', 40),
+                runnerExeSha256 = Hash(runner),
+                cliAssemblySha256 = Hash(assembly),
+            }));
+        return (root, runner, workspace, alternate);
+    }
+
     public static void SelfCheckReturnsStructuredReadyJson()
     {
         using var stdout = new StringWriter();
