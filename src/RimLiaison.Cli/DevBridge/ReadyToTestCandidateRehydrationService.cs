@@ -156,7 +156,7 @@ public sealed class ReadyToTestCandidateRehydrationService
                         return new ReadyToTestCandidateResult(true, null, null, finalManifestPath, raced.Manifest, null);
                     return Failure("FROZEN_CANDIDATE_REHYDRATION_CONFLICT", "The durable candidate identity was concurrently claimed by different content.");
                 }
-                }
+            }
             finally
             {
                 if (Directory.Exists(temporaryBase))
