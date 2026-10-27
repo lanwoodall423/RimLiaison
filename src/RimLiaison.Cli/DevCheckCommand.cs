@@ -889,7 +889,7 @@ internal static class DevCheckCommand
     {
         if (string.IsNullOrWhiteSpace(log))
             yield break;
-        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(Path.GetFileName)];
+        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(path => Path.GetFileName(path) ?? string.Empty)];
         foreach (string line in log.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
         {
             bool error = line.Contains("error", StringComparison.OrdinalIgnoreCase) ||
