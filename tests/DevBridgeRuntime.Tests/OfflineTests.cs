@@ -130,6 +130,7 @@ internal static partial class OfflineTests
         Run("RimBridge GABP framing rejects malformed messages", TestRimBridgeProtocolFramingFailures);
         Run("RimBridge companion authentication failures stay bounded", TestRimBridgeProtocolCompanionFailures);
         Run("DevBridge core mod remains SDK-free", TestCoreModRemainsSdkFree);
+        Run("game-backed Mod resolves real RimWorld assemblies with explicit preflight", TestRealRimWorldManagedAssemblyPreflightContract);
         Run("BridgeTools companion project and publish contract", TestBridgeToolsPublishContract);
         Run("BridgeTools publishing refreshes stale deployment output", TestBridgeToolsPublishRefreshesStaleDll);
         Run("assembly verifier requires authenticated tool metadata", TestAssemblyVerifierRequiresAuthenticatedToolMetadata);
