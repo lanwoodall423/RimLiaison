@@ -158,6 +158,8 @@ internal static class Program
         ("net472 reference assemblies dependency is pinned and private", UnifiedRuntimeOwnershipTests.Net472ReferenceAssembliesDependencyIsPinnedAndPrivate),
         ("isolated runtime build avoids executing CLI output", UnifiedRuntimeOwnershipTests.IsolatedRuntimeBuildAvoidsExecutingCliOutput),
         ("complete CLI closure mutation fails", CliDeploymentTests.CompleteClosurePassesAndMutationFails),
+        ("native rimtest runner binds exact mod workspace", CliDeploymentTests.NativeRimtestRunnerBindsInvocationWorkspaceOnly),
+        ("native rimtest runner rejects corrupted provenance", CliDeploymentTests.NativeRimtestRunnerRejectsMissingOrChangedPackage),
         ("self-check returns structured ready JSON", CliDeploymentTests.SelfCheckReturnsStructuredReadyJson),
         ("published self-check is read-only and workspace-independent", CliDeploymentTests.PublishedSelfCheckIsReadOnlyAndWorkspaceIndependent),
         ("published self-check works in read-only directory", CliDeploymentTests.PublishedSelfCheckWorksInReadOnlyDirectory),

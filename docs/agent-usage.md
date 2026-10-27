@@ -46,6 +46,46 @@ Changing a mod does not require RimLiaison qualification or promotion. Promotion
 when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
 production toolchain.
 
+## Native rimtest development-runner track (RL-RIMTEST-01A)
+
+The source-only native runner entrypoint is separate from the promoted production toolchain and
+from the legacy `rimtest.cmd` batch alias (which still forwards through `rimliaison.cmd`).
+ProjectNexus runs declared executables directly on Windows: a batch alias or a development
+checkout that is not present on the executor's PATH does **not** make `rimtest` available.
+
+A **separately published** native apphost named `rimtest.exe` uses a restricted entrypoint:
+
+- Only `rimtest.exe dev-check [<workspace>] --json` is admitted. No qualification, promotion,
+  experimental, arbitrary-command or self-install invocation is available through this native
+  name. A rejected command produces `rimtest-dev-runner/v1` blocked JSON and nonzero exit.
+- With no workspace argument, the mod source is bound to the **invoking process working
+  directory**, including a ProjectNexus-managed mod worktree. It does not default to the
+  RimLiaison source checkout or the runner's own installation directory. The target must contain
+  `About/About.xml`. A deliberate explicit workspace is resolved against the invocation cwd.
+- Before invoking `dev-check`, the native runner requires a local sidecar
+  `rimtest-dev-runner.json` in its own directory, with exactly four properties:
+  `schemaVersion: "rimtest-dev-runner/v1"`, a lowercase 40-hex `sourceCommit`, and lowercase
+  64-hex `runnerExeSha256` and `cliAssemblySha256` matching the actual `rimtest.exe` and
+  sibling `rimliaison.dll` file bytes. Missing, malformed, duplicated, symlinked or mutated
+  provenance blocks the normal managed entrypoint; the inspected identities are written to
+  standard error. These two hashes check **the native apphost and CLI assembly bytes only**;
+  they do not prove dependency-closure integrity, the true Git source revision or resistance
+  to intentional local binary replacement. The later packager must validate and bind the
+  real clean source commit, all dependency bytes and the trusted Windows installation before
+  treating a runner as qualified for ProjectNexus execution.
+- The ordinary `rimliaison.exe` and `dotnet rimliaison.dll` entrypoints remain unchanged;
+  production routing still requires its own qualified and promoted manifest.
+
+**Current delivery boundary:** This 01A source candidate defines the restricted native dispatch
+and deterministic fixture tests only. It does not publish, install, register PATH or qualify a
+native `rimtest.exe` and must **not** be treated as an available ProjectNexus check yet. Next:
+a separately reviewed, reproducible .NET 8 native apphost packager with source/provenance
+verification, safe account-local versioned deployment and a direct Windows process-spawn test.
+Then requalify the installed Waylith-capable CLI, the exact NatureTiles source workspace and
+the independent ProjectNexus `validation.rimtest` check under its own trust/review gates.
+Never hand-copy a detached candidate binary into production or relabel a manual test as a native
+ProjectNexus PASS. RimWorld 1.6/1.7 runtime and cleanup evidence remain separately required.
+
 ## Explicit release and qualification workflows
 
 RimLiaison remains available for explicitly documented release, qualification, promotion, and other
