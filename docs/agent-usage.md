@@ -46,6 +46,19 @@ Changing a mod does not require RimLiaison qualification or promotion. Promotion
 when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
 production toolchain.
 
+## Portable recipe resolver contract tests
+
+The built-in ecosystem recipe-resolution tests use short-lived synthetic project-owned
+`.rimdev/recipes/*.json` fixtures. They verify exact canonical project owners,
+recipe IDs, path conventions, schema and SHA-256 without relying on
+`C:\\RimDev\\Repos` or any other developer-private external checkout.
+A missing external source/recipe is explicitly tested as `PROJECT_RECIPE_NOT_FOUND`,
+not treated as a successful real-world recipe. The synthetic tests do **not**
+prove that DeferredRealityFramework, Frontier, InsightCanvas or KnowledgeFramework
+is installed, that its actual recipe exists, or that any external mod will load.
+Real external-project recipe availability, version identity and live RimWorld
+qualification remain separate checks requiring genuine source/artifacts.
+
 ## Explicit release and qualification workflows
 
 RimLiaison remains available for explicitly documented release, qualification, promotion, and other
