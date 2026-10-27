@@ -15,10 +15,14 @@
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
     <RimBridgeSdkPath Condition="'$(RimBridgeSdkPath)' == ''"></RimBridgeSdkPath>
     <OutputPath>$(DevBridgeRuntimePackageRoot)1.6\BridgeTools\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Keep the checked-in net472 package lock graph explicit on Windows and Linux.
+         This is a compile-time reference pack, never a shipped runtime dependency. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="RimBridgeServer.Sdk" Condition="'$(RimBridgeSdkPath)' != '' and Exists('$(RimBridgeSdkPath)')">
       <HintPath>$(RimBridgeSdkPath)</HintPath>
       <Private>false</Private>

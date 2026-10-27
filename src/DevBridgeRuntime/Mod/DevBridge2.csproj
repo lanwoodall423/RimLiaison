@@ -14,7 +14,6 @@
     <Deterministic>true</Deterministic>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == ''">$(RIMWORLD_MANAGED_DIR)</RimWorldManagedDir>
     <OutputPath Condition="'$(OutputPath)' == ''">$(DevBridgeRuntimePackageRoot)1.6\Assemblies\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
@@ -35,4 +34,22 @@
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+  <!-- This gate is for the game-backed Mod project only. Offline tooling
+       projects do not require RimWorld game assemblies to build or test. -->
+  <Target Name="ValidateRealRimWorldManagedAssemblies"
+          BeforeTargets="ResolveReferences"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Code="RLW0001"
+           Condition="'$(RimWorldManagedDir)' == ''"
+           Text="RimWorld managed assemblies are not configured. Set /p:RimWorldManagedDir, RIMWORLD_MANAGED_DIR, RIMWORLD_MANAGED_PATH, RIMWORLD_MANAGED_ASSEMBLIES or RIMWORLD_ROOT to the real installed game." />
+    <Error Code="RLW0002"
+           Condition="'$(RimWorldManagedDir)' != '' and !Exists('$(RimWorldManagedDir)')"
+           Text="The configured RimWorld managed assembly directory does not exist. Verify the actual installed RimWorld path." />
+    <Error Code="RLW0003"
+           Condition="'$(RimWorldManagedDir)' != '' and Exists('$(RimWorldManagedDir)') and !Exists('$(RimWorldManagedDir)\Assembly-CSharp.dll')"
+           Text="The installed RimWorld Assembly-CSharp.dll is missing from the managed directory. A real game installation is required." />
+    <Error Code="RLW0004"
+           Condition="'$(RimWorldManagedDir)' != '' and Exists('$(RimWorldManagedDir)') and !Exists('$(RimWorldManagedDir)\UnityEngine.CoreModule.dll')"
+           Text="The installed RimWorld UnityEngine.CoreModule.dll is missing from the managed directory. A real game installation is required." />
+  </Target>
 </Project>
