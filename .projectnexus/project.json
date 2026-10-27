@@ -13,7 +13,7 @@
           "executable": "dotnet",
           "args": [
             "build",
-            "RimLiaison.sln",
+            "RimLiaison.Offline.slnf",
             "--configuration",
             "Release",
             "--nologo"

@@ -77,20 +77,71 @@ internal static class ToolchainCandidateTests
         Assert(result.NextAction is not null, "stale root must provide an actionable next action");
     }
 
-    public static void CurrentRimWorldInstallationResolvesToManagedDirectory()
+    public static void ConfiguredRimWorldFixtureResolvesToManagedDirectory()
     {
-        const string root = @"C:\Games\Steam\steamapps\common\RimWorld";
-        if (!Directory.Exists(root))
-        {
-            return;
-        }
-
-        using TestEnvironment environment = TestEnvironment.Create(root);
+        using TestEnvironment environment = TestEnvironment.Create();
         RimWorldManagedAssemblyResolution result = environment.Resolve(environment.DevBridgeRoot);
 
-        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "current RimWorld installation did not resolve");
-        Assert(result.RimWorldRoot == Path.GetFullPath(root), "current RimWorld root resolved incorrectly");
-        Assert(result.ManagedDirectory == Path.Combine(Path.GetFullPath(root), "RimWorldWin64_Data", "Managed"), "current managed directory resolved incorrectly");
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "configured RimWorld fixture did not resolve");
+        Assert(result.RimWorldRoot == Path.GetFullPath(environment.RimWorldRoot),
+            "configured RimWorld root resolved incorrectly");
+        Assert(result.ManagedDirectory == environment.ManagedDirectory &&
+               Directory.Exists(environment.ManagedDirectory) &&
+               File.Exists(Path.Combine(environment.ManagedDirectory, "Assembly-CSharp.dll")) &&
+               File.Exists(Path.Combine(environment.ManagedDirectory, "UnityEngine.CoreModule.dll")),
+            "configured managed directory or required assembly fixtures were not resolved");
+    }
+
+    public static void FirstInstallQualificationResolvesCanonicalDestination()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Directory.CreateDirectory(Path.Combine(environment.RimWorldRoot, "Mods"));
+        string manifest = Path.Combine(environment.Root, "missing-production-toolchain.json");
+        var result = environment.ResolveQualificationDestination(manifest);
+
+        Assert(result.Ok, result.Error ?? "the clean first-install destination was rejected");
+        Assert(result.RuntimeRoot == Path.Combine(environment.RimWorldRoot, "Mods", "DevBridge2"),
+            "first-install runtime destination diverged from the configured canonical Mods root");
+        Assert(result.Contract == ToolchainPromotionSchemas.RuntimeProtocolContract,
+            "first-install qualification selected a different runtime protocol");
+        Assert(!File.Exists(manifest), "qualification wrote a production toolchain manifest");
+    }
+
+    public static void FirstInstallQualificationRejectsInvalidExistingManifest()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Directory.CreateDirectory(Path.Combine(environment.RimWorldRoot, "Mods"));
+        string manifest = Path.Combine(environment.Root, "production-toolchain.json");
+        File.WriteAllText(manifest, "{invalid JSON");
+        var result = environment.ResolveQualificationDestination(manifest);
+
+        Assert(!result.Ok, "invalid existing production manifest was treated as first installation");
+        Assert(File.ReadAllText(manifest) == "{invalid JSON",
+            "qualification changed an invalid installed manifest");
+    }
+
+    public static void FirstInstallQualificationRejectsNoncanonicalDestination()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Directory.CreateDirectory(Path.Combine(environment.RimWorldRoot, "Mods"));
+        environment.WriteWorkspace(environment.RimWorldRoot,
+            Path.Combine(environment.Root, "outside", "DevBridge2"));
+        var result = environment.ResolveQualificationDestination(
+            Path.Combine(environment.Root, "production-toolchain.json"));
+
+        Assert(!result.Ok && result.Error?.Contains("canonical", StringComparison.OrdinalIgnoreCase) == true,
+            "first-install qualification accepted a destination outside canonical RimWorld Mods");
+    }
+
+    public static void FirstInstallQualificationRequiresExplicitDestination()
+    {
+        using TestEnvironment environment = TestEnvironment.Create();
+        Directory.CreateDirectory(Path.Combine(environment.RimWorldRoot, "Mods"));
+        environment.WriteWorkspace(environment.RimWorldRoot, "");
+        var result = environment.ResolveQualificationDestination(
+            Path.Combine(environment.Root, "production-toolchain.json"));
+
+        Assert(!result.Ok, "qualification inferred an unconfigured production destination");
     }
 
     public static void CandidateContractDoesNotExposeExternalReleaseWorkflow()
@@ -530,6 +581,24 @@ internal static class ToolchainCandidateTests
             return environment;
         }
 
+        public (bool Ok, string? RuntimeRoot, string Contract, string? Error)
+            ResolveQualificationDestination(string manifest)
+        {
+            string? previous = Environment.GetEnvironmentVariable("RIMDEV_ROOT");
+            Environment.SetEnvironmentVariable("RIMDEV_ROOT", Root);
+            try
+            {
+                bool ok = ToolchainPromotionService.TryResolveQualificationDestination(
+                    ProjectRoot, manifest,
+                    out string? runtimeRoot, out string contract, out string? error);
+                return (ok, runtimeRoot, contract, error);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("RIMDEV_ROOT", previous);
+            }
+        }
+
         public RimWorldManagedAssemblyResolution Resolve(string devBridgeRoot)
         {
             string? previous = Environment.GetEnvironmentVariable("RIMDEV_ROOT");
@@ -544,7 +613,7 @@ internal static class ToolchainCandidateTests
             }
         }
 
-        public void WriteWorkspace(string rimWorldRoot)
+        public void WriteWorkspace(string rimWorldRoot, string? runtimeRootOverride = null)
         {
             File.WriteAllText(
                 WorkspacePath,
@@ -552,6 +621,8 @@ internal static class ToolchainCandidateTests
                 {
                     schemaVersion = RimDevSchemas.Workspace,
                     rimWorldRoot,
+                    devBridgeRuntimeRoot = runtimeRootOverride ??
+                        Path.Combine(rimWorldRoot, "Mods", "DevBridge2"),
                     activeModsRoot = Path.Combine(rimWorldRoot, "Mods"),
                     repositories = new[] { new { path = "Project" } },
                     packageMappings = new { }
