@@ -1,0 +1,21 @@
+{
+  "solution": {
+    "path": "RimLiaison.sln",
+    "projects": [
+      "src\\RimLiaison.Cli\\RimLiaison.Cli.csproj",
+      "src\\RimLiaison.Desktop\\RimLiaison.Desktop.csproj",
+      "tests\\RimLiaison.Tests\\RimLiaison.Tests.csproj",
+      "src\\RimContext.Core\\RimContext.Core.csproj",
+      "src\\RimContext.Cli\\RimContext.Cli.csproj",
+      "tests\\RimContext.Tests\\RimContext.Tests.csproj",
+      "src\\RimError.Core\\RimError.Core.csproj",
+      "src\\RimError.Cli\\RimError.Cli.csproj",
+      "tests\\RimError.Core.Tests\\RimError.Core.Tests.csproj",
+      "src\\RimDev.Contracts\\RimDev.Contracts.csproj",
+      "src\\DevBridgeRuntime\\Coordinator.Core\\DevBridge.Coordinator.Core.csproj",
+      "src\\DevBridgeRuntime\\Coordinator\\DevBridge.Coordinator.csproj",
+      "src\\DevBridgeRuntime\\BridgeTools\\DevBridge2.BridgeTools.csproj",
+      "tests\\DevBridgeRuntime.Tests\\DevBridgeRuntime.Tests.csproj"
+    ]
+  }
+}
