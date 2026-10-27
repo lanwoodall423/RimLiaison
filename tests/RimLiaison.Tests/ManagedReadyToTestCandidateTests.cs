@@ -598,11 +598,19 @@ internal static class ManagedReadyToTestCandidateTests
                 .ToArray();
             Manifest = new ReadyToTestCandidateManifest
             {
-                CandidateId = Path.GetFileName(candidate), Project = "fixture", CanonicalProjectId = "fixture",
-                PackageId = "lan.fixture", SourceRepositoryRoot = RepositoryRoot, SourceFingerprint = SourceFingerprint,
-                StagedRuntimeRoot = RuntimeRoot, PackageSha256 = ReadyToTestCandidateVerifier.ComputePackageHash(entries),
-                RequiredRuntimeDependencies = ["Core"], BuildEvidenceIdentity = "candidate-build:test",
-                BuildStatus = "PASS", StaticValidationIdentity = "runtime-package:test", StaticValidationStatus = "PASS",
+                CandidateId = Path.GetFileName(candidate),
+                Project = "fixture",
+                CanonicalProjectId = "fixture",
+                PackageId = "lan.fixture",
+                SourceRepositoryRoot = RepositoryRoot,
+                SourceFingerprint = SourceFingerprint,
+                StagedRuntimeRoot = RuntimeRoot,
+                PackageSha256 = ReadyToTestCandidateVerifier.ComputePackageHash(entries),
+                RequiredRuntimeDependencies = ["Core"],
+                BuildEvidenceIdentity = "candidate-build:test",
+                BuildStatus = "PASS",
+                StaticValidationIdentity = "runtime-package:test",
+                StaticValidationStatus = "PASS",
                 CreatedUtc = DateTimeOffset.UtcNow.ToString("O")
             };
             string manifestPath = Path.Combine(candidate, "candidate.json");
@@ -615,62 +623,69 @@ internal static class ManagedReadyToTestCandidateTests
             {
                 BridgeOptions = new DevBridgeAdapterOptions
                 {
-                    CommandPath = Path.Combine(RepositoryRoot, "DevBridge.cmd"), RootPath = RepositoryRoot,
+                    CommandPath = Path.Combine(RepositoryRoot, "DevBridge.cmd"),
+                    RootPath = RepositoryRoot,
                     SourceRootPath = RepositoryRoot
                 },
-                DeploymentRoot = ManagedModsRoot, WorkflowId = "candidate-test",
-                Timeout = TimeSpan.FromSeconds(5), MaxStdoutBytes = 65536, MaxStderrBytes = 4096
+                DeploymentRoot = ManagedModsRoot,
+                WorkflowId = "candidate-test",
+                Timeout = TimeSpan.FromSeconds(5),
+                MaxStdoutBytes = 65536,
+                MaxStderrBytes = 4096
             });
         public InternalDevelopmentTransactionService Transaction(RecordingTransport transport) =>
             new(transport, new DevBridgeModDevelopmentAdapterOptions
             {
-                RootPath = RepositoryRoot, DeploymentRoot = ManagedModsRoot,
-                Timeout = TimeSpan.FromSeconds(5), MaxStdoutBytes = 65536, MaxStderrBytes = 4096
+                RootPath = RepositoryRoot,
+                DeploymentRoot = ManagedModsRoot,
+                Timeout = TimeSpan.FromSeconds(5),
+                MaxStdoutBytes = 65536,
+                MaxStderrBytes = 4096
             });
 
         public DevBridgeProcessResult RuntimeHandler(DevBridgeProcessRequest request, CancellationToken _)
         {
-                if (request.Arguments.Contains("devbridge/verify_loaded_assembly"))
-                {
-                    string expectedHash = AssemblyHash();
-                    string expectedMvid = AssemblyMvid();
-                    bool loaded = GenericAssemblyVerification;
-                    bool unique = loaded;
-                    bool backingFileReadable = GenericAssemblyBackingFileReadable;
-                    bool hashMatches = backingFileReadable && loaded && !GenericAssemblyVerificationMismatch;
-                    bool mvidMatches = loaded && !GenericAssemblyMvidMismatch;
-                    bool verified = loaded && (backingFileReadable ? hashMatches && mvidMatches : mvidMatches);
-                    string returnedHash = hashMatches ? expectedHash : new string('0', 64);
-                    string returnedHashJson = backingFileReadable ? "\"" + returnedHash + "\"" : "null";
-                    string errorCode = !loaded
-                        ? "\"TARGET_ASSEMBLY_NOT_LOADED\""
-                        : verified ? "null"
-                        : backingFileReadable && !hashMatches || !mvidMatches
-                            ? "\"TARGET_ASSEMBLY_IDENTITY_MISMATCH\""
-                            : "\"TARGET_ASSEMBLY_EVIDENCE_UNAVAILABLE\"";
-                    string payload = "{\"success\":" + verified.ToString().ToLowerInvariant() +
-                        ",\"loaded\":" + loaded.ToString().ToLowerInvariant() +
-                        ",\"uniqueMatch\":" + unique.ToString().ToLowerInvariant() +
-                        ",\"assemblyName\":\"Fixture\",\"assemblyFullName\":\"Fixture, Version=1.0.0.0\"," +
-                        "\"moduleName\":\"Fixture.dll\",\"moduleFullyQualifiedName\":\"Fixture.dll\"," +
-                        "\"location\":" + (backingFileReadable ? "\"" + RuntimeRoot.Replace("\\", "\\\\") +
-                            "\\\\1.6\\\\Assemblies\\\\Fixture.dll\"" : "null") +
-                        ",\"fileName\":" + (backingFileReadable ? "\"Fixture.dll\"" : "null") +
-                        ",\"sha256\":" + returnedHashJson + ",\"runtimeSha256\":" + returnedHashJson +
-                        ",\"expectedSha256\":\"" + expectedHash + "\"" +
-                        ",\"hashMatches\":" + hashMatches.ToString().ToLowerInvariant() +
-                        ",\"mvid\":\"" + expectedMvid + "\",\"loadedMvid\":\"" + expectedMvid +
-                        "\",\"expectedMvid\":\"" + expectedMvid + "\"" +
-                        ",\"mvidMatches\":" + mvidMatches.ToString().ToLowerInvariant() +
-                        ",\"backingFileReadable\":" + backingFileReadable.ToString().ToLowerInvariant() +
-                        ",\"verificationMethod\":" + (verified ? "\"" +
-                            (backingFileReadable ? "sha256+mvid" : "mvid") + "\"" : "\"none\"") +
-                        ",\"errorCode\":" + errorCode +
-                        ",\"error\":" + (verified ? "null" : "\"assembly identity mismatch or unavailable\"") + "}";
-                    return Result(
-                        "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":" +
-                        payload + "},\"provenance\":{\"generation\":2}}");
-                }
+            if (request.Arguments.Contains("devbridge/verify_loaded_assembly"))
+            {
+                string expectedHash = AssemblyHash();
+                string expectedMvid = AssemblyMvid();
+                bool loaded = GenericAssemblyVerification;
+                bool unique = loaded;
+                bool backingFileReadable = GenericAssemblyBackingFileReadable;
+                bool hashMatches = backingFileReadable && loaded && !GenericAssemblyVerificationMismatch;
+                bool mvidMatches = loaded && !GenericAssemblyMvidMismatch;
+                bool verified = loaded && (backingFileReadable ? hashMatches && mvidMatches : mvidMatches);
+                string returnedHash = hashMatches ? expectedHash : new string('0', 64);
+                string returnedHashJson = backingFileReadable ? "\"" + returnedHash + "\"" : "null";
+                string errorCode = !loaded
+                    ? "\"TARGET_ASSEMBLY_NOT_LOADED\""
+                    : verified ? "null"
+                    : backingFileReadable && !hashMatches || !mvidMatches
+                        ? "\"TARGET_ASSEMBLY_IDENTITY_MISMATCH\""
+                        : "\"TARGET_ASSEMBLY_EVIDENCE_UNAVAILABLE\"";
+                string payload = "{\"success\":" + verified.ToString().ToLowerInvariant() +
+                    ",\"loaded\":" + loaded.ToString().ToLowerInvariant() +
+                    ",\"uniqueMatch\":" + unique.ToString().ToLowerInvariant() +
+                    ",\"assemblyName\":\"Fixture\",\"assemblyFullName\":\"Fixture, Version=1.0.0.0\"," +
+                    "\"moduleName\":\"Fixture.dll\",\"moduleFullyQualifiedName\":\"Fixture.dll\"," +
+                    "\"location\":" + (backingFileReadable ? "\"" + RuntimeRoot.Replace("\\", "\\\\") +
+                        "\\\\1.6\\\\Assemblies\\\\Fixture.dll\"" : "null") +
+                    ",\"fileName\":" + (backingFileReadable ? "\"Fixture.dll\"" : "null") +
+                    ",\"sha256\":" + returnedHashJson + ",\"runtimeSha256\":" + returnedHashJson +
+                    ",\"expectedSha256\":\"" + expectedHash + "\"" +
+                    ",\"hashMatches\":" + hashMatches.ToString().ToLowerInvariant() +
+                    ",\"mvid\":\"" + expectedMvid + "\",\"loadedMvid\":\"" + expectedMvid +
+                    "\",\"expectedMvid\":\"" + expectedMvid + "\"" +
+                    ",\"mvidMatches\":" + mvidMatches.ToString().ToLowerInvariant() +
+                    ",\"backingFileReadable\":" + backingFileReadable.ToString().ToLowerInvariant() +
+                    ",\"verificationMethod\":" + (verified ? "\"" +
+                        (backingFileReadable ? "sha256+mvid" : "mvid") + "\"" : "\"none\"") +
+                    ",\"errorCode\":" + errorCode +
+                    ",\"error\":" + (verified ? "null" : "\"assembly identity mismatch or unavailable\"") + "}";
+                return Result(
+                    "{\"success\":true,\"rimBridgeRoute\":{\"success\":true,\"result\":" +
+                    payload + "},\"provenance\":{\"generation\":2}}");
+            }
             if (request.Arguments.Contains("bridge") && request.Arguments.Contains("call"))
             {
                 if (GenericFallback)

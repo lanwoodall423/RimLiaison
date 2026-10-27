@@ -394,7 +394,7 @@ internal static class ToolchainCandidateMaterializer
 
         CliProcessEvidence restore = await RunDotnetAsync(
                 fullSourceRoot,
-                ["restore", project, "--nologo", ..isolatedProperties],
+                ["restore", project, "--nologo", .. isolatedProperties],
                 cancellationToken)
             .ConfigureAwait(false);
         commands.Add(restore);

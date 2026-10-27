@@ -46,6 +46,32 @@ Changing a mod does not require RimLiaison qualification or promotion. Promotion
 when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
 production toolchain.
 
+## Native rimtest package candidates (RL-RIMTEST-01B)
+
+The candidate package service is separate from RimLiaison's promoted production toolchain.
+An account-local candidate is staged under
+`%LOCALAPPDATA%/RimLiaison/Rimtest/CandidatePackages/rimtest-<40-hex-source-commit>`.
+The service uses a read-only Git worktree snapshot before and after package preparation:
+the exact source HEAD must match, the source must remain clean, and a second source
+observation must still match immediately before the non-replacing directory move.
+The caller supplies a `dotnet publish` CLI output directory and its expected clean source
+commit. The service checks for `rimliaison.exe`, `rimliaison.dll`, `rimliaison.deps.json` and
+`rimliaison.runtimeconfig.json`, copies published dependencies without following links,
+and renames the copied apphost to `rimtest.exe` without shipping the unrestricted
+`rimliaison.exe`. It generates the four-field `rimtest-dev-runner/v1` sidecar and
+a full-closure `rimliaison-cli-manifest/v1`, then verifies all file hashes. If the
+version directory already exists, it is never overwritten; failed work cleans only
+its new temporary staging directory.
+
+**Scope:** This is a source-only internal packaging primitive and deterministic fixture
+coverage, not a published or qualified Windows `rimtest.exe`. An independently
+reviewed exact .NET build must still prove the executable really came from the clean
+source commit; matching package hashes are not build provenance or a security signature.
+Packaging does not install, change PATH, run RimWorld, or bypass any ProjectNexus check.
+The `rimtest` command's restricted native dispatch and the Waylith-capable runtime
+remain separate source candidates pending combined compilation, test, installation,
+and exact NatureTiles ProjectNexus validation.
+
 ## Explicit release and qualification workflows
 
 RimLiaison remains available for explicitly documented release, qualification, promotion, and other
