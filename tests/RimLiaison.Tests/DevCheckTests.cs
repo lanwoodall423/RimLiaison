@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Xml;
 using RimLiaison;
 
 namespace RimLiaison.Tests;
@@ -11,6 +12,351 @@ internal static class DevCheckTests
         CliRequest request = CliParser.Parse(["dev-check", "C:/example-mod", "--json"]);
         if (request.Command != CliCommand.DevCheck || request.Id != "C:/example-mod")
             throw new InvalidOperationException("dev-check did not preserve its optional workspace positional.");
+    }
+
+    public static void IdentifiesUnityAndWaylithLayoutsWithoutGuessing()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "Data"));
+            Directory.CreateDirectory(Path.Combine(root, "Mods"));
+            string legacyManaged = Path.Combine(root, "RimWorldWin64_Data", "Managed");
+            Directory.CreateDirectory(legacyManaged);
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "");
+            File.WriteAllText(Path.Combine(legacyManaged, "Assembly-CSharp.dll"), "");
+            DevCheckCommand.RimWorldGameLayout unity = DevCheckCommand.DetectRimWorldGameLayout(root);
+            if (unity.IsWaylith || unity.ContentVersion != "1.6" ||
+                !unity.ExecutablePath.EndsWith("RimWorldWin64.exe", StringComparison.Ordinal))
+                throw new InvalidOperationException("Complete 1.6 layout was not recognized.");
+
+            File.Delete(Path.Combine(root, "RimWorldWin64.exe"));
+            File.Delete(Path.Combine(legacyManaged, "Assembly-CSharp.dll"));
+            foreach (string name in new[] { "RimWorld.exe", "Assembly-CSharp.dll", "Waylith.dll", "UnityStubs.dll" })
+                File.WriteAllText(Path.Combine(root, name), "");
+            DevCheckCommand.RimWorldGameLayout waylith = DevCheckCommand.DetectRimWorldGameLayout(root);
+            if (!waylith.IsWaylith || waylith.ContentVersion != "1.7" ||
+                !waylith.ExecutablePath.EndsWith("RimWorld.exe", StringComparison.Ordinal))
+                throw new InvalidOperationException("Complete 1.7 Waylith layout was not recognized.");
+
+            File.Delete(Path.Combine(root, "UnityStubs.dll"));
+            ExpectInvalidLayout(root, "partial Waylith");
+            File.WriteAllText(Path.Combine(root, "UnityStubs.dll"), "");
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "");
+            ExpectInvalidLayout(root, "mixed Unity and Waylith");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    private static void ExpectInvalidLayout(string root, string label)
+    {
+        try
+        {
+            DevCheckCommand.DetectRimWorldGameLayout(root);
+        }
+        catch (InvalidDataException)
+        {
+            return;
+        }
+        throw new InvalidOperationException("dev-check accepted " + label + " installation.");
+    }
+
+    public static void WaylithLaunchPreservesIsolatedInputs()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimtest-layout-fixture");
+        string savedata = Path.Combine(root, "savedata");
+        string log = Path.Combine(savedata, "Logs", "Player.log");
+        var waylith = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorld.exe"), "1.7");
+        ProcessStartInfo start = DevCheckCommand.CreateRuntimeStartInfo(
+            waylith, savedata, log,
+            ["ludeon.rimworld", "required.mod", "direct.validation.runtime.signal", "target.mod"]);
+        if (!string.Equals(start.FileName, waylith.ExecutablePath, StringComparison.Ordinal) ||
+            !start.ArgumentList.Contains("-savedatafolder=" + savedata) ||
+            !start.ArgumentList.Contains("-mod=required.mod;direct.validation.runtime.signal;target.mod") ||
+            !start.ArgumentList.Contains("-Headless") ||
+            !DevCheckCommand.IsWaylithTargetSelected(start, "target.mod") ||
+            DevCheckCommand.IsWaylithTargetSelected(start, "other.mod") ||
+            start.ArgumentList.Contains("-logfile") ||
+            !start.RedirectStandardOutput || !start.RedirectStandardError)
+            throw new InvalidOperationException("Waylith test launch lost isolated save/mod selection.");
+
+        var unity = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorldWin64.exe"), "1.6");
+        ProcessStartInfo legacy = DevCheckCommand.CreateRuntimeStartInfo(
+            unity, savedata, Path.Combine(savedata, "legacy.log"),
+            ["ludeon.rimworld", "direct.validation.runtime.signal", "target.mod"]);
+        if (!legacy.ArgumentList.Contains("-savedatafolder=" + savedata) ||
+            !legacy.ArgumentList.Contains("-logfile") ||
+            legacy.ArgumentList.Any(value => value.StartsWith("-mod=", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Unity 1.6 launch behavior regressed.");
+    }
+
+    public static void VersionedDefsAndAssembliesRetainTheirIdentity()
+    {
+        foreach (string path in new[]
+                 { "Defs/ThingDefs/Thing.xml", "1.6/Defs/ThingDefs/Thing.xml",
+                   "1.7/Defs/GenStepDefs/Step.xml" })
+            if (!DevCheckCommand.IsDefSourcePath(path))
+                throw new InvalidOperationException("Versioned Def path missed: " + path);
+        foreach (string path in new[]
+                 { "samples/Defs/Test.xml", "1.x/Defs/Test.xml", "DefsBroken/Thing.xml" })
+            if (DevCheckCommand.IsDefSourcePath(path))
+                throw new InvalidOperationException("Non-Def fixture misclassified: " + path);
+
+        string root = Path.Combine(Path.GetTempPath(), "rimtest-layout-fixture");
+        var game = new DevCheckCommand.RimWorldGameLayout(
+            root, Path.Combine(root, "RimWorld.exe"), "1.7");
+        if (DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "1.6", "Assemblies", "Legacy.dll")) != "1.6" ||
+            DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "1.7", "Assemblies", "Native.dll")) != "1.7" ||
+            DevCheckCommand.TargetAssemblyContentVersion(game, root,
+                Path.Combine(root, "Source", "bin", "Release", "net10.0", "Native.dll")) != "1.7")
+            throw new InvalidOperationException("Versioned assembly staging changed identity.");
+    }
+
+    public static void WaylithHelperBuildUsesIsolatedSdkSelector()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            string source = Path.Combine(root, "DevCheckRuntime");
+            string staging = Path.Combine(root, "isolated-helper");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(staging);
+            var waylith = new DevCheckCommand.RimWorldGameLayout(
+                root, Path.Combine(root, "RimWorld.exe"), "1.7");
+            string working = DevCheckCommand.PrepareHelperBuildDirectory(
+                waylith, source, staging);
+            string selector = File.ReadAllText(Path.Combine(staging, "global.json"));
+            using JsonDocument document = JsonDocument.Parse(selector);
+            JsonElement sdk = document.RootElement.GetProperty("sdk");
+            if (working != staging ||
+                sdk.GetProperty("version").GetString() != "10.0.100" ||
+                sdk.GetProperty("rollForward").GetString() != "latestFeature" ||
+                File.Exists(Path.Combine(source, "global.json")))
+                throw new InvalidOperationException("Waylith helper did not isolate its .NET 10 SDK selector.");
+
+            var unity = new DevCheckCommand.RimWorldGameLayout(
+                root, Path.Combine(root, "RimWorldWin64.exe"), "1.6");
+            string legacy = DevCheckCommand.PrepareHelperBuildDirectory(
+                unity, source, Path.Combine(root, "does-not-exist"));
+            if (legacy != source)
+                throw new InvalidOperationException("Legacy Unity helper SDK resolution changed.");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    public static void WaylithLogMustMatchExactFreshInvocation()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            string logPath = Path.Combine(root, "Logs", "Player.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            string savedata = Path.Combine(root, "rimtest-dev-check-savedata-unique-123456");
+            var game = new DevCheckCommand.RimWorldGameLayout(
+                root, Path.Combine(root, "RimWorld.exe"), "1.7");
+            ProcessStartInfo start = DevCheckCommand.CreateRuntimeStartInfo(
+                game, savedata, logPath,
+                ["ludeon.rimworld", "direct.validation.runtime.signal", "target.mod"]);
+            DateTimeOffset began = DateTimeOffset.UtcNow.AddSeconds(-5);
+            DateTimeOffset logStarted = began.AddSeconds(1);
+            DateTimeOffset exited = began.AddSeconds(10);
+            string header = "Started:   " +
+                logStarted.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff zzz",
+                    System.Globalization.CultureInfo.InvariantCulture) +
+                "\nVersion:   1.7.4990.1069\n" +
+                "Log file:  " + logPath + "\n" +
+                "Command:   " + Path.Combine(root, "RimWorld.dll") + "\n" +
+                "-savedatafolder=" + savedata + "\n" +
+                "-mod=direct.validation.runtime.signal;target.mod -Headless\n" +
+                "Other diagnostic output follows.\n";
+
+            if (!DevCheckCommand.VerifyWaylithLogHeader(
+                    header, logPath, game, start, began, exited, out string reason) ||
+                reason != "WAYLITH_LOG_VERIFIED")
+                throw new InvalidOperationException("Valid isolated Waylith log header rejected.");
+
+            void Reject(string altered, string label, DateTimeOffset? alteredBegan = null)
+            {
+                if (DevCheckCommand.VerifyWaylithLogHeader(
+                    altered, logPath, game, start, alteredBegan ?? began,
+                    exited, out _))
+                    throw new InvalidOperationException("Invalid Waylith " + label + " log accepted.");
+            }
+            Reject(header.Replace("unique-123456", "other-run-789"), "wrong run ID");
+            Reject(header.Replace("target.mod -Headless", "other.mod -Headless"), "wrong mods");
+            Reject(header.Replace("1.7.4990.1069", "1.6.4990.1069"), "wrong version");
+            Reject(header.Replace("Log file:  " + logPath, "Log file:  C:\\unrelated.log"), "wrong log path");
+            Reject(header.Replace("-Headless", ""), "nonheadless");
+            Reject(header, "stale timestamp", began.AddMinutes(1));
+
+            File.WriteAllText(logPath, "old log");
+            DevCheckCommand.WaylithLogSnapshot prior =
+                DevCheckCommand.CaptureWaylithLogSnapshot(logPath);
+            File.WriteAllText(logPath, header);
+            if (!DevCheckCommand.TryReadVerifiedWaylithLog(
+                    prior, game, start, began, exited, out string verified,
+                    out string verifiedReason) ||
+                verified != header || verifiedReason != "WAYLITH_LOG_VERIFIED")
+                throw new InvalidOperationException("Fresh matched global Waylith log was rejected.");
+
+            DevCheckCommand.WaylithLogSnapshot now =
+                DevCheckCommand.CaptureWaylithLogSnapshot(logPath);
+            if (DevCheckCommand.TryReadVerifiedWaylithLog(
+                    now, game, start, began, exited, out _, out string unchanged) ||
+                unchanged != "WAYLITH_LOG_UNCHANGED")
+                throw new InvalidOperationException("Unchanged Waylith log was accepted.");
+            File.Delete(logPath);
+            if (DevCheckCommand.TryReadVerifiedWaylithLog(
+                    prior, game, start, began, exited, out _, out _))
+                throw new InvalidOperationException("Missing Waylith log was accepted.");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    public static void TypedGenStepAndBiomePatchExpectationsAreStrict()
+    {
+        const string defs = """
+            <Defs>
+              <ThingDef><defName>NT_Bramble</defName></ThingDef>
+              <GenStepDef><defName>NT_BrambleThickets</defName></GenStepDef>
+            </Defs>
+            """;
+        XmlDocument defDocument = ParseXmlFixture(defs);
+        IReadOnlyList<DevCheckCommand.TypedDefExpectation> typed =
+            DevCheckCommand.ExtractTypedDefExpectations(
+                defDocument, "1.6/Defs/GenStepDefs/NatureTiles.xml");
+        if (typed.Count != 2 ||
+            !typed.Contains(new DevCheckCommand.TypedDefExpectation("ThingDef", "NT_Bramble")) ||
+            !typed.Contains(new DevCheckCommand.TypedDefExpectation("GenStepDef", "NT_BrambleThickets")) ||
+            DevCheckCommand.ExtractTypedDefExpectations(defDocument, "samples/Defs/Invalid.xml").Count != 0)
+            throw new InvalidOperationException("Typed versioned ThingDef/GenStepDef extraction regressed.");
+
+        const string patch = """
+            <Patch>
+              <Operation Class="PatchOperationConditional">
+                <xpath>Defs/BiomeDef[defName="TemperateForest"]/extraGenSteps</xpath>
+                <match Class="PatchOperationAdd">
+                  <xpath>Defs/BiomeDef[defName="TemperateForest"]/extraGenSteps</xpath>
+                  <value><li>NT_BrambleThickets</li></value>
+                </match>
+                <nomatch Class="PatchOperationAdd">
+                  <xpath>Defs/BiomeDef[defName="TemperateForest"]</xpath>
+                  <value><extraGenSteps><li>NT_BrambleThickets</li></extraGenSteps></value>
+                </nomatch>
+              </Operation>
+            </Patch>
+            """;
+        IReadOnlyList<DevCheckCommand.BiomeGenStepExpectation> biome =
+            DevCheckCommand.ExtractBiomeGenStepExpectations(
+                ParseXmlFixture(patch), "1.6/Patches/NatureTiles_BiomeMapGeneration.xml");
+        if (biome.Count != 1 || biome[0] !=
+            new DevCheckCommand.BiomeGenStepExpectation("TemperateForest", "NT_BrambleThickets"))
+            throw new InvalidOperationException("Strict conditional biome registration was not discovered.");
+
+        static void MustReject(Action action, string label)
+        {
+            try { action(); }
+            catch (InvalidDataException) { return; }
+            throw new InvalidOperationException("Invalid " + label + " was accepted.");
+        }
+        MustReject(
+            () => DevCheckCommand.ExtractTypedDefExpectations(
+                ParseXmlFixture("<Defs><GenStepDef /></Defs>"), "1.7/Defs/GenSteps.xml"),
+            "missing GenStepDef name");
+        MustReject(
+            () => DevCheckCommand.ExtractBiomeGenStepExpectations(
+                ParseXmlFixture(patch.Replace(
+                    "NT_BrambleThickets</li></extraGenSteps>",
+                    "AnotherStep</li></extraGenSteps>")),
+                "1.6/Patches/Other.xml"),
+            "mismatched conditional branches");
+        MustReject(
+            () => DevCheckCommand.ExtractBiomeGenStepExpectations(
+                ParseXmlFixture(patch.Replace(
+                    "TemperateForest\"]/extraGenSteps</xpath>",
+                    "TemperateForest\"]/somethingElse</xpath>")),
+                "1.6/Patches/Other.xml"),
+            "wrong patch target");
+    }
+
+    public static void RuntimeSignalRequiresExactTypedDefsAndBiomeMembership()
+    {
+        IReadOnlyList<DevCheckCommand.TypedDefExpectation> typed =
+        [
+            new("ThingDef", "NT_Bramble"),
+            new("GenStepDef", "NT_BrambleThickets")
+        ];
+        IReadOnlyList<DevCheckCommand.BiomeGenStepExpectation> biome =
+        [
+            new("TemperateForest", "NT_BrambleThickets")
+        ];
+        const string valid = """
+            {
+              "requestedDefs": [
+                {"defType":"ThingDef","defName":"NT_Bramble","exists":true},
+                {"defType":"GenStepDef","defName":"NT_BrambleThickets","exists":true}
+              ],
+              "biomeGenSteps": [
+                {"biomeDefName":"TemperateForest","genStepDefName":"NT_BrambleThickets","exists":true}
+              ]
+            }
+            """;
+        using JsonDocument good = JsonDocument.Parse(valid);
+        if (!DevCheckCommand.VerifyRuntimeDefinitionSignal(good.RootElement, typed, biome))
+            throw new InvalidOperationException("Typed GenStep + biome proof was rejected.");
+        static void MustReject(string json,
+            IReadOnlyList<DevCheckCommand.TypedDefExpectation> definitions,
+            IReadOnlyList<DevCheckCommand.BiomeGenStepExpectation> steps,
+            string label)
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (DevCheckCommand.VerifyRuntimeDefinitionSignal(doc.RootElement, definitions, steps))
+                throw new InvalidOperationException("Invalid " + label + " runtime proof was accepted.");
+        }
+        MustReject(valid.Replace(
+            "\"defType\":\"GenStepDef\"", "\"defType\":\"ThingDef\""),
+            typed, biome, "wrong Def type");
+        MustReject(valid.Replace(
+            "\"defName\":\"NT_BrambleThickets\",\"exists\":true",
+            "\"defName\":\"NT_BrambleThickets\",\"exists\":false"),
+            typed, biome, "unloaded generation definition");
+        MustReject(valid.Replace(
+            "\"genStepDefName\":\"NT_BrambleThickets\",\"exists\":true",
+            "\"genStepDefName\":\"NT_BrambleThickets\",\"exists\":false"),
+            typed, biome, "absent biome membership");
+        MustReject("""
+            {"requestedDefs":[
+              {"defType":"ThingDef","defName":"NT_Bramble","exists":true},
+              {"defType":"GenStepDef","defName":"NT_BrambleThickets","exists":true}
+            ]}
+            """, typed, biome, "missing biome signal");
+        MustReject("""
+            {"requestedDefs":[{"defType":"ThingDef","defName":"NT_Bramble","exists":true}]}
+            """, typed, biome, "missing GenStep signal");
+        MustReject(valid.Replace(
+            "\"biomeDefName\":\"TemperateForest\"",
+            "\"biomeDefName\":\"Tundra\""),
+            typed, biome, "wrong biome");
+    }
+
+    private static XmlDocument ParseXmlFixture(string xml)
+    {
+        var document = new XmlDocument { XmlResolver = null };
+        document.LoadXml(xml);
+        return document;
     }
 
     public static void MissingAboutFailsClosed()
