@@ -547,7 +547,8 @@ public static class CliApplication
                     string manifestPath = Environment.GetEnvironmentVariable(
                             "RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST") ??
                         "C:/RimDev/.rimdev/production-toolchain.json";
-                    if (!ToolchainPromotionService.TryReadPromotionDestination(
+                    if (!ToolchainPromotionService.TryResolveQualificationDestination(
+                            request.StackManifest.RepositoryRoot,
                             manifestPath,
                             out string? runtimeRoot,
                             out string runtimeProtocolContract,

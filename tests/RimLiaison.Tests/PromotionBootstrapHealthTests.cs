@@ -261,6 +261,171 @@ internal static class PromotionBootstrapHealthTests
             "bootstrap did not archive the legacy manifest");
     }
 
+    public static void ManifestlessFirstInstallRequiresExplicitBootstrap()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        ToolchainPromotionResult ordinary = fixture.Promote();
+        Assert(ordinary.Status == "blocked" && !File.Exists(fixture.ManifestPath),
+            "ordinary promotion created an initial production identity");
+
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "promoted",
+            $"explicit first install failed: {result.ErrorCode} {result.Error}");
+        using JsonDocument installed = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
+        Assert(installed.RootElement.GetProperty("productionState").GetString() == "MODERN_PRODUCTION" &&
+               installed.RootElement.GetProperty("devBridgeRuntimeRoot").GetString() ==
+                   fixture.ProductionRuntimeRoot &&
+               File.Exists(Path.Combine(fixture.ProductionRuntimeRoot, "DevBridge.cmd")),
+            "first install did not establish the single verified canonical production identity");
+        Assert(!Directory.EnumerateFiles(fixture.Root, "*.legacy-*.json").Any(),
+            "manifestless first installation invented a legacy manifest archive");
+    }
+
+    public static void ManifestlessFirstInstallRejectsLateRuntimeCollision()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        string sentinel = Path.Combine(fixture.ProductionRuntimeRoot, "foreign-owner.txt");
+        // A generic injected transaction must never replace a first-install target.
+        fixture.RuntimeDirectoryTransaction.ThrowOnCommit = true;
+        fixture.RuntimeQuiescenceVerifier.OnVerify = runtimeRoot =>
+        {
+            Assert(runtimeRoot == fixture.ProductionRuntimeRoot &&
+                   !Directory.Exists(runtimeRoot),
+                "late-collision fixture did not start from an absent destination");
+            Directory.CreateDirectory(runtimeRoot);
+            File.WriteAllText(sentinel, "foreign-runtime-owner");
+        };
+
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "blocked" &&
+               result.ErrorCode == "BOOTSTRAP_RUNTIME_SWAP_FAILED" &&
+               result.PromotionPhase == "runtime-swap",
+            "late first-install collision was not blocked at the runtime swap");
+        PromotionTransactionEvidence? transaction = result.TransactionEvidence;
+        Assert(transaction is not null &&
+               transaction.Operation == "move-staged-runtime-to-unoccupied-target" &&
+               transaction.LockedPath == fixture.ProductionRuntimeRoot,
+            "late-collision failure did not identify the non-replacing operation");
+        Assert(fixture.RuntimeDirectoryTransaction.CommitCalls == 0,
+            "first installation delegated to a replace-capable runtime transaction");
+        Assert(File.ReadAllText(sentinel) == "foreign-runtime-owner" &&
+               !File.Exists(Path.Combine(fixture.ProductionRuntimeRoot, "DevBridge.cmd")),
+            "late first-install collision replaced or modified the foreign runtime");
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
+        Assert(manifest.RootElement.GetProperty("productionState").GetString() == "NO_PRODUCTION" &&
+               manifest.RootElement.GetProperty("bootstrapStatus").GetString() == "BOOTSTRAP_FAILED" &&
+               !manifest.RootElement.TryGetProperty("promotedFingerprint", out _),
+            "late collision published a modern or healthy-looking production identity");
+    }
+
+    public static void InitialBootstrapDirectoryMoveNeverReplacesTarget()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimliaison-first-install-move-" + Guid.NewGuid().ToString("N"));
+        string stagedRoot = Path.Combine(root, "runtime-promoted-fixture");
+        string targetRoot = Path.Combine(root, "DevBridge2");
+        string stagedSentinel = Path.Combine(stagedRoot, "staged.txt");
+        string foreignSentinel = Path.Combine(targetRoot, "foreign.txt");
+        Directory.CreateDirectory(stagedRoot);
+        Directory.CreateDirectory(targetRoot);
+        try
+        {
+            File.WriteAllText(stagedSentinel, "qualified-staged-runtime");
+            File.WriteAllText(foreignSentinel, "another-runtime-owner");
+
+            bool refused = false;
+            try
+            {
+                ToolchainPromotionService.CommitRuntimeDirectoryForInitialBootstrap(
+                    stagedRoot, targetRoot);
+            }
+            catch (PromotionRuntimeSwapException exception)
+            {
+                refused = exception.Operation == "move-staged-runtime-to-unoccupied-target" &&
+                          exception.LockedPath == targetRoot;
+            }
+
+            Assert(refused &&
+                   File.ReadAllText(foreignSentinel) == "another-runtime-owner" &&
+                   File.ReadAllText(stagedSentinel) == "qualified-staged-runtime",
+                "non-replacing bootstrap move lost the foreign target or staged source");
+
+            Directory.Delete(targetRoot, recursive: true);
+            ToolchainPromotionService.CommitRuntimeDirectoryForInitialBootstrap(
+                stagedRoot, targetRoot);
+            Assert(!Directory.Exists(stagedRoot) &&
+                   File.ReadAllText(Path.Combine(targetRoot, "staged.txt")) ==
+                       "qualified-staged-runtime",
+                "non-replacing bootstrap move did not activate an unoccupied target");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static void ManifestlessFirstInstallRejectsPackageDestinationMismatch()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        string alternateGameRoot = Path.Combine(fixture.Root, "other-game");
+        Directory.CreateDirectory(Path.Combine(alternateGameRoot, "Mods"));
+        fixture.WriteFirstInstallWorkspace(alternateGameRoot);
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "BOOTSTRAP_FIRST_INSTALL_DESTINATION_MISMATCH" &&
+               !File.Exists(fixture.ManifestPath),
+            "first installation accepted a package with a different canonical runtime destination");
+    }
+
+    public static void ManifestlessFirstInstallRejectsOccupiedRuntime()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        Directory.CreateDirectory(fixture.ProductionRuntimeRoot);
+        string sentinel = Path.Combine(fixture.ProductionRuntimeRoot, "unrelated.txt");
+        File.WriteAllText(sentinel, "existing-owner");
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "BOOTSTRAP_FIRST_INSTALL_DESTINATION_OCCUPIED" &&
+               File.ReadAllText(sentinel) == "existing-owner" &&
+               !File.Exists(fixture.ManifestPath),
+            "first installation replaced an unowned existing Mods directory");
+    }
+
+    public static void ManifestlessFirstInstallRejectsCorruptManifest()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        File.WriteAllText(fixture.ManifestPath, "{malformed");
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.Status == "blocked" &&
+               File.ReadAllText(fixture.ManifestPath) == "{malformed",
+            "explicit first installation ignored or replaced malformed production metadata");
+    }
+
+    public static void ManifestlessFirstInstallFailedCandidateDoesNotCreateManifest()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true);
+        ToolchainPromotionResult result = fixture.Promote(candidatePass: false, bootstrap: true);
+        Assert(result.ErrorCode == "PROMOTION_CANDIDATE_HEALTH_FAILED" &&
+               !File.Exists(fixture.ManifestPath) &&
+               !Directory.Exists(fixture.ProductionRuntimeRoot),
+            "failed first-install candidate was permitted to commit a production identity");
+    }
+
+    public static void ManifestlessFirstInstallPostCommitFailureIsNoProduction()
+    {
+        using Fixture fixture = new("missing", modernState: false, firstInstall: true)
+        {
+            CanonicalPass = false
+        };
+        ToolchainPromotionResult result = fixture.Promote(bootstrap: true);
+        Assert(result.ErrorCode == "PROMOTION_POST_COMMIT_HEALTH_FAILED",
+            "first-install post-commit doctor failure was not preserved");
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(fixture.ManifestPath));
+        Assert(manifest.RootElement.GetProperty("productionState").GetString() == "NO_PRODUCTION" &&
+               manifest.RootElement.GetProperty("bootstrapStatus").GetString() == "BOOTSTRAP_FAILED" &&
+               !Directory.Exists(fixture.ProductionRuntimeRoot),
+            "first-install doctor failure retained a healthy-looking runtime or product identity");
+    }
+
     public static void BootstrapRejectsExistingModernIdentity()
     {
         using Fixture fixture = new("missing");
@@ -842,6 +1007,7 @@ internal static class PromotionBootstrapHealthTests
     {
         private const string SourceCommit = "source-commit";
         private readonly string? previousManifestEnvironment;
+        private readonly string? previousRimDevRoot;
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "rimliaison-bootstrap-test-" + Guid.NewGuid().ToString("N"));
         public string ManifestPath { get; }
         public string PackagePath { get; }
@@ -860,16 +1026,24 @@ internal static class PromotionBootstrapHealthTests
         public bool CancelCandidate { get; init; }
         public TimeSpan CandidateDelay { get; init; }
 
-        public Fixture(string legacyState, bool modernState = true)
+        public Fixture(string legacyState, bool modernState = true, bool firstInstall = false)
         {
+            previousRimDevRoot = Environment.GetEnvironmentVariable("RIMDEV_ROOT");
             Directory.CreateDirectory(Root);
             string artifactRoot = Path.Combine(Root, "qualified-artifacts");
             string candidatePayloadRoot = Path.Combine(Root, "qualified-runtime");
             string transactionRoot = Path.Combine(artifactRoot, "transaction-components");
             CandidateRuntimeRoot = candidatePayloadRoot;
             ExpectedCandidateRuntimeRoot = candidatePayloadRoot;
-            ProductionRuntimeRoot = Path.Combine(Root, "production", "DevBridge2");
+            ProductionRuntimeRoot = firstInstall
+                ? Path.Combine(Root, "production", "Mods", "DevBridge2")
+                : Path.Combine(Root, "production", "DevBridge2");
             ManifestPath = Path.Combine(Root, "production-toolchain.json");
+            if (firstInstall)
+            {
+                WriteFirstInstallWorkspace(Path.Combine(Root, "production"));
+                Environment.SetEnvironmentVariable("RIMDEV_ROOT", Root);
+            }
             PackagePath = Path.Combine(Root, "qualified-package.json");
             Directory.CreateDirectory(artifactRoot);
             Directory.CreateDirectory(Path.Combine(candidatePayloadRoot, "Coordinator"));
@@ -1035,9 +1209,35 @@ internal static class PromotionBootstrapHealthTests
                 File.WriteAllText(ManifestPath, manifest.ToJsonString());
             }
             ManifestBefore = File.ReadAllText(ManifestPath);
+            if (firstInstall)
+                File.Delete(ManifestPath);
             previousManifestEnvironment = Environment.GetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST");
             Environment.SetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST", ManifestPath);
             CandidateVerifier.ExpectedRuntimeRoot = null;
+        }
+
+        public void WriteFirstInstallWorkspace(string rimWorldRoot)
+        {
+            string workspaceDirectory = Path.Combine(Root, ".rimdev");
+            Directory.CreateDirectory(workspaceDirectory);
+            Directory.CreateDirectory(Path.Combine(rimWorldRoot, "Mods"));
+            File.WriteAllText(Path.Combine(workspaceDirectory, "stack.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimdev-stack/v1",
+                    project = "RimLiaison",
+                    devBridgeProject = "frontier",
+                    catalog = "TestCatalog/rimtest.catalog.json",
+                    rimBridge = "via-devbridge"
+                }));
+            File.WriteAllText(Path.Combine(workspaceDirectory, "workspace.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimdev-workspace/v1",
+                    rimWorldRoot,
+                    devBridgeRuntimeRoot = Path.Combine(rimWorldRoot, "Mods", "DevBridge2"),
+                    repositories = new[] { new { path = "." } }
+                }));
         }
 
         public ToolchainPromotionResult Promote(bool candidatePass = true, bool bootstrap = false)
@@ -1078,6 +1278,7 @@ internal static class PromotionBootstrapHealthTests
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("RIMLIAISON_PRODUCTION_TOOLCHAIN_MANIFEST", previousManifestEnvironment);
+            Environment.SetEnvironmentVariable("RIMDEV_ROOT", previousRimDevRoot);
             if (Directory.Exists(Root))
                 Directory.Delete(Root, recursive: true);
         }

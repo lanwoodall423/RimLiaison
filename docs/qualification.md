@@ -58,6 +58,35 @@ Both commands emit machine-readable aggregate JSON and write:
 
 The production lifecycle is candidate-first:
 
+### First installation without a legacy manifest
+
+A genuinely missing `C:/RimDev/.rimdev/production-toolchain.json` does not
+automatically authorize production installation. Qualification may obtain only
+the **prospective runtime destination**, read-only, from the machine-local
+`.rimdev/workspace.json`: both `rimWorldRoot` and
+`devBridgeRuntimeRoot` must be explicitly configured, and the latter must
+resolve exactly to `<rimWorldRoot>/Mods/DevBridge2`. The RimWorld and
+`Mods` directories must exist. A present but invalid production manifest
+never falls back to this first-install path.
+
+After the exact source passes the 25-run qualification burn-in and emits
+a complete immutable, hash-verified promotion package, an operator may
+separately authorize `rimliaison qualification promote --bootstrap
+--promotion-package <qualified-toolchain-package.json> --json`.
+With no legacy manifest, this explicit first-install transaction requires a
+matching qualified package destination, an **absent** target runtime, and
+all existing machine preflight, candidate health, process quiescence,
+package integrity, lock, installed identity and post-commit doctor checks.
+It reserves a `NO_PRODUCTION` marker before modifying runtime state,
+commits `MODERN_PRODUCTION` only after verification, and leaves a blocked
+`NO_PRODUCTION` marker if post-commit verification fails. A failed
+first-install marker is **not** a valid installed product and requires an
+intentional operator recovery decision; it cannot silently become a
+legacy-manifest bootstrap or substitute an experimental checkout.
+
+No qualification command launches or modifies an installed RimWorld runtime
+on its own. Do not create production manifests or promotion packages by hand.
+
 1. RimLiaison asks the pinned external DevBridge2 parity workflow to build an isolated
    RimLiaison.Runtime candidate.
 2. Qualification binds the exact candidate CLI, assembly, transaction consumer, runtime manifest,
