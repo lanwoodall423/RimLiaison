@@ -151,5 +151,15 @@
       }
     ],
     "transforms": []
+  },
+  "developmentRelations": {
+    "provides": [
+      {
+        "capabilityId": "rimworld.mod-development",
+        "title": "RimWorld agent mod development",
+        "contractVersion": 1
+      }
+    ],
+    "consumes": []
   }
 }
