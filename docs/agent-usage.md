@@ -24,6 +24,71 @@ Interpret results as follows:
 - `INFRASTRUCTURE_FAIL`: distinguish environment/tooling failure from a mod failure.
 - `CLEANUP_FAIL`: do not treat validation as healthy.
 
+### Runtime layout selection (1.6 Unity / 1.7 Waylith)
+
+The direct `dev-check` source candidate can inspect two **complete, mutually
+exclusive** layouts before attempting to launch a game:
+
+- 1.6 Unity: `RimWorldWin64.exe` with
+  `RimWorldWin64_Data/Managed/Assembly-CSharp.dll`.
+- 1.7 Waylith: `RimWorld.exe` with root-level
+  `Assembly-CSharp.dll`, `Waylith.dll`, and `UnityStubs.dll`.
+
+Both require the game's `Data` and `Mods` folders. Missing/mixed layouts
+fail closed; an existing game folder is not sufficient proof. Set
+`RIMWORLD_ROOT` only when the installed game is elsewhere.
+
+On 1.7 the runtime-signal helper targets `net10.0` with installed Waylith
+references and is staged in `1.7/Assemblies`; the first build therefore
+requires a local .NET 10 SDK. An existing target mod built for 1.6 is
+left in its declared `1.6/Assemblies` folder, rather than copied as a
+supposed native 1.7 assembly. Waylith uses an isolated `-mod=` list and
+`-Headless` with a temporary `-savedatafolder`; it does not read or
+change the player's ordinary `ModsConfig.xml`. The helper build picks a
+compatible .NET 10 SDK from an owned temporary directory, without modifying
+the CLI repository's .NET 8 `global.json`.
+
+The runtime content-load wait is **engine-specific**: Unity 1.6 retains
+its existing 45-second upper limit; Waylith 1.7 allows up to 120 seconds
+because a real cold startup exceeded the previous 45-second limit.
+A completed content-load signal ends the wait early, so successful starts
+do not incur an artificial delay. This is a startup timeout adjustment,
+**not** a game-load PASS or a substitute for current-run runtime evidence.
+
+**Waylith 1.7 does not relocate `Player.log` with `-savedatafolder`.**
+It writes to `%USERPROFILE%/AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Logs/Player.log`.
+The direct validator requires RimWorld to be closed first, records a
+read-only prelaunch log snapshot and checks a postexit log's fresh startup
+time, 1.7 version, exact log path, game DLL, unique temporary save-data
+directory, exact `-mod=` IDs and `-Headless` command before reading it
+as runtime evidence. An absent, stale, changed or unrelated log makes the
+runtime check fail closed. The runner **never writes, deletes, rotates or
+copies** the user's normal log. Files larger than 4 MiB are not accepted
+as attributable logs in this diagnostic loop. The existing 1.6
+isolated `-logfile` route is unchanged.
+
+### Typed definitions and biome generation registration
+
+The runtime signal checks changed `ThingDef` and `GenStepDef` names against
+their distinct in-game Def databases. When a supported conditional
+`BiomeDef.extraGenSteps` patch is present, it also confirms that the exact
+`GenStepDef` is attached to the requested biome after game content loading.
+Unsupported or malformed `extraGenSteps` patch shapes fail static validation
+instead of silently becoming proof. A missing or false typed runtime response
+is a load failure. This confirms registration, **not** that a map was
+generated or any GenStep behavior was exercised.
+
+These source changes are **not an assertion that 1.7 gameplay works**.
+The required proof remains `BUILD_PASS`, `STATIC_PASS`,
+`RUNTIME_LOAD_PASS`, `INFRASTRUCTURE_PASS` and `CLEANUP_PASS` for
+the exact installed engine, with explicit mod/def/assembly signal evidence.
+If an SDK, engine helper, or provably fresh runtime log cannot be
+established, report infrastructure failure or incomplete runtime evidence,
+never a mod PASS.
+
+The new launch arguments and 1.7 engine/reference contract are described by
+[Ludeon's 1.7 Modder Primer](https://docs.google.com/document/d/e/2PACX-1vSykw5_DYaaw42nEznI9zmBZVT_Vgg2bxYq_v2XWvAsHC3QSKFuDK2OyiQ5WC9jvVRUcrjpFt7xLLF5/pub).
+
 For multi-project workspaces, `dev-check` builds one unambiguous production root and follows its
 `ProjectReference` graph. Projects under obvious test, tooling, sample, benchmark, or example
 paths are excluded unless a production project references them. Multiple unreferenced production
@@ -45,6 +110,259 @@ RimWorld mutation.
 Changing a mod does not require RimLiaison qualification or promotion. Promotion is required only
 when the RimLiaison toolchain itself changes and an intentional new version replaces the installed
 production toolchain.
+
+## Native rimtest development-runner track (RL-RIMTEST-01A)
+
+The source-only native runner entrypoint is separate from the promoted production toolchain and
+from the legacy `rimtest.cmd` batch alias (which still forwards through `rimliaison.cmd`).
+ProjectNexus runs declared executables directly on Windows: a batch alias or a development
+checkout that is not present on the executor's PATH does **not** make `rimtest` available.
+
+A **separately published** native apphost named `rimtest.exe` uses a restricted entrypoint:
+
+- Only `rimtest.exe dev-check [<workspace>] --json` is admitted. No qualification, promotion,
+  experimental, arbitrary-command or self-install invocation is available through this native
+  name. A rejected command produces `rimtest-dev-runner/v1` blocked JSON and nonzero exit.
+- With no workspace argument, the mod source is bound to the **invoking process working
+  directory**, including a ProjectNexus-managed mod worktree. It does not default to the
+  RimLiaison source checkout or the runner's own installation directory. The target must contain
+  `About/About.xml`. A deliberate explicit workspace is resolved against the invocation cwd.
+- Before invoking `dev-check`, the native runner requires a local sidecar
+  `rimtest-dev-runner.json` in its own directory, with exactly four properties:
+  `schemaVersion: "rimtest-dev-runner/v1"`, a lowercase 40-hex `sourceCommit`, and lowercase
+  64-hex `runnerExeSha256` and `cliAssemblySha256` matching the actual `rimtest.exe` and
+  sibling `rimliaison.dll` file bytes. Missing, malformed, duplicated, symlinked or mutated
+  provenance blocks the normal managed entrypoint; the inspected identities are written to
+  standard error. The sidecar's two hashes cover the native apphost and main CLI assembly;
+  the separately checked full-closure manifest also covers dependencies and runtime config.
+  Neither check proves the true source-to-binary build identity or resistance to intentional
+  local replacement. A separately reviewed, exact-source Windows build, full package
+  attestation, and authorized installation remain required before treating the runner as
+  qualified for ProjectNexus execution.
+- The ordinary `rimliaison.exe` and `dotnet rimliaison.dll` entrypoints remain unchanged;
+  production routing still requires its own qualified and promoted manifest.
+
+**Current delivery boundary:** This 01A source candidate defines the restricted native dispatch
+and deterministic fixture tests only. It does not publish, install, register PATH or qualify a
+native `rimtest.exe` and must **not** be treated as an available ProjectNexus check yet. Next:
+a separately reviewed, reproducible .NET 8 native apphost packager with source/provenance
+verification, safe account-local versioned deployment and a direct Windows process-spawn test.
+Then requalify the installed Waylith-capable CLI, the exact NatureTiles source workspace and
+the independent ProjectNexus `validation.rimtest` check under its own trust/review gates.
+Never hand-copy a detached candidate binary into production or relabel a manual test as a native
+ProjectNexus PASS. RimWorld 1.6/1.7 runtime and cleanup evidence remain separately required.
+
+## Native rimtest package candidates (RL-RIMTEST-01B)
+
+The candidate package service is separate from RimLiaison's promoted production toolchain.
+An account-local candidate is staged under
+`%LOCALAPPDATA%/RimLiaison/Rimtest/CandidatePackages/rimtest-<40-hex-source-commit>`.
+The service uses a read-only Git worktree snapshot before and after package preparation:
+the exact source HEAD must match, the source must remain clean, and a second source
+observation must still match immediately before the non-replacing directory move.
+The caller supplies a `dotnet publish` CLI output directory and its expected clean source
+commit. The service checks for `rimliaison.exe`, `rimliaison.dll`, `rimliaison.deps.json` and
+`rimliaison.runtimeconfig.json`, copies published dependencies without following links,
+and renames the copied apphost to `rimtest.exe` without shipping the unrestricted
+`rimliaison.exe`. It generates the four-field `rimtest-dev-runner/v1` sidecar and
+a full-closure `rimliaison-cli-manifest/v1`, then verifies all file hashes.
+The restricted native entrypoint independently re-verifies that complete closure
+before every dev-check launch; changed dependencies, missing files or an invalid
+manifest block startup. The hashes do not constitute a cryptographic publisher signature. If the
+version directory already exists, it is never overwritten; failed work cleans only
+its new temporary staging directory.
+
+**Candidate-only CLI invocation (RL-RIMTEST-01C):** After independently producing and
+verifying the Windows .NET 8 CLI publish output from an exact clean source revision,
+invoke the **normal RimLiaison CLI**, not the restricted native `rimtest.exe`:
+
+```text
+rimliaison rimtest-package-candidate <absolute-clean-git-source-root> <absolute-dotnet-publish-directory> <40-character-lowercase-source-commit> --json
+```
+
+The command refuses missing/extra switches, relative paths, and noncanonical commit IDs;
+it calls the double-checked clean-source packager and reports `candidate-only` JSON with
+the package location and closure hashes. Bad requests return nonzero `blocked` JSON.
+The source and publish paths are inputs only: no caller-selectable destination or
+production install is permitted. Output remains the immutable, account-local candidate
+folder documented above. This command **does not execute `dotnet publish`** or prove
+that the provided publish directory came from the given source commit.
+
+**Pinned source-to-candidate Windows publish (RL-RIMTEST-01F):**
+After an authorized Windows source build and review, the ordinary RimLiaison CLI
+also offers one explicit, fixed-scope publish-and-stage path:
+
+```text
+rimliaison rimtest-publish-candidate <absolute-clean-git-source-root> <40-character-lowercase-source-commit> --json
+```
+
+The source root must have an unchanged exact Git HEAD and the repository's
+`global.json` must pin SDK **8.0.424** with `rollForward=disable`. The
+host selection first honors explicit `DOTNET_HOST_PATH`, then `DOTNET_ROOT/dotnet.exe`.
+When neither environment variable is configured, it checks only the conventional
+`%ProgramFiles%/dotnet/dotnet.exe` and `%LOCALAPPDATA%/Microsoft/dotnet/dotnet.exe`
+locations, in that order. Invalid explicit overrides fail closed, with no fallback.
+The selected host and directory chain must not contain links/junctions, and its
+`--version` from the clean source root must report exactly **8.0.424**.
+A bare PATH `dotnet` is never executed, and host location alone is not SDK proof.
+It executes only `dotnet publish` for the known RimLiaison CLI project,
+targeting `Release/net8.0/win-x64` with a framework-dependent native apphost.
+The child process has a bounded lifetime and diagnostic output. The destination
+is a unique account-local publish scratch directory; after the exact source
+is rechecked, the existing immutable candidate packager copies the apphost,
+manifest and full dependency closure to the versioned CandidatePackages folder,
+and the publish scratch is cleaned. A dirty/moved source, missing exact SDK,
+missing output or existing candidate version **blocks** the operation.
+
+This is opt-in **candidate preparation**, not a ProjectNexus check, independent
+reproducibility attestation, production promotion, PATH installation, or
+RimWorld/game validation. SDK restore may require locally available NuGet
+dependencies; any tracked lockfile mutation invalidates the clean-source gate.
+The code and its fake-publisher fixtures are currently **source-only**, pending
+an authorized actual Windows build and process execution.
+
+**Read-only verification (RL-RIMTEST-01D):** Before a separate installation
+review, inspect only the exact candidate package in the current account's
+versioned staging directory using the normal RimLiaison CLI:
+
+```text
+rimliaison rimtest-package-verify <absolute-candidate-package-directory> <40-character-lowercase-source-commit> --json
+```
+
+The package directory must exactly equal
+`%LOCALAPPDATA%/RimLiaison/Rimtest/CandidatePackages/rimtest-<source-commit>`.
+The verifier rejects relative paths, wrong revisions, arbitrary directory
+locations, links/junctions, missing or changed files, the unrestricted CLI
+apphost, malformed source/hash metadata and unexpected switches. It rechecks
+the complete file closure and reports manifest/package SHA-256 in
+`candidate-verified` JSON. Failure is nonzero `blocked` JSON with a stable
+error code, never a silent PASS. The process only reads the candidate:
+it cannot copy files, build, install, update PATH, promote a production
+toolchain or modify RimWorld. The hashes are **content checks only**, not
+source-to-binary proof, a publisher signature or ProjectNexus approval.
+
+**Immutable account-local candidate copy (RL-RIMTEST-01G):** After independently
+reviewing a Windows-published native package, an operator may explicitly
+copy a **verified** source-bound candidate into an account-local, versioned
+installed directory using the normal (unrestricted) RimLiaison CLI:
+
+```text
+rimliaison rimtest-install-candidate <40-character-lowercase-source-commit> --json
+```
+
+The source is always
+`%LOCALAPPDATA%/RimLiaison/Rimtest/CandidatePackages/rimtest-<commit>`
+and the destination is always
+`%LOCALAPPDATA%/RimLiaison/Rimtest/Installed/rimtest-<commit>`.
+There are **no source/target path, replace, or force arguments**. It verifies
+the entire candidate package and its source/hash sidecar, copies all files
+without following reparse points to an owned temporary directory under the
+same account-local Installed parent, and re-verifies the copied closure,
+manifest SHA and original source before atomically moving to the new
+versioned location. Any existing version is never overwritten. A failure
+cleans only the temporary directory it created, never a pre-existing version.
+The returned state `installed-unbound-candidate` is deliberately **not**
+a qualified/attested runner or a PATH registration.
+
+This step does **not** set environment variables, Windows user/machine PATH
+or registry entries, install Steam/RimBridgeServer, launch an executable,
+alter RimWorld, or authorize ProjectNexus. The exact installed directory
+still needs separately approved PATH exposure to the real PN Windows
+executor, followed by its original `rimtest dev-check --json` workspace check.
+Even a successful copy cannot prove independent source-to-build identity.
+
+**Read-only Windows PATH preflight (RL-RIMTEST-01E):** When a native
+`rimtest.exe` has been separately reviewed and installed into its exact
+versioned account-local location, run the ordinary RimLiaison CLI command:
+
+```text
+rimliaison rimtest-path-preflight <40-character-lowercase-source-commit> --json
+```
+
+This checks only **the invoking process's current Windows PATH and cwd** for
+the exact `%LOCALAPPDATA%/RimLiaison/Rimtest/Installed/rimtest-<commit>/rimtest.exe`,
+rejecting a missing executable, invalid/relative PATH entries, a different
+`rimtest.exe` earlier or later on PATH, and cwd shadowing. A `rimtest.cmd`
+batch alias is not a native executable. The preflight re-verifies all packaged
+dependency files, source revision and manifest bytes before reporting
+`status=local-path-preflight-only`. It does **not** install, run or elevate an
+executable, change PATH, or grant production/ProjectNexus trust. Even a passing
+preflight cannot prove the PATH of a **different** process or the eventual
+ProjectNexus Windows executor. Only the original, exact trusted NatureTiles
+`workspace.check` (`rimtest dev-check --json`) can provide that proof.
+
+**Scope:** This is source-only package preparation and deterministic fixture coverage,
+not a published or qualified Windows `rimtest.exe`. An independently reviewed exact
+.NET build must still prove the executable really came from the clean source commit;
+matching package hashes are not build provenance or a security signature.
+Packaging does not install, change PATH, run RimWorld, or bypass any ProjectNexus check.
+The restricted native `rimtest.exe` dispatch, package-staging source, and Waylith-capable
+runtime now coexist in this isolated candidate. They still require an actual combined
+Windows compilation and regression pass, source-to-binary provenance verification,
+separately authorized installation/PATH registration, and the exact NatureTiles
+ProjectNexus runtime check. This does not make a native runner currently available.
+
+## Portable recipe resolver contract tests
+
+The built-in ecosystem recipe-resolution tests use short-lived synthetic project-owned
+`.rimdev/recipes/*.json` fixtures. They verify exact canonical project owners,
+recipe IDs, path conventions, schema and SHA-256 without relying on
+`C:\\RimDev\\Repos` or any other developer-private external checkout.
+A missing external source/recipe is explicitly tested as `PROJECT_RECIPE_NOT_FOUND`,
+not treated as a successful real-world recipe. The synthetic tests do **not**
+prove that DeferredRealityFramework, Frontier, InsightCanvas or KnowledgeFramework
+is installed, that its actual recipe exists, or that any external mod will load.
+Real external-project recipe availability, version identity and live RimWorld
+qualification remain separate checks requiring genuine source/artifacts.
+
+## Real RimWorld assemblies for game-backed builds
+
+The `DevBridge2` game Mod project builds against real RimWorld managed DLLs. The normal
+independent .NET tooling and test projects can be built without an installed game; a
+successful tooling-only build is **not** a successful game assembly build.
+
+For a game-backed Windows build, pass `/p:RimWorldManagedDir=<real installed
+RimWorld root>\\RimWorldWin64_Data\\Managed` or configure one of the existing
+RimLiaison-managed environment values. The order is explicit MSBuild
+`RimWorldManagedDir`, `RIMWORLD_MANAGED_DIR`, `RIMWORLD_MANAGED_PATH`,
+`RIMWORLD_MANAGED_ASSEMBLIES`, `RIMWORLD_ROOT` (game root), and finally the
+legacy project-owned `.rimdev/workspace.json` game root. The final property must
+point to the genuine installed game's `Managed` directory, **not** a placeholder
+or simulated fixture.
+
+The game Mod's `ResolveReferences` preflight reports `RLW0001` when no
+directory is configured, `RLW0002` when it does not exist, `RLW0003`
+when `Assembly-CSharp.dll` is absent and `RLW0004` when
+`UnityEngine.CoreModule.dll` is absent. These are prerequisite diagnostics,
+not tests that substitute game DLLs. No game files are copied, launched or
+modified by the preflight. The 1.6/1.7 runtime selection and actual
+in-game validation remain separate evidence gates.
+
+## Shared QA map-event reader (offline primitive)
+
+`MapQaEventReader` is a bounded, pure C# reader for **already-attributed**
+RimWorld log lines. It accepts a configured ASCII marker (for example
+`[NatureTilesQA]`) and a unique 8-40-character run nonce. A prefixed line
+such as `INFO [Verse] [NatureTilesQA] {"schemaVersion":"naturetiles-map-smoke/v1","nonce":"session_123456","mapUniqueId":17}`
+is parsed as a JSON object with exactly one `schemaVersion` and `nonce`.
+Other fields remain opaque and belong to that mod's own reviewed assertions.
+
+The reader ignores unrelated lines and **rejects** wrong nonces, missing or
+duplicate identity keys, malformed JSON, unsafe schema names, excessive depth,
+log lines beyond 8192 characters, or more than 128 accepted events. Rejections
+are reason-coded and the retained reason list is bounded. No executable,
+process, file read/write, network call, mod installation or game state is
+touched by the reader. Its regression fixtures are synthetic, without RimWorld.
+
+**This is not a qualified `map-check` command yet.** A future centralized
+RimLiaison runtime executor must first prove the exact candidate + toolchain,
+launch and own the correct game process, isolate its mod/savedata inputs,
+attest the fresh Player.log start/header, bind the run nonce, verify the
+actual game version, generated biome and map-ready state, evaluate
+consumer-specific expectations, and prove teardown and cleanup. Parsing
+a JSON line alone proves none of those facts. Do not count an offline fixture
+as game-runtime or gameplay evidence, or reimplement the launcher in a mod
+repository. The shared map-check backlog lives in RimLiaison issue #16.
 
 ## Explicit release and qualification workflows
 
