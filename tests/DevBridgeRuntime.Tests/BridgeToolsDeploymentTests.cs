@@ -1,9 +1,75 @@
 using System.Text;
+using System.Xml.Linq;
 
 namespace DevBridge.Coordinator;
 
 internal static partial class OfflineTests
 {
+    private static void TestRealRimWorldManagedAssemblyPreflightContract()
+    {
+        string component = Path.Combine(FindWorkspaceRoot(), "src", "DevBridgeRuntime");
+        XDocument props = XDocument.Load(Path.Combine(component, "Directory.Build.props"));
+        XElement group = props.Root?.Element("PropertyGroup");
+        Assert(group is not null, "DevBridge runtime requires its shared MSBuild property group");
+
+        XElement[] sources = group.Elements("RimWorldManagedDir").ToArray();
+        string[] fallbackValues =
+        [
+            "$(RIMWORLD_MANAGED_DIR)",
+            "$(RIMWORLD_MANAGED_PATH)",
+            "$(RIMWORLD_MANAGED_ASSEMBLIES)",
+            "$(RIMWORLD_ROOT)\\RimWorldWin64_Data\\Managed",
+            "$(RimWorldRootFromWorkspace)\\RimWorldWin64_Data\\Managed"
+        ];
+        Assert(sources.Length == fallbackValues.Length,
+            "RimWorld assembly resolution must preserve five ordered explicit fallback sources");
+        for (int i = 0; i < fallbackValues.Length; i++)
+        {
+            Assert(sources[i].Value == fallbackValues[i] &&
+                   sources[i].Attribute("Condition")?.Value.StartsWith(
+                       "'$(RimWorldManagedDir)' == ''", StringComparison.Ordinal) == true,
+                "each fallback must preserve an explicitly supplied managed directory");
+        }
+        Assert(group.Element("RimWorldRootFromWorkspace") is not null,
+            "legacy project-owned workspace discovery must remain available");
+
+        XDocument mod = XDocument.Load(Path.Combine(component, "Mod", "DevBridge2.csproj"));
+        Assert(!mod.Descendants("RimWorldManagedDir").Any(),
+            "the game Mod must not override centralized explicit path precedence");
+        XElement target = mod.Descendants("Target").SingleOrDefault(item =>
+            item.Attribute("Name")?.Value == "ValidateRealRimWorldManagedAssemblies");
+        Assert(target is not null &&
+               target.Attribute("BeforeTargets")?.Value == "ResolveReferences" &&
+               target.Attribute("Condition")?.Value.Contains(
+                   "'$(DesignTimeBuild)' != 'true'", StringComparison.Ordinal) == true,
+            "the real-game prerequisite gate must precede normal Mod reference resolution");
+
+        XElement[] errors = target.Elements("Error").ToArray();
+        Assert(errors.Select(item => item.Attribute("Code")?.Value).SequenceEqual(
+                   ["RLW0001", "RLW0002", "RLW0003", "RLW0004"]),
+            "preflight must distinguish missing configuration, directory and both real DLLs");
+        foreach (XElement error in errors)
+            Assert(error.Attribute("Condition")?.Value.Contains(
+                       "$(RimWorldManagedDir)", StringComparison.Ordinal) == true &&
+                   !string.IsNullOrWhiteSpace(error.Attribute("Text")?.Value),
+                "every game-assembly prerequisite needs an actionable condition and message");
+        Assert(errors[2].Attribute("Condition")?.Value.Contains(
+                   "Assembly-CSharp.dll", StringComparison.Ordinal) == true &&
+               errors[3].Attribute("Condition")?.Value.Contains(
+                   "UnityEngine.CoreModule.dll", StringComparison.Ordinal) == true,
+            "the game prerequisites must name the actual installed assemblies");
+
+        foreach (string name in new[] { "Assembly-CSharp", "UnityEngine.CoreModule" })
+        {
+            XElement reference = mod.Descendants("Reference").SingleOrDefault(item =>
+                item.Attribute("Include")?.Value == name);
+            Assert(reference?.Element("HintPath")?.Value ==
+                   "$(RimWorldManagedDir)\\" + name + ".dll" &&
+                   reference.Element("Private")?.Value == "false",
+                "the Mod must reference actual game DLLs without embedding local copies");
+        }
+    }
+
     private static void TestBridgeToolsPublishContract()
     {
         if (SkipUnselectedBridgeToolsCoverage())
