@@ -147,7 +147,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(root, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(
@@ -202,7 +202,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(root, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(
@@ -689,7 +689,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(RuntimeRoot, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %1 %2 %3 %4 %5 %6
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %1 %2 %3 %4 %5 %6
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(

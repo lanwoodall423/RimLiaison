@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:ValidationProofSchemaVersion = 'rimliaison-validation-proof/v1'
-$script:ValidationProofValidatorVersion = 'rimliaison-validation-proof-2'
+$script:ValidationProofValidatorVersion = 'rimliaison-validation-proof-3'
 $script:ValidationProofMaxRecordBytes = 64KB
 $script:ValidationProofDefaultMaxRecords = 64
 $script:ValidationProofDefaultMaxBytes = 1MB
@@ -18,12 +18,171 @@ function Get-ValidationProofMaxRecordBytes {
     return $script:ValidationProofMaxRecordBytes
 }
 
+# This helper defines the exact offline tooling source-closure. It does not
+# weaken the separate mandatory RimWorld game Mod build or live runtime gates.
+# The project list matches the developer-reviewed 14-project Offline.slnf;
+# unlike a solution filter, it requires no new tracked file in the workspace.
+function Get-OfflineToolingProjectPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $solution = Join-Path $root 'RimLiaison.sln'
+    if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
+        throw 'OFFLINE_SOLUTION_MISSING'
+    }
+    if (([IO.File]::GetAttributes($solution) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'OFFLINE_SOLUTION_LINK_FORBIDDEN'
+    }
+
+    $excluded = 'src/DevBridgeRuntime/Mod/DevBridge2.csproj'
+    $included = @(
+        'src/RimLiaison.Cli/RimLiaison.Cli.csproj',
+        'src/RimLiaison.Desktop/RimLiaison.Desktop.csproj',
+        'tests/RimLiaison.Tests/RimLiaison.Tests.csproj',
+        'src/RimContext.Core/RimContext.Core.csproj',
+        'src/RimContext.Cli/RimContext.Cli.csproj',
+        'tests/RimContext.Tests/RimContext.Tests.csproj',
+        'src/RimError.Core/RimError.Core.csproj',
+        'src/RimError.Cli/RimError.Cli.csproj',
+        'tests/RimError.Core.Tests/RimError.Core.Tests.csproj',
+        'src/RimDev.Contracts/RimDev.Contracts.csproj',
+        'src/DevBridgeRuntime/Coordinator.Core/DevBridge.Coordinator.Core.csproj',
+        'src/DevBridgeRuntime/Coordinator/DevBridge.Coordinator.csproj',
+        'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj',
+        'tests/DevBridgeRuntime.Tests/DevBridgeRuntime.Tests.csproj'
+    )
+    $actual = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $solutionProjectCount = 0
+    foreach ($line in [IO.File]::ReadAllLines($solution)) {
+        if ($line -match '^Project\("\{[^}]+\}"\) = "[^"]+", "([^"]+\.csproj)", "\{[^}]+\}"') {
+            $relative = $Matches[1].Replace('\', '/')
+            $solutionProjectCount++
+            if (-not $actual.Add($relative)) {
+                throw "OFFLINE_SOLUTION_DUPLICATE_PROJECT:$relative"
+            }
+        }
+    }
+
+    # Fail closed if new projects enter the solution or the sole game Mod is
+    # removed/renamed. Never silently turn a full game build into offline PASS.
+    if ($solutionProjectCount -ne 15 -or $actual.Count -ne 15 -or
+        -not $actual.Contains($excluded)) {
+        throw 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    }
+
+    $includedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($relative in $included) {
+        if (-not $includedSet.Add($relative) -or -not $actual.Contains($relative)) {
+            throw "OFFLINE_SOLUTION_MEMBERSHIP_DRIFT:$relative"
+        }
+        $projectPath = Join-Path $root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
+            throw "OFFLINE_TOOLING_PROJECT_MISSING:$relative"
+        }
+        if (([IO.File]::GetAttributes($projectPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "OFFLINE_TOOLING_PROJECT_LINK_FORBIDDEN:$relative"
+        }
+
+        # Even an included project's indirect ProjectReference must not bring
+        # the excluded RimWorld/Unity game project back into the tooling build.
+        [xml]$xml = [IO.File]::ReadAllText($projectPath)
+        $references = @($xml.SelectNodes('//*[local-name()="ProjectReference"]'))
+        foreach ($reference in $references) {
+            $include = [string]$reference.GetAttribute('Include')
+            if ([string]::IsNullOrWhiteSpace($include) -or $include.Contains('$(')) {
+                throw "OFFLINE_TOOLING_REFERENCE_UNRESOLVED:$relative"
+            }
+            $target = [IO.Path]::GetFullPath(
+                (Join-Path (Split-Path -Parent $projectPath) $include))
+            if (-not (Test-ValidationPathWithin -RepositoryRoot $root -Candidate $target)) {
+                throw "OFFLINE_TOOLING_REFERENCE_OUTSIDE_CLOSURE:$relative"
+            }
+            $targetRelative = ConvertTo-ValidationRelativePath -RepositoryRoot $root -Path $target
+            if (-not $includedSet.Contains($targetRelative) -and
+                -not ($included -contains $targetRelative)) {
+                throw "OFFLINE_TOOLING_REFERENCE_OUTSIDE_CLOSURE:$relative->$targetRelative"
+            }
+        }
+    }
+
+    if ($includedSet.Count -ne 14 -or $actual.Count -ne ($includedSet.Count + 1)) {
+        throw 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    }
+    return $included
+}
+
+# An offline build PASS must leave the pinned net472 lock unchanged and
+# produce the actual outputs consumed by the three --no-build regressions.
+# This checks physical files, not compiler provenance or test execution.
+function Assert-OfflineToolingBuildEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedLockSha256
+    )
+
+    if ($ExpectedLockSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'OFFLINE_TOOLING_LOCK_SNAPSHOT_INVALID'
+    }
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $lockPath = Join-Path $root 'src/DevBridgeRuntime/BridgeTools/packages.lock.json'
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        throw 'OFFLINE_TOOLING_LOCK_MISSING'
+    }
+    $actualLockSha = Get-ValidationFileSha256 $lockPath
+    if ($actualLockSha -cne $ExpectedLockSha256) {
+        throw 'OFFLINE_TOOLING_LOCK_CHANGED'
+    }
+
+    # The original PN checks execute dotnet run/test with --no-build.
+    # Their expected target frameworks differ: RimLiaison.Tests targets
+    # net8.0-windows, not net8.0. Missing files cannot be accepted as PASS.
+    $requiredOutputs = @(
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.dll',
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.runtimeconfig.json',
+        'tests/RimError.Core.Tests/bin/Release/net8.0/RimError.Core.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.runtimeconfig.json'
+    )
+    foreach ($relative in $requiredOutputs) {
+        $full = Join-Path $root $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            throw "OFFLINE_TOOLING_OUTPUT_MISSING:$relative"
+        }
+        $file = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $file.Length -le 0) {
+            throw "OFFLINE_TOOLING_OUTPUT_INVALID:$relative"
+        }
+    }
+    return $true
+}
+
 function Get-ValidationProofStageDefinition {
     param(
         [Parameter(Mandatory = $true)][string]$StageId
     )
 
     switch ($StageId) {
+        'offline-tooling-build' {
+            # A build must never be reused by input-hash proof: its obj/bin
+            # outputs and the checked-in NuGet lockfile are mutable state.
+            return [pscustomobject]@{
+                StageId = $StageId
+                Reusable = $false
+                Toolchain = 'dotnet'
+                SourceRoots = @('src', 'tests')
+                ExtraRoots = @()
+                RequiredFiles = @(
+                    'RimLiaison.sln',
+                    'global.json',
+                    'scripts/ci-validate.ps1',
+                    'scripts/validation-proof.ps1',
+                    'src/DevBridgeRuntime/BridgeTools/packages.lock.json')
+                NonReusableReason = 'build-artifacts-and-locked-restore'
+            }
+        }
         'rimcontext' {
             return [pscustomobject]@{
                 StageId = $StageId
@@ -172,10 +331,16 @@ function Test-ValidationPathWithin {
         [Parameter(Mandatory = $true)][string]$Candidate
     )
 
-    $root = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($RepositoryRoot))
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    # The prefix separator prevents C:\repo-extra from matching C:\repo.
+    # String.TrimEnd is available in both Windows PowerShell 5.1 and pwsh.
+    $rootPrefix = $root.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
     $fullCandidate = [IO.Path]::GetFullPath($Candidate)
     return $fullCandidate.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
-        $fullCandidate.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+        $fullCandidate.Equals(
+            $rootPrefix.Substring(0, $rootPrefix.Length - 1),
+            [StringComparison]::OrdinalIgnoreCase) -or
+        $fullCandidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function ConvertTo-ValidationRelativePath {
@@ -189,7 +354,15 @@ function ConvertTo-ValidationRelativePath {
         throw 'Validation input escaped the repository root.'
     }
 
-    return ([IO.Path]::GetRelativePath($RepositoryRoot, $fullPath).Replace('\', '/')).ToLowerInvariant()
+    $root = [IO.Path]::GetFullPath($RepositoryRoot)
+    $rootPrefix = $root.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
+    if ($fullPath.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+        $fullPath.Equals(
+            $rootPrefix.Substring(0, $rootPrefix.Length - 1),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return '.'
+    }
+    return $fullPath.Substring($rootPrefix.Length).Replace('\', '/').ToLowerInvariant()
 }
 
 function Get-ValidationFileSha256 {
@@ -201,7 +374,7 @@ function Get-ValidationFileSha256 {
     try {
         $stream = [IO.File]::OpenRead($Path)
         try {
-            return ([Convert]::ToHexString($algorithm.ComputeHash($stream))).ToLowerInvariant()
+            return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
         }
         finally {
             $stream.Dispose()
@@ -210,6 +383,45 @@ function Get-ValidationFileSha256 {
     finally {
         $algorithm.Dispose()
     }
+}
+
+# ProcessStartInfo.ArgumentList is unavailable on Windows PowerShell 5.1's
+# .NET Framework runtime. For its Arguments-string fallback, encode one token
+# using the Windows C runtime argv rules: double backslashes before a quote
+# and at the end of a quoted token. No shell is ever invoked.
+function ConvertTo-ValidationWindowsProcessArgument {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    if ($Value -match '[\x00-\x1f]') {
+        throw 'VALIDATION_ARGUMENT_CONTROL_CHARACTER'
+    }
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $encoded = [Text.StringBuilder]::new()
+    [void]$encoded.Append('"')
+    $backslashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq [char]'\') {
+            $backslashes++
+            continue
+        }
+        if ($ch -eq [char]'"') {
+            [void]$encoded.Append('\' * ($backslashes * 2 + 1))
+            [void]$encoded.Append('"')
+            $backslashes = 0
+            continue
+        }
+        [void]$encoded.Append('\' * $backslashes)
+        [void]$encoded.Append([char]$ch)
+        $backslashes = 0
+    }
+    [void]$encoded.Append('\' * ($backslashes * 2))
+    [void]$encoded.Append('"')
+    return $encoded.ToString()
 }
 
 function Get-ValidationToolVersion {
@@ -516,7 +728,7 @@ function Get-ValidationStageFingerprint {
             Add-FingerprintText ([string]$entry.Sha256)
         }
 
-        $closureHash = ([Convert]::ToHexString($hash.GetHashAndReset())).ToLowerInvariant()
+        $closureHash = ([BitConverter]::ToString($hash.GetHashAndReset())).Replace('-', '').ToLowerInvariant()
     }
     finally {
         $hash.Dispose()

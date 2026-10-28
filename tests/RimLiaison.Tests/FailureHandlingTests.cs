@@ -167,7 +167,14 @@ internal static class FailureHandlingTests
             new RimContextService().Index(new RimContextIndexRequest(root));
             using var output = new StringWriter();
             using var errors = new StringWriter();
-            string devBridgeRoot = Path.GetFullPath(Path.Combine(oldDirectory, "..", "DevBridge2"));
+            // The recording transport supplies all health/project responses.
+            // Doctor still verifies that the configured command exists, but it
+            // must not depend on a sibling DevBridge2 repository on this host.
+            string devBridgeRoot = Path.Combine(root, "DevBridge-fixture");
+            Directory.CreateDirectory(devBridgeRoot);
+            File.WriteAllText(
+                Path.Combine(devBridgeRoot, "DevBridge.cmd"),
+                "@echo off\r\nrem inert doctor test fixture\r\n");
             var transport = new DoctorTransport();
             int exitCode = CliApplication.RunAsync(
                     [

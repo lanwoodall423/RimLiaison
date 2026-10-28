@@ -105,6 +105,23 @@ public static class CliApplication
         IAgentObservabilityTelemetry? observabilityTelemetry = null,
         IDevBridgeFreshGenerationAdapter? freshGenerationRecoveryAdapter = null)
     {
+        // Explicit inert developer packaging is not a production command.
+        // Do not route it through promotion or the normal game lifecycle.
+        // The native rimtest.exe name cannot reach this branch: its entrypoint
+        // rejects all commands other than dev-check before CLI dispatch.
+        if (NativeRimtestPackageCandidateCommand.IsRequested(args))
+            return await NativeRimtestPackageCandidateCommand.RunAsync(
+                args, stdout, cancellationToken).ConfigureAwait(false);
+        if (NativeRimtestPackageVerificationCommand.IsRequested(args))
+            return NativeRimtestPackageVerificationCommand.Run(args, stdout);
+        if (NativeRimtestPathPreflightCommand.IsRequested(args))
+            return NativeRimtestPathPreflightCommand.Run(args, stdout);
+        if (NativeRimtestSourcePublishCommand.IsRequested(args))
+            return await NativeRimtestSourcePublishCommand.RunAsync(
+                args, stdout, cancellationToken).ConfigureAwait(false);
+        if (NativeRimtestCandidateInstallCommand.IsRequested(args))
+            return NativeRimtestCandidateInstallCommand.Run(args, stdout);
+
         CliRequest? earlyRequest = null;
         try
         {

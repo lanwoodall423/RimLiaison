@@ -74,6 +74,74 @@ function Assert-ProofMissAfterMutation {
 try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null
 
+    # This code path must remain compatible with the .NET Framework runtime
+    # used by built-in Windows PowerShell 5.1 (also valid under PowerShell 7).
+    # A canonical root/path prefix collision must never count as containment.
+    Write-ProofFixtureFile 'ps51-compat/nested/IDENTITY.TXT' 'abc'
+    $compatRoot = Join-Path $root 'ps51-compat'
+    $compatFile = Join-Path $compatRoot 'nested/IDENTITY.TXT'
+    $compatSibling = Join-Path $root 'ps51-compat-sibling'
+    [void](New-Item -ItemType Directory -Force -Path $compatSibling)
+    $outsideFile = Join-Path $compatSibling 'outside.txt'
+    [IO.File]::WriteAllText($outsideFile, 'outside', [Text.UTF8Encoding]::new($false))
+
+    $testCount++
+    Assert-ValidationTrue -Condition (
+        (Test-ValidationPathWithin -RepositoryRoot $compatRoot -Candidate $compatFile) -and
+        (Test-ValidationPathWithin -RepositoryRoot $compatRoot -Candidate $compatRoot) -and
+        -not (Test-ValidationPathWithin -RepositoryRoot $compatRoot -Candidate $outsideFile)
+    ) -Message 'path containment rejects same-prefix sibling and accepts only root or descendants'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationRelativePath -RepositoryRoot $compatRoot -Path $compatFile) -Expected 'nested/identity.txt' -Message 'relative path is normalized and case stable'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationRelativePath -RepositoryRoot $compatRoot -Path $compatRoot) -Expected '.' -Message 'exact repository root has safe relative identity'
+
+    $outsideRejected = $false
+    try {
+        [void](ConvertTo-ValidationRelativePath -RepositoryRoot $compatRoot -Path (
+                Join-Path $compatRoot '../ps51-compat-sibling/outside.txt'))
+    }
+    catch {
+        $outsideRejected = $_.Exception.Message.Contains('escaped the repository root')
+    }
+    $testCount++
+    Assert-ValidationTrue -Condition $outsideRejected -Message 'relative path conversion rejects normalized parent traversal'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (Get-ValidationFileSha256 $compatFile) -Expected 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' -Message 'PowerShell 5.1 compatible SHA-256 matches known lowercase hash vector'
+
+    $testCount++
+    Assert-ValidationTrue -Condition (
+        Test-ValidationPathWithin -RepositoryRoot ([IO.Path]::GetPathRoot($compatRoot)) -Candidate $compatFile
+    ) -Message 'a volume root with a trailing separator remains a valid lexical ancestor'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationWindowsProcessArgument -Value '--no-restore') -Expected '--no-restore' -Message 'safe unquoted argument stays byte-identical'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationWindowsProcessArgument -Value '') -Expected '""' -Message 'Windows process argument preserves an empty token'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationWindowsProcessArgument -Value 'C:\Source Folder\repo.csproj') -Expected ('"' + 'C:\Source Folder\repo.csproj' + '"') -Message 'Windows argument encloses a path with spaces'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationWindowsProcessArgument -Value 'C:\Source Folder\') -Expected ('"' + 'C:\Source Folder\\' + '"') -Message 'Windows quoted trailing slash is doubled before closing quote'
+
+    $testCount++
+    Assert-ValidationEqual -Actual (ConvertTo-ValidationWindowsProcessArgument -Value 'a"b') -Expected ('"' + 'a\"b' + '"') -Message 'Windows embedded quote is escaped without shell interpretation'
+
+    $controlRejected = $false
+    try {
+        [void](ConvertTo-ValidationWindowsProcessArgument -Value ("valid" + [char]10 + "injected"))
+    }
+    catch {
+        $controlRejected = $_.Exception.Message.Contains('VALIDATION_ARGUMENT_CONTROL_CHARACTER')
+    }
+    $testCount++
+    Assert-ValidationTrue -Condition $controlRejected -Message 'process command lines reject control-character injection'
+
     # This fixture deliberately contains the complete known closure used by
     # the deterministic RimLiaison suite. The proof layer may miss when a
     # closure cannot be enumerated; it never turns an unknown closure into a hit.
@@ -205,6 +273,139 @@ try {
     $testCount += 2
     Assert-ValidationTrue (-not $live.Reusable) 'live stack stage is never offline-reusable'
     Assert-ValidationTrue (-not $artifact.Reusable) 'artifact freshness stage is never offline-reusable'
+
+    # Offline build membership tests are fixture-only. No dotnet process is run.
+    $toolingStage = Get-ValidationProofStageDefinition 'offline-tooling-build'
+    $testCount++
+    Assert-ValidationTrue -Condition (-not $toolingStage.Reusable -and
+        $toolingStage.Toolchain -eq 'dotnet') -Message 'offline build must never reuse mutable output proof'
+
+    $offlineRoot = Join-Path $root 'offline-tooling-contract'
+    $solutionText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../RimLiaison.sln'))
+    Write-ProofFixtureFile -RelativePath 'offline-tooling-contract/RimLiaison.sln' -Value $solutionText
+    $solutionProjectLines = @([IO.File]::ReadAllLines((Join-Path $offlineRoot 'RimLiaison.sln')) |
+        Where-Object { $_ -match '^Project\("\{[^}]+\}"\) = "[^"]+", "[^"]+\.csproj"' })
+    foreach ($entry in $solutionProjectLines) {
+        if ($entry -match '^Project\("\{[^}]+\}"\) = "[^"]+", "([^"]+\.csproj)"') {
+            $projectRelative = $Matches[1].Replace('\', '/')
+            Write-ProofFixtureFile -RelativePath ("offline-tooling-contract/" + $projectRelative) -Value '<Project Sdk="Microsoft.NET.Sdk" />'
+        }
+    }
+
+    $offlineProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+    $testCount++
+    Assert-ValidationTrue -Condition ($offlineProjects.Count -eq 14 -and
+        -not ($offlineProjects -contains 'src/DevBridgeRuntime/Mod/DevBridge2.csproj') -and
+        ($offlineProjects -contains 'tests/RimLiaison.Tests/RimLiaison.Tests.csproj') -and
+        ($offlineProjects -contains 'src/DevBridgeRuntime/BridgeTools/DevBridge2.BridgeTools.csproj')) -Message 'exactly fourteen tooling projects and no game Mod are selected'
+
+    function Assert-OfflineToolingRefusal {
+        param([Parameter(Mandatory = $true)][string]$ExpectedCode)
+        $reason = $null
+        try {
+            [void]@(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+        }
+        catch {
+            $reason = $_.Exception.Message
+        }
+        Assert-ValidationTrue -Condition ($null -ne $reason -and $reason.Contains($ExpectedCode)) -Message "unexpected result for $ExpectedCode"
+    }
+
+    $contractSolution = Join-Path $offlineRoot 'RimLiaison.sln'
+    $unexpectedProject = 'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NewUnreviewed", "src\New\Unreviewed.csproj", "{11111111-1111-1111-1111-111111111111}"'
+    [IO.File]::WriteAllText($contractSolution, $solutionText + [Environment]::NewLine + $unexpectedProject, [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_SOLUTION_MEMBERSHIP_DRIFT'
+    [IO.File]::WriteAllText($contractSolution, $solutionText, [Text.UTF8Encoding]::new($false))
+
+    $duplicateProject = [string]$solutionProjectLines[0]
+    [IO.File]::WriteAllText(
+        $contractSolution,
+        $solutionText + [Environment]::NewLine + $duplicateProject,
+        [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_SOLUTION_DUPLICATE_PROJECT'
+    [IO.File]::WriteAllText($contractSolution, $solutionText, [Text.UTF8Encoding]::new($false))
+
+    $missingProject = Join-Path $offlineRoot 'tests/RimContext.Tests/RimContext.Tests.csproj'
+    Remove-Item -LiteralPath $missingProject
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_TOOLING_PROJECT_MISSING'
+    [IO.File]::WriteAllText($missingProject, '<Project />', [Text.UTF8Encoding]::new($false))
+
+    $consumer = Join-Path $offlineRoot 'src/RimLiaison.Cli/RimLiaison.Cli.csproj'
+    [IO.File]::WriteAllText($consumer,
+        '<Project><ItemGroup><ProjectReference Include="..\DevBridgeRuntime\Mod\DevBridge2.csproj" /></ItemGroup></Project>',
+        [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineToolingRefusal 'OFFLINE_TOOLING_REFERENCE_OUTSIDE_CLOSURE'
+    [IO.File]::WriteAllText($consumer, '<Project />', [Text.UTF8Encoding]::new($false))
+    $restoredProjects = @(Get-OfflineToolingProjectPaths -RepositoryRoot $offlineRoot)
+    $testCount++
+    Assert-ValidationTrue -Condition ($restoredProjects.Count -eq 14) -Message 'restored fixture returns the exact tooling closure'
+
+    # Offline build output evidence is a separate gate after 14 successful
+    # command exits. These fixtures never run dotnet or a RimWorld binary.
+    $lockRelative = 'src/DevBridgeRuntime/BridgeTools/packages.lock.json'
+    $fixtureLockRelative = 'offline-tooling-contract/' + $lockRelative
+    Write-ProofFixtureFile -RelativePath $fixtureLockRelative -Value '{"version":1}'
+    $fixtureLock = Join-Path $offlineRoot $lockRelative
+    $originalLockHash = Get-ValidationFileSha256 $fixtureLock
+    $testOutputs = @(
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.dll',
+        'tests/RimContext.Tests/bin/Release/net8.0/RimContext.Tests.runtimeconfig.json',
+        'tests/RimError.Core.Tests/bin/Release/net8.0/RimError.Core.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.dll',
+        'tests/RimLiaison.Tests/bin/Release/net8.0-windows/RimLiaison.Tests.runtimeconfig.json'
+    )
+    foreach ($relative in $testOutputs) {
+        Write-ProofFixtureFile -RelativePath ("offline-tooling-contract/" + $relative) -Value 'compiled-fixture'
+    }
+
+    function Assert-OfflineEvidenceRefusal {
+        param(
+            [Parameter(Mandatory = $true)][string]$ExpectedCode,
+            [Parameter(Mandatory = $true)][string]$ExpectedLockSha256
+        )
+        $reason = $null
+        try {
+            [void](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $ExpectedLockSha256)
+        }
+        catch {
+            $reason = [string]$_.Exception.Message
+        }
+        Assert-ValidationTrue -Condition ($null -ne $reason -and $reason.Contains($ExpectedCode)) -Message "build evidence must fail closed on $ExpectedCode"
+    }
+
+    $testCount++
+    Assert-ValidationTrue -Condition ([bool](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $originalLockHash)) -Message 'complete three-suite outputs and unchanged locked restore allow build evidence'
+
+    foreach ($relative in $testOutputs) {
+        $output = Join-Path $offlineRoot $relative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        Remove-Item -LiteralPath $output
+        $testCount++
+        Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_OUTPUT_MISSING' -ExpectedLockSha256 $originalLockHash
+        [IO.File]::WriteAllText($output, 'compiled-fixture', [Text.UTF8Encoding]::new($false))
+    }
+
+    $emptyOutput = Join-Path $offlineRoot $testOutputs[0].Replace('/', [IO.Path]::DirectorySeparatorChar)
+    [IO.File]::WriteAllText($emptyOutput, '', [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_OUTPUT_INVALID' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($emptyOutput, 'compiled-fixture', [Text.UTF8Encoding]::new($false))
+
+    [IO.File]::WriteAllText($fixtureLock, '{"version":2}', [Text.UTF8Encoding]::new($false))
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_LOCK_CHANGED' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($fixtureLock, '{"version":1}', [Text.UTF8Encoding]::new($false))
+
+    Remove-Item -LiteralPath $fixtureLock
+    $testCount++
+    Assert-OfflineEvidenceRefusal -ExpectedCode 'OFFLINE_TOOLING_LOCK_MISSING' -ExpectedLockSha256 $originalLockHash
+    [IO.File]::WriteAllText($fixtureLock, '{"version":1}', [Text.UTF8Encoding]::new($false))
+
+    $testCount++
+    Assert-ValidationTrue -Condition ([bool](Assert-OfflineToolingBuildEvidence -RepositoryRoot $offlineRoot -ExpectedLockSha256 $originalLockHash)) -Message 'restored output-and-lock fixtures regain evidence readiness'
 
     # Exercise bounded deterministic eviction with valid compact records.
     $boundedRoot = Join-Path $root 'bounded-cache'

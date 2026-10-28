@@ -12,12 +12,28 @@ internal static class RecipePropagationTests
         string root = Path.Combine(Path.GetTempPath(), "rimliaison-recipe-propagation-" + Guid.NewGuid().ToString("N"));
         string recipePath = Path.Combine(root, ".rimdev", "recipes", "fixture-anchor.json");
         string previousDirectory = Environment.CurrentDirectory;
+        string? previousRimDevRoot = Environment.GetEnvironmentVariable("RIMDEV_ROOT");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(recipePath)!);
+            string gameRoot = Path.Combine(root, "RimWorld");
+            string modsRoot = Path.Combine(gameRoot, "Mods");
+            Directory.CreateDirectory(modsRoot);
+            File.WriteAllText(
+                Path.Combine(root, ".rimdev", "workspace.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimdev-workspace/v1",
+                    rimWorldRoot = gameRoot,
+                    activeModsRoot = modsRoot,
+                    devBridgeRuntimeRoot = Path.Combine(modsRoot, "DevBridge2"),
+                    repositories = new[] { new { path = "." } },
+                    packageMappings = new { }
+                }),
+                Encoding.UTF8);
             File.WriteAllText(
                 Path.Combine(root, ".rimdev", "stack.json"),
-                "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"FixtureProject\",\"devBridgeProject\":\"fixture-project\",\"catalog\":\"catalog.json\",\"rimBridge\":\"disabled\",\"workload\":\"production\",\"projectType\":\"rimworld-content-mod\",\"packageId\":\"fixture.project\",\"sourceProject\":\"Source/Fixture.csproj\",\"configuration\":\"Release\",\"expectedAssembly\":\"Fixture.dll\",\"deploymentTarget\":\"Fixture.dll\",\"testRecipe\":\"fixture-anchor\",\"testRecipePath\":\".rimdev/recipes/fixture-anchor.json\",\"runtimePackage\":{\"sourceRoot\":\".\",\"include\":[\"About/**\",\"1.*/**\"],\"exclude\":[\".rimdev/**\",\"Source/**\",\"bin/**\",\"obj/**\"]},\"dependencies\":[]}",
+                "{\"schemaVersion\":\"rimdev-stack/v1\",\"project\":\"FixtureProject\",\"devBridgeProject\":\"fixture-project\",\"catalog\":\"catalog.json\",\"rimBridge\":\"disabled\",\"workload\":\"fixture\",\"projectType\":\"rimworld-content-mod\",\"packageId\":\"fixture.project\",\"sourceProject\":\"Source/Fixture.csproj\",\"configuration\":\"Release\",\"expectedAssembly\":\"Fixture.dll\",\"deploymentTarget\":\"Fixture.dll\",\"testRecipe\":\"fixture-anchor\",\"testRecipePath\":\".rimdev/recipes/fixture-anchor.json\",\"runtimePackage\":{\"sourceRoot\":\".\",\"include\":[\"About/**\",\"1.*/**\"],\"exclude\":[\".rimdev/**\",\"Source/**\",\"bin/**\",\"obj/**\"]},\"dependencies\":[]}",
                 Encoding.UTF8);
             File.WriteAllText(
                 recipePath,
@@ -42,13 +58,16 @@ internal static class RecipePropagationTests
             var stack = RimLiaison.Stack.StackManifestResolver.Discover(root);
             Assert(stack.Manifest is not null,
                 $"fixture stack did not resolve: {stack.ErrorCode} {stack.Error}");
+            Assert(string.Equals(stack.Manifest.Workload, "fixture", StringComparison.Ordinal),
+                "recording transport scenario must be a nonproduction fixture");
 
             var transport = new RecordingTransport();
+            Environment.SetEnvironmentVariable("RIMDEV_ROOT", root);
             Environment.CurrentDirectory = root;
             using var stdout = new StringWriter();
             using var stderr = new StringWriter();
             int exitCode = CliApplication.RunAsync(
-                    ["recipe", "show", "fixture-anchor", "--json", "--devbridge-root", root],
+                    ["recipe", "show", "fixture-anchor", "--json", "--experimental", "--devbridge-root", root],
                     stdout,
                     stderr,
                     processTransport: transport)
@@ -71,10 +90,10 @@ internal static class RecipePropagationTests
             Assert(!Directory.Exists(Path.Combine(root, "TestRecipes")),
                 "regression fixture unexpectedly supplied a central recipe catalog");
         }
-    
         finally
         {
             Environment.CurrentDirectory = previousDirectory;
+            Environment.SetEnvironmentVariable("RIMDEV_ROOT", previousRimDevRoot);
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }

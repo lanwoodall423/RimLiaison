@@ -1,20 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net472</TargetFramework>
+    <TargetFramework Condition="'$(DevCheckWaylith)' == 'true'">net10.0</TargetFramework>
+    <TargetFramework Condition="'$(DevCheckWaylith)' != 'true'">net472</TargetFramework>
+    <DevCheckContentVersion Condition="'$(DevCheckWaylith)' == 'true'">1.7</DevCheckContentVersion>
+    <DevCheckContentVersion Condition="'$(DevCheckWaylith)' != 'true'">1.6</DevCheckContentVersion>
     <AssemblyName>DirectValidationRuntimeSignal</AssemblyName>
     <RootNamespace>DirectValidationRuntimeSignal</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <Deterministic>true</Deterministic>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>$(DevCheckRuntimePackageRoot)1.6\Assemblies\</OutputPath>
+    <OutputPath>$(DevCheckRuntimePackageRoot)$(DevCheckContentVersion)\Assemblies\</OutputPath>
   </PropertyGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(DevCheckWaylith)' != 'true'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net472" Version="1.0.3" PrivateAssets="All" />
     <Reference Include="Assembly-CSharp">
       <HintPath>$(RimWorldRoot)\RimWorldWin64_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(DevCheckWaylith)' == 'true'">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(RimWorldRoot)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Waylith">
+      <HintPath>$(RimWorldRoot)\Waylith.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityStubs">
+      <HintPath>$(RimWorldRoot)\UnityStubs.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
