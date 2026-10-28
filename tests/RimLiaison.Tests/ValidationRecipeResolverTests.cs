@@ -123,32 +123,76 @@ internal static class ValidationRecipeResolverTests
         Assert(result.IsSuccess && result.Recipe!.Sha256 == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) &&
                result.Recipe.SchemaVersion == "devbridge-test-recipe/v1", "recipe hash and schema must be recorded");
     }
+    // These are synthetic contract fixtures, NOT claims that live external
+    // repositories or their actual runtime test recipes are present locally.
+    private static readonly (string Name, string Owner, string RecipeId)[] EcosystemContracts =
+    [
+        ("DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke"),
+        ("Frontier", "frontier", "mod-development-smoke"),
+        ("InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite"),
+        ("KnowledgeFramework", "knowledge-framework", "knowledge-framework-release-runtime")
+    ];
+
     public static void EcosystemRecipesResolveByConvention()
     {
-        AssertResolveByConvention("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\KnowledgeFramework", "knowledge-framework", "knowledge-framework-release-runtime");
+        foreach (var contract in EcosystemContracts)
+            AssertSyntheticRecipeContract(contract, explicitPath: false);
     }
-
-    private static void AssertResolveByConvention(string root, string project, string id)
-    {
-        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(project, id, root, null, null);
-        Assert(result.IsSuccess, $"{id} must resolve by convention: {result.ErrorCode} {result.Error}");
-    }
-
 
     public static void EcosystemRecipesResolve()
     {
-        AssertResolve("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke", ".rimdev/recipes/deferred-reality-development-smoke.json");
-        AssertResolve("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke", ".rimdev/recipes/mod-development-smoke.json");
-        AssertResolve("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite", ".rimdev/recipes/insightcanvas-in-game-suite.json");
+        foreach (var contract in EcosystemContracts.Take(3))
+            AssertSyntheticRecipeContract(contract, explicitPath: true);
     }
 
-    private static void AssertResolve(string root, string project, string id, string path)
+    public static void MissingExternalRepositoryDoesNotProduceRecipePass()
     {
-        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(project, id, root, path, null);
-        Assert(result.IsSuccess, $"{id} must resolve: {result.ErrorCode} {result.Error}");
+        string absentRoot = Path.Combine(
+            Path.GetTempPath(), "rimliaison-external-unavailable-" + Guid.NewGuid().ToString("N"));
+        Assert(!Directory.Exists(absentRoot),
+            "a missing external-root fixture must not accidentally exist");
+
+        const string owner = "deferred-reality";
+        const string id = "deferred-reality-development-smoke";
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
+            owner, id, absentRoot, null, null);
+        Assert(!result.IsSuccess &&
+               result.Recipe is null &&
+               result.ErrorCode == "PROJECT_RECIPE_NOT_FOUND" &&
+               result.Error?.Contains(owner, StringComparison.Ordinal) == true,
+            "an unavailable external worktree must be reported as a missing recipe prerequisite, not a successful compatibility test");
+    }
+
+    private static void AssertSyntheticRecipeContract(
+        (string Name, string Owner, string RecipeId) contract,
+        bool explicitPath)
+    {
+        using TempRepo repo = TempRepo.Create(
+            contract.Name, owner: contract.Owner, recipeId: contract.RecipeId);
+        string relative = ".rimdev/recipes/" + contract.RecipeId + ".json";
+        string expectedPath = Path.Combine(
+            repo.Root, ".rimdev", "recipes", contract.RecipeId + ".json");
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
+            contract.Owner,
+            contract.RecipeId,
+            repo.Root,
+            explicitPath ? relative : null,
+            null);
+
+        Assert(result.IsSuccess &&
+               result.Recipe is
+               {
+                   Source: "PROJECT_OWNED",
+                   SchemaVersion: "devbridge-test-recipe/v1"
+               } &&
+               result.Recipe.Id == contract.RecipeId &&
+               result.Recipe.OwnerProject == contract.Owner &&
+               string.Equals(result.Recipe.Path, expectedPath,
+                   StringComparison.OrdinalIgnoreCase) &&
+               result.Recipe.Sha256 == Convert.ToHexString(
+                   SHA256.HashData(File.ReadAllBytes(expectedPath))),
+            "synthetic " + contract.Name + " recipe ownership/path/hash contract failed: " +
+            result.ErrorCode + " " + result.Error);
     }
 
     private static void WriteRecipe(string root, string id, string recipeId, params string[] owners)
@@ -177,15 +221,19 @@ internal static class ValidationRecipeResolverTests
     {
         public string Root { get; }
         internal TempRepo(string root) => Root = root;
-        public static TempRepo Create(string name, string owner = "demo", string[]? owners = null)
+        public static TempRepo Create(
+            string name,
+            string owner = "demo",
+            string[]? owners = null,
+            string recipeId = "demo-smoke")
         {
             string root = Path.Combine(Path.GetTempPath(), "recipe-resolver-" + name + "-" + Guid.NewGuid().ToString("N"));
-            string path = Path.Combine(root, ".rimdev", "recipes", "demo-smoke.json");
+            string path = Path.Combine(root, ".rimdev", "recipes", recipeId + ".json");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(new
             {
                 schemaVersion = "devbridge-test-recipe/v1",
-                id = "demo-smoke",
+                id = recipeId,
                 description = "test",
                 projects = owners ?? [owner],
                 inputs = new { quicktest = true },

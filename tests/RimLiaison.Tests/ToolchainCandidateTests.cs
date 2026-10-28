@@ -77,20 +77,19 @@ internal static class ToolchainCandidateTests
         Assert(result.NextAction is not null, "stale root must provide an actionable next action");
     }
 
-    public static void CurrentRimWorldInstallationResolvesToManagedDirectory()
+    public static void ConfiguredRimWorldFixtureResolvesToManagedDirectory()
     {
-        const string root = @"C:\Games\Steam\steamapps\common\RimWorld";
-        if (!Directory.Exists(root))
-        {
-            return;
-        }
-
-        using TestEnvironment environment = TestEnvironment.Create(root);
+        using TestEnvironment environment = TestEnvironment.Create();
         RimWorldManagedAssemblyResolution result = environment.Resolve(environment.DevBridgeRoot);
 
-        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "current RimWorld installation did not resolve");
-        Assert(result.RimWorldRoot == Path.GetFullPath(root), "current RimWorld root resolved incorrectly");
-        Assert(result.ManagedDirectory == Path.Combine(Path.GetFullPath(root), "RimWorldWin64_Data", "Managed"), "current managed directory resolved incorrectly");
+        Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "configured RimWorld fixture did not resolve");
+        Assert(result.RimWorldRoot == Path.GetFullPath(environment.RimWorldRoot),
+            "configured RimWorld root resolved incorrectly");
+        Assert(result.ManagedDirectory == environment.ManagedDirectory &&
+               Directory.Exists(environment.ManagedDirectory) &&
+               File.Exists(Path.Combine(environment.ManagedDirectory, "Assembly-CSharp.dll")) &&
+               File.Exists(Path.Combine(environment.ManagedDirectory, "UnityEngine.CoreModule.dll")),
+            "configured managed directory or required assembly fixtures were not resolved");
     }
 
     public static void CandidateContractDoesNotExposeExternalReleaseWorkflow()

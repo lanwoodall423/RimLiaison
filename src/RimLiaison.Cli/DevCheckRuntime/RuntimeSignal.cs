@@ -26,6 +26,10 @@ namespace DirectValidationRuntimeSignal
             string requestedDefsText = Environment.GetEnvironmentVariable("DIRECT_VALIDATION_TARGET_DEFS") ?? "";
             var requestedDefs = requestedDefsText.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(x => x.Trim()).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            string typedDefsText = Environment.GetEnvironmentVariable(
+                "DIRECT_VALIDATION_TARGET_TYPED_DEFS") ?? "";
+            string biomeStepsText = Environment.GetEnvironmentVariable(
+                "DIRECT_VALIDATION_EXPECTED_BIOME_GENSTEPS") ?? "";
 
             try
             {
@@ -40,10 +44,36 @@ namespace DirectValidationRuntimeSignal
                 bool targetAssemblyLoaded = assemblyResults.Count == 0 || assemblyResults.All(
                     result => result.IndexOf("\"loaded\":true", StringComparison.Ordinal) >= 0);
                 var defResults = new List<string>();
-                foreach (string defName in requestedDefs)
+                var typedRequests = typedDefsText.Length == 0
+                    ? requestedDefs.Select(name => new[] { "ThingDef", name }).ToList()
+                    : ReadPairs(typedDefsText);
+                foreach (string[] request in typedRequests)
                 {
-                    bool exists = DefDatabase<ThingDef>.GetNamedSilentFail(defName) != null;
-                    defResults.Add("{\"defName\":\"" + Escape(defName) + "\",\"defType\":\"ThingDef\",\"exists\":" + (exists ? "true" : "false") + "}");
+                    string defType = request[0];
+                    string defName = request[1];
+                    bool exists;
+                    if (defType == "ThingDef")
+                        exists = DefDatabase<ThingDef>.GetNamedSilentFail(defName) != null;
+                    else if (defType == "GenStepDef")
+                        exists = DefDatabase<GenStepDef>.GetNamedSilentFail(defName) != null;
+                    else
+                        throw new InvalidDataException("Unsupported direct validation Def type: " + defType);
+                    defResults.Add("{\"defName\":\"" + Escape(defName) +
+                        "\",\"defType\":\"" + Escape(defType) +
+                        "\",\"exists\":" + (exists ? "true" : "false") + "}");
+                }
+                var biomeResults = new List<string>();
+                foreach (string[] request in ReadPairs(biomeStepsText))
+                {
+                    string biomeName = request[0];
+                    string genStepName = request[1];
+                    BiomeDef biome = DefDatabase<BiomeDef>.GetNamedSilentFail(biomeName);
+                    GenStepDef step = DefDatabase<GenStepDef>.GetNamedSilentFail(genStepName);
+                    bool included = biome != null && step != null &&
+                        biome.extraGenSteps != null && biome.extraGenSteps.Contains(step);
+                    biomeResults.Add("{\"biomeDefName\":\"" + Escape(biomeName) +
+                        "\",\"genStepDefName\":\"" + Escape(genStepName) +
+                        "\",\"exists\":" + (included ? "true" : "false") + "}");
                 }
 
                 string json = "{\"protocol\":\"" + Protocol + "\",\"timestampUtc\":\"" + Escape(DateTime.UtcNow.ToString("O")) +
@@ -51,7 +81,9 @@ namespace DirectValidationRuntimeSignal
                     "\",\"targetModLoaded\":" + (targetModLoaded ? "true" : "false") +
                     ",\"targetAssemblyLoaded\":" + (targetAssemblyLoaded ? "true" : "false") +
                     ",\"targetAssembliesLoaded\":[" + string.Join(",", assemblyResults) + "]" +
-                    ",\"requestedDefs\":[" + string.Join(",", defResults) + "] ,\"completion\":\"content-loaded\"}";
+                    ",\"requestedDefs\":[" + string.Join(",", defResults) + "]" +
+                    ",\"biomeGenSteps\":[" + string.Join(",", biomeResults) + "]" +
+                    ",\"completion\":\"content-loaded\"}";
                 WriteAtomic(resultPath, json);
             }
             catch (Exception ex)
@@ -62,6 +94,24 @@ namespace DirectValidationRuntimeSignal
                 try { WriteAtomic(resultPath, json); } catch { }
             }
             return;
+        }
+
+        private static List<string[]> ReadPairs(string text)
+        {
+            var result = new List<string[]>();
+            if (string.IsNullOrWhiteSpace(text))
+                return result;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string encoded in text.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string[] pair = encoded.Split('|');
+                if (pair.Length != 2 || pair.Any(value => string.IsNullOrWhiteSpace(value) ||
+                    value.Any(ch => !char.IsLetterOrDigit(ch) && ch != '_' && ch != '-' && ch != '.')) ||
+                    !seen.Add(pair[0] + "|" + pair[1]))
+                    throw new InvalidDataException("Invalid or duplicate direct-validation expectation.");
+                result.Add(pair);
+            }
+            return result;
         }
 
         private static string Escape(string value)
