@@ -1,5 +1,49 @@
 # Change-aware repository validation
 
+## Explicit tooling-only Windows build (NatureTiles blocker #12)
+
+RimLiaison's full solution includes one real RimWorld game Mod whose build
+requires the actual installed game's managed assemblies. The separate
+headless tooling-only build is an explicit preparation gate: a PASS is
+never proof that the game Mod compiled or loaded in RimWorld.
+
+In a developer-approved Windows environment with the pinned .NET SDK,
+an authorized operator may run:
+
+    pwsh -NoProfile -File .\scripts\ci-validate.ps1 -StageId offline-tooling-build -NoProofReuse -Json
+
+This stage reads the tracked RimLiaison.sln and requires exactly its
+14 reviewed tooling/test projects plus the one excluded game Mod:
+src/DevBridgeRuntime/Mod/DevBridge2.csproj. It fails closed if a project
+is added, removed, duplicated, missing, or refers to the excluded game
+Mod through ProjectReference. It restores each selected project, uses
+--locked-mode for the BridgeTools net472 dependency graph, then builds
+all 14 under Release using --no-restore. A failed restore or build
+terminates the stage. It snapshots the checked-in BridgeTools
+packages.lock.json SHA-256 before restore and rejects any lockfile drift.
+Before reporting PASS, it also requires nonempty, non-link compiled
+regression files from the expected Release frameworks: RimContext.Tests
+under net8.0, RimError.Core.Tests under net8.0, and RimLiaison.Tests
+under net8.0-windows. The two executable suites also require their
+runtimeconfig.json files. Missing files or a changed dependency lock
+produce a failed stage instead of an apparent build PASS.
+
+These output checks prove only file presence and unchanged locked
+dependencies. They do not prove fresh compilation, exact source-to-binary
+provenance, or successful regression execution. The original three
+ProjectNexus regression checks must still run after the build is
+authorized.
+
+This source-only route requires no newly tracked RimLiaison.Offline.slnf
+file. It is deliberately non-reusable in validation-proof tracking,
+because build outputs and lockfile residue are mutable. It is not wired
+into the automatic CI planner, production release, or ProjectNexus trust.
+The PN agent must independently review and authorize the exact declared
+build check before its output can satisfy #12. Run the original game-backed
+build and isolated 1.6/1.7 runtime qualification under their distinct
+real-assembly gates; neither is waived by this tooling stage.
+
+
 GitHub Actions uses one workflow (`.github/workflows/ci.yml`) and one authoritative planning job.
 That job runs the planner/proof/cache infrastructure checks once, then fans out to selected
 deterministic validation and a conditional composition gate. `scripts/ci-plan.ps1` compares the
