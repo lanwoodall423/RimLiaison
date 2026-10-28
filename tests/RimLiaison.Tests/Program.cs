@@ -181,6 +181,7 @@ internal static class Program
         ("dev-check uses isolated Waylith SDK selector", DevCheckTests.WaylithHelperBuildUsesIsolatedSdkSelector),
         ("dev-check validates fresh Waylith global log custody", DevCheckTests.WaylithLogMustMatchExactFreshInvocation),
         ("dev-check isolates Waylith launch options", DevCheckTests.WaylithLaunchPreservesIsolatedInputs),
+        ("dev-check preserves Unity and Waylith startup budgets", DevCheckTests.RuntimeStartupBudgetIsEngineSpecific),
         ("dev-check retains versioned defs and assemblies", DevCheckTests.VersionedDefsAndAssembliesRetainTheirIdentity),
         ("dev-check missing About fails closed", DevCheckTests.MissingAboutFailsClosed),
         ("dev-check selects referenced production projects", DevCheckTests.SelectsReferencedProductionProjects),

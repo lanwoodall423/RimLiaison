@@ -16,7 +16,13 @@ internal static class DevCheckCommand
     private const string BehaviorProtocol = "direct-validation-behavior/v1";
     private const int MaximumDiagnosticLength = 8_192;
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RuntimeTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan UnityRuntimeTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan WaylithRuntimeTimeout = TimeSpan.FromSeconds(120);
+
+    // Waylith 1.7 cold startup has been observed to exceed 45 seconds.
+    // A completed content-load signal exits the loop immediately in either engine.
+    internal static TimeSpan RuntimeTimeoutForGame(RimWorldGameLayout game) =>
+        game.IsWaylith ? WaylithRuntimeTimeout : UnityRuntimeTimeout;
 
     public static async Task<int> RunAsync(
         CliRequest request,
@@ -1107,7 +1113,7 @@ internal static class DevCheckCommand
             state.Processes.Add(Path.GetFileName(game.ExecutablePath) ?? game.ExecutablePath);
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            DateTime deadline = DateTime.UtcNow + RuntimeTimeout;
+            DateTime deadline = DateTime.UtcNow + RuntimeTimeoutForGame(game);
             JsonElement? signal = null;
             while (DateTime.UtcNow < deadline && !process.HasExited)
             {

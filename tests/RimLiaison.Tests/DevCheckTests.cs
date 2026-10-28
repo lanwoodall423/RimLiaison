@@ -95,6 +95,21 @@ internal static class DevCheckTests
             throw new InvalidOperationException("Unity 1.6 launch behavior regressed.");
     }
 
+    public static void RuntimeStartupBudgetIsEngineSpecific()
+    {
+        var unity = new DevCheckCommand.RimWorldGameLayout(
+            "C:/fixture", "C:/fixture/RimWorldWin64.exe", "1.6");
+        var waylith = new DevCheckCommand.RimWorldGameLayout(
+            "C:/fixture", "C:/fixture/RimWorld.exe", "1.7");
+
+        if (DevCheckCommand.RuntimeTimeoutForGame(unity) != TimeSpan.FromSeconds(45) ||
+            DevCheckCommand.RuntimeTimeoutForGame(waylith) != TimeSpan.FromSeconds(120))
+        {
+            throw new InvalidOperationException(
+                "Runtime timeout changed the 1.6 budget or truncated 1.7 cold startup.");
+        }
+    }
+
     public static void VersionedDefsAndAssembliesRetainTheirIdentity()
     {
         foreach (string path in new[]

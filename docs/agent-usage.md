@@ -48,6 +48,13 @@ change the player's ordinary `ModsConfig.xml`. The helper build picks a
 compatible .NET 10 SDK from an owned temporary directory, without modifying
 the CLI repository's .NET 8 `global.json`.
 
+The runtime content-load wait is **engine-specific**: Unity 1.6 retains
+its existing 45-second upper limit; Waylith 1.7 allows up to 120 seconds
+because a real cold startup exceeded the previous 45-second limit.
+A completed content-load signal ends the wait early, so successful starts
+do not incur an artificial delay. This is a startup timeout adjustment,
+**not** a game-load PASS or a substitute for current-run runtime evidence.
+
 **Waylith 1.7 does not relocate `Player.log` with `-savedatafolder`.**
 It writes to `%USERPROFILE%/AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Logs/Player.log`.
 The direct validator requires RimWorld to be closed first, records a
