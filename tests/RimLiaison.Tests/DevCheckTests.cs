@@ -1122,6 +1122,120 @@ internal static class DevCheckTests
         return packageRoot;
     }
 
+    // Shared, game-free log reader fixtures. These are never evidence of
+    // an actual RimWorld map or the freshness of a global Player.log.
+    public static void QaReaderAcceptsTimestampedMapEvent()
+    {
+        const string nonce = "fixture_run_1234";
+        var reader = new MapQaEventReader("[NatureTilesQA]", nonce);
+        if (reader.Observe("2026-10-27 INFO [Verse] ordinary log text") !=
+                MapQaEventDisposition.Ignored ||
+            reader.Observe("""2026-10-27 INFO [Verse] [NatureTilesQA] {"schemaVersion":"naturetiles-map-smoke/v1","nonce":"fixture_run_1234","mapUniqueId":17,"biome":"TemperateForest","brambleCount":25}""") !=
+                MapQaEventDisposition.Accepted ||
+            reader.Events.Count != 1 || reader.HasRejectedEvents ||
+            reader.Events[0].SchemaVersion != "naturetiles-map-smoke/v1")
+        {
+            throw new InvalidOperationException("valid timestamped QA evidence was not accepted exactly once.");
+        }
+
+        using JsonDocument payload = JsonDocument.Parse(reader.Events[0].PayloadJson);
+        if (payload.RootElement.GetProperty("mapUniqueId").GetInt32() != 17 ||
+            payload.RootElement.GetProperty("biome").GetString() != "TemperateForest" ||
+            payload.RootElement.GetProperty("brambleCount").GetInt32() != 25)
+        {
+            throw new InvalidOperationException("QA reader lost opaque mod-specific JSON fields.");
+        }
+    }
+
+    public static void QaReaderRejectsForeignAndAmbiguousIdentity()
+    {
+        var reader = new MapQaEventReader("[ExampleQA]", "session_123456");
+        string[] invalid =
+        [
+            """[ExampleQA] {"schemaVersion":"example-map/v1","nonce":"foreign_1234"}""",
+            """[ExampleQA] {"schemaVersion":"example-map/v1","nonce":"session_123456","nonce":"session_123456"}""",
+            """[ExampleQA] {"schemaVersion":"example-map/v1","schemaVersion":"example-map/v1","nonce":"session_123456"}""",
+            """[ExampleQA] {"schemaVersion":"example-map/v1"}""",
+            """[ExampleQA] {"schemaVersion":"example-map/v1","nonce":"session_123456",}""",
+            """[ExampleQA] []"""
+        ];
+        foreach (string line in invalid)
+        {
+            if (reader.Observe(line) != MapQaEventDisposition.Rejected)
+                throw new InvalidOperationException("ambiguous, foreign or malformed QA event was accepted.");
+        }
+
+        if (reader.Events.Count != 0 || reader.RejectedCount != invalid.Length ||
+            !reader.RejectionCodes.Contains("QA_FOREIGN_NONCE") ||
+            !reader.RejectionCodes.Contains("QA_IDENTITY_AMBIGUOUS") ||
+            !reader.RejectionCodes.Contains("QA_JSON_INVALID"))
+        {
+            throw new InvalidOperationException("invalid QA evidence was not reason-coded and rejected.");
+        }
+    }
+
+    public static void QaReaderBoundsEventFloodAndLargeLines()
+    {
+        var reader = new MapQaEventReader("[ExampleQA]", "session_123456");
+        const string line = """2030-01-01 INFO [Verse] [ExampleQA] {"schemaVersion":"example-map/v1","nonce":"session_123456","tick":1}""";
+        for (int index = 0; index < MapQaEventReader.MaximumEvents; index++)
+        {
+            if (reader.Observe(line) != MapQaEventDisposition.Accepted)
+                throw new InvalidOperationException("bounded QA event count rejected too early.");
+        }
+        if (reader.Observe(line) != MapQaEventDisposition.Rejected ||
+            reader.Events.Count != MapQaEventReader.MaximumEvents ||
+            !reader.RejectionCodes.Contains("QA_EVENT_LIMIT"))
+        {
+            throw new InvalidOperationException("QA event flood was not rejected at its hard cap.");
+        }
+
+        var large = new MapQaEventReader("[ExampleQA]", "session_123456");
+        if (large.Observe("[ExampleQA] " + new string('X', MapQaEventReader.MaximumLineCharacters)) !=
+                MapQaEventDisposition.Rejected ||
+            !large.RejectionCodes.Contains("QA_LINE_TOO_LONG"))
+        {
+            throw new InvalidOperationException("oversized QA log line was not safely bounded.");
+        }
+    }
+
+    public static void QaReaderValidatesConfigurationAndDepth()
+    {
+        bool markerRejected = false;
+        bool nonceRejected = false;
+        try
+        {
+            _ = new MapQaEventReader("bad marker", "session_123456");
+        }
+        catch (ArgumentException)
+        {
+            markerRejected = true;
+        }
+        try
+        {
+            _ = new MapQaEventReader("[ExampleQA]", "bad nonce");
+        }
+        catch (ArgumentException)
+        {
+            nonceRejected = true;
+        }
+        if (!markerRejected || !nonceRejected)
+            throw new InvalidOperationException("unsafe QA marker or nonce was accepted.");
+
+        var reader = new MapQaEventReader("[ExampleQA]", "session_123456");
+        string nested = """[ExampleQA] {"schemaVersion":"example-map/v1","nonce":"session_123456","nested":""" +
+            new string('[', 20) + "0" + new string(']', 20) + "}";
+        if (reader.Observe(nested) != MapQaEventDisposition.Rejected ||
+            reader.Observe("""[ExampleQA] {"schemaVersion":"bad schema","nonce":"session_123456"}""") !=
+                MapQaEventDisposition.Rejected ||
+            reader.RejectedCount != 2 ||
+            !reader.RejectionCodes.Contains("QA_SCHEMA_INVALID") ||
+            !reader.RejectionCodes.Contains("QA_JSON_INVALID"))
+        {
+            throw new InvalidOperationException("invalid schema and excessive JSON depth were not rejected.");
+        }
+    }
+
     private static void WriteAbout(string path, string packageId, IReadOnlyList<string> dependencies)
     {
         string dependencyXml = dependencies.Count == 0

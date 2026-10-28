@@ -205,6 +205,11 @@ internal static class Program
         ("dev-check bounds dependency cycles and duplicates", DevCheckTests.DependencyCyclesAndDuplicatesAreBounded),
         ("dev-check excludes unrelated runtime mods", DevCheckTests.UnrelatedInstalledModsAreExcluded),
 
+        ("map QA accepts timestamped JSON", DevCheckTests.QaReaderAcceptsTimestampedMapEvent),
+        ("map QA rejects foreign and ambiguous events", DevCheckTests.QaReaderRejectsForeignAndAmbiguousIdentity),
+        ("map QA bounds event flood and long lines", DevCheckTests.QaReaderBoundsEventFloodAndLargeLines),
+        ("map QA validates config and JSON depth", DevCheckTests.QaReaderValidatesConfigurationAndDepth),
+
         ("machine preflight missing managed assembly blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingManagedAssemblyBlocks),
         ("machine preflight missing profile blocks", UnifiedRuntimeOwnershipTests.MachinePreflightMissingProfileBlocks),
         ("machine preflight ready is read-only", UnifiedRuntimeOwnershipTests.MachinePreflightReadyIsReadOnly),

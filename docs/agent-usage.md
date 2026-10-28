@@ -331,6 +331,32 @@ not tests that substitute game DLLs. No game files are copied, launched or
 modified by the preflight. The 1.6/1.7 runtime selection and actual
 in-game validation remain separate evidence gates.
 
+## Shared QA map-event reader (offline primitive)
+
+`MapQaEventReader` is a bounded, pure C# reader for **already-attributed**
+RimWorld log lines. It accepts a configured ASCII marker (for example
+`[NatureTilesQA]`) and a unique 8-40-character run nonce. A prefixed line
+such as `INFO [Verse] [NatureTilesQA] {"schemaVersion":"naturetiles-map-smoke/v1","nonce":"session_123456","mapUniqueId":17}`
+is parsed as a JSON object with exactly one `schemaVersion` and `nonce`.
+Other fields remain opaque and belong to that mod's own reviewed assertions.
+
+The reader ignores unrelated lines and **rejects** wrong nonces, missing or
+duplicate identity keys, malformed JSON, unsafe schema names, excessive depth,
+log lines beyond 8192 characters, or more than 128 accepted events. Rejections
+are reason-coded and the retained reason list is bounded. No executable,
+process, file read/write, network call, mod installation or game state is
+touched by the reader. Its regression fixtures are synthetic, without RimWorld.
+
+**This is not a qualified `map-check` command yet.** A future centralized
+RimLiaison runtime executor must first prove the exact candidate + toolchain,
+launch and own the correct game process, isolate its mod/savedata inputs,
+attest the fresh Player.log start/header, bind the run nonce, verify the
+actual game version, generated biome and map-ready state, evaluate
+consumer-specific expectations, and prove teardown and cleanup. Parsing
+a JSON line alone proves none of those facts. Do not count an offline fixture
+as game-runtime or gameplay evidence, or reimplement the launcher in a mod
+repository. The shared map-check backlog lives in RimLiaison issue #16.
+
 ## Explicit release and qualification workflows
 
 RimLiaison remains available for explicitly documented release, qualification, promotion, and other

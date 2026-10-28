@@ -1866,3 +1866,177 @@ internal static class DevCheckCommand
             new("RUNTIME_NOT_RUN", reason, false, false, false, false, null, [], null, [], [], null, false);
     }
 }
+
+/// <summary>
+/// Pure bounded reader for mod-specific JSON evidence in a *previously verified*
+/// RimWorld log. This is NOT a game launcher or a log-provenance verifier.
+/// It never reads files, opens processes, or interprets a mod's game rules.
+/// </summary>
+internal sealed class MapQaEventReader
+{
+    internal const int MaximumLineCharacters = 8_192;
+    internal const int MaximumEvents = 128;
+    private const int MaximumRejectionCodes = 16;
+
+    private readonly string marker;
+    private readonly string expectedNonce;
+    private readonly List<MapQaEvent> events = [];
+    private readonly List<string> rejectionCodes = [];
+
+    internal MapQaEventReader(string marker, string expectedNonce)
+    {
+        if (!IsValidMarker(marker))
+            throw new ArgumentException("QA marker must be a bounded ASCII [Name] token.", nameof(marker));
+        if (!IsValidNonce(expectedNonce))
+            throw new ArgumentException("QA run nonce must be 8-40 safe ASCII characters.", nameof(expectedNonce));
+        this.marker = marker;
+        this.expectedNonce = expectedNonce;
+    }
+
+    internal IReadOnlyList<MapQaEvent> Events => events;
+    internal IReadOnlyList<string> RejectionCodes => rejectionCodes;
+    internal int RejectedCount { get; private set; }
+    internal bool HasRejectedEvents => RejectedCount > 0;
+
+    internal MapQaEventDisposition Observe(string? line)
+    {
+        if (line is null)
+            return MapQaEventDisposition.Ignored;
+
+        int start = line.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+            return MapQaEventDisposition.Ignored;
+        if (line.Length > MaximumLineCharacters)
+            return Reject("QA_LINE_TOO_LONG");
+
+        string payload = line[(start + marker.Length)..].Trim();
+        if (payload.Length < 2 || payload[0] != '{')
+            return Reject("QA_JSON_OBJECT_REQUIRED");
+        if (events.Count >= MaximumEvents)
+            return Reject("QA_EVENT_LIMIT");
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(payload, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 12
+            });
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return Reject("QA_JSON_OBJECT_REQUIRED");
+
+            int schemaFields = 0;
+            int nonceFields = 0;
+            string? schema = null;
+            string? nonce = null;
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (property.NameEquals("schemaVersion"))
+                {
+                    schemaFields++;
+                    if (property.Value.ValueKind != JsonValueKind.String)
+                        return Reject("QA_SCHEMA_INVALID");
+                    schema = property.Value.GetString();
+                }
+                else if (property.NameEquals("nonce"))
+                {
+                    nonceFields++;
+                    if (property.Value.ValueKind != JsonValueKind.String)
+                        return Reject("QA_NONCE_INVALID");
+                    nonce = property.Value.GetString();
+                }
+            }
+
+            if (schemaFields != 1 || nonceFields != 1)
+                return Reject("QA_IDENTITY_AMBIGUOUS");
+            if (!IsValidSchema(schema))
+                return Reject("QA_SCHEMA_INVALID");
+            if (!IsValidNonce(nonce))
+                return Reject("QA_NONCE_INVALID");
+            if (!string.Equals(nonce, expectedNonce, StringComparison.Ordinal))
+                return Reject("QA_FOREIGN_NONCE");
+
+            // Preserve the original bounded JSON for the owning mod's
+            // separately reviewed assertion schema; no game claim is inferred.
+            events.Add(new MapQaEvent(schema!, nonce!, payload));
+            return MapQaEventDisposition.Accepted;
+        }
+        catch (JsonException)
+        {
+            return Reject("QA_JSON_INVALID");
+        }
+    }
+
+    private MapQaEventDisposition Reject(string reason)
+    {
+        if (RejectedCount < int.MaxValue)
+            RejectedCount++;
+        if (rejectionCodes.Count < MaximumRejectionCodes)
+            rejectionCodes.Add(reason);
+        return MapQaEventDisposition.Rejected;
+    }
+
+    private static bool IsValidMarker(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 3 or > 64 ||
+            value[0] != '[' || value[^1] != ']')
+            return false;
+        for (int i = 1; i < value.Length - 1; i++)
+        {
+            if (!IsAsciiTokenCharacter(value[i]))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsValidNonce(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 8 or > 40)
+            return false;
+        foreach (char character in value)
+        {
+            if (!IsAsciiTokenCharacter(character))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsValidSchema(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length is < 4 or > 96)
+            return false;
+        int separatorCount = 0;
+        for (int i = 0; i < value.Length; i++)
+        {
+            char character = value[i];
+            if (character == '/')
+            {
+                if (i == 0 || i == value.Length - 1)
+                    return false;
+                separatorCount++;
+            }
+            else if (!IsAsciiTokenCharacter(character) && character != '.')
+            {
+                return false;
+            }
+        }
+        return separatorCount == 1;
+    }
+
+    private static bool IsAsciiTokenCharacter(char character) =>
+        (character >= 'A' && character <= 'Z') ||
+        (character >= 'a' && character <= 'z') ||
+        (character >= '0' && character <= '9') ||
+        character is '_' or '-';
+}
+
+internal enum MapQaEventDisposition
+{
+    Ignored,
+    Accepted,
+    Rejected
+}
+
+internal sealed record MapQaEvent(string SchemaVersion, string Nonce, string PayloadJson);
