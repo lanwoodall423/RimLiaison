@@ -150,6 +150,50 @@
         }
       }
     ],
-    "transforms": []
+    "transforms": [],
+    "localOperations": [
+      {
+        "operationId": "native.rimtest-artifact-build",
+        "title": "Build portable native RimTest candidate (no install)",
+        "command": {
+          "executable": "dotnet",
+          "args": [
+            "run",
+            "--project",
+            "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
+            "--configuration",
+            "Release",
+            "--no-restore",
+            "--",
+            "rimtest-artifact-build",
+            "--json"
+          ],
+          "cwd": "."
+        },
+        "inputs": [
+          "global.json",
+          "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
+          "src/RimLiaison.Cli/Program.cs",
+          "src/RimLiaison.Cli/CliApplication.cs",
+          "src/RimLiaison.Cli/Toolchain/CliDeploymentManifest.cs"
+        ],
+        "requirements": {
+          "platform": "win32",
+          "executables": ["dotnet"]
+        },
+        "sideEffectClass": "artifact-generation",
+        "timeoutSeconds": 900,
+        "outputs": [
+          {
+            "path": "artifacts/rimtest-native-candidate.zip",
+            "maxBytes": 134217728
+          },
+          {
+            "path": "artifacts/rimtest-native-build.json",
+            "maxBytes": 16384
+          }
+        ]
+      }
+    ]
   }
 }

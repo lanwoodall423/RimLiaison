@@ -226,7 +226,7 @@ internal static class NativeRimtestSourcePublishCommand
     internal const string Name = "rimtest-publish-candidate";
     private const string Schema = "rimtest-source-publish/v1";
     // The exact source SDK also builds the net8.0 developer CLI; do not pin the host to .NET 8.
-    private const string PinnedSdk = "10.0.403";
+    internal const string PinnedSdk = "10.0.403";
 
     internal sealed record Request(string SourceRoot, string SourceCommit);
 
@@ -336,7 +336,7 @@ internal static class NativeRimtestSourcePublishCommand
                 accountLocalRoot, "Microsoft", "dotnet", "dotnet.exe"), isAvailable);
     }
 
-    private static bool IsSafeDotnetHost(string file)
+    internal static bool IsSafeDotnetHost(string file)
     {
         try
         {
@@ -549,7 +549,7 @@ internal static class NativeRimtestSourcePublishCommand
         return RimLiaison.CliExitCodes.ConservativeSelection;
     }
 
-    private static async Task<NativeRimtestPublishResult> ExecuteFixedDotnetAsync(
+    internal static async Task<NativeRimtestPublishResult> ExecuteFixedDotnetAsync(
         string executable,
         string cwd,
         IReadOnlyList<string> args,
@@ -1621,3 +1621,236 @@ internal static class NativeRimtestPackageService
                 StringComparison.OrdinalIgnoreCase);
     }
 }
+
+// Candidate-only Windows artifact emission for a separately trusted PN local
+// operation. No user-supplied path, install step or system PATH change exists.
+internal static class ManagedNativeRimtestArtifactBuildCommand
+{
+    internal const string Name = "rimtest-artifact-build";
+    internal const string ArchivePath = "artifacts/rimtest-native-candidate.zip";
+    internal const string ReceiptPath = "artifacts/rimtest-native-build.json";
+    private const long MaximumArchiveBytes = 128L * 1024 * 1024;
+
+    internal static bool IsRequested(IReadOnlyList<string> args) =>
+        args.Count > 0 && args[0] == Name;
+
+    internal static bool TryParse(IReadOnlyList<string> args) =>
+        args.Count == 2 && args[0] == Name && args[1] == "--json";
+
+    internal static string[] PublishArguments(string publishedRoot) =>
+    [
+        "publish", "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
+        "--configuration", "Release",
+        "--framework", "net8.0",
+        "--runtime", "win-x64",
+        "--self-contained", "false",
+        "-p:UseAppHost=true",
+        "--output", publishedRoot,
+        "--nologo"
+    ];
+
+    internal static async Task<int> RunAsync(
+        string[] args, TextWriter stdout, CancellationToken cancellationToken)
+    {
+        if (!TryParse(args))
+            return Block(stdout, "RIMTEST_ARTIFACT_ARGUMENTS_INVALID");
+        if (!OperatingSystem.IsWindows())
+            return Block(stdout, "RIMTEST_ARTIFACT_WINDOWS_REQUIRED");
+
+        string? scratch = null;
+        string? archive = null;
+        string? receipt = null;
+        bool completed = false;
+        try
+        {
+            string root = Path.GetFullPath(Environment.CurrentDirectory);
+            if (!File.Exists(Path.Combine(root, "RimLiaison.sln")) ||
+                !File.Exists(Path.Combine(root, ".projectnexus", "project.json")) ||
+                !File.Exists(Path.Combine(
+                    root, "src", "RimLiaison.Cli", "RimLiaison.Cli.csproj")))
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_ROOT_INVALID");
+
+            using JsonDocument pin = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(root, "global.json")));
+            JsonElement sdk = pin.RootElement.GetProperty("sdk");
+            if (sdk.GetProperty("version").GetString() !=
+                    NativeRimtestSourcePublishCommand.PinnedSdk ||
+                sdk.GetProperty("rollForward").GetString() != "disable" ||
+                sdk.GetProperty("allowPrerelease").ValueKind != JsonValueKind.False)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SDK_PIN_INVALID");
+
+            var git = new RimLiaison.Git.SystemGitRepositoryStateProvider();
+            RimLiaison.Git.GitRepositoryStateResult original =
+                await git.ReadWorktreeAsync(root, cancellationToken).ConfigureAwait(false);
+            RimLiaison.Git.GitRepositoryStateSnapshot? state = original.State;
+            string? pinnedSource = state?.HeadSha;
+            if (!original.Resolved || state is null || state.Dirty ||
+                pinnedSource is not { Length: 40 } ||
+                !string.Equals(Path.GetFullPath(state.RootPath), root,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_UNVERIFIED");
+            string sourceCommit = pinnedSource;
+
+            string? host = NativeRimtestSourcePublishCommand.ResolvePinnedDotnetHost(
+                Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
+                Environment.GetEnvironmentVariable("DOTNET_ROOT"),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                NativeRimtestSourcePublishCommand.IsSafeDotnetHost);
+            if (host is null)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_DOTNET_HOST_MISSING");
+
+            NativeRimtestPublishResult version =
+                await NativeRimtestSourcePublishCommand.ExecuteFixedDotnetAsync(
+                    host, root, ["--version"], cancellationToken).ConfigureAwait(false);
+            if (version.ExitCode != 0 ||
+                version.Output.Trim() != NativeRimtestSourcePublishCommand.PinnedSdk)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SDK_MISMATCH");
+
+            string artifactRoot = Path.Combine(root, "artifacts");
+            archive = Path.Combine(root,
+                ArchivePath.Replace('/', Path.DirectorySeparatorChar));
+            receipt = Path.Combine(root,
+                ReceiptPath.Replace('/', Path.DirectorySeparatorChar));
+            if (Path.Exists(archive) || Path.Exists(receipt))
+                throw new InvalidDataException("RIMTEST_ARTIFACT_OUTPUT_ALREADY_EXISTS");
+            if (Directory.Exists(artifactRoot) &&
+                (new DirectoryInfo(artifactRoot).Attributes &
+                    FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_OUTPUT_REPARSE");
+
+            scratch = Path.Combine(root, "src", "RimLiaison.Cli", "obj",
+                ".rimtest-artifact-" + Guid.NewGuid().ToString("N"));
+            if (Path.Exists(scratch))
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SCRATCH_COLLISION");
+            Directory.CreateDirectory(scratch);
+            string published = Path.Combine(scratch, "published");
+            NativeRimtestPublishResult build =
+                await NativeRimtestSourcePublishCommand.ExecuteFixedDotnetAsync(
+                    host, root, PublishArguments(published), cancellationToken)
+                    .ConfigureAwait(false);
+            if (build.ExitCode != 0)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_PUBLISH_FAILED");
+
+            string package = Path.Combine(scratch, "package");
+            Directory.Move(published, package);
+            foreach (string required in new[]
+                     {
+                         "rimliaison.exe", "rimliaison.dll",
+                         "rimliaison.deps.json", "rimliaison.runtimeconfig.json"
+                     })
+                if (!File.Exists(Path.Combine(package, required)))
+                    throw new InvalidDataException("RIMTEST_ARTIFACT_PUBLISH_INCOMPLETE");
+
+            string apphost = Path.Combine(package, "rimliaison.exe");
+            string runner = Path.Combine(package, "rimtest.exe");
+            string assembly = Path.Combine(package, "rimliaison.dll");
+            File.Copy(apphost, runner, overwrite: false);
+            File.Delete(apphost); // Never package the unrestricted CLI apphost.
+            File.WriteAllText(
+                Path.Combine(package, NativeRimtestPackageService.RunnerSidecarFileName),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimtest-dev-runner/v1",
+                    sourceCommit,
+                    runnerExeSha256 = ToolchainFileHash.Sha256(runner),
+                    cliAssemblySha256 = ToolchainFileHash.Sha256(assembly)
+                }), new UTF8Encoding(false));
+
+            CliDeploymentManifest manifest =
+                CliDeploymentManifestService.Write(package, sourceCommit, "net8.0");
+            if (!NativeRimtestPackageService.Verify(
+                    package, sourceCommit, out _))
+                throw new InvalidDataException("RIMTEST_ARTIFACT_PACKAGE_INVALID");
+
+            RimLiaison.Git.GitRepositoryStateResult after =
+                await git.ReadWorktreeAsync(root, cancellationToken).ConfigureAwait(false);
+            if (!after.Resolved || after.State is null || after.State.Dirty ||
+                after.State.HeadSha != sourceCommit)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_MOVED");
+
+            Directory.CreateDirectory(artifactRoot);
+            System.IO.Compression.ZipFile.CreateFromDirectory(
+                package, archive, System.IO.Compression.CompressionLevel.Optimal,
+                includeBaseDirectory: false);
+            long archiveBytes = new FileInfo(archive).Length;
+            if (archiveBytes <= 0 || archiveBytes > MaximumArchiveBytes)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_OVERSIZE");
+
+            string archiveSha256 = ToolchainFileHash.Sha256(archive);
+            File.WriteAllText(receipt, JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimtest-pn-artifact/v1",
+                status = "source-build-only",
+                sourceCommit,
+                sdkVersion = NativeRimtestSourcePublishCommand.PinnedSdk,
+                targetFramework = "net8.0",
+                runtimeIdentifier = "win-x64",
+                archive = ArchivePath,
+                archiveSha256,
+                archiveBytes,
+                packageSha256 = manifest.PackageSha256,
+                runnerExeSha256 = ToolchainFileHash.Sha256(runner),
+                cliAssemblySha256 = ToolchainFileHash.Sha256(assembly),
+                manifestSha256 = ToolchainFileHash.Sha256(Path.Combine(
+                    package, CliDeploymentManifestService.FileName)),
+                qualified = false,
+                installed = false,
+                pathConfigured = false,
+                pnCheckPassed = false
+            }), new UTF8Encoding(false));
+            completed = true;
+            stdout.WriteLine(JsonSerializer.Serialize(new
+            {
+                schemaVersion = "rimtest-pn-artifact/v1",
+                status = "source-build-only",
+                sourceCommit,
+                archiveSha256,
+                installed = false,
+                pathConfigured = false,
+                qualified = false,
+                pnCheckPassed = false
+            }));
+            return RimLiaison.CliExitCodes.Success;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            InvalidDataException or ArgumentException or JsonException or
+            NotSupportedException or OperationCanceledException or
+            System.Security.SecurityException or System.ComponentModel.Win32Exception
+            or KeyNotFoundException)
+        {
+            string code = ex.Message.Split(':')[0];
+            if (!code.StartsWith("RIMTEST_ARTIFACT_", StringComparison.Ordinal))
+                code = "RIMTEST_ARTIFACT_BUILD_FAILED";
+            return Block(stdout, code);
+        }
+        finally
+        {
+            if (!completed)
+            {
+                if (archive is not null && File.Exists(archive))
+                    File.Delete(archive);
+                if (receipt is not null && File.Exists(receipt))
+                    File.Delete(receipt);
+            }
+            if (scratch is not null && Directory.Exists(scratch))
+                Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    private static int Block(TextWriter stdout, string code)
+    {
+        stdout.WriteLine(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "rimtest-pn-artifact/v1",
+            status = "blocked",
+            code,
+            installed = false,
+            pathConfigured = false,
+            qualified = false,
+            pnCheckPassed = false
+        }));
+        return RimLiaison.CliExitCodes.ConservativeSelection;
+    }
+}
+

@@ -61,6 +61,95 @@ internal static class CliDeploymentTests
     }
 
 
+    public static void NativeManagedArtifactDeclarationIsFixedAndInert()
+    {
+        Assert(ManagedNativeRimtestArtifactBuildCommand.TryParse(
+                [ManagedNativeRimtestArtifactBuildCommand.Name, "--json"]),
+            "native artifact builder must accept its only fixed command");
+        foreach (string[] invalid in new[]
+                 {
+                     new[] { ManagedNativeRimtestArtifactBuildCommand.Name },
+                     new[] { ManagedNativeRimtestArtifactBuildCommand.Name, "--install" },
+                     new[] { ManagedNativeRimtestArtifactBuildCommand.Name, "--json", "--force" },
+                     new[] { ManagedNativeRimtestArtifactBuildCommand.Name,
+                         "C:\\RimWorld", "--json" }
+                 })
+            Assert(!ManagedNativeRimtestArtifactBuildCommand.TryParse(invalid),
+                "native artifact builder must reject parameters, paths and install switches");
+
+        using StringWriter blockedOutput = new();
+        int blockedExit = ManagedNativeRimtestArtifactBuildCommand.RunAsync(
+            [ManagedNativeRimtestArtifactBuildCommand.Name, "--install"],
+            blockedOutput, CancellationToken.None).GetAwaiter().GetResult();
+        using JsonDocument blocked = JsonDocument.Parse(blockedOutput.ToString());
+        Assert(blockedExit != 0 &&
+               blocked.RootElement.GetProperty("status").GetString() == "blocked" &&
+               blocked.RootElement.GetProperty("code").GetString() ==
+                   "RIMTEST_ARTIFACT_ARGUMENTS_INVALID" &&
+               !blocked.RootElement.GetProperty("installed").GetBoolean() &&
+               !blocked.RootElement.GetProperty("pathConfigured").GetBoolean(),
+            "unsupported native artifact command must fail before any work or installation");
+
+        string[] publish = ManagedNativeRimtestArtifactBuildCommand.PublishArguments(
+            Path.Combine("fixture", "published"));
+        Assert(publish.Contains("net8.0") && publish.Contains("win-x64") &&
+               publish.Contains("-p:UseAppHost=true") &&
+               publish.Contains("--self-contained") &&
+               publish.Contains("false") &&
+               !publish.Any(arg => arg.Contains("install", StringComparison.OrdinalIgnoreCase)),
+            "native artifact publisher must keep a fixed net8 Windows apphost shape");
+
+        DirectoryInfo? root = new(Environment.CurrentDirectory);
+        while (root is not null &&
+               !File.Exists(Path.Combine(root.FullName, "RimLiaison.sln")))
+            root = root.Parent;
+        Assert(root is not null, "tracked RimLiaison manifest must be discoverable");
+
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(root!.FullName, ".projectnexus", "project.json")));
+        JsonElement capabilities = manifest.RootElement.GetProperty("capabilities");
+        JsonElement[] operations = capabilities.GetProperty("localOperations")
+            .EnumerateArray().ToArray();
+        Assert(operations.Length == 1 &&
+               operations[0].GetProperty("operationId").GetString() ==
+                   "native.rimtest-artifact-build" &&
+               operations[0].GetProperty("sideEffectClass").GetString() ==
+                   "artifact-generation" &&
+               operations[0].GetProperty("requirements")
+                   .GetProperty("platform").GetString() == "win32",
+            "native local operation must be exclusively artifact generation");
+
+        JsonElement command = operations[0].GetProperty("command");
+        string[] arguments = command.GetProperty("args").EnumerateArray()
+            .Select(element => element.GetString()!).ToArray();
+        Assert(command.GetProperty("executable").GetString() == "dotnet" &&
+               command.GetProperty("cwd").GetString() == "." &&
+               arguments.SequenceEqual(new[]
+               {
+                   "run", "--project", "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
+                   "--configuration", "Release", "--no-restore", "--",
+                   ManagedNativeRimtestArtifactBuildCommand.Name, "--json"
+               }),
+            "managed artifact operation must have a fixed command and no caller paths");
+
+        JsonElement[] outputs = operations[0].GetProperty("outputs")
+            .EnumerateArray().ToArray();
+        Assert(outputs.Length == 2 &&
+               outputs[0].GetProperty("path").GetString() ==
+                   ManagedNativeRimtestArtifactBuildCommand.ArchivePath &&
+               outputs[0].GetProperty("maxBytes").GetInt64() == 134217728 &&
+               outputs[1].GetProperty("path").GetString() ==
+                   ManagedNativeRimtestArtifactBuildCommand.ReceiptPath &&
+               outputs[1].GetProperty("maxBytes").GetInt64() == 16384,
+            "managed artifact outputs must be only the fixed bounded archive and receipt");
+
+        string[] inputs = operations[0].GetProperty("inputs").EnumerateArray()
+            .Select(element => element.GetString()!).ToArray();
+        Assert(inputs.Contains("global.json") &&
+               inputs.Contains("src/RimLiaison.Cli/Toolchain/CliDeploymentManifest.cs"),
+            "managed operation trust must bind SDK pin and artifact producer source");
+    }
+
     public static void NativeCandidateInstallCopiesVerifiedClosureWithoutPATHChanges()
     {
         (string root, string source, string published, string packages) = NativePackageFixture();

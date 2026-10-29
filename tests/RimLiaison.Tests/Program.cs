@@ -158,6 +158,7 @@ internal static class Program
         ("net472 reference assemblies dependency is pinned and private", UnifiedRuntimeOwnershipTests.Net472ReferenceAssembliesDependencyIsPinnedAndPrivate),
         ("isolated runtime build avoids executing CLI output", UnifiedRuntimeOwnershipTests.IsolatedRuntimeBuildAvoidsExecutingCliOutput),
         ("complete CLI closure mutation fails", CliDeploymentTests.CompleteClosurePassesAndMutationFails),
+        ("native managed artifact operation is fixed and inert", CliDeploymentTests.NativeManagedArtifactDeclarationIsFixedAndInert),
         ("native candidate install preserves full closure without changing PATH", CliDeploymentTests.NativeCandidateInstallCopiesVerifiedClosureWithoutPATHChanges),
         ("native publisher resolves only pinned Windows .NET hosts", CliDeploymentTests.NativePublisherResolvesOnlyExplicitOrKnownWindowsDotnetHosts),
         ("native source-pinned publish is bounded and candidate-only", CliDeploymentTests.NativeRimtestSourcePublishIsPinnedAndNeverInstalls),

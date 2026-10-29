@@ -119,6 +119,9 @@ public static class CliApplication
         if (NativeRimtestSourcePublishCommand.IsRequested(args))
             return await NativeRimtestSourcePublishCommand.RunAsync(
                 args, stdout, cancellationToken).ConfigureAwait(false);
+        if (ManagedNativeRimtestArtifactBuildCommand.IsRequested(args))
+            return await ManagedNativeRimtestArtifactBuildCommand.RunAsync(
+                args, stdout, cancellationToken).ConfigureAwait(false);
         if (NativeRimtestCandidateInstallCommand.IsRequested(args))
             return NativeRimtestCandidateInstallCommand.Run(args, stdout);
 
