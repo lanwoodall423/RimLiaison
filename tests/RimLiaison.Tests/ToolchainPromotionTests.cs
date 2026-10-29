@@ -261,7 +261,7 @@ internal static class ToolchainPromotionTests
             string packageRoot = Path.Combine(root, "unified");
             Directory.CreateDirectory(Path.Combine(artifactRoot));
             Directory.CreateDirectory(Path.Combine(runtimeRoot, "Coordinator"));
-            string modPath = Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll");
+            string modPath = Path.Combine(runtimeRoot, "1.7", "Assemblies", "DevBridge2.dll");
             Directory.CreateDirectory(Path.GetDirectoryName(modPath)!);
             Directory.CreateDirectory(packageRoot);
             string cliRoot = Path.Combine(artifactRoot, "cli");
@@ -299,7 +299,7 @@ internal static class ToolchainPromotionTests
                     files = new[]
                     {
                         new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = coordinatorHash },
-                        new { path = "1.6/Assemblies/DevBridge2.dll", sha256 = Hash(modPath) }
+                        new { path = "1.7/Assemblies/DevBridge2.dll", sha256 = Hash(modPath) }
                     }
                 }));
             string manifestPath = Path.Combine(root, "production-toolchain.json");

@@ -11,7 +11,7 @@ internal static class DevelopmentBuildEnvironmentTests
         string id = Guid.NewGuid().ToString("N");
         string root = Path.Combine(Path.GetTempPath(), "rimliaison-build-env-" + id);
         string rimWorldRoot = Path.Combine(root, "RimWorld");
-        string managed = Path.Combine(rimWorldRoot, "RimWorldWin64_Data", "Managed");
+        string managed = rimWorldRoot;
         string harmonyAssembly = Path.Combine(rimWorldRoot, "Mods", "Harmony", "Assemblies", "0Harmony.dll");
         string deploymentRoot = Path.Combine(Path.GetTempPath(), "rimliaison-build-deployed-" + id);
         byte[] builtBytes = "canonical-build-output"u8.ToArray();
@@ -25,9 +25,8 @@ internal static class DevelopmentBuildEnvironmentTests
             foreach (string name in new[]
                      {
                          "Assembly-CSharp.dll",
-                         "UnityEngine.CoreModule.dll",
-                         "UnityEngine.IMGUIModule.dll",
-                         "UnityEngine.TextRenderingModule.dll"
+                         "Waylith.dll",
+                         "UnityStubs.dll"
                      })
             {
                 File.WriteAllText(Path.Combine(managed, name), name);
@@ -45,7 +44,7 @@ internal static class DevelopmentBuildEnvironmentTests
                   "catalog":"catalog.json","rimBridge":"disabled","workload":"production",
                   "projectType":"rimworld-content-mod","packageId":"lan.fixture",
                   "sourceProject":"Source/Fixture.csproj","configuration":"Release",
-                  "expectedAssembly":"Fixture.dll","deploymentTarget":"1.6/Assemblies/Fixture.dll",
+                  "expectedAssembly":"Fixture.dll","deploymentTarget":"1.7/Assemblies/Fixture.dll",
                   "testRecipe":"fixture","runtimePackage":{"sourceRoot":".","include":["About/**","1.*/**"],"exclude":[".rimdev/**","Source/**","bin/**","obj/**"]},"dependencies":[]
                 }
                 """);
@@ -120,7 +119,7 @@ internal static class DevelopmentBuildEnvironmentTests
                     argument.Contains(Path.Combine("Source", "obj", "**"), StringComparison.OrdinalIgnoreCase)),
                 "isolated builds must retain the source project's obj exclusion");
 
-            string deployed = Path.Combine(deploymentRoot, "1.6", "Assemblies", "Fixture.dll");
+            string deployed = Path.Combine(deploymentRoot, "1.7", "Assemblies", "Fixture.dll");
             string expectedHash = Convert.ToHexString(SHA256.HashData(builtBytes)).ToLowerInvariant();
             AssertEqual(expectedHash, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(deployed))).ToLowerInvariant(), "deployed build artifact");
             AssertEqual(expectedHash, result.Freshness?.BuiltArtifactSha256, "reported built artifact");

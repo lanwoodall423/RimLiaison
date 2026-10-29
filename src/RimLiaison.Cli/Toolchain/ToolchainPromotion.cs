@@ -781,7 +781,7 @@ public static class ToolchainPromotionService
                 string.Equals(entry.Path, "Coordinator/DevBridge.Coordinator.exe",
                     StringComparison.OrdinalIgnoreCase)).Sha256;
             string modHash = entries.FirstOrDefault(entry =>
-                string.Equals(entry.Path, "1.6/Assemblies/DevBridge2.dll",
+                string.Equals(entry.Path, "1.7/Assemblies/DevBridge2.dll",
                     StringComparison.OrdinalIgnoreCase)).Sha256;
             return string.Equals(
                     ReadRuntimePackageHash(manifestPath),
@@ -2040,7 +2040,8 @@ public static class ToolchainPromotionService
         }
 
         if (File.Exists(Path.Combine(runtimeRoot, "Coordinator", "DevBridge.Coordinator.exe")) ||
-            File.Exists(Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll")))
+            File.Exists(Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll")) ||
+            File.Exists(Path.Combine(runtimeRoot, "1.7", "Assemblies", "DevBridge2.dll")))
         {
             error = "The legacy runtime still contains an executable modern runtime payload.";
             return false;

@@ -85,7 +85,8 @@ internal static class RimWorldManagedAssemblyResolver
     private static readonly string[] RequiredAssemblies =
     [
         "Assembly-CSharp.dll",
-        "UnityEngine.CoreModule.dll"
+        "Waylith.dll",
+        "UnityStubs.dll"
     ];
 
     public static RimWorldManagedAssemblyResolution Resolve(
@@ -144,16 +145,14 @@ internal static class RimWorldManagedAssemblyResolver
                 "Repair rimWorldRoot in the managed .rimdev/workspace.json or set RIMWORLD_ROOT.");
         }
 
-        string managedDirectory = Path.Combine(
-            rimWorldRoot,
-            "RimWorldWin64_Data",
-            "Managed");
+        // Waylith 1.7 publishes its game managed assemblies at the game root.
+        string managedDirectory = rimWorldRoot;
         if (!Directory.Exists(managedDirectory))
         {
             return Failure(
                 rimWorldRoot,
                 managedDirectory,
-                "The resolved RimWorld managed directory does not exist.",
+                "The resolved Waylith 1.7 game assembly directory does not exist.",
                 "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
                 resolutionSource,
                 OldCheckoutRelativePath(devBridgeRoot),

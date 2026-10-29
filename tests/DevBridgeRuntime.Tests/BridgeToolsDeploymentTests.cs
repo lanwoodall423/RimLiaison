@@ -27,11 +27,11 @@ internal static partial class OfflineTests
         Assert(companionProject.Contains("RimBridgeServer.Sdk", StringComparison.Ordinal) &&
                companionProject.Contains("PrivateAssets=\"all\"", StringComparison.Ordinal) &&
                companionProject.Contains("ExcludeAssets=\"runtime\"", StringComparison.Ordinal) &&
-               companionProject.Contains("$(DevBridgeRuntimePackageRoot)1.6\\BridgeTools\\",
+               companionProject.Contains("$(DevBridgeRuntimePackageRoot)1.7\\BridgeTools\\",
                    StringComparison.Ordinal) &&
                !coreProject.Contains("RimBridgeServer.Sdk", StringComparison.OrdinalIgnoreCase) &&
                !coreSource.Contains("RimBridgeServer", StringComparison.OrdinalIgnoreCase),
-            "the companion must use the active 1.6 load folder and keep its SDK reference compile-time-only");
+            "the companion must use the active 1.7 load folder and keep its SDK reference compile-time-only");
         Assert(companionTools.Contains("public sealed class DevBridgeGenerationTools", StringComparison.Ordinal) &&
                companionTools.Contains("public DevBridgeGenerationContextPayload GetGenerationContext()", StringComparison.Ordinal) &&
                companionTools.Contains("public DevBridgeControlPolicyPayload GetControlPolicy()", StringComparison.Ordinal) &&
@@ -43,7 +43,7 @@ internal static partial class OfflineTests
                File.Exists(Path.Combine(packageRoot, "About", "About.xml")),
             "the package must retain the imported source identity and runtime entrypoint");
 
-        string releaseOutput = Path.Combine(packageRoot, "1.6", "BridgeTools");
+        string releaseOutput = Path.Combine(packageRoot, "1.7", "BridgeTools");
         string companionDll = Path.Combine(releaseOutput, "DevBridge2.BridgeTools.dll");
         Assert(File.Exists(companionDll) &&
                !File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
@@ -51,7 +51,7 @@ internal static partial class OfflineTests
                    SearchOption.AllDirectories).Any() &&
                !Directory.EnumerateFiles(packageRoot, "RimBridgeServer.Sdk.dll",
                    SearchOption.AllDirectories).Any(),
-            "the package must place BridgeTools below 1.6 and exclude a private SDK runtime copy");
+            "the package must place BridgeTools below 1.7 and exclude a private SDK runtime copy");
     }
 
     private static void TestBridgeToolsPublishRefreshesStaleDll()
@@ -65,10 +65,10 @@ internal static partial class OfflineTests
         [
             "DevBridge.cmd",
             Path.Combine("About", "About.xml"),
-            Path.Combine("1.6", "BridgeTools", "DevBridge2.BridgeTools.dll"),
+            Path.Combine("1.7", "BridgeTools", "DevBridge2.BridgeTools.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.exe"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.dll"),
-            Path.Combine("1.6", "Assemblies", "DevBridge2.dll")
+            Path.Combine("1.7", "Assemblies", "DevBridge2.dll")
         ];
 
         foreach (string relativePath in requiredFiles)
@@ -95,7 +95,7 @@ internal static partial class OfflineTests
 
         JsonCommandResponse response = RunDoctor(fixture, out _, out _);
         Assert(response.Findings.Any(value => value.Code == "BRIDGETOOLS_WRONG_LOCATION"),
-            "doctor must identify root-level companion output outside the active 1.6 load folder");
+            "doctor must identify root-level companion output outside the active 1.7 load folder");
     }
 
     private static void TestRimBridgeCompanionDiagnosticCategory()

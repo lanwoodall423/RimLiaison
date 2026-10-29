@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using RimLiaison.Recovery;
 
 namespace RimLiaison.DevBridge;
+
 internal static class DevBridgeTimeoutContract
 {
     // DevBridge owns a 15-second coordinator connection allowance and a
@@ -67,7 +68,7 @@ public static class DevBridgeProcessEnvironment
 
         string? managed = ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_PATH")) ??
             ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_ASSEMBLIES")) ??
-            ExistingDirectory(Path.Combine(root, "RimWorldWin64_Data", "Managed"));
+            ExistingDirectory(root);
         if (managed is not null)
         {
             environment["RIMWORLD_MANAGED_PATH"] = managed;

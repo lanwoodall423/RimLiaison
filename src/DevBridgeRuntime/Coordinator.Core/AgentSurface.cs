@@ -1289,7 +1289,7 @@ internal sealed partial class CoordinatorState
 
     private AgentComponentBuildSnapshot BuildComponentBuildSnapshotLocked()
     {
-        string modPath = Path.Combine(root, "1.6", "Assemblies", "DevBridge2.dll");
+        string modPath = Path.Combine(root, "1.7", "Assemblies", "DevBridge2.dll");
         string bridgeToolsPath = ExpectedBridgeToolsPathLocked();
         DevBridgeBuildIdentity modBuild = DevBridgeBuildIdentity.FromAssemblyPath(modPath);
         DevBridgeBuildIdentity bridgeToolsBuild = DevBridgeBuildIdentity.FromAssemblyPath(bridgeToolsPath);
@@ -1327,7 +1327,7 @@ internal sealed partial class CoordinatorState
 
     private string ExpectedBridgeToolsPathLocked()
     {
-        return Path.Combine(root, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll");
+        return Path.Combine(root, "1.7", "BridgeTools", "DevBridge2.BridgeTools.dll");
     }
 
     private static bool? BuildMatches(DevBridgeBuildIdentity published,

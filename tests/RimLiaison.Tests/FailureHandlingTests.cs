@@ -146,8 +146,12 @@ internal static class FailureHandlingTests
             "TestCatalog",
             "rimtest.catalog.json");
         string oldDirectory = Environment.CurrentDirectory;
-        string rimWorldRoot = Path.Combine(root, "RimWorld");
+        string rimWorldRoot = Path.Combine(Path.GetTempPath(), "rimliaison-manifest-game-" + Guid.NewGuid().ToString("N"));
         string activeModsRoot = Path.Combine(rimWorldRoot, "Mods");
+        // Doctor uses a synthetic DevBridge installation in this isolated fixture.
+        // Never rely on a sibling repository or installed game for the test.
+        string devBridgeRoot = Path.Combine(Path.GetTempPath(),
+            "rimliaison-manifest-devbridge-" + Guid.NewGuid().ToString("N"));
         string? previousRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
         string? previousActiveModsRoot = Environment.GetEnvironmentVariable("RIMWORLD_MODS_ROOT");
         try
@@ -156,6 +160,8 @@ internal static class FailureHandlingTests
             Directory.CreateDirectory(root);
             Directory.CreateDirectory(Path.Combine(root, ".git"));
             Directory.CreateDirectory(activeModsRoot);
+            Directory.CreateDirectory(devBridgeRoot);
+            File.WriteAllText(Path.Combine(devBridgeRoot, "DevBridge.cmd"), "@echo off");
             Directory.CreateDirectory(Path.Combine(root, ".rimdev"));
             File.WriteAllText(
                 Path.Combine(root, ".rimdev", "workspace.json"),
@@ -167,7 +173,6 @@ internal static class FailureHandlingTests
             new RimContextService().Index(new RimContextIndexRequest(root));
             using var output = new StringWriter();
             using var errors = new StringWriter();
-            string devBridgeRoot = Path.GetFullPath(Path.Combine(oldDirectory, "..", "DevBridge2"));
             var transport = new DoctorTransport();
             int exitCode = CliApplication.RunAsync(
                     [
@@ -188,7 +193,8 @@ internal static class FailureHandlingTests
                     processTransport: transport)
                 .GetAwaiter()
                 .GetResult();
-            Equal(0, exitCode);
+            True(exitCode == 0,
+                $"manifest repair doctor returned {exitCode}; stdout={output}; stderr={errors}");
             using JsonDocument document = JsonDocument.Parse(output.ToString());
             JsonElement result = document.RootElement;
             Equal("ready", result.GetProperty("status").GetString());
@@ -208,6 +214,14 @@ internal static class FailureHandlingTests
             if (Directory.Exists(root))
             {
                 Directory.Delete(root, recursive: true);
+            }
+            if (Directory.Exists(rimWorldRoot))
+            {
+                Directory.Delete(rimWorldRoot, recursive: true);
+            }
+            if (Directory.Exists(devBridgeRoot))
+            {
+                Directory.Delete(devBridgeRoot, recursive: true);
             }
         }
     }

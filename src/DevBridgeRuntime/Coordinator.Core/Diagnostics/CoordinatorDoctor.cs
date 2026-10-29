@@ -191,7 +191,7 @@ internal sealed partial class CoordinatorState
             AssemblyVersion(typeof(CoordinatorState).Assembly) ?? versions.CoordinatorVersion;
 
         string aboutVersion = ReadAboutVersion();
-        string modAssemblyPath = Path.Combine(root, "1.6", "Assemblies", "DevBridge2.dll");
+        string modAssemblyPath = Path.Combine(root, "1.7", "Assemblies", "DevBridge2.dll");
         versions.ModBuild = DevBridgeBuildIdentity.FromAssemblyPath(modAssemblyPath);
         string modVersion = versions.ModBuild?.ProductVersion ?? AssemblyVersion(modAssemblyPath);
         versions.ModVersion = modVersion ?? aboutVersion ?? "missing";
@@ -256,7 +256,7 @@ internal sealed partial class CoordinatorState
             if (modLocalBridgeToolsPath != null)
             {
                 report.AddFinding(DoctorSeverities.Warning, "BRIDGETOOLS_WRONG_LOCATION",
-                    "The BridgeTools companion is outside the active 1.6 load folder; RimBridgeServer discovers mod-local loaded-folder companions.",
+                    "The BridgeTools companion is outside the active 1.7 load folder; RimBridgeServer discovers mod-local loaded-folder companions.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath(),
@@ -266,7 +266,7 @@ internal sealed partial class CoordinatorState
             else if (sourceBridgeToolsPath != null)
             {
                 report.AddFinding(DoctorSeverities.Warning, "BRIDGETOOLS_WRONG_LOCATION",
-                    "The BridgeTools companion exists only in a source build output; RimBridgeServer discovers the active 1.6 load-folder companion.",
+                    "The BridgeTools companion exists only in a source build output; RimBridgeServer discovers the active 1.7 load-folder companion.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath(),
@@ -276,7 +276,7 @@ internal sealed partial class CoordinatorState
             else
             {
                 report.AddFinding(DoctorSeverities.Info, "BRIDGETOOLS_ASSEMBLY_NOT_DISCOVERED",
-                    "The optional BridgeTools companion assembly was not found in the active 1.6 load folder.",
+                    "The optional BridgeTools companion assembly was not found in the active 1.7 load folder.",
                     "Compatibility", new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["expectedPath"] = ExpectedBridgeToolsAssemblyPath()
@@ -1366,7 +1366,7 @@ internal sealed partial class CoordinatorState
 
     private string ExpectedBridgeToolsAssemblyPath()
     {
-        return Path.Combine(root, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll");
+        return Path.Combine(root, "1.7", "BridgeTools", "DevBridge2.BridgeTools.dll");
     }
 
     private string FindSourceBridgeToolsAssembly()

@@ -304,8 +304,8 @@ internal static class DevCheckTests
         try
         {
             File.WriteAllText(Path.Combine(source, "LoadFolders.xml"), "<loadFolders />");
-            Directory.CreateDirectory(Path.Combine(source, "1.6", "Assemblies"));
-            File.WriteAllText(Path.Combine(source, "1.6", "Assemblies", "Payload.dll"), "payload");
+            Directory.CreateDirectory(Path.Combine(source, "1.7", "Assemblies"));
+            File.WriteAllText(Path.Combine(source, "1.7", "Assemblies", "Payload.dll"), "payload");
             Directory.CreateDirectory(Path.Combine(source, ".git", "objects"));
             File.WriteAllText(Path.Combine(source, ".git", "objects", "read-only-object"), "repository");
             Directory.CreateDirectory(Path.Combine(source, "Source"));
@@ -318,7 +318,7 @@ internal static class DevCheckTests
             [
                 "About/About.xml",
                 "LoadFolders.xml",
-                "1.6/Assemblies/Payload.dll"
+                "1.7/Assemblies/Payload.dll"
             ];
             foreach (string relative in expected)
             {

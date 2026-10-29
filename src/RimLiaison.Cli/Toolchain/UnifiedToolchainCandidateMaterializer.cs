@@ -132,7 +132,7 @@ internal static class ToolchainCandidateMaterializer
             CopyDirectory(isolatedPackageRoot, runtimeCandidateRoot);
             string candidateRuntimeManifest = Path.Combine(runtimeCandidateRoot, RuntimeManifestName);
             string candidateCoordinator = Path.Combine(runtimeCandidateRoot, "Coordinator", "DevBridge.Coordinator.exe");
-            string candidateMod = Path.Combine(runtimeCandidateRoot, "1.6", "Assemblies", "DevBridge2.dll");
+            string candidateMod = Path.Combine(runtimeCandidateRoot, "1.7", "Assemblies", "DevBridge2.dll");
 
             string cliDeploymentRoot = Path.Combine(fullCandidateRoot, "cli");
             CliPublishResult cliPublish = await PublishCliAsync(
@@ -394,7 +394,7 @@ internal static class ToolchainCandidateMaterializer
 
         CliProcessEvidence restore = await RunDotnetAsync(
                 fullSourceRoot,
-                ["restore", project, "--nologo", ..isolatedProperties],
+                ["restore", project, "--nologo", .. isolatedProperties],
                 cancellationToken)
             .ConfigureAwait(false);
         commands.Add(restore);
@@ -849,7 +849,7 @@ internal static class ToolchainCandidateMaterializer
                     "Runtime package builtin recipe source is missing: " + requiredRecipe,
                     Path.Combine(recipeRoot, requiredRecipe));
         }
-        string[] generatedDirectories = ["Coordinator", "1.6"];
+        string[] generatedDirectories = ["Coordinator", "1.6", "1.7"];
         foreach (string sourceFile in Directory.EnumerateFiles(sourcePackageRoot, "*", SearchOption.AllDirectories))
         {
             string relativePath = Path.GetRelativePath(sourcePackageRoot, sourceFile);
@@ -930,12 +930,12 @@ internal static class ToolchainCandidateMaterializer
             Path.Combine("About", "About.xml"),
             "LoadFolders.xml",
             "RimBridgeProtocolCompatibility.json",
-            Path.Combine("1.6", "BridgeTools", "DevBridge2.BridgeTools.dll"),
+            Path.Combine("1.7", "BridgeTools", "DevBridge2.BridgeTools.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.exe"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.Core.dll"),
             Path.Combine("Coordinator", "DevBridge.Coordinator.runtimeconfig.json"),
-            Path.Combine("1.6", "Assemblies", "DevBridge2.dll"),
+            Path.Combine("1.7", "Assemblies", "DevBridge2.dll"),
             ..RequiredRepositoryRecipeFiles.Select(file => Path.Combine("TestRecipes", file))
         ];
         string obsoleteRoot = Path.Combine(packageRoot, "BridgeTools");

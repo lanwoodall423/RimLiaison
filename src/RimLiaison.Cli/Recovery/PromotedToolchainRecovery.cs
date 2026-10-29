@@ -477,7 +477,7 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                     "DevBridge.Coordinator.exe");
                 string mod = Path.Combine(
                     package.DevBridgeRuntimeArtifactRoot,
-                    "1.6",
+                    "1.7",
                     "Assemblies",
                     "DevBridge2.dll");
                 if (!File.Exists(runtimeManifest) ||
@@ -493,7 +493,7 @@ internal sealed class QualifiedPromotedToolchainInstaller : IPromotedToolchainIn
                         StringComparison.OrdinalIgnoreCase) ||
                     unifiedPackage &&
                     (!string.Equals(
-                        ReadRuntimeFileHash(runtimeManifest, "1.6/Assemblies/DevBridge2.dll"),
+                        ReadRuntimeFileHash(runtimeManifest, "1.7/Assemblies/DevBridge2.dll"),
                         package.DevBridgeModSha256,
                         StringComparison.OrdinalIgnoreCase) ||
                      !HashEquals(mod, package.DevBridgeModSha256) ||

@@ -61,8 +61,8 @@ internal static class Program
         ("ambiguous legacy ownership fails closed", ValidationRecipeResolverTests.AmbiguousLegacyOwnershipFailsClosed),
         ("legacy recipe resolves deterministically", ValidationRecipeResolverTests.LegacyProjectRecipeMigratesDeterministically),
         ("recipe hash and schema are recorded", ValidationRecipeResolverTests.RecipeHashAndSchemaAreRecorded),
-        ("ecosystem recipes resolve", ValidationRecipeResolverTests.EcosystemRecipesResolve),
-        ("ecosystem recipes resolve by convention", ValidationRecipeResolverTests.EcosystemRecipesResolveByConvention),
+        ("ecosystem isolated recipes resolve explicitly", ValidationRecipeResolverTests.EcosystemRecipesResolve),
+        ("ecosystem isolated recipes resolve by convention", ValidationRecipeResolverTests.EcosystemRecipesResolveByConvention),
         ("managed project identity map explicit", CanonicalProjectIdentityTests.ManagedProjectIdentityMapIsExplicit),
         ("DRF display and routing share canonical identity", CanonicalProjectIdentityTests.DrfDisplayNameAndRoutingSlugResolveSameCanonical),
         ("Frontier identifiers resolve correctly", CanonicalProjectIdentityTests.FrontierIdentifiersResolveCorrectly),
@@ -896,6 +896,7 @@ internal static class Program
         }
 
         int failures = 0;
+        List<string> failedTestNames = [];
         Queue<string> recentTests = new();
         int timeoutSeconds = ReadTestTimeoutSeconds();
         foreach ((string name, _) in selected)
@@ -907,6 +908,7 @@ internal static class Program
             if (result.TimedOut)
             {
                 failures++;
+                failedTestNames.Add(name);
                 Console.Error.WriteLine("TEST_TIMEOUT");
                 Console.Error.WriteLine($"test={name}");
                 Console.Error.WriteLine(duration);
@@ -921,6 +923,7 @@ internal static class Program
             else
             {
                 failures++;
+                failedTestNames.Add(name);
                 string details = FirstNonEmpty(result.StandardError, result.StandardOutput);
                 Console.Error.WriteLine(
                     $"FAIL {name} {duration}: {BoundedSingleLine(details)}");
@@ -934,6 +937,8 @@ internal static class Program
         }
 
         Console.WriteLine($"{selected.Length - failures}/{selected.Length} tests passed.");
+        if (failedTestNames.Count != 0)
+            Console.Error.WriteLine("FAILED_TEST_NAMES: " + string.Join(" | ", failedTestNames));
         return failures == 0 ? 0 : 1;
     }
 

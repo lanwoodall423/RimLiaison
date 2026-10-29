@@ -123,32 +123,51 @@ internal static class ValidationRecipeResolverTests
         Assert(result.IsSuccess && result.Recipe!.Sha256 == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) &&
                result.Recipe.SchemaVersion == "devbridge-test-recipe/v1", "recipe hash and schema must be recorded");
     }
+    // These are portable contract tests for the known ecosystem recipe IDs.
+    // Verifying the *installed* external repositories remains a separate integration
+    // qualification, not a precondition of RimLiaison's offline unit regression.
     public static void EcosystemRecipesResolveByConvention()
     {
-        AssertResolveByConvention("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite");
-        AssertResolveByConvention("C:\\RimDev\\Repos\\KnowledgeFramework", "knowledge-framework", "knowledge-framework-release-runtime");
+        AssertEcosystemRecipeFixture("deferred-reality", "deferred-reality-development-smoke", byConvention: true);
+        AssertEcosystemRecipeFixture("frontier", "mod-development-smoke", byConvention: true);
+        AssertEcosystemRecipeFixture("insight-canvas", "insightcanvas-in-game-suite", byConvention: true);
+        AssertEcosystemRecipeFixture("knowledge-framework", "knowledge-framework-release-runtime", byConvention: true);
     }
-
-    private static void AssertResolveByConvention(string root, string project, string id)
-    {
-        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(project, id, root, null, null);
-        Assert(result.IsSuccess, $"{id} must resolve by convention: {result.ErrorCode} {result.Error}");
-    }
-
 
     public static void EcosystemRecipesResolve()
     {
-        AssertResolve("C:\\RimDev\\Repos\\DeferredRealityFramework", "deferred-reality", "deferred-reality-development-smoke", ".rimdev/recipes/deferred-reality-development-smoke.json");
-        AssertResolve("C:\\RimDev\\Repos\\Frontier", "frontier", "mod-development-smoke", ".rimdev/recipes/mod-development-smoke.json");
-        AssertResolve("C:\\RimDev\\Repos\\InsightCanvas", "insight-canvas", "insightcanvas-in-game-suite", ".rimdev/recipes/insightcanvas-in-game-suite.json");
+        AssertEcosystemRecipeFixture("deferred-reality", "deferred-reality-development-smoke", byConvention: false);
+        AssertEcosystemRecipeFixture("frontier", "mod-development-smoke", byConvention: false);
+        AssertEcosystemRecipeFixture("insight-canvas", "insightcanvas-in-game-suite", byConvention: false);
     }
 
-    private static void AssertResolve(string root, string project, string id, string path)
+    private static void AssertEcosystemRecipeFixture(string project, string id, bool byConvention)
     {
-        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(project, id, root, path, null);
-        Assert(result.IsSuccess, $"{id} must resolve: {result.ErrorCode} {result.Error}");
+        using TempRepo repo = TempRepo.Create("ecosystem-" + project, owner: project);
+        string relativePath = ".rimdev/recipes/" + id + ".json";
+        string recipePath = Path.Combine(repo.Root, ".rimdev", "recipes", id + ".json");
+        File.WriteAllText(recipePath, JsonSerializer.Serialize(new
+        {
+            schemaVersion = "devbridge-test-recipe/v1",
+            id,
+            description = "Isolated ecosystem recipe contract",
+            projects = new[] { project },
+            inputs = new { quicktest = true },
+            requiresReady = true,
+            success = new { quicktestReady = true }
+        }));
+
+        ValidationRecipeResolutionResult result = ValidationRecipeResolver.Resolve(
+            project, id, repo.Root, byConvention ? null : relativePath, null);
+        Assert(result.IsSuccess && result.Recipe is { Source: "PROJECT_OWNED" } &&
+               string.Equals(result.Recipe.Path, recipePath, StringComparison.OrdinalIgnoreCase) &&
+               result.Recipe.SchemaVersion == "devbridge-test-recipe/v1",
+            $"{id} must resolve its own project recipe: {result.ErrorCode} {result.Error}");
+
+        ValidationRecipeResolutionResult wrongOwner = ValidationRecipeResolver.Resolve(
+            "foreign-project", id, repo.Root, byConvention ? null : relativePath, null);
+        Assert(wrongOwner.ErrorCode == "DEVELOPMENT_RECIPE_PROJECT_MISMATCH",
+            $"{id} must refuse a foreign project owner");
     }
 
     private static void WriteRecipe(string root, string id, string recipeId, params string[] owners)

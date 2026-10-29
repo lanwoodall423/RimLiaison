@@ -36,7 +36,13 @@ internal static class ObservabilityHydrationTests
 
             Assert(result.Completed);
             AssertEqual(25, store.GetEvents(limit: 100).Count);
+            store.Refresh();
+            AssertEqual(25, store.GetEvents(limit: 100).Count);
             AssertEqual("evt-10000", store.GetEvents(limit: 1).Single().Id);
+            store.HydrateRecentAsync(maximumEvents: 25, maximumIssues: 10, maximumAgents: 5)
+                .GetAwaiter()
+                .GetResult();
+            AssertEqual(25, store.GetEvents(limit: 100).Count);
         }
         finally
         {
@@ -284,7 +290,7 @@ internal static class ObservabilityHydrationTests
             using var reader = new AgentObservabilityStore(
                 directory,
                 loadPersistedRecords: false);
-            reader.HydrateRecentAsync()
+            reader.HydrateRecentAsync(maximumEvents: 1, maximumIssues: 5, maximumAgents: 5)
                 .GetAwaiter()
                 .GetResult();
 
@@ -298,9 +304,18 @@ internal static class ObservabilityHydrationTests
                 DevelopmentStage.Testing,
                 "live.event",
                 "Arrived after hydration."));
+            AgentEvent newest = writer.AppendEvent(new AgentEventRequest(
+                agent.RunId,
+                agent.AgentId,
+                agent.ModId,
+                DevelopmentStage.Testing,
+                "live.event",
+                "Another event after hydration."));
 
             reader.Refresh();
             AssertEqual(1, reader.GetEvents(limit: 10).Count);
+            Assert(reader.GetEvents(limit: 1).Single().Id == newest.Id,
+                "bounded live refresh must retain the newest appended event");
         }
         finally
         {

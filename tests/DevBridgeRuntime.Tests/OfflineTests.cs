@@ -383,11 +383,11 @@ internal static partial class OfflineTests
             Root = Path.Combine(Path.GetTempPath(), "DevBridge2-offline-" + Guid.NewGuid().ToString("N"), "Coordinator");
             Directory.CreateDirectory(Path.Combine(Root, "Runtime"));
             Directory.CreateDirectory(Path.Combine(Root, "About"));
-            Directory.CreateDirectory(Path.Combine(Root, "1.6", "Assemblies"));
+            Directory.CreateDirectory(Path.Combine(Root, "1.7", "Assemblies"));
             RimWorldPath = Path.Combine(Root, "RimWorldWin64.exe");
             File.WriteAllText(RimWorldPath, "offline-test-executable");
             File.WriteAllText(Path.Combine(Root, "About", "About.xml"), "<ModMetaData />");
-            File.WriteAllText(Path.Combine(Root, "1.6", "Assemblies", "DevBridge2.dll"), "offline-test-assembly");
+            File.WriteAllText(Path.Combine(Root, "1.7", "Assemblies", "DevBridge2.dll"), "offline-test-assembly");
             File.WriteAllText(Path.Combine(Root, "ModsConfig.xml"), "<activeMods><li>lan.devbridge2</li></activeMods>");
             string metadataRoot = Path.Combine(Root, "InstalledMods");
             Directory.CreateDirectory(metadataRoot);

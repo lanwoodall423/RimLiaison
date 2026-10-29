@@ -486,7 +486,7 @@ internal static class ProductionToolchainBindingResolver
             runtimeRoot,
             "Coordinator",
             "DevBridge.Coordinator.exe");
-        string modPath = Path.Combine(runtimeRoot, "1.6", "Assemblies", "DevBridge2.dll");
+        string modPath = Path.Combine(runtimeRoot, "1.7", "Assemblies", "DevBridge2.dll");
         bool modernRuntimeIdentity =
             !string.IsNullOrWhiteSpace(manifest.DevBridgeModSha256) &&
             !string.IsNullOrWhiteSpace(manifest.DevBridgeRuntimeManifestSha256);
@@ -504,7 +504,7 @@ internal static class ProductionToolchainBindingResolver
                 "Coordinator/DevBridge.Coordinator.exe");
             coordinatorHash = Sha256(coordinatorPath);
             recordedModHash = modernRuntimeIdentity
-                ? ReadRuntimeFileHash(runtimeManifestPath, "1.6/Assemblies/DevBridge2.dll")
+                ? ReadRuntimeFileHash(runtimeManifestPath, "1.7/Assemblies/DevBridge2.dll")
                 : string.Empty;
             modHash = modernRuntimeIdentity ? Sha256(modPath) : string.Empty;
         }

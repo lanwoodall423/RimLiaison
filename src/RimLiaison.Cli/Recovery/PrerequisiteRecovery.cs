@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Text.Json;
@@ -581,7 +582,7 @@ public static partial class DevBridgeCapabilityRecovery
             foreach (string line in output.Split(
                          '\n',
                          StringSplitOptions.RemoveEmptyEntries |
-                         StringSplitOptions.TrimEntries).Reverse())
+                         StringSplitOptions.TrimEntries).AsEnumerable().Reverse())
             {
                 try
                 {

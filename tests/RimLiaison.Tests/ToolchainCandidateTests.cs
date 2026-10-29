@@ -54,13 +54,13 @@ internal static class ToolchainCandidateTests
     public static void MissingUnityCoreModuleFailsBeforeBuild()
     {
         using TestEnvironment environment = TestEnvironment.Create();
-        File.Delete(Path.Combine(environment.ManagedDirectory, "UnityEngine.CoreModule.dll"));
+        File.Delete(Path.Combine(environment.ManagedDirectory, "Waylith.dll"));
 
         RimWorldManagedAssemblyResolution result = environment.Resolve(environment.DevBridgeRoot);
 
-        Assert(!result.Succeeded, "missing UnityEngine.CoreModule.dll must block the candidate build");
-        Assert(result.ErrorCode == "RIMWORLD_MANAGED_ASSEMBLIES_MISSING", "missing UnityEngine.CoreModule.dll returned the wrong code");
-        Assert(result.MissingRequiredFile == Path.Combine(environment.ManagedDirectory, "UnityEngine.CoreModule.dll"), "missing file evidence is incomplete");
+        Assert(!result.Succeeded, "missing Waylith.dll must block the candidate build");
+        Assert(result.ErrorCode == "RIMWORLD_MANAGED_ASSEMBLIES_MISSING", "missing Waylith.dll returned the wrong code");
+        Assert(result.MissingRequiredFile == Path.Combine(environment.ManagedDirectory, "Waylith.dll"), "missing file evidence is incomplete");
     }
 
     public static void WrongConfiguredRootFailsClearly()
@@ -90,7 +90,7 @@ internal static class ToolchainCandidateTests
 
         Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "current RimWorld installation did not resolve");
         Assert(result.RimWorldRoot == Path.GetFullPath(root), "current RimWorld root resolved incorrectly");
-        Assert(result.ManagedDirectory == Path.Combine(Path.GetFullPath(root), "RimWorldWin64_Data", "Managed"), "current managed directory resolved incorrectly");
+        Assert(result.ManagedDirectory == Path.GetFullPath(root), "Waylith 1.7 game-root assemblies resolved incorrectly");
     }
 
     public static void CandidateContractDoesNotExposeExternalReleaseWorkflow()
@@ -124,7 +124,7 @@ internal static class ToolchainCandidateTests
         ToolchainCandidateMaterializer.CliPublishResult result = environment.Publish();
 
         Assert(result.Succeeded, result.Error ?? result.ErrorCode ?? "source-only CLI publish failed");
-        Assert(result.SelectedSdk == "8.0.424", "CLI publish did not use the pinned SDK");
+        Assert(result.SelectedSdk == "10.0.403", "CLI publish did not use the pinned SDK");
         Assert(File.Exists(Path.Combine(result.StagingPath, "rimliaison.dll")),
             "source-only CLI publish did not emit the assembly");
         Assert(result.Commands.Any(command =>
@@ -333,7 +333,7 @@ internal static class ToolchainCandidateTests
                 """
                 {
                   "sdk": {
-                    "version": "8.0.424",
+                    "version": "10.0.403",
                     "rollForward": "disable",
                     "allowPrerelease": false
                   }
@@ -476,7 +476,7 @@ internal static class ToolchainCandidateTests
             Root = root;
             ProjectRoot = projectRoot;
             RimWorldRoot = rimWorldRoot;
-            ManagedDirectory = Path.Combine(rimWorldRoot, "RimWorldWin64_Data", "Managed");
+            ManagedDirectory = rimWorldRoot;
             DevBridgeRoot = Path.Combine(root, "far-away", "DevBridge2");
         }
 
@@ -517,14 +517,15 @@ internal static class ToolchainCandidateTests
                 sourceProject = "Source/CandidateProject.csproj",
                 configuration = "Release",
                 expectedAssembly = "CandidateProject.dll",
-                deploymentTarget = "1.6/Assemblies/CandidateProject.dll",
+                deploymentTarget = "1.7/Assemblies/CandidateProject.dll",
                 runtimePackage = new { sourceRoot = ".", include = new[] { "About/**", "1.*/**" }, exclude = new[] { "Source/**" } }
             }));
             File.WriteAllText(Path.Combine(project, "Source", "CandidateProject.csproj"), "<Project />");
             if (rimWorldRoot is null)
             {
                 File.WriteAllText(Path.Combine(environment.ManagedDirectory, "Assembly-CSharp.dll"), "fixture");
-                File.WriteAllText(Path.Combine(environment.ManagedDirectory, "UnityEngine.CoreModule.dll"), "fixture");
+                File.WriteAllText(Path.Combine(environment.ManagedDirectory, "Waylith.dll"), "fixture");
+                File.WriteAllText(Path.Combine(environment.ManagedDirectory, "UnityStubs.dll"), "fixture");
             }
             environment.WriteWorkspace(rimWorld);
             return environment;

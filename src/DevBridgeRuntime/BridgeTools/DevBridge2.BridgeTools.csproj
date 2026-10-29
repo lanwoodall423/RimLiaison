@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net472</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>DevBridge2.BridgeTools</RootNamespace>
     <AssemblyName>DevBridge2.BridgeTools</AssemblyName>
     <Version>$(DevBridgeProductVersion)</Version>
@@ -16,7 +16,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RimBridgeSdkPath Condition="'$(RimBridgeSdkPath)' == ''"></RimBridgeSdkPath>
-    <OutputPath>$(DevBridgeRuntimePackageRoot)1.6\BridgeTools\</OutputPath>
+    <OutputPath>$(DevBridgeRuntimePackageRoot)1.7\BridgeTools\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="RimBridgeServer.Sdk" Condition="'$(RimBridgeSdkPath)' != '' and Exists('$(RimBridgeSdkPath)')">

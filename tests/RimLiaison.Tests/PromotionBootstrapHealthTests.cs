@@ -147,7 +147,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(root, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(
@@ -184,7 +184,12 @@ internal static class PromotionBootstrapHealthTests
             Assert(result.Evidence.Shutdown?.ExitCode == 0, "production verifier did not accept shutdown");
             Assert(result.Evidence.After?.State == "Absent", "production verifier did not prove absent state");
             Assert(result.Evidence.After?.CoordinatorPid is null, "production verifier accepted a remaining PID");
-            Assert(result.Evidence.After?.RuntimeRoot == root, "production verifier accepted a different runtime root");
+            Assert(result.Evidence.After?.RuntimeRoot is { } reportedRoot &&
+                string.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(reportedRoot)),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)),
+                    StringComparison.OrdinalIgnoreCase),
+                "production verifier accepted a different canonical runtime root");
         }
         finally
         {
@@ -202,7 +207,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(root, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %*
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(
@@ -481,7 +486,7 @@ internal static class PromotionBootstrapHealthTests
     public static void MissingCandidateDllFailsAccurately()
     {
         using Fixture fixture = new("missing");
-        File.Delete(Path.Combine(fixture.CandidateRuntimeRoot, "1.6", "Assemblies", "DevBridge2.dll"));
+        File.Delete(Path.Combine(fixture.CandidateRuntimeRoot, "1.7", "Assemblies", "DevBridge2.dll"));
         ToolchainPromotionResult result = fixture.Promote();
         Assert(result.ErrorCode == "PROMOTION_RECOVERY_PAYLOAD_INVALID", "missing candidate DLL was not rejected");
         Assert(File.ReadAllText(fixture.ManifestPath) == fixture.ManifestBefore, "missing DLL changed active identity");
@@ -689,7 +694,7 @@ internal static class PromotionBootstrapHealthTests
                 Path.Combine(RuntimeRoot, "DevBridge.cmd"),
                 """
                 @echo off
-                pwsh -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %1 %2 %3 %4 %5 %6
+                powershell.exe -NoLogo -NoProfile -NonInteractive -File "%~dp0fake-devbridge.ps1" %1 %2 %3 %4 %5 %6
                 exit /b %ERRORLEVEL%
                 """);
             File.WriteAllText(
@@ -873,7 +878,7 @@ internal static class PromotionBootstrapHealthTests
             PackagePath = Path.Combine(Root, "qualified-package.json");
             Directory.CreateDirectory(artifactRoot);
             Directory.CreateDirectory(Path.Combine(candidatePayloadRoot, "Coordinator"));
-            Directory.CreateDirectory(Path.Combine(candidatePayloadRoot, "1.6", "Assemblies"));
+            Directory.CreateDirectory(Path.Combine(candidatePayloadRoot, "1.7", "Assemblies"));
             Directory.CreateDirectory(transactionRoot);
             File.WriteAllText(Path.Combine(artifactRoot, "rimliaison.exe"), "candidate-executable");
             File.WriteAllText(Path.Combine(artifactRoot, "rimliaison.dll"), "candidate-assembly");
@@ -881,9 +886,9 @@ internal static class PromotionBootstrapHealthTests
             File.WriteAllText(Path.Combine(artifactRoot, "unified-package.json"), "{}");
             File.WriteAllText(Path.Combine(candidatePayloadRoot, "DevBridge.cmd"), "candidate-runtime");
             File.WriteAllText(Path.Combine(candidatePayloadRoot, "Coordinator", "DevBridge.Coordinator.exe"), "candidate-coordinator");
-            File.WriteAllText(Path.Combine(candidatePayloadRoot, "1.6", "Assemblies", "DevBridge2.dll"), "candidate-mod");
+            File.WriteAllText(Path.Combine(candidatePayloadRoot, "1.7", "Assemblies", "DevBridge2.dll"), "candidate-mod");
             string coordinatorHash = Hash(Path.Combine(candidatePayloadRoot, "Coordinator", "DevBridge.Coordinator.exe"));
-            string modHash = Hash(Path.Combine(candidatePayloadRoot, "1.6", "Assemblies", "DevBridge2.dll"));
+            string modHash = Hash(Path.Combine(candidatePayloadRoot, "1.7", "Assemblies", "DevBridge2.dll"));
             File.WriteAllText(
                 Path.Combine(candidatePayloadRoot, ".devbridge-runtime-manifest.json"),
                 JsonSerializer.Serialize(new
@@ -900,7 +905,7 @@ internal static class PromotionBootstrapHealthTests
                     files = new[]
                     {
                         new { path = "Coordinator/DevBridge.Coordinator.exe", sha256 = coordinatorHash },
-                        new { path = "1.6/Assemblies/DevBridge2.dll", sha256 = modHash }
+                        new { path = "1.7/Assemblies/DevBridge2.dll", sha256 = modHash }
                     }
                 }));
             string runtimeManifestHash = Hash(Path.Combine(candidatePayloadRoot, ".devbridge-runtime-manifest.json"));
