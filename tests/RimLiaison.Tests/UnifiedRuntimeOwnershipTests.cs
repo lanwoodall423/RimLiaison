@@ -129,11 +129,8 @@ internal static class UnifiedRuntimeOwnershipTests
         string sourceRoot = FindSourceRoot();
         string componentRoot = Path.Combine(sourceRoot, "src", "DevBridgeRuntime");
         string sourcePackageRoot = Path.Combine(componentRoot, "Package");
-        RimWorldManagedAssemblyResolution managed = RimWorldManagedAssemblyResolver.Resolve(
-            sourceRoot,
-            componentRoot);
-        Assert(managed.Succeeded && managed.ManagedDirectory is not null,
-            managed.Error ?? "RimWorld managed assemblies could not be resolved for isolated build coverage");
+        // Use a self-contained synthetic game root. This test qualifies source isolation,
+        // not the user\'s real Waylith installation or runtime compatibility.
         string packageSnapshot = Snapshot(sourcePackageRoot);
         string cliSnapshot = Snapshot(Path.Combine(sourceRoot, "src", "RimLiaison.Cli", "bin", "Release", "net8.0"));
         string root = Path.Combine(
@@ -142,6 +139,8 @@ internal static class UnifiedRuntimeOwnershipTests
         string first = Path.Combine(root, "candidate-a", "runtime-build", "package");
         string second = Path.Combine(root, "candidate-b", "runtime-build", "package");
         Directory.CreateDirectory(root);
+        string syntheticGameRoot = Path.Combine(root, "WaylithFixture");
+        Directory.CreateDirectory(syntheticGameRoot);
         try
         {
             string executingCliAssembly = Path.Combine(
@@ -162,13 +161,13 @@ internal static class UnifiedRuntimeOwnershipTests
                         sourceRoot,
                         sourcePackageRoot,
                         first,
-                        managed.ManagedDirectory!,
+                        syntheticGameRoot,
                         CancellationToken.None),
                     ToolchainCandidateMaterializer.BuildOwnedRuntimeAsync(
                         sourceRoot,
                         sourcePackageRoot,
                         second,
-                        managed.ManagedDirectory!,
+                        syntheticGameRoot,
                         CancellationToken.None))
                 .GetAwaiter()
                 .GetResult();
@@ -199,9 +198,9 @@ internal static class UnifiedRuntimeOwnershipTests
                 Assert(File.Exists(Path.Combine(packageRoot, "About", "About.xml")) &&
                     File.Exists(Path.Combine(packageRoot, "CHANGELOG.md")) &&
                     File.Exists(Path.Combine(packageRoot, "Coordinator", "DevBridge.Coordinator.exe")) &&
-                    File.Exists(Path.Combine(packageRoot, "1.6", "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
+                    File.Exists(Path.Combine(packageRoot, "1.7", "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
                     !File.Exists(Path.Combine(packageRoot, "BridgeTools", "DevBridge2.BridgeTools.dll")) &&
-                    File.Exists(Path.Combine(packageRoot, "1.6", "Assemblies", "DevBridge2.dll")),
+                    File.Exists(Path.Combine(packageRoot, "1.7", "Assemblies", "DevBridge2.dll")),
                     "isolated runtime package omitted static or generated product content");
                 Assert(packageRoot.StartsWith(Path.Combine(root, "candidate-"),
                         StringComparison.OrdinalIgnoreCase),
@@ -348,11 +347,12 @@ internal static class UnifiedRuntimeOwnershipTests
             "Mod",
             "DevBridge2.csproj"));
         Assert(project.Contains(
-                "<PackageReference Include=\"Microsoft.NETFramework.ReferenceAssemblies.net472\"",
+                "<PackageReference Include=\"Krafs.Rimworld.Ref\"",
                 StringComparison.Ordinal) &&
-            project.Contains("Version=\"1.0.3\"", StringComparison.Ordinal) &&
-            project.Contains("PrivateAssets=\"All\"", StringComparison.Ordinal),
-            "net472 reference assemblies package must be pinned and private");
+            project.Contains("Version=\"1.7.4990-unstable\"", StringComparison.Ordinal) &&
+            project.Contains("PrivateAssets=\"all\"", StringComparison.Ordinal) &&
+            !project.Contains("Microsoft.NETFramework.ReferenceAssemblies.net472", StringComparison.Ordinal),
+            "Waylith 1.7 compile-only reference package must be pinned and private");
     }
     private static void Assert(bool condition, string message)
     {
@@ -501,10 +501,9 @@ internal static class UnifiedRuntimeOwnershipTests
             Directory.CreateDirectory(Path.Combine(RimWorldRoot, "Mods"));
             if (withManagedAssemblies)
             {
-                string managed = Path.Combine(RimWorldRoot, "RimWorldWin64_Data", "Managed");
-                Directory.CreateDirectory(managed);
-                File.WriteAllText(Path.Combine(managed, "Assembly-CSharp.dll"), "fixture");
-                File.WriteAllText(Path.Combine(managed, "UnityEngine.CoreModule.dll"), "fixture");
+                File.WriteAllText(Path.Combine(RimWorldRoot, "Assembly-CSharp.dll"), "fixture");
+                File.WriteAllText(Path.Combine(RimWorldRoot, "Waylith.dll"), "fixture");
+                File.WriteAllText(Path.Combine(RimWorldRoot, "UnityStubs.dll"), "fixture");
             }
             File.WriteAllText(Path.Combine(RimWorldRoot, "RimWorldWin64.exe"), "fixture");
             if (withProfile)

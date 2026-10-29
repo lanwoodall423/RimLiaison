@@ -67,7 +67,7 @@ public static class DevBridgeProcessEnvironment
 
         string? managed = ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_PATH")) ??
             ExistingDirectory(Environment.GetEnvironmentVariable("RIMWORLD_MANAGED_ASSEMBLIES")) ??
-            ExistingDirectory(Path.Combine(root, "RimWorldWin64_Data", "Managed"));
+            ExistingDirectory(root);
         if (managed is not null)
         {
             environment["RIMWORLD_MANAGED_PATH"] = managed;

@@ -72,7 +72,7 @@ internal sealed class ProductionMachinePreflightVerifier : IPromotionMachinePref
                 root,
                 executable,
                 runtimeRoot: productionRuntimeRoot);
-        string managedDirectory = Path.Combine(root, "RimWorldWin64_Data", "Managed");
+        string managedDirectory = root;
         if (!File.Exists(executable))
             return ProductionMachinePreflightResult.Blocked(
                 "RIMWORLD_EXECUTABLE_NOT_FOUND",
@@ -83,7 +83,8 @@ internal sealed class ProductionMachinePreflightVerifier : IPromotionMachinePref
                 runtimeRoot: productionRuntimeRoot);
         if (!Directory.Exists(managedDirectory) ||
             !File.Exists(Path.Combine(managedDirectory, "Assembly-CSharp.dll")) ||
-            !File.Exists(Path.Combine(managedDirectory, "UnityEngine.CoreModule.dll")))
+            !File.Exists(Path.Combine(managedDirectory, "Waylith.dll")) ||
+            !File.Exists(Path.Combine(managedDirectory, "UnityStubs.dll")))
             return ProductionMachinePreflightResult.Blocked(
                 "RIMWORLD_MANAGED_ASSEMBLIES_MISSING",
                 "The canonical RimWorld managed assemblies are incomplete.",

@@ -146,7 +146,7 @@ internal static class FailureHandlingTests
             "TestCatalog",
             "rimtest.catalog.json");
         string oldDirectory = Environment.CurrentDirectory;
-        string rimWorldRoot = Path.Combine(root, "RimWorld");
+        string rimWorldRoot = Path.Combine(Path.GetTempPath(), "rimliaison-manifest-game-" + Guid.NewGuid().ToString("N"));
         string activeModsRoot = Path.Combine(rimWorldRoot, "Mods");
         string? previousRimWorldRoot = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
         string? previousActiveModsRoot = Environment.GetEnvironmentVariable("RIMWORLD_MODS_ROOT");
@@ -188,7 +188,8 @@ internal static class FailureHandlingTests
                     processTransport: transport)
                 .GetAwaiter()
                 .GetResult();
-            Equal(0, exitCode);
+            True(exitCode == 0,
+                $"manifest repair doctor returned {exitCode}; stdout={output}; stderr={errors}");
             using JsonDocument document = JsonDocument.Parse(output.ToString());
             JsonElement result = document.RootElement;
             Equal("ready", result.GetProperty("status").GetString());
@@ -208,6 +209,10 @@ internal static class FailureHandlingTests
             if (Directory.Exists(root))
             {
                 Directory.Delete(root, recursive: true);
+            }
+            if (Directory.Exists(rimWorldRoot))
+            {
+                Directory.Delete(rimWorldRoot, recursive: true);
             }
         }
     }

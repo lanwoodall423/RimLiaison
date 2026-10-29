@@ -5,9 +5,9 @@
     <DevBridgeRuntimePackageRoot Condition="'$(DevBridgeRuntimePackageRoot)' == ''">$(MSBuildThisFileDirectory)Package\</DevBridgeRuntimePackageRoot>
     <RimDevWorkspaceFile>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.rimdev\workspace.json'))</RimDevWorkspaceFile>
     <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RIMWORLD_MANAGED_DIR)' != ''">$(RIMWORLD_MANAGED_DIR)</RimWorldManagedDir>
-    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RIMWORLD_ROOT)' != ''">$(RIMWORLD_ROOT)\RimWorldWin64_Data\Managed</RimWorldManagedDir>
+    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RIMWORLD_ROOT)' != ''">$(RIMWORLD_ROOT)</RimWorldManagedDir>
     <RimWorldRootFromWorkspace Condition="'$(RimWorldManagedDir)' == '' and Exists('$(RimDevWorkspaceFile)')">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(RimDevWorkspaceFile)')), '&quot;rimWorldRoot&quot;\s*:\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</RimWorldRootFromWorkspace>
-    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RimWorldRootFromWorkspace)' != ''">$(RimWorldRootFromWorkspace)\RimWorldWin64_Data\Managed</RimWorldManagedDir>
+    <RimWorldManagedDir Condition="'$(RimWorldManagedDir)' == '' and '$(RimWorldRootFromWorkspace)' != ''">$(RimWorldRootFromWorkspace)</RimWorldManagedDir>
     <DefaultItemExcludes Condition="'$(DevBridgeRuntimeIsolatedBuild)' == 'true'">$(DefaultItemExcludes);$(MSBuildProjectDirectory)\obj\**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

@@ -555,7 +555,7 @@ internal static class DevCheckCommand
                 .ConfigureAwait(false);
             if (result.ExitCode != 0 || result.TimedOut)
                 throw new InvalidOperationException("Runtime signal helper build failed: " + Bound(result.Stdout + Environment.NewLine + result.Stderr));
-            string assembly = Path.Combine(staging, "1.6", "Assemblies", "DirectValidationRuntimeSignal.dll");
+            string assembly = Path.Combine(staging, "1.7", "Assemblies", "DirectValidationRuntimeSignal.dll");
             if (!File.Exists(assembly))
                 throw new InvalidOperationException("Runtime signal helper build produced no assembly.");
             return staging;
@@ -575,8 +575,10 @@ internal static class DevCheckCommand
         string full = Path.GetFullPath(root);
         if (!File.Exists(Path.Combine(full, "RimWorldWin64.exe")))
             throw new DirectoryNotFoundException("RimWorld executable is missing: " + full);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64_Data", "Managed", "Assembly-CSharp.dll")))
-            throw new FileNotFoundException("RimWorld Assembly-CSharp.dll is missing.");
+        if (!File.Exists(Path.Combine(full, "Assembly-CSharp.dll")) ||
+            !File.Exists(Path.Combine(full, "Waylith.dll")) ||
+            !File.Exists(Path.Combine(full, "UnityStubs.dll")))
+            throw new FileNotFoundException("Waylith 1.7 game-root assemblies are incomplete.");
         if (!Directory.Exists(Path.Combine(full, "Mods")))
             throw new DirectoryNotFoundException("RimWorld Mods directory is missing: " + full);
         return full;
