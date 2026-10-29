@@ -225,7 +225,8 @@ internal static class NativeRimtestSourcePublishCommand
 {
     internal const string Name = "rimtest-publish-candidate";
     private const string Schema = "rimtest-source-publish/v1";
-    private const string PinnedSdk = "8.0.424";
+    // The exact source SDK also builds the net8.0 developer CLI; do not pin the host to .NET 8.
+    private const string PinnedSdk = "10.0.403";
 
     internal sealed record Request(string SourceRoot, string SourceCommit);
 

@@ -426,12 +426,21 @@ internal static class RuntimeRootEnrollmentTests
         using TestEnvironment environment = TestEnvironment.Create();
         using Process first = StartProbe(environment, "workspace enrollment process probe");
         using Process second = StartProbe(environment, "workspace enrollment process probe");
+        // Drain both redirected streams as the children execute so a full
+        // stderr/stdout pipe cannot deadlock a concurrent probe.
+        Task<string> firstStdout = first.StandardOutput.ReadToEndAsync();
+        Task<string> firstStderr = first.StandardError.ReadToEndAsync();
+        Task<string> secondStdout = second.StandardOutput.ReadToEndAsync();
+        Task<string> secondStderr = second.StandardError.ReadToEndAsync();
         Assert(first.WaitForExit(120_000), "first concurrent enrollment exceeded its bound");
         Assert(second.WaitForExit(120_000), "second concurrent enrollment exceeded its bound");
-        string firstOutput = first.StandardOutput.ReadToEnd();
-        string secondOutput = second.StandardOutput.ReadToEnd();
+        string firstOutput = firstStdout.GetAwaiter().GetResult();
+        string secondOutput = secondStdout.GetAwaiter().GetResult();
+        string firstError = firstStderr.GetAwaiter().GetResult();
+        string secondError = secondStderr.GetAwaiter().GetResult();
         Assert(first.ExitCode == 0 && second.ExitCode == 0,
-            "concurrent processes did not receive a consistent result: " + firstOutput + secondOutput);
+            $"concurrent enrollment exits first={first.ExitCode} second={second.ExitCode}; " +
+            $"stdout1={firstOutput}; stderr1={firstError}; stdout2={secondOutput}; stderr2={secondError}");
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(environment.WorkspacePath));
         string[] paths = document.RootElement.GetProperty("repositories")
             .EnumerateArray()

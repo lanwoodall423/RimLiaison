@@ -289,7 +289,7 @@ internal static class CliDeploymentTests
             Directory.CreateDirectory(Path.GetDirectoryName(project)!);
             File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\"/>");
             File.WriteAllText(Path.Combine(source, "global.json"),
-                "{\"sdk\":{\"version\":\"8.0.424\",\"rollForward\":\"disable\",\"allowPrerelease\":false}}");
+                "{\"sdk\":{\"version\":\"10.0.403\",\"rollForward\":\"disable\",\"allowPrerelease\":false}}");
 
             string[] valid =
             [
@@ -328,7 +328,7 @@ internal static class CliDeploymentTests
                 if (args.Count == 1 && args[0] == "--version")
                 {
                     sdkChecks++;
-                    return new NativeRimtestPublishResult(0, "8.0.424");
+                    return new NativeRimtestPublishResult(0, "10.0.403");
                 }
                 string[] words = args.ToArray();
                 Assert(words.SequenceEqual(
@@ -416,16 +416,36 @@ internal static class CliDeploymentTests
 
             Task<NativeRimtestPublishResult> WrongSdk(
                 string exe, string cwd, IReadOnlyList<string> args, CancellationToken token) =>
-                Task.FromResult(new NativeRimtestPublishResult(0, "8.0.427"));
+                Task.FromResult(new NativeRimtestPublishResult(0, "8.0.424"));
             var sdkMismatch = Invoke(valid, sdkHost, scratch, packages,
                 new FixtureNativeGitState(source, commit), WrongSdk);
             Assert(sdkMismatch.Code == "RIMTEST_PUBLISH_SDK_PIN_MISMATCH",
-                "publisher must reject a wrong SDK version before any build");
+                "publisher must reject the former .NET 8 SDK before any build");
+
+            // Catch a future source global.json migration without a matching
+            // publisher migration: the checked-in SDK pin is authoritative.
+            string pinPath = Path.Combine(source, "global.json");
+            string pinnedManifest = File.ReadAllText(pinPath);
+            int publisherInvocationsBeforeStalePin = sdkChecks + fixedPublishes;
+            try
+            {
+                File.WriteAllText(pinPath, pinnedManifest.Replace(
+                    "\"10.0.403\"", "\"8.0.424\"", StringComparison.Ordinal));
+                var staleSourcePin = Invoke(valid, sdkHost, scratch, packages,
+                    new FixtureNativeGitState(source, commit), FakePublisher);
+                Assert(staleSourcePin.Code == "RIMTEST_PUBLISH_SDK_PIN_MISMATCH" &&
+                       sdkChecks + fixedPublishes == publisherInvocationsBeforeStalePin,
+                    "a stale global SDK pin must block before any compiler process");
+            }
+            finally
+            {
+                File.WriteAllText(pinPath, pinnedManifest);
+            }
 
             Task<NativeRimtestPublishResult> BrokenBuild(
                 string exe, string cwd, IReadOnlyList<string> args, CancellationToken token) =>
                 Task.FromResult(args.Count == 1
-                    ? new NativeRimtestPublishResult(0, "8.0.424")
+                    ? new NativeRimtestPublishResult(0, "10.0.403")
                     : new NativeRimtestPublishResult(1, "compiler failed"));
             var failed = Invoke(valid, sdkHost, scratch, packages,
                 new FixtureNativeGitState(source, commit), BrokenBuild);
@@ -436,7 +456,7 @@ internal static class CliDeploymentTests
             Task<NativeRimtestPublishResult> EmptyOutput(
                 string exe, string cwd, IReadOnlyList<string> args, CancellationToken token) =>
                 Task.FromResult(new NativeRimtestPublishResult(
-                    0, args.Count == 1 ? "8.0.424" : "not actually published"));
+                    0, args.Count == 1 ? "10.0.403" : "not actually published"));
             var incomplete = Invoke(valid, sdkHost, scratch, packages,
                 new FixtureNativeGitState(source, commit), EmptyOutput);
             Assert(incomplete.Code == "RIMTEST_PACKAGE_PUBLISH_INCOMPLETE" &&
