@@ -26,6 +26,8 @@ internal static class ObservabilityHydrationTests
                 loadPersistedRecords: false);
             Assert(store.InitialHydrationPending, "deferred stores must advertise pending hydration");
             AssertEqual(0, store.GetEvents(limit: 10).Count);
+            store.Refresh();
+            AssertEqual(0, store.GetEvents(limit: 10).Count);
 
             AgentObservabilityHydrationResult result = store.HydrateRecentAsync(
                     maximumEvents: 25,
@@ -37,6 +39,40 @@ internal static class ObservabilityHydrationTests
             Assert(result.Completed);
             AssertEqual(25, store.GetEvents(limit: 100).Count);
             AssertEqual("evt-10000", store.GetEvents(limit: 1).Single().Id);
+
+            // A watcher/manual refresh must honor the same recent bounds.
+            // In the original regression it silently loaded all 10,000 events.
+            store.Refresh();
+            AssertEqual(25, store.GetEvents(limit: 100).Count);
+
+            int delivered = 0;
+            using IDisposable subscription = store.Subscribe(notification =>
+            {
+                if (notification.Kind == AgentObservabilityNotificationKind.EventAppended &&
+                    notification.Event?.Id == "evt-10001")
+                {
+                    Interlocked.Increment(ref delivered);
+                }
+            });
+            File.AppendAllText(
+                Path.Combine(directory, "events.jsonl"),
+                Persisted("event", Event(agent, 10001)) + Environment.NewLine);
+            store.Refresh();
+            AssertEqual(25, store.GetEvents(limit: 100).Count);
+            AssertEqual("evt-10001", store.GetEvents(limit: 1).Single().Id);
+            AssertEqual(1, Volatile.Read(ref delivered));
+
+            store.HydrateRecentAsync(maximumEvents: 25, maximumIssues: 10, maximumAgents: 5)
+                .GetAwaiter()
+                .GetResult();
+            AssertEqual(25, store.GetEvents(limit: 100).Count);
+
+            // Full history remains accessible only after explicit expansion.
+            AgentObservabilityHydrationResult history = store.HydrateHistoryAsync()
+                .GetAwaiter()
+                .GetResult();
+            Assert(history.Completed);
+            AssertEqual(100, store.GetEvents(limit: 100).Count);
         }
         finally
         {

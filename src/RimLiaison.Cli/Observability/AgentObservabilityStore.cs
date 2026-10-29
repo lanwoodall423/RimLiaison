@@ -115,6 +115,8 @@ public sealed class AgentObservabilityStore :
 
     private readonly object gate = new();
     private int initialHydrationPending;
+    // Protected by refreshGate: a live watcher must not expand a deferred recent snapshot.
+    private (int Events, int Issues, int Agents)? recentHydrationLimits;
     private readonly bool useWatcherForLiveRefresh;
     private readonly object refreshGate = new();
     private readonly AgentObservabilityOptions options;
@@ -1903,8 +1905,9 @@ public sealed class AgentObservabilityStore :
     /// </summary>
     public void Refresh()
     {
-        if (storageDirectory is null)
+        if (storageDirectory is null || InitialHydrationPending)
         {
+            // Only explicit hydration may establish the first deferred snapshot.
             return;
         }
 
@@ -1920,7 +1923,7 @@ public sealed class AgentObservabilityStore :
                 Dictionary<AgentObservabilityAgentIdentity, AgentSnapshot> previousAgents =
                     new(agents);
 
-                if (!ReloadPersistedRecordsLocked())
+                if (!ReloadPersistedRecordsLocked(recentHydrationLimits))
                 {
                     return;
                 }
@@ -2066,22 +2069,22 @@ public sealed class AgentObservabilityStore :
                 Dictionary<AgentObservabilityAgentIdentity, AgentSnapshot> previousAgents =
                     new(agents);
 
-                if (!recentOnly)
+                // Both recent and complete hydration replace successfully read
+                // snapshots. Repeated recent loads must not accumulate more
+                // than their requested bounds, including after live updates.
+                if (CanReplaceHydratedState(persistedEvents))
                 {
-                    if (CanReplaceHydratedState(persistedEvents))
-                    {
-                        events.Clear();
-                    }
+                    events.Clear();
+                }
 
-                    if (CanReplaceHydratedState(persistedIssues))
-                    {
-                        issues.Clear();
-                    }
+                if (CanReplaceHydratedState(persistedIssues))
+                {
+                    issues.Clear();
+                }
 
-                    if (CanReplaceHydratedState(persistedAgents))
-                    {
-                        agents.Clear();
-                    }
+                if (CanReplaceHydratedState(persistedAgents))
+                {
+                    agents.Clear();
                 }
 
                 LoadAgents(persistedAgents.Records);
@@ -2122,6 +2125,11 @@ public sealed class AgentObservabilityStore :
                     historyComplete = false;
                 }
             }
+            // Set the refresh policy before releasing refreshGate, so a queued
+            // watcher event cannot replace this bounded snapshot with full history.
+            recentHydrationLimits = recentOnly
+                ? (maximumEvents, maximumIssues, maximumAgents)
+                : null;
             string? message = degraded
                 ? "Some historical observability records were skipped or unavailable."
                 : null;
@@ -2309,17 +2317,18 @@ public sealed class AgentObservabilityStore :
         Rewrite(path, kind, values, enforceMaximumBytes: false);
     }
 
-    private bool ReloadPersistedRecordsLocked()
+    private bool ReloadPersistedRecordsLocked(
+        (int Events, int Issues, int Agents)? recentLimits = null)
     {
-        IReadOnlyList<JsonElement>? persistedEvents = ReadRecords(
-            eventsPath,
-            EventRecordKind);
-        IReadOnlyList<JsonElement>? persistedIssues = ReadRecords(
-            issuesPath,
-            IssueRecordKind);
-        IReadOnlyList<JsonElement>? persistedAgents = ReadRecords(
-            agentsPath,
-            AgentRecordKind);
+        IReadOnlyList<JsonElement>? persistedEvents = recentLimits is { } bounds
+            ? ReadBoundedRefreshRecords(eventsPath, EventRecordKind, bounds.Events)
+            : ReadRecords(eventsPath, EventRecordKind);
+        IReadOnlyList<JsonElement>? persistedIssues = recentLimits is { } issueBounds
+            ? ReadBoundedRefreshRecords(issuesPath, IssueRecordKind, issueBounds.Issues)
+            : ReadRecords(issuesPath, IssueRecordKind);
+        IReadOnlyList<JsonElement>? persistedAgents = recentLimits is { } agentBounds
+            ? ReadBoundedRefreshRecords(agentsPath, AgentRecordKind, agentBounds.Agents)
+            : ReadRecords(agentsPath, AgentRecordKind);
         IReadOnlyList<JsonElement>? persistedCampaigns = ReadRecords(
             reliabilityCampaignsPath,
             ReliabilityCampaignRecordKind);
@@ -2350,6 +2359,21 @@ public sealed class AgentObservabilityStore :
         TrimAgents();
         return true;
     }
+
+    private IReadOnlyList<JsonElement>? ReadBoundedRefreshRecords(
+        string? path,
+        string expectedKind,
+        int maximumRecords)
+    {
+        PersistedReadResult result = ReadPersistedRecords(
+            path,
+            expectedKind,
+            maximumRecords,
+            CancellationToken.None);
+        historyDegraded |= result.Degraded;
+        return result.Available ? result.Records : null;
+    }
+
     private PersistedReadResult ReadPersistedRecords(
         string? path,
         string expectedKind,
