@@ -1769,25 +1769,36 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
                 after.State.HeadSha != sourceCommit)
                 throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_MOVED");
 
-            Directory.CreateDirectory(artifactRoot);
+            // Keep the as-yet unpublished ZIP under the ignored obj/ scratch
+            // tree. Creating artifacts/ before the final Git recheck would
+            // make our own untracked output look like a source mutation.
+            string stagedArchive = Path.Combine(scratch, "rimtest-native-candidate.zip");
             System.IO.Compression.ZipFile.CreateFromDirectory(
-                package, archive, System.IO.Compression.CompressionLevel.Optimal,
+                package, stagedArchive, System.IO.Compression.CompressionLevel.Optimal,
                 includeBaseDirectory: false);
-            long archiveBytes = new FileInfo(archive).Length;
+            long archiveBytes = new FileInfo(stagedArchive).Length;
             if (archiveBytes <= 0 || archiveBytes > MaximumArchiveBytes)
                 throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_OVERSIZE");
 
-            string archiveSha256 = ToolchainFileHash.Sha256(archive);
+            string archiveSha256 = ToolchainFileHash.Sha256(stagedArchive);
             int archiveSmokeProbeCount = await NativeRimtestArchiveSmoke.VerifyAsync(
-                archive, archiveSha256, sourceCommit, manifest.PackageSha256,
+                stagedArchive, archiveSha256, sourceCommit, manifest.PackageSha256,
                 Path.Combine(scratch, "archive-smoke"), cancellationToken)
                 .ConfigureAwait(false);
 
-            RimLiaison.Git.GitRepositoryStateResult postSmoke =
-                await git.ReadWorktreeAsync(root, cancellationToken).ConfigureAwait(false);
-            if (!postSmoke.Resolved || postSmoke.State is null ||
-                postSmoke.State.Dirty || postSmoke.State.HeadSha != sourceCommit)
-                throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_MOVED");
+            // Publication requires proof that the real repository remained
+            // clean after running the ZIP's fail-closed native probes. Only
+            // then is the exact verified ZIP moved to ProjectNexus's fixed
+            // declared output path.
+            await NativeRimtestArchivePublication.PublishAfterSourceCheckAsync(
+                stagedArchive, archive, archiveBytes, archiveSha256,
+                async token =>
+                {
+                    RimLiaison.Git.GitRepositoryStateResult postSmoke =
+                        await git.ReadWorktreeAsync(root, token).ConfigureAwait(false);
+                    return postSmoke.Resolved && postSmoke.State is not null &&
+                        !postSmoke.State.Dirty && postSmoke.State.HeadSha == sourceCommit;
+                }, cancellationToken).ConfigureAwait(false);
 
             File.WriteAllText(receipt, JsonSerializer.Serialize(new
             {
@@ -1871,6 +1882,52 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
     }
 }
 
+
+// Publishes a verified native ZIP only after a fresh source cleanliness
+// check. Both the staged ZIP and every smoke-test scratch file remain under
+// the ignored obj/ tree until the check completes.
+internal static class NativeRimtestArchivePublication
+{
+    internal static async Task PublishAfterSourceCheckAsync(
+        string stagedArchive,
+        string outputArchive,
+        long expectedBytes,
+        string expectedSha256,
+        Func<CancellationToken, Task<bool>> sourceClean,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        static bool Matches(string path, long bytes, string sha256) =>
+            File.Exists(path) && new FileInfo(path).Length == bytes &&
+            string.Equals(ToolchainFileHash.Sha256(path), sha256,
+                StringComparison.Ordinal);
+
+        if (expectedBytes <= 0 || expectedSha256.Length != 64 ||
+            Path.Exists(outputArchive) ||
+            !Matches(stagedArchive, expectedBytes, expectedSha256))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_MISMATCH");
+
+        if (!await sourceClean(cancellationToken).ConfigureAwait(false))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_MOVED");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Path.Exists(outputArchive) ||
+            !Matches(stagedArchive, expectedBytes, expectedSha256))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_MISMATCH");
+
+        string destination = Path.GetFullPath(outputArchive);
+        string parent = Path.GetDirectoryName(destination)
+            ?? throw new InvalidDataException("RIMTEST_ARTIFACT_OUTPUT_INVALID");
+        if (Directory.Exists(parent) &&
+            (new DirectoryInfo(parent).Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("RIMTEST_ARTIFACT_OUTPUT_REPARSE");
+
+        Directory.CreateDirectory(parent);
+        File.Move(stagedArchive, destination); // No overwrite of an existing output.
+        if (!Matches(destination, expectedBytes, expectedSha256))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_MISMATCH");
+    }
+}
 
 // This source-build-only verifier proves the actual ZIP just emitted by
 // the fixed native artifact operation. It never runs an allowed dev-check,

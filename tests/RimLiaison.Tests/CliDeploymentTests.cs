@@ -1047,6 +1047,100 @@ internal static class CliDeploymentTests
         }
     }
 
+    public static void NativeArchivePublicationWaitsForCleanSourceAndPreservesBytes()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimtest-archive-publication-" +
+                Guid.NewGuid().ToString("N"));
+        string input = Path.Combine(root, "fixture");
+        string scratch = Path.Combine(root, "obj");
+        string staged = Path.Combine(scratch, "rimtest-native-candidate.zip");
+        string output = Path.Combine(root, "artifacts", "rimtest-native-candidate.zip");
+        try
+        {
+            Directory.CreateDirectory(input);
+            Directory.CreateDirectory(scratch);
+            File.WriteAllText(Path.Combine(input, "fixture.txt"), "immutable source fixture");
+            System.IO.Compression.ZipFile.CreateFromDirectory(
+                input, staged, System.IO.Compression.CompressionLevel.Optimal,
+                includeBaseDirectory: false);
+            long expectedBytes = new FileInfo(staged).Length;
+            string expectedSha256 = ToolchainFileHash.Sha256(staged);
+            int sourceChecks = 0;
+
+            NativeRimtestArchivePublication.PublishAfterSourceCheckAsync(
+                    staged, output, expectedBytes, expectedSha256,
+                    _ =>
+                    {
+                        sourceChecks++;
+                        Assert(File.Exists(staged) && !Path.Exists(output) &&
+                               !Directory.Exists(Path.GetDirectoryName(output)),
+                            "Git source cleanliness must be checked before any artifact output is published");
+                        return Task.FromResult(true);
+                    }, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(sourceChecks == 1 && !File.Exists(staged) &&
+                   File.Exists(output) &&
+                   new FileInfo(output).Length == expectedBytes &&
+                   ToolchainFileHash.Sha256(output) == expectedSha256,
+                "archive publication must move the exact verified ZIP only after source admission");
+
+            string blockedStage = Path.Combine(scratch, "unverified.zip");
+            string blockedOutput = Path.Combine(root, "artifacts", "blocked.zip");
+            File.Copy(output, blockedStage);
+            int rejectedChecks = 0;
+            AssertThrows<InvalidDataException>(() =>
+                NativeRimtestArchivePublication.PublishAfterSourceCheckAsync(
+                    blockedStage, blockedOutput, expectedBytes, expectedSha256,
+                    _ =>
+                    {
+                        rejectedChecks++;
+                        Assert(!File.Exists(blockedOutput),
+                            "failed source admission must precede archive publication");
+                        return Task.FromResult(false);
+                    }, CancellationToken.None).GetAwaiter().GetResult(),
+                "dirty source must fail before emitting any archive");
+            Assert(rejectedChecks == 1 && File.Exists(blockedStage) &&
+                   !Path.Exists(blockedOutput) &&
+                   ToolchainFileHash.Sha256(blockedStage) == expectedSha256,
+                "rejected source admission must preserve staged bytes without output");
+
+            string corruptOutput = Path.Combine(root, "artifacts", "corrupt.zip");
+            int corruptChecks = 0;
+            AssertThrows<InvalidDataException>(() =>
+                NativeRimtestArchivePublication.PublishAfterSourceCheckAsync(
+                    blockedStage, corruptOutput, expectedBytes, new string('0', 64),
+                    _ =>
+                    {
+                        corruptChecks++;
+                        return Task.FromResult(true);
+                    }, CancellationToken.None).GetAwaiter().GetResult(),
+                "incorrect staged ZIP hash must be rejected before checking source or publishing");
+            Assert(corruptChecks == 0 && !Path.Exists(corruptOutput),
+                "unverified archive must never publish");
+
+            string mutatedOutput = Path.Combine(root, "artifacts", "mutated.zip");
+            AssertThrows<InvalidDataException>(() =>
+                NativeRimtestArchivePublication.PublishAfterSourceCheckAsync(
+                    blockedStage, mutatedOutput, expectedBytes, expectedSha256,
+                    _ =>
+                    {
+                        File.AppendAllText(blockedStage, "unexpected mutation");
+                        return Task.FromResult(true);
+                    }, CancellationToken.None).GetAwaiter().GetResult(),
+                "ZIP changed during source check must fail before publication");
+            Assert(!Path.Exists(mutatedOutput) &&
+                   File.Exists(output) &&
+                   ToolchainFileHash.Sha256(output) == expectedSha256,
+                "rejected mutation must not alter the previously verified output");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void NativeEmittedZipSmokeVerifiesExactArchiveWithoutRunningGame()
     {
         if (!OperatingSystem.IsWindows())
