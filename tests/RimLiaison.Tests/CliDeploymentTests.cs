@@ -1047,6 +1047,81 @@ internal static class CliDeploymentTests
         }
     }
 
+    public static void NativeEmittedZipSmokeVerifiesExactArchiveWithoutRunningGame()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string builtCli = Path.Combine(
+            FindSourceRoot(), "src", "RimLiaison.Cli", "bin", "Release", "net8.0");
+        Assert(File.Exists(Path.Combine(builtCli, "rimliaison.exe")),
+            "archive smoke needs the actual Release native apphost");
+
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimtest-zip-smoke-" + Guid.NewGuid().ToString("N"));
+        string source = Path.Combine(root, "source");
+        string packages = Path.Combine(root, "packages");
+        string sourceCommit = new('a', 40);
+        try
+        {
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(packages);
+            NativeRimtestPackageCandidate candidate =
+                NativeRimtestPackageService.StageForTestsAsync(
+                    source, builtCli, sourceCommit, packages,
+                    new FixtureNativeGitState(source, sourceCommit))
+                .GetAwaiter().GetResult();
+
+            string zip = Path.Combine(root, "emitted-candidate.zip");
+            System.IO.Compression.ZipFile.CreateFromDirectory(
+                candidate.PackageRoot, zip,
+                System.IO.Compression.CompressionLevel.Optimal,
+                includeBaseDirectory: false);
+            string archiveSha256 = ToolchainFileHash.Sha256(zip);
+            string originalTree = SnapshotTree(root);
+
+            int probes = NativeRimtestArchiveSmoke.VerifyAsync(
+                    zip, archiveSha256, sourceCommit, candidate.PackageSha256,
+                    Path.Combine(root, "owned-archive-smoke"), CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(probes == NativeRimtestArchiveSmoke.ExpectedProbeCount &&
+                   NativeRimtestArchiveSmoke.Method ==
+                       "zip-extracted-blocked-apphost/v1" &&
+                   ToolchainFileHash.Sha256(zip) == archiveSha256 &&
+                   NativeRimtestPackageService.Verify(
+                       candidate.PackageRoot, sourceCommit, out _) &&
+                   SnapshotTree(root) == originalTree,
+                "extracted exact ZIP must pass bounded native rejection probes without changing source or package");
+
+            string badScratch = Path.Combine(root, "bad-hash-smoke");
+            AssertThrows<InvalidDataException>(() =>
+                NativeRimtestArchiveSmoke.VerifyAsync(
+                    zip, new string('0', 64), sourceCommit,
+                    candidate.PackageSha256, badScratch, CancellationToken.None)
+                    .GetAwaiter().GetResult(),
+                "wrong archive SHA must fail before any extraction or child launch");
+            Assert(!Directory.Exists(badScratch) &&
+                   SnapshotTree(root) == originalTree,
+                "mismatching archive identity must not leave scratch or mutate input");
+
+            string badSourceScratch = Path.Combine(root, "bad-source-smoke");
+            AssertThrows<InvalidDataException>(() =>
+                NativeRimtestArchiveSmoke.VerifyAsync(
+                    zip, archiveSha256, new string('b', 40),
+                    candidate.PackageSha256, badSourceScratch, CancellationToken.None)
+                    .GetAwaiter().GetResult(),
+                "mismatching source revision must block before any executable is launched");
+            Assert(!Directory.Exists(badSourceScratch) &&
+                   SnapshotTree(root) == originalTree,
+                "rejected source identity must leave all fixture bytes unchanged");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void NativeRimtestRunnerBindsInvocationWorkspaceOnly()
     {
         (string root, string runner, string workspace, string alternate) = CreateNativeRunnerFixture();

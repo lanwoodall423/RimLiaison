@@ -1778,6 +1778,17 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
                 throw new InvalidDataException("RIMTEST_ARTIFACT_ARCHIVE_OVERSIZE");
 
             string archiveSha256 = ToolchainFileHash.Sha256(archive);
+            int archiveSmokeProbeCount = await NativeRimtestArchiveSmoke.VerifyAsync(
+                archive, archiveSha256, sourceCommit, manifest.PackageSha256,
+                Path.Combine(scratch, "archive-smoke"), cancellationToken)
+                .ConfigureAwait(false);
+
+            RimLiaison.Git.GitRepositoryStateResult postSmoke =
+                await git.ReadWorktreeAsync(root, cancellationToken).ConfigureAwait(false);
+            if (!postSmoke.Resolved || postSmoke.State is null ||
+                postSmoke.State.Dirty || postSmoke.State.HeadSha != sourceCommit)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SOURCE_MOVED");
+
             File.WriteAllText(receipt, JsonSerializer.Serialize(new
             {
                 schemaVersion = "rimtest-pn-artifact/v1",
@@ -1789,6 +1800,9 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
                 archive = ArchivePath,
                 archiveSha256,
                 archiveBytes,
+                archiveSmokePassed = true,
+                archiveSmokeMethod = NativeRimtestArchiveSmoke.Method,
+                archiveSmokeProbeCount,
                 packageSha256 = manifest.PackageSha256,
                 runnerExeSha256 = ToolchainFileHash.Sha256(runner),
                 cliAssemblySha256 = ToolchainFileHash.Sha256(assembly),
@@ -1806,6 +1820,9 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
                 status = "source-build-only",
                 sourceCommit,
                 archiveSha256,
+                archiveSmokePassed = true,
+                archiveSmokeMethod = NativeRimtestArchiveSmoke.Method,
+                archiveSmokeProbeCount,
                 installed = false,
                 pathConfigured = false,
                 qualified = false,
@@ -1851,6 +1868,136 @@ internal static class ManagedNativeRimtestArtifactBuildCommand
             pnCheckPassed = false
         }));
         return RimLiaison.CliExitCodes.ConservativeSelection;
+    }
+}
+
+
+// This source-build-only verifier proves the actual ZIP just emitted by
+// the fixed native artifact operation. It never runs an allowed dev-check,
+// installs a runner, changes PATH, or asserts real-game qualification.
+internal static class NativeRimtestArchiveSmoke
+{
+    internal const string Method = "zip-extracted-blocked-apphost/v1";
+    internal const int ExpectedProbeCount = 2;
+    private const long MaximumArchiveBytes = 128L * 1024 * 1024;
+    private const long MaximumExpandedBytes = 512L * 1024 * 1024;
+    private const int MaximumFileCount = 2048;
+
+    internal static async Task<int> VerifyAsync(
+        string archivePath,
+        string expectedArchiveSha256,
+        string expectedSourceCommit,
+        string expectedPackageSha256,
+        string scratchRoot,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_WINDOWS_REQUIRED");
+        string archive = Path.GetFullPath(archivePath);
+        string ownedRoot = Path.GetFullPath(scratchRoot);
+        if (Path.Exists(ownedRoot))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_SCRATCH_EXISTS");
+        if (!File.Exists(archive) ||
+            new FileInfo(archive).Length is <= 0 or > MaximumArchiveBytes ||
+            !string.Equals(ToolchainFileHash.Sha256(archive),
+                expectedArchiveSha256, StringComparison.Ordinal))
+            throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_ARCHIVE_MISMATCH");
+
+        // Bound decompression before materializing anything, including archives
+        // that could have a small compressed size but enormous contents.
+        using (var zip = System.IO.Compression.ZipFile.OpenRead(archive))
+        {
+            long expandedBytes = 0;
+            int count = 0;
+            foreach (System.IO.Compression.ZipArchiveEntry entry in zip.Entries)
+            {
+                if (entry.Name.Length == 0)
+                    continue;
+                if (++count > MaximumFileCount ||
+                    entry.Length > MaximumExpandedBytes - expandedBytes)
+                    throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_ZIP_LIMIT");
+                expandedBytes += entry.Length;
+            }
+            if (count == 0)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_ZIP_EMPTY");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(ownedRoot);
+        try
+        {
+            string extracted = Path.Combine(ownedRoot, "extracted");
+            System.IO.Compression.ZipFile.ExtractToDirectory(archive, extracted);
+            string manifestPath = Path.Combine(
+                extracted, CliDeploymentManifestService.FileName);
+            if (!NativeRimtestPackageService.Verify(
+                    extracted, expectedSourceCommit, out _) ||
+                !CliDeploymentManifestService.Verify(
+                    extracted, manifestPath, null, expectedPackageSha256,
+                    out CliDeploymentManifest? manifest, out _) ||
+                manifest is null || manifest.SourceCommit != expectedSourceCommit)
+                throw new InvalidDataException("RIMTEST_ARTIFACT_SMOKE_CLOSURE_MISMATCH");
+
+            string emptyMod = Path.Combine(ownedRoot, "not-a-mod");
+            Directory.CreateDirectory(emptyMod);
+            string runner = Path.Combine(extracted, "rimtest.exe");
+            var probes = new (string[] Args, string ErrorCode)[]
+            {
+                (["qualification", "promote", "--json"],
+                    "DEV_RUNNER_COMMAND_NOT_ALLOWED"),
+                (["dev-check", "--json"], "DEV_RUNNER_WORKSPACE_INVALID")
+            };
+            foreach ((string[] arguments, string code) in probes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RimLiaison.NativeRimtestRunner.Dispatch? admission =
+                    RimLiaison.NativeRimtestRunner.Prepare(
+                        runner, arguments, emptyMod);
+                if (admission is null || admission.Allowed ||
+                    admission.ErrorCode != code)
+                    throw new InvalidDataException(
+                        "RIMTEST_ARTIFACT_SMOKE_PROBE_ADMITTED");
+
+                PromotionChildProcessResult child =
+                    await ToolchainPromotionService.RunJsonCommandAsync(
+                        runner, arguments, cancellationToken,
+                        workingDirectory: emptyMod,
+                        processTimeout: TimeSpan.FromSeconds(12))
+                        .ConfigureAwait(false);
+                if (child.ExitCode != RimLiaison.CliExitCodes.ConservativeSelection ||
+                    child.TimedOut || child.Cancelled ||
+                    child.StartError is not null ||
+                    !string.IsNullOrWhiteSpace(child.Stderr) ||
+                    child.Stdout.Length is <= 0 or > 4096)
+                    throw new InvalidDataException(
+                        "RIMTEST_ARTIFACT_SMOKE_PROCESS_FAILED");
+                using JsonDocument result = JsonDocument.Parse(child.Stdout);
+                JsonElement output = result.RootElement;
+                if (output.GetProperty("schemaVersion").GetString() !=
+                        "rimtest-dev-runner/v1" ||
+                    output.GetProperty("status").GetString() != "blocked" ||
+                    output.GetProperty("code").GetString() != code)
+                    throw new InvalidDataException(
+                        "RIMTEST_ARTIFACT_SMOKE_IDENTITY_MISMATCH");
+            }
+
+            if (Directory.EnumerateFileSystemEntries(emptyMod).Any() ||
+                !string.Equals(ToolchainFileHash.Sha256(archive),
+                    expectedArchiveSha256, StringComparison.Ordinal) ||
+                !NativeRimtestPackageService.Verify(
+                    extracted, expectedSourceCommit, out _) ||
+                !CliDeploymentManifestService.Verify(
+                    extracted, manifestPath, null, expectedPackageSha256,
+                    out _, out _))
+                throw new InvalidDataException(
+                    "RIMTEST_ARTIFACT_SMOKE_POSTRUN_MISMATCH");
+            return probes.Length;
+        }
+        finally
+        {
+            if (Directory.Exists(ownedRoot))
+                Directory.Delete(ownedRoot, recursive: true);
+        }
     }
 }
 
