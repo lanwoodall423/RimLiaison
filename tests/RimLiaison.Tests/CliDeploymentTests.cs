@@ -924,6 +924,129 @@ internal static class CliDeploymentTests
             "the restricted native runner must never expose candidate packaging or installation");
     }
 
+    public static void NativePackagedWindowsApphostFailsClosedWithoutLaunchingGame()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string builtCli = Path.Combine(
+            FindSourceRoot(), "src", "RimLiaison.Cli", "bin", "Release", "net8.0");
+        string builtApphost = Path.Combine(builtCli, "rimliaison.exe");
+        Assert(File.Exists(builtApphost) &&
+               File.Exists(Path.Combine(builtCli, "rimliaison.dll")) &&
+               File.Exists(Path.Combine(builtCli, "rimliaison.deps.json")) &&
+               File.Exists(Path.Combine(builtCli, "rimliaison.runtimeconfig.json")),
+            "native smoke requires the actual built Release CLI, never a fake apphost");
+
+        string root = Path.Combine(
+            Path.GetTempPath(), "rimtest-native-exe-smoke-" + Guid.NewGuid().ToString("N"));
+        string source = Path.Combine(root, "fixture-source");
+        string candidateParent = Path.Combine(root, "candidate-packages");
+        string invalidMod = Path.Combine(root, "not-a-mod");
+        string validMod = Path.Combine(root, "fixture-mod");
+        string sourceCommit = new('a', 40);
+        try
+        {
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(candidateParent);
+            Directory.CreateDirectory(invalidMod);
+            Directory.CreateDirectory(Path.Combine(validMod, "About"));
+            File.WriteAllText(Path.Combine(validMod, "About", "About.xml"),
+                "<ModMetaData><name>Native smoke fixture</name><packageId>fixture.native</packageId></ModMetaData>");
+
+            NativeRimtestPackageCandidate candidate =
+                NativeRimtestPackageService.StageForTestsAsync(
+                    source, builtCli, sourceCommit, candidateParent,
+                    new FixtureNativeGitState(source, sourceCommit))
+                .GetAwaiter().GetResult();
+            string runner = Path.Combine(candidate.PackageRoot, "rimtest.exe");
+            string assembly = Path.Combine(candidate.PackageRoot, "rimliaison.dll");
+            string sidecar = Path.Combine(candidate.PackageRoot, "rimtest-dev-runner.json");
+            Assert(NativeRimtestPackageService.Verify(
+                       candidate.PackageRoot, sourceCommit, out _) &&
+                   File.Exists(runner) &&
+                   !File.Exists(Path.Combine(candidate.PackageRoot, "rimliaison.exe")) &&
+                   ToolchainFileHash.Sha256(runner) ==
+                       ToolchainFileHash.Sha256(builtApphost),
+                "native smoke must use the actual compiled Windows apphost in a verified, restricted package");
+
+            // Prove positive package/source binding only in-process. Never run
+            // a valid dev-check child: doing so could launch RimWorld.
+            NativeRimtestRunner.Dispatch? valid = NativeRimtestRunner.Prepare(
+                runner, ["dev-check", "--json"], validMod);
+            Assert(valid is { Allowed: true } &&
+                   valid.SourceCommit == sourceCommit &&
+                   valid.RunnerExeSha256 == ToolchainFileHash.Sha256(runner) &&
+                   valid.CliAssemblySha256 == ToolchainFileHash.Sha256(assembly) &&
+                   valid.Args.SequenceEqual(["dev-check", validMod, "--json"]),
+                "the real native package must bind exact hashes and workspace without executing a game check");
+
+            string originalTree = SnapshotTree(root);
+
+            static void AssertBlockedNative(
+                string executable, string cwd, string[] arguments, string errorCode)
+            {
+                // The in-process safety precondition prevents a future gate
+                // regression from turning a smoke probe into a live game run.
+                NativeRimtestRunner.Dispatch? admission = NativeRimtestRunner.Prepare(
+                    executable, arguments, cwd);
+                Assert(admission is { Allowed: false } &&
+                       admission.ErrorCode == errorCode,
+                    "unsafe native smoke arguments unexpectedly passed the in-process admission gate");
+                PromotionChildProcessResult child = ToolchainPromotionService
+                    .RunJsonCommandAsync(executable, arguments, CancellationToken.None,
+                        workingDirectory: cwd, processTimeout: TimeSpan.FromSeconds(12))
+                    .GetAwaiter().GetResult();
+                Assert(child.ExitCode == CliExitCodes.ConservativeSelection &&
+                       !child.TimedOut && !child.Cancelled &&
+                       child.StartError is null &&
+                       string.IsNullOrWhiteSpace(child.Stderr) &&
+                       child.Stdout.Length is > 0 and < 4096,
+                    "real native apphost must start, terminate promptly and return bounded blocked evidence");
+                using JsonDocument result = JsonDocument.Parse(child.Stdout);
+                Assert(result.RootElement.GetProperty("schemaVersion").GetString() ==
+                           "rimtest-dev-runner/v1" &&
+                       result.RootElement.GetProperty("status").GetString() == "blocked" &&
+                       result.RootElement.GetProperty("code").GetString() == errorCode,
+                    "real native apphost returned an unexpected blocked-command identity");
+            }
+
+            AssertBlockedNative(runner, invalidMod,
+                ["qualification", "promote", "--json"], "DEV_RUNNER_COMMAND_NOT_ALLOWED");
+            AssertBlockedNative(runner, invalidMod,
+                ["dev-check", "--json"], "DEV_RUNNER_WORKSPACE_INVALID");
+
+            // The only probe from a syntactically valid mod workspace has
+            // deliberately corrupted provenance. Admission must reject it
+            // in-process BEFORE the executable is launched.
+            string originalSidecar = File.ReadAllText(sidecar);
+            string corrupted = originalSidecar.Replace(
+                sourceCommit, new string('b', 40), StringComparison.Ordinal);
+            Assert(corrupted != originalSidecar,
+                "fixture source identity must be present in the sidecar");
+            try
+            {
+                File.WriteAllText(sidecar, corrupted);
+                AssertBlockedNative(runner, validMod,
+                    ["dev-check", "--json"], "DEV_RUNNER_PROVENANCE_INVALID");
+            }
+            finally
+            {
+                File.WriteAllText(sidecar, originalSidecar);
+            }
+
+            Assert(NativeRimtestPackageService.Verify(
+                       candidate.PackageRoot, sourceCommit, out _) &&
+                   SnapshotTree(root) == originalTree,
+                "native smoke must restore exact package bytes and leave fixture directories untouched");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void NativeRimtestRunnerBindsInvocationWorkspaceOnly()
     {
         (string root, string runner, string workspace, string alternate) = CreateNativeRunnerFixture();

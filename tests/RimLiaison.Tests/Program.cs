@@ -169,6 +169,7 @@ internal static class Program
         ("native candidate rejects unverified Git and unsafe output", CliDeploymentTests.NativeRunnerCandidateRejectsUnverifiedSource),
         ("native rimtest runner binds exact mod workspace", CliDeploymentTests.NativeRimtestRunnerBindsInvocationWorkspaceOnly),
         ("native rimtest runner rejects corrupted provenance", CliDeploymentTests.NativeRimtestRunnerRejectsMissingOrChangedPackage),
+        ("native packaged Windows apphost refuses unsafe commands without launching game", CliDeploymentTests.NativePackagedWindowsApphostFailsClosedWithoutLaunchingGame),
         ("self-check returns structured ready JSON", CliDeploymentTests.SelfCheckReturnsStructuredReadyJson),
         ("published self-check is read-only and workspace-independent", CliDeploymentTests.PublishedSelfCheckIsReadOnlyAndWorkspaceIndependent),
         ("published self-check works in read-only directory", CliDeploymentTests.PublishedSelfCheckWorksInReadOnlyDirectory),
