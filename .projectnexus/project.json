@@ -163,7 +163,6 @@
             "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
             "--configuration",
             "Release",
-            "--no-restore",
             "--",
             "rimtest-artifact-build",
             "--json"

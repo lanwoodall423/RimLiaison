@@ -124,13 +124,14 @@ internal static class CliDeploymentTests
             .Select(element => element.GetString()!).ToArray();
         Assert(command.GetProperty("executable").GetString() == "dotnet" &&
                command.GetProperty("cwd").GetString() == "." &&
+               !arguments.Contains("--no-restore") &&
                arguments.SequenceEqual(new[]
                {
                    "run", "--project", "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
-                   "--configuration", "Release", "--no-restore", "--",
+                   "--configuration", "Release", "--",
                    ManagedNativeRimtestArtifactBuildCommand.Name, "--json"
                }),
-            "managed artifact operation must have a fixed command and no caller paths");
+            "managed artifact operation must restore clean workspaces with fixed args and no caller paths");
 
         JsonElement[] outputs = operations[0].GetProperty("outputs")
             .EnumerateArray().ToArray();
