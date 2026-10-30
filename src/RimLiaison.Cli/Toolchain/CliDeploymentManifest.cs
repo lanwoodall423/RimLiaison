@@ -1271,6 +1271,298 @@ internal static class NativeRimtestCandidateInstallCommand
     }
 }
 
+// Explicit candidate-only import from a ProjectNexus-owned, hash-verified
+// native artifact operation. This is never a PATH installation, promotion,
+// qualification result, or authority to run RimWorld. No user path input.
+internal static class NativeRimtestManagedArtifactImportCommand
+{
+    internal const string Name = "rimtest-import-managed-artifact";
+    private const string Schema = "rimtest-managed-artifact-import/v1";
+    private const string OperationName = "native.rimtest-artifact-build";
+    private const string ZipName = "artifacts/rimtest-native-candidate.zip";
+    private const string ReceiptName = "artifacts/rimtest-native-build.json";
+    private const long MaxArchiveBytes = 128L * 1024 * 1024;
+    private const long MaxExtractedBytes = 512L * 1024 * 1024;
+    private const int MaxEntries = 2048;
+    private const int MaxDepth = 24;
+
+    internal static bool IsRequested(IReadOnlyList<string> args) =>
+        args.Count > 0 && args[0] == Name;
+
+    internal static bool TryParse(
+        IReadOnlyList<string> args, out string? operationId,
+        out string? commit, out string? archiveHash)
+    {
+        operationId = commit = archiveHash = null;
+        if (args.Count != 5 || args[0] != Name || args[4] != "--json" ||
+            !Guid.TryParseExact(args[1], "D", out Guid parsed) ||
+            parsed.ToString("D") != args[1] || !LowerHex(args[2], 40) ||
+            !LowerHex(args[3], 64))
+            return false;
+        operationId = args[1];
+        commit = args[2];
+        archiveHash = args[3];
+        return true;
+    }
+
+    internal static int Run(string[] args, TextWriter stdout)
+    {
+        if (!OperatingSystem.IsWindows())
+            return Block(stdout, "RIMTEST_IMPORT_WINDOWS_REQUIRED");
+        string local = Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(local))
+            return Block(stdout, "RIMTEST_IMPORT_ACCOUNT_ROOT_UNAVAILABLE");
+        return RunForTests(args, stdout,
+            Path.Combine(local, "ProjectNexus", "mcp-probe", "operations"),
+            Path.Combine(local, "RimLiaison", "Rimtest", "CandidatePackages"));
+    }
+
+    // Injected roots are internal-only deterministic test fixtures.
+    internal static int RunForTests(
+        string[] args, TextWriter stdout, string operationsRoot,
+        string candidatesRoot)
+    {
+        if (!TryParse(args, out string? operationId, out string? commit,
+                out string? archiveHash))
+            return Block(stdout, "RIMTEST_IMPORT_ARGUMENTS_INVALID");
+
+        string? ownedStage = null;
+        try
+        {
+            string operations = Path.GetFullPath(operationsRoot);
+            string candidates = Path.GetFullPath(candidatesRoot);
+            string operationFile = Path.Combine(operations, operationId! + ".json");
+            string captured = Path.Combine(operations, operationId + ".outputs",
+                "outputs", "artifacts");
+            string archive = Path.Combine(captured, "rimtest-native-candidate.zip");
+            string receiptFile = Path.Combine(captured, "rimtest-native-build.json");
+
+            RequirePlainFile(operationFile, 65536);
+            RequirePlainFile(archive, MaxArchiveBytes);
+            RequirePlainFile(receiptFile, 16384);
+            string archiveActualHash = ToolchainFileHash.Sha256(archive);
+            if (archiveActualHash != archiveHash)
+                throw new InvalidDataException("RIMTEST_IMPORT_ARCHIVE_HASH_MISMATCH");
+
+            using JsonDocument operation = JsonDocument.Parse(
+                File.ReadAllText(operationFile));
+            JsonElement meta = operation.RootElement;
+            if (Int(meta, "schemaVersion") != 2 ||
+                Text(meta, "operationId") != operationId ||
+                Text(meta, "projectId") != "rimliaison" ||
+                Text(meta, "kind") != "managed-local-operation" ||
+                Text(meta, "capabilityId") != "local_operation.run" ||
+                Text(meta, "localOperationId") != OperationName ||
+                Text(meta, "localOperationSideEffectClass") != "artifact-generation" ||
+                Text(meta, "status") != "passed" || Int(meta, "exitCode") != 0 ||
+                !meta.GetProperty("sourceUnchanged").GetBoolean() ||
+                Text(meta, "sourceHead") != commit ||
+                !Text(meta, "localOperationDefinitionId").StartsWith(
+                    "sha256:", StringComparison.Ordinal) ||
+                !LowerHex(Text(meta, "localOperationDefinitionId")[7..], 64))
+                throw new InvalidDataException("RIMTEST_IMPORT_OPERATION_UNVERIFIED");
+
+            JsonElement outputs = meta.GetProperty("outputEvidence");
+            if (outputs.ValueKind != JsonValueKind.Array ||
+                outputs.GetArrayLength() != 2)
+                throw new InvalidDataException("RIMTEST_IMPORT_OUTPUTS_UNVERIFIED");
+            VerifyOutput(outputs[0], ZipName,
+                "outputs/artifacts/rimtest-native-candidate.zip",
+                new FileInfo(archive).Length, archiveActualHash);
+            VerifyOutput(outputs[1], ReceiptName,
+                "outputs/artifacts/rimtest-native-build.json",
+                new FileInfo(receiptFile).Length,
+                ToolchainFileHash.Sha256(receiptFile));
+
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(receiptFile));
+            JsonElement receipt = document.RootElement;
+            if (Text(receipt, "schemaVersion") != "rimtest-pn-artifact/v1" ||
+                Text(receipt, "status") != "source-build-only" ||
+                Text(receipt, "sourceCommit") != commit ||
+                Text(receipt, "archive") != ZipName ||
+                Text(receipt, "archiveSha256") != archiveHash ||
+                receipt.GetProperty("archiveBytes").GetInt64() !=
+                    new FileInfo(archive).Length ||
+                !receipt.GetProperty("archiveSmokePassed").GetBoolean() ||
+                Text(receipt, "archiveSmokeMethod") !=
+                    NativeRimtestArchiveSmoke.Method ||
+                Int(receipt, "archiveSmokeProbeCount") !=
+                    NativeRimtestArchiveSmoke.ExpectedProbeCount ||
+                Text(receipt, "runtimeIdentifier") != "win-x64" ||
+                Text(receipt, "targetFramework") != "net8.0" ||
+                Text(receipt, "sdkVersion") !=
+                    NativeRimtestSourcePublishCommand.PinnedSdk ||
+                !LowerHex(Text(receipt, "packageSha256"), 64) ||
+                !LowerHex(Text(receipt, "manifestSha256"), 64) ||
+                !LowerHex(Text(receipt, "runnerExeSha256"), 64) ||
+                !LowerHex(Text(receipt, "cliAssemblySha256"), 64) ||
+                receipt.GetProperty("installed").GetBoolean() ||
+                receipt.GetProperty("qualified").GetBoolean() ||
+                receipt.GetProperty("pathConfigured").GetBoolean() ||
+                receipt.GetProperty("pnCheckPassed").GetBoolean())
+                throw new InvalidDataException("RIMTEST_IMPORT_RECEIPT_UNVERIFIED");
+
+            // Reject dangerous archive forms before creating account-local
+            // staging. Extraction is bounded and is never run in the game.
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(archive))
+            {
+                long expanded = 0;
+                int files = 0;
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (System.IO.Compression.ZipArchiveEntry entry in zip.Entries)
+                {
+                    string path = entry.FullName;
+                    bool directory = path.EndsWith('/');
+                    string[] parts = path.TrimEnd('/').Split('/');
+                    if (parts.Length == 0 || parts.Length > MaxDepth ||
+                        parts.Any(part => part.Length is 0 or > 160 ||
+                            part == "." || part == ".." || part.EndsWith('.') ||
+                            part.EndsWith(' ') || part.Contains(':') ||
+                            part.Contains('\\') || part.Any(char.IsControl)) ||
+                        path.StartsWith('/') ||
+                        (entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0 ||
+                        ((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000 ||
+                        !names.Add(path.TrimEnd('/')))
+                        throw new InvalidDataException("RIMTEST_IMPORT_ZIP_UNSAFE");
+                    if (directory)
+                        continue;
+                    if (++files > MaxEntries || entry.Length > MaxExtractedBytes - expanded)
+                        throw new InvalidDataException("RIMTEST_IMPORT_ZIP_LIMIT");
+                    expanded += entry.Length;
+                }
+                if (files == 0)
+                    throw new InvalidDataException("RIMTEST_IMPORT_ZIP_EMPTY");
+            }
+
+            string final = Path.Combine(candidates, "rimtest-" + commit);
+            if (Path.Exists(final))
+                throw new InvalidDataException("RIMTEST_IMPORT_VERSION_ALREADY_EXISTS");
+            RequirePlainParents(candidates);
+            Directory.CreateDirectory(candidates);
+            RequirePlainParents(candidates);
+            ownedStage = Path.Combine(candidates, ".rimtest-import-" +
+                Guid.NewGuid().ToString("N"));
+            if (Path.Exists(ownedStage))
+                throw new InvalidDataException("RIMTEST_IMPORT_STAGE_COLLISION");
+            Directory.CreateDirectory(ownedStage);
+            System.IO.Compression.ZipFile.ExtractToDirectory(archive, ownedStage);
+
+            if (!NativeRimtestPackageService.Verify(ownedStage, commit, out _) ||
+                !CliDeploymentManifestService.Verify(ownedStage,
+                    Path.Combine(ownedStage, CliDeploymentManifestService.FileName),
+                    Text(receipt, "manifestSha256"),
+                    Text(receipt, "packageSha256"), out _, out _) ||
+                ToolchainFileHash.Sha256(Path.Combine(ownedStage, "rimtest.exe")) !=
+                    Text(receipt, "runnerExeSha256") ||
+                ToolchainFileHash.Sha256(Path.Combine(ownedStage, "rimliaison.dll")) !=
+                    Text(receipt, "cliAssemblySha256"))
+                throw new InvalidDataException("RIMTEST_IMPORT_PACKAGE_UNVERIFIED");
+
+            // Reverify both immutable input files immediately before creating
+            // the versioned candidate; no existing version may be replaced.
+            if (ToolchainFileHash.Sha256(archive) != archiveHash ||
+                ToolchainFileHash.Sha256(receiptFile) !=
+                    Text(outputs[1], "sha256") || Path.Exists(final))
+                throw new InvalidDataException("RIMTEST_IMPORT_EVIDENCE_CHANGED");
+            Directory.Move(ownedStage, final);
+            ownedStage = null;
+
+            if (!NativeRimtestPackageService.Verify(final, commit, out _))
+                throw new InvalidDataException("RIMTEST_IMPORT_POSTMOVE_INVALID");
+            stdout.WriteLine(JsonSerializer.Serialize(new
+            {
+                schemaVersion = Schema,
+                status = "candidate-imported",
+                sourceCommit = commit,
+                operationId,
+                archiveSha256 = archiveHash,
+                candidateRoot = final,
+                packageSha256 = Text(receipt, "packageSha256"),
+                installed = false,
+                pathConfigured = false,
+                qualified = false,
+                pnCheckPassed = false,
+                independentlyAttestedBuild = false
+            }));
+            return RimLiaison.CliExitCodes.Success;
+        }
+        catch (Exception ex) when (ex is IOException or
+            UnauthorizedAccessException or InvalidDataException or
+            ArgumentException or NotSupportedException or JsonException or
+            KeyNotFoundException or InvalidOperationException or
+            System.Security.SecurityException)
+        {
+            string code = ex.Message.Split(':')[0];
+            if (!code.StartsWith("RIMTEST_IMPORT_", StringComparison.Ordinal))
+                code = "RIMTEST_IMPORT_EVIDENCE_INVALID";
+            return Block(stdout, code);
+        }
+        finally
+        {
+            if (ownedStage is not null && Directory.Exists(ownedStage))
+                Directory.Delete(ownedStage, recursive: true);
+        }
+    }
+
+    private static void VerifyOutput(JsonElement output, string path,
+        string evidencePath, long actualBytes, string actualSha256)
+    {
+        if (Text(output, "path") != path ||
+            Text(output, "evidencePath") != evidencePath ||
+            output.GetProperty("size").GetInt64() != actualBytes ||
+            Text(output, "sha256") != actualSha256)
+            throw new InvalidDataException("RIMTEST_IMPORT_OUTPUTS_UNVERIFIED");
+    }
+
+    private static string Text(JsonElement root, string property) =>
+        root.GetProperty(property).GetString() ??
+        throw new InvalidDataException("RIMTEST_IMPORT_EVIDENCE_INVALID");
+    private static int Int(JsonElement root, string property) =>
+        root.GetProperty(property).GetInt32();
+    private static bool LowerHex(string? value, int length) =>
+        value is not null && value.Length == length &&
+        value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static void RequirePlainFile(string file, long maxBytes)
+    {
+        RequirePlainParents(Path.GetDirectoryName(file)!);
+        var info = new FileInfo(file);
+        if (!info.Exists || info.Length is <= 0 || info.Length > maxBytes ||
+            (info.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("RIMTEST_IMPORT_CAPTURE_UNAVAILABLE");
+    }
+
+    private static void RequirePlainParents(string directory)
+    {
+        DirectoryInfo? cursor = new(Path.GetFullPath(directory));
+        while (cursor is not null)
+        {
+            if (cursor.Exists &&
+                (cursor.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("RIMTEST_IMPORT_REPARSE_PARENT");
+            cursor = cursor.Parent;
+        }
+    }
+
+    private static int Block(TextWriter output, string code)
+    {
+        output.WriteLine(JsonSerializer.Serialize(new
+        {
+            schemaVersion = Schema,
+            status = "blocked",
+            code,
+            installed = false,
+            pathConfigured = false,
+            qualified = false,
+            pnCheckPassed = false,
+            independentlyAttestedBuild = false
+        }));
+        return RimLiaison.CliExitCodes.ConservativeSelection;
+    }
+}
+
 internal static class NativeRimtestPackageService
 {
     internal const string RunnerSidecarFileName = "rimtest-dev-runner.json";

@@ -1141,6 +1141,223 @@ internal static class CliDeploymentTests
         }
     }
 
+    public static void NativeCapturedArtifactImportVerifiesPnProofAndStagesOnlyCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        (string root, string runner, _, _) = CreateNativeRunnerFixture();
+        string commit = new('a', 40);
+        string operationId = Guid.NewGuid().ToString("D");
+        string operations = Path.Combine(root, "pn-operations");
+        string captured = Path.Combine(operations, operationId + ".outputs",
+            "outputs", "artifacts");
+        string zip = Path.Combine(captured, "rimtest-native-candidate.zip");
+        string receipt = Path.Combine(captured, "rimtest-native-build.json");
+        string record = Path.Combine(operations, operationId + ".json");
+        string candidates = Path.Combine(root, "CandidatePackages");
+        string rejectedCandidates = Path.Combine(root, "RejectedCandidates");
+        string manifest = Path.Combine(Path.GetDirectoryName(runner)!,
+            CliDeploymentManifestService.FileName);
+        using JsonDocument package = JsonDocument.Parse(File.ReadAllText(manifest));
+        string packageSha = package.RootElement.GetProperty("packageSha256").GetString()!;
+        try
+        {
+            Directory.CreateDirectory(captured);
+            System.IO.Compression.ZipFile.CreateFromDirectory(
+                Path.GetDirectoryName(runner)!, zip,
+                System.IO.Compression.CompressionLevel.Optimal, false);
+            string zipHash = ToolchainFileHash.Sha256(zip);
+            string manifestHash = ToolchainFileHash.Sha256(manifest);
+            string runnerHash = ToolchainFileHash.Sha256(runner);
+            string assemblyHash = ToolchainFileHash.Sha256(
+                Path.Combine(Path.GetDirectoryName(runner)!, "rimliaison.dll"));
+
+            void WriteReceipt(bool smoked = true)
+            {
+                File.WriteAllText(receipt, JsonSerializer.Serialize(new
+                {
+                    schemaVersion = "rimtest-pn-artifact/v1",
+                    status = "source-build-only",
+                    sourceCommit = commit,
+                    sdkVersion = NativeRimtestSourcePublishCommand.PinnedSdk,
+                    targetFramework = "net8.0",
+                    runtimeIdentifier = "win-x64",
+                    archive = "artifacts/rimtest-native-candidate.zip",
+                    archiveSha256 = zipHash,
+                    archiveBytes = new FileInfo(zip).Length,
+                    archiveSmokePassed = smoked,
+                    archiveSmokeMethod = NativeRimtestArchiveSmoke.Method,
+                    archiveSmokeProbeCount = NativeRimtestArchiveSmoke.ExpectedProbeCount,
+                    packageSha256 = packageSha,
+                    manifestSha256 = manifestHash,
+                    runnerExeSha256 = runnerHash,
+                    cliAssemblySha256 = assemblyHash,
+                    qualified = false,
+                    installed = false,
+                    pathConfigured = false,
+                    pnCheckPassed = false
+                }));
+            }
+
+            void WriteRecord(string status = "passed", bool sourceUnchanged = true,
+                string? sourceHead = null)
+            {
+                File.WriteAllText(record, JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 2,
+                    operationId,
+                    projectId = "rimliaison",
+                    kind = "managed-local-operation",
+                    capabilityId = "local_operation.run",
+                    localOperationId = "native.rimtest-artifact-build",
+                    localOperationSideEffectClass = "artifact-generation",
+                    localOperationDefinitionId = "sha256:" + new string('b', 64),
+                    status,
+                    exitCode = 0,
+                    sourceUnchanged,
+                    sourceHead = sourceHead ?? commit,
+                    outputEvidence = new[]
+                    {
+                        new
+                        {
+                            path = "artifacts/rimtest-native-candidate.zip",
+                            size = new FileInfo(zip).Length,
+                            sha256 = ToolchainFileHash.Sha256(zip),
+                            evidencePath = "outputs/artifacts/rimtest-native-candidate.zip"
+                        },
+                        new
+                        {
+                            path = "artifacts/rimtest-native-build.json",
+                            size = new FileInfo(receipt).Length,
+                            sha256 = ToolchainFileHash.Sha256(receipt),
+                            evidencePath = "outputs/artifacts/rimtest-native-build.json"
+                        }
+                    }
+                }));
+            }
+
+            (int Exit, string Status, string? Code) Import(
+                string[] args, string outputRoot)
+            {
+                using StringWriter output = new();
+                int exit = NativeRimtestManagedArtifactImportCommand.RunForTests(
+                    args, output, operations, outputRoot);
+                using JsonDocument data = JsonDocument.Parse(output.ToString());
+                JsonElement json = data.RootElement;
+                Assert(!json.GetProperty("installed").GetBoolean() &&
+                       !json.GetProperty("qualified").GetBoolean() &&
+                       !json.GetProperty("pathConfigured").GetBoolean() &&
+                       !json.GetProperty("pnCheckPassed").GetBoolean() &&
+                       !json.GetProperty("independentlyAttestedBuild").GetBoolean(),
+                    "captured artifact import must never claim installation or PN qualification");
+                return (exit, json.GetProperty("status").GetString()!,
+                    json.TryGetProperty("code", out JsonElement code)
+                        ? code.GetString() : null);
+            }
+
+            string[] args =
+            [
+                NativeRimtestManagedArtifactImportCommand.Name,
+                operationId, commit, zipHash, "--json"
+            ];
+            WriteReceipt();
+            WriteRecord();
+            Assert(NativeRimtestManagedArtifactImportCommand.TryParse(
+                args, out string? op, out string? source, out string? archiveSha) &&
+                op == operationId && source == commit && archiveSha == zipHash,
+                "fixed import request must parse only canonical operation and hash identities");
+            foreach (string[] malformed in new[]
+                     {
+                         args[..^1],
+                         new[] { args[0], operationId.ToUpperInvariant(), commit, zipHash, "--json" },
+                         new[] { args[0], operationId, commit.ToUpperInvariant(), zipHash, "--json" },
+                         new[] { args[0], operationId, commit, zipHash, "--install" },
+                         new[] { args[0], operationId, commit, zipHash, "--json", "--force" },
+                         new[] { args[0], "..\\outside", commit, zipHash, "--json" }
+                     })
+            {
+                var denied = Import(malformed, rejectedCandidates);
+                Assert(denied.Exit == CliExitCodes.ConservativeSelection &&
+                       denied.Code == "RIMTEST_IMPORT_ARGUMENTS_INVALID" &&
+                       !Directory.Exists(rejectedCandidates),
+                    "noncanonical import arguments must fail before account mutation");
+            }
+
+            var imported = Import(args, candidates);
+            string final = Path.Combine(candidates, "rimtest-" + commit);
+            Assert(imported.Exit == CliExitCodes.Success &&
+                   imported.Status == "candidate-imported" &&
+                   NativeRimtestPackageService.Verify(final, commit, out _) &&
+                   ToolchainFileHash.Sha256(
+                       Path.Combine(final, CliDeploymentManifestService.FileName)) ==
+                       manifestHash &&
+                   !Directory.Exists(Path.Combine(root, "Installed")) &&
+                   !Directory.EnumerateDirectories(candidates,
+                       ".rimtest-import-*").Any(),
+                "only a fully verified candidate may be imported atomically; no installation");
+            Assert(Import(args, candidates).Code ==
+                       "RIMTEST_IMPORT_VERSION_ALREADY_EXISTS" &&
+                   NativeRimtestPackageService.Verify(final, commit, out _),
+                "import must never overwrite an existing version");
+
+            WriteRecord(status: "failed");
+            Assert(Import(args, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_OPERATION_UNVERIFIED" &&
+                   !Directory.Exists(rejectedCandidates),
+                "failed ProjectNexus operation must not produce an account candidate");
+            WriteRecord(sourceUnchanged: false);
+            Assert(Import(args, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_OPERATION_UNVERIFIED",
+                "source-mutated operation must not be imported");
+            WriteRecord(sourceHead: new string('c', 40));
+            Assert(Import(args, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_OPERATION_UNVERIFIED",
+                "wrong source HEAD must not be imported");
+
+            WriteReceipt(smoked: false);
+            WriteRecord();
+            Assert(Import(args, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_RECEIPT_UNVERIFIED",
+                "archive lacking actual smoke proof must not be imported");
+
+            WriteReceipt();
+            WriteRecord();
+            File.AppendAllText(zip, "tampered capture");
+            Assert(Import(args, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_ARCHIVE_HASH_MISMATCH",
+                "altered operation output ZIP must fail before extraction");
+
+            File.Delete(zip);
+            using (var unsafeZip = System.IO.Compression.ZipFile.Open(
+                zip, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                using var writer = new StreamWriter(
+                    unsafeZip.CreateEntry("../outside.txt").Open());
+                writer.Write("traversal content");
+            }
+            zipHash = ToolchainFileHash.Sha256(zip);
+            WriteReceipt();
+            WriteRecord();
+            string[] unsafeArgs =
+            [
+                NativeRimtestManagedArtifactImportCommand.Name,
+                operationId, commit, zipHash, "--json"
+            ];
+            Assert(Import(unsafeArgs, rejectedCandidates).Code ==
+                       "RIMTEST_IMPORT_ZIP_UNSAFE" &&
+                   !Directory.Exists(rejectedCandidates) &&
+                   !File.Exists(Path.Combine(root, "outside.txt")) &&
+                   NativeRimtestPackageService.Verify(final, commit, out _),
+                "ZIP traversal must be rejected without writes or mutation to a prior candidate");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void NativeEmittedZipSmokeVerifiesExactArchiveWithoutRunningGame()
     {
         if (!OperatingSystem.IsWindows())

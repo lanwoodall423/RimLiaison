@@ -172,6 +172,7 @@ internal static class Program
         ("native packaged Windows apphost refuses unsafe commands without launching game", CliDeploymentTests.NativePackagedWindowsApphostFailsClosedWithoutLaunchingGame),
         ("native emitted ZIP smoke verifies exact archive without launching game", CliDeploymentTests.NativeEmittedZipSmokeVerifiesExactArchiveWithoutRunningGame),
         ("native archive publication waits for clean source and preserves verified bytes", CliDeploymentTests.NativeArchivePublicationWaitsForCleanSourceAndPreservesBytes),
+        ("native captured ProjectNexus artifact imports only verified candidate", CliDeploymentTests.NativeCapturedArtifactImportVerifiesPnProofAndStagesOnlyCandidate),
         ("self-check returns structured ready JSON", CliDeploymentTests.SelfCheckReturnsStructuredReadyJson),
         ("published self-check is read-only and workspace-independent", CliDeploymentTests.PublishedSelfCheckIsReadOnlyAndWorkspaceIndependent),
         ("published self-check works in read-only directory", CliDeploymentTests.PublishedSelfCheckWorksInReadOnlyDirectory),

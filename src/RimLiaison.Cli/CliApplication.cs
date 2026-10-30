@@ -124,6 +124,8 @@ public static class CliApplication
                 args, stdout, cancellationToken).ConfigureAwait(false);
         if (NativeRimtestCandidateInstallCommand.IsRequested(args))
             return NativeRimtestCandidateInstallCommand.Run(args, stdout);
+        if (NativeRimtestManagedArtifactImportCommand.IsRequested(args))
+            return NativeRimtestManagedArtifactImportCommand.Run(args, stdout);
 
         CliRequest? earlyRequest = null;
         try
