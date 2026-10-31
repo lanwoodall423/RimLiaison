@@ -356,6 +356,175 @@ internal static class ValidationPolicyTests
         AssertEqual(2, two.SampleCount);
     }
 
+    public static void MapEventsMatchedAreNeverNativeProof()
+    {
+        MapEventAssessment result = MapEventEvaluator.Evaluate(MapFixture(), MapEvents());
+        AssertEqual(MapEventContract.ReadyForNativeReview, result.Status);
+        AssertEqual("MATCHED_UNTRUSTED_MAP_EVENTS", result.ReasonCode);
+        AssertEqual(17, result.MapUniqueId);
+        AssertEqual(24, result.ObservedCount);
+        AssertEqual("untrusted-log-text", result.Provenance);
+        Assert(!result.NativeQualified, "Source event text cannot qualify RimWorld.");
+        Assert(result.Status != "PASS", "An untrusted event must not be reported as PASS.");
+    }
+
+    public static void MapEventsMissingAndChanceMissStayInconclusive()
+    {
+        MapEventExpectation fixture = MapFixture();
+        AssertEqual(MapEventContract.Inconclusive,
+            MapEventEvaluator.Evaluate(fixture, []).Status);
+        AssertEqual("NO_MAP_EVENTS", MapEventEvaluator.Evaluate(fixture, []).ReasonCode);
+        AssertEqual("MISSING_MATCHED_EVENT",
+            MapEventEvaluator.Evaluate(fixture, [MapEvents()[0]]).ReasonCode);
+        AssertEqual("MISSING_MATCHED_EVENT",
+            MapEventEvaluator.Evaluate(fixture, [MapEvents()[1]]).ReasonCode);
+        string[] chanceMiss = MapEvents();
+        chanceMiss[0] = chanceMiss[0].Replace(
+            "\"outcome\":\"completed\"", "\"outcome\":\"chance_miss\"", StringComparison.Ordinal);
+        chanceMiss[1] = chanceMiss[1].Replace(
+            "\"brambleCount\":24", "\"brambleCount\":0", StringComparison.Ordinal)
+            .Replace("\"featureObserved\":true", "\"featureObserved\":false",
+                StringComparison.Ordinal);
+        MapEventAssessment missingFeature = MapEventEvaluator.Evaluate(fixture, chanceMiss);
+        AssertEqual(MapEventContract.Inconclusive, missingFeature.Status);
+        AssertEqual("NO_FEATURE_OBSERVED", missingFeature.ReasonCode);
+        AssertEqual(0, missingFeature.ObservedCount);
+        Assert(!missingFeature.NativeQualified, "No-feature fixture cannot be native.");
+        string[] otherOutcome = MapEvents();
+        otherOutcome[0] = otherOutcome[0].Replace(
+            "\"outcome\":\"completed\"", "\"outcome\":\"no_eligible_seeds\"",
+            StringComparison.Ordinal);
+        AssertEqual("TERMINAL_OUTCOME_NOT_POSITIVE",
+            MapEventEvaluator.Evaluate(fixture, otherOutcome).ReasonCode);
+    }
+
+    public static void MapEventsForeignMalformedAndDuplicateAreInvalid()
+    {
+        MapEventExpectation expected = MapFixture();
+        string[] valid = MapEvents();
+        void Reject(MapEventExpectation contract, IReadOnlyList<string> lines, string label)
+        {
+            MapEventAssessment assessment = MapEventEvaluator.Evaluate(contract, lines);
+            AssertEqual(MapEventContract.InvalidEvidence, assessment.Status);
+            Assert(!assessment.NativeQualified, label + " was called native evidence.");
+        }
+        void Mutate(int index, string from, string to, string label)
+        {
+            string[] lines = MapEvents();
+            lines[index] = lines[index].Replace(from, to, StringComparison.Ordinal);
+            Assert(lines[index] != valid[index], "Mutation not applied: " + label);
+            Reject(expected, lines, label);
+        }
+
+        Mutate(0, "\"nonce\":\"map-abc12345\"", "\"nonce\":\"other-run-1234\"",
+            "cross-run");
+        Mutate(1, "\"mapUniqueId\":17", "\"mapUniqueId\":18", "cross-map");
+        Mutate(1, "\"mapWidth\":250", "\"mapWidth\":251", "cross-geometry");
+        Mutate(1, "\"biome\":\"TemperateForest\"", "\"biome\":\"BorealForest\"",
+            "foreign biome");
+        Mutate(1, "naturetiles-map-smoke/v1", "naturetiles-map-smoke/v2", "wrong schema");
+        Mutate(0, "\"mapUniqueId\":17", "\"mapUniqueId\":17,\"mapUniqueId\":17",
+            "duplicate JSON property");
+        Mutate(1, "\"placementValid\":true",
+            "\"placementValid\":true,\"nativeQualified\":true",
+            "forged native authority");
+        Mutate(1, "\"gameTick\":1", "\"gameTick\":1,\"runnerSha\":\"forged\"",
+            "forged runner");
+        Mutate(1, "\"featureObserved\":true", "\"featureObserved\":\"true\"",
+            "wrong field type");
+        Mutate(1, "\"brambleCount\":24", "\"brambleCount\":-1", "negative count");
+        Mutate(0, "\"outcome\":\"completed\"", "\"outcome\":",
+            "malformed JSON");
+        Reject(expected, [valid[0], valid[0], valid[1]], "duplicate terminal event");
+        Reject(expected, [valid[0], valid[1], valid[1]], "duplicate map event");
+        Reject(expected, Enumerable.Repeat(valid[0], 9).ToArray(),
+            "oversized event list");
+        Reject(expected, [valid[0], valid[1] + "\nforeign"], "multiline log injection");
+        Reject(expected with { Nonce = "other-run-1234" }, valid, "foreign expectation");
+        Reject(expected with { MaximumCount = 0 }, valid, "vacuous max");
+        Reject(expected with { CountField = "nativeQualified" }, valid,
+            "reserved metric");
+    }
+
+    public static void MapEventsBoundsAndPlacementFailClosed()
+    {
+        MapEventExpectation expected = MapFixture();
+        string[] tooMany = MapEvents();
+        tooMany[1] = tooMany[1].Replace(
+            "\"brambleCount\":24", "\"brambleCount\":351", StringComparison.Ordinal);
+        MapEventAssessment overCap = MapEventEvaluator.Evaluate(expected, tooMany);
+        AssertEqual(MapEventContract.AssertionFailed, overCap.Status);
+        AssertEqual("COUNT_BOUND_VIOLATED", overCap.ReasonCode);
+        AssertEqual(351, overCap.ObservedCount);
+        Assert(!overCap.NativeQualified, "Failed assertion never proves native gameplay.");
+
+        string[] invalidPlacement = MapEvents();
+        invalidPlacement[1] = invalidPlacement[1].Replace(
+            "\"placementValid\":true", "\"placementValid\":false",
+            StringComparison.Ordinal);
+        AssertEqual("PLACEMENT_INVALID",
+            MapEventEvaluator.Evaluate(expected, invalidPlacement).ReasonCode);
+        AssertEqual(MapEventContract.AssertionFailed,
+            MapEventEvaluator.Evaluate(expected, invalidPlacement).Status);
+
+        string[] contradictory = MapEvents();
+        contradictory[1] = contradictory[1].Replace(
+            "\"featureObserved\":true", "\"featureObserved\":false",
+            StringComparison.Ordinal);
+        AssertEqual("PRESENCE_COUNT_CONTRADICTION",
+            MapEventEvaluator.Evaluate(expected, contradictory).ReasonCode);
+        AssertEqual(MapEventContract.InvalidEvidence,
+            MapEventEvaluator.Evaluate(expected, contradictory).Status);
+    }
+
+    public static void MapEventsAreReusableAcrossModSchemas()
+    {
+        MapEventExpectation other = MapFixture() with
+        {
+            EventPrefix = "OtherModQA",
+            OutcomeSchema = "othermod-genstep-outcome/v1",
+            ObservationSchema = "othermod-map-smoke/v1",
+            Nonce = "other-run-1234",
+            ExpectedBiome = "BorealForest",
+            CountField = "crystalCount",
+            PresenceField = "featureSeen",
+            IntegrityField = "layoutValid",
+            PositiveOutcome = "placed"
+        };
+        string[] source = MapEvents();
+        string[] converted = source.Select(line => line
+            .Replace("NatureTilesQA", "OtherModQA", StringComparison.Ordinal)
+            .Replace("naturetiles-genstep-outcome/v1", "othermod-genstep-outcome/v1",
+                StringComparison.Ordinal)
+            .Replace("naturetiles-map-smoke/v1", "othermod-map-smoke/v1",
+                StringComparison.Ordinal)
+            .Replace("map-abc12345", "other-run-1234", StringComparison.Ordinal)
+            .Replace("TemperateForest", "BorealForest", StringComparison.Ordinal)
+            .Replace("brambleCount", "crystalCount", StringComparison.Ordinal)
+            .Replace("featureObserved", "featureSeen", StringComparison.Ordinal)
+            .Replace("placementValid", "layoutValid", StringComparison.Ordinal)
+            .Replace("\"outcome\":\"completed\"", "\"outcome\":\"placed\"",
+                StringComparison.Ordinal)).ToArray();
+        MapEventAssessment result = MapEventEvaluator.Evaluate(other, converted);
+        AssertEqual(MapEventContract.ReadyForNativeReview, result.Status);
+        Assert(!result.NativeQualified, "Generic source events remain untrusted.");
+        AssertEqual(MapEventContract.InvalidEvidence,
+            MapEventEvaluator.Evaluate(MapFixture(), converted).Status);
+    }
+
+    private static MapEventExpectation MapFixture() => new(
+        "NatureTilesQA", "naturetiles-genstep-outcome/v1",
+        "naturetiles-map-smoke/v1", "map-abc12345", "TemperateForest",
+        "brambleCount", "featureObserved", "placementValid", "completed", 350);
+
+    // Exact field names and schema match the opt-in 16-file NatureTiles 1.7
+    // source candidate; these strings are inert synthetic fixtures, NOT a game log.
+    private static string[] MapEvents() =>
+    [
+        "[NatureTilesQA] {\"schemaVersion\":\"naturetiles-genstep-outcome/v1\",\"nonce\":\"map-abc12345\",\"mapUniqueId\":17,\"biome\":\"TemperateForest\",\"mapWidth\":250,\"mapHeight\":250,\"outcome\":\"completed\",\"chanceSelected\":true,\"newlyPlaced\":24}",
+        "[NatureTilesQA] {\"schemaVersion\":\"naturetiles-map-smoke/v1\",\"nonce\":\"map-abc12345\",\"mapUniqueId\":17,\"biome\":\"TemperateForest\",\"mapWidth\":250,\"mapHeight\":250,\"gameTick\":1,\"brambleCount\":24,\"featureObserved\":true,\"placementValid\":true}"
+    ];
+
     private static CounterfactualContext SyntheticContext(int seed) =>
         new(CounterfactualContract.Current, new string('a', 40),
             "naturetiles", "bramble-route", "fixture-map-" + seed, "nonce-" + seed,

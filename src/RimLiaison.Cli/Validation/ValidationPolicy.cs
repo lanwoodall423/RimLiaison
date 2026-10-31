@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace RimLiaison.Validation;
@@ -427,4 +428,241 @@ public static class CounterfactualEvaluator
         value is { Length: > 0 and <= 80 } && value.All(character =>
             character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or
                 >= '0' and <= '9' or '-' or '_' or '.');
+}
+
+/// <summary>
+/// Pure, game-free cross-event consistency check. A caller-supplied log is
+/// never a trusted game process: even a perfect match is only eligible for a
+/// separately qualified native-run provenance and cleanup attestation.
+/// </summary>
+public static class MapEventContract
+{
+    public const string Current = "rimliaison-map-events/v1";
+    public const string ReadyForNativeReview = "READY_FOR_NATIVE_REVIEW";
+    public const string Inconclusive = "INCONCLUSIVE";
+    public const string InvalidEvidence = "INVALID_EVIDENCE";
+    public const string AssertionFailed = "ASSERTION_FAILED";
+}
+
+public sealed record MapEventExpectation(
+    string EventPrefix,
+    string OutcomeSchema,
+    string ObservationSchema,
+    string Nonce,
+    string ExpectedBiome,
+    string CountField,
+    string PresenceField,
+    string IntegrityField,
+    string PositiveOutcome,
+    int MaximumCount);
+
+public sealed record MapEventAssessment(
+    string SchemaVersion,
+    string Status,
+    string ReasonCode,
+    int? MapUniqueId,
+    int? ObservedCount,
+    string Provenance = "untrusted-log-text",
+    bool NativeQualified = false);
+
+public static class MapEventEvaluator
+{
+    private const int MaximumEvents = 8;
+    private const int MaximumEventCharacters = 4_096;
+    private const int MaximumDimension = 1_000;
+    private const int MaximumObservedCount = 1_000_000;
+    private static readonly JsonDocumentOptions JsonOptions = new()
+    {
+        MaxDepth = 4,
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow
+    };
+
+    private sealed record MapEvent(
+        string Schema, int MapId, string Biome, int Width, int Height,
+        string? Outcome, int? Count, bool? Present, bool? Integrity);
+
+    public static MapEventAssessment Evaluate(
+        MapEventExpectation expected, IReadOnlyList<string> logEvents)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(logEvents);
+
+        MapEventAssessment Result(
+            string status, string reason, int? mapId = null, int? count = null) =>
+            new(MapEventContract.Current, status, reason, mapId, count);
+
+        MapEventAssessment Invalid(string reason) =>
+            Result(MapEventContract.InvalidEvidence, reason);
+
+        if (!Token(expected.EventPrefix, 48) ||
+            !SchemaToken(expected.OutcomeSchema) ||
+            !SchemaToken(expected.ObservationSchema) ||
+            expected.OutcomeSchema == expected.ObservationSchema ||
+            !Token(expected.Nonce, 40, minimum: 8) ||
+            !Token(expected.ExpectedBiome, 80) ||
+            !Token(expected.CountField, 48) ||
+            !Token(expected.PresenceField, 48) ||
+            !Token(expected.IntegrityField, 48) ||
+            !Token(expected.PositiveOutcome, 48) ||
+            new[] { expected.CountField, expected.PresenceField,
+                    expected.IntegrityField }.Distinct(StringComparer.Ordinal).Count() != 3 ||
+            new[] { expected.CountField, expected.PresenceField,
+                    expected.IntegrityField }.Any(value =>
+                    value is "nonce" or "schemaVersion" or "mapUniqueId" or
+                        "mapWidth" or "mapHeight" or "biome" or "outcome" or
+                        "nativeQualified" or "provenance") ||
+            expected.MaximumCount is < 1 or > MaximumObservedCount)
+            return Invalid("EXPECTATION_CONTRACT_INVALID");
+
+        if (logEvents.Count > MaximumEvents)
+            return Invalid("EVENT_LIMIT_EXCEEDED");
+        if (logEvents.Count == 0)
+            return Result(MapEventContract.Inconclusive, "NO_MAP_EVENTS");
+
+        string prefix = "[" + expected.EventPrefix + "] ";
+        MapEvent? terminal = null;
+        MapEvent? observed = null;
+
+        foreach (string raw in logEvents)
+        {
+            if (raw is null || raw.Length > MaximumEventCharacters ||
+                raw.Any(char.IsControl) ||
+                !raw.StartsWith(prefix, StringComparison.Ordinal))
+                return Invalid("EVENT_ENVELOPE_INVALID");
+
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(
+                    raw.AsMemory(prefix.Length), JsonOptions);
+                JsonElement item = document.RootElement;
+                if (item.ValueKind != JsonValueKind.Object)
+                    return Invalid("EVENT_JSON_INVALID");
+
+                var keys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (JsonProperty property in item.EnumerateObject())
+                {
+                    if (!keys.Add(property.Name))
+                        return Invalid("DUPLICATE_JSON_PROPERTY");
+                }
+                // Event text may never claim native trust; only the approved
+                // external host check can establish such provenance.
+                if (keys.Overlaps(new[]
+                    {
+                        "nativeQualified", "currentLogVerified",
+                        "cleanupComplete", "runnerSha", "sourceSha", "provenance"
+                    }))
+                    return Invalid("FORGED_AUTHORITY_PROPERTY");
+
+                if (!TryString(item, "schemaVersion", out string? schema) ||
+                    (schema != expected.OutcomeSchema &&
+                     schema != expected.ObservationSchema) ||
+                    !TryString(item, "nonce", out string? nonce) ||
+                    nonce != expected.Nonce ||
+                    !TryString(item, "biome", out string? biome) ||
+                    biome != expected.ExpectedBiome ||
+                    !TryInteger(item, "mapUniqueId", out int mapId) || mapId < 0 ||
+                    !TryInteger(item, "mapWidth", out int width) ||
+                    !TryInteger(item, "mapHeight", out int height) ||
+                    width is < 50 or > MaximumDimension ||
+                    height is < 50 or > MaximumDimension)
+                    return Invalid("EVENT_IDENTITY_INVALID");
+
+                MapEvent record;
+                if (schema == expected.OutcomeSchema)
+                {
+                    if (!TryString(item, "outcome", out string? outcome) ||
+                        !Token(outcome, 48))
+                        return Invalid("OUTCOME_FIELD_INVALID");
+                    record = new(schema, mapId, biome!, width, height,
+                        outcome, null, null, null);
+                    if (terminal is not null)
+                        return Invalid("DUPLICATE_TERMINAL_EVENT");
+                    terminal = record;
+                }
+                else
+                {
+                    if (!TryInteger(item, expected.CountField, out int count) ||
+                        count is < 0 or > MaximumObservedCount ||
+                        !TryBool(item, expected.PresenceField, out bool present) ||
+                        !TryBool(item, expected.IntegrityField, out bool integrity))
+                        return Invalid("OBSERVATION_FIELD_INVALID");
+                    record = new(schema!, mapId, biome!, width, height,
+                        null, count, present, integrity);
+                    if (observed is not null)
+                        return Invalid("DUPLICATE_OBSERVATION_EVENT");
+                    observed = record;
+                }
+            }
+            catch (JsonException)
+            {
+                return Invalid("EVENT_JSON_INVALID");
+            }
+        }
+
+        if (terminal is null || observed is null)
+            return Result(MapEventContract.Inconclusive, "MISSING_MATCHED_EVENT");
+        if (terminal.MapId != observed.MapId ||
+            terminal.Biome != observed.Biome ||
+            terminal.Width != observed.Width ||
+            terminal.Height != observed.Height)
+            return Invalid("CROSS_MAP_EVENT_MISMATCH");
+
+        int metric = observed.Count!.Value;
+        if (observed.Present != (metric > 0))
+            return Invalid("PRESENCE_COUNT_CONTRADICTION");
+        if (metric > expected.MaximumCount)
+            return Result(MapEventContract.AssertionFailed, "COUNT_BOUND_VIOLATED",
+                observed.MapId, metric);
+        if (observed.Integrity != true)
+            return Result(MapEventContract.AssertionFailed, "PLACEMENT_INVALID",
+                observed.MapId, metric);
+        if (metric == 0)
+            return Result(MapEventContract.Inconclusive, "NO_FEATURE_OBSERVED",
+                observed.MapId, metric);
+        if (terminal.Outcome != expected.PositiveOutcome)
+            return Result(MapEventContract.Inconclusive, "TERMINAL_OUTCOME_NOT_POSITIVE",
+                observed.MapId, metric);
+        return Result(MapEventContract.ReadyForNativeReview,
+            "MATCHED_UNTRUSTED_MAP_EVENTS", observed.MapId, metric);
+    }
+
+    private static bool TryString(JsonElement item, string key, out string? value)
+    {
+        value = null;
+        if (!item.TryGetProperty(key, out JsonElement property) ||
+            property.ValueKind != JsonValueKind.String)
+            return false;
+        value = property.GetString();
+        return value is not null;
+    }
+
+    private static bool TryInteger(JsonElement item, string key, out int value)
+    {
+        value = 0;
+        return item.TryGetProperty(key, out JsonElement property) &&
+               property.ValueKind == JsonValueKind.Number &&
+               property.TryGetInt32(out value);
+    }
+
+    private static bool TryBool(JsonElement item, string key, out bool value)
+    {
+        value = false;
+        if (!item.TryGetProperty(key, out JsonElement property) ||
+            property.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return false;
+        value = property.GetBoolean();
+        return true;
+    }
+
+    private static bool SchemaToken(string? value) =>
+        value is { Length: > 0 and <= 80 } &&
+        value.Count(character => character == '/') == 1 &&
+        value.All(character => character is >= 'a' and <= 'z' or
+            >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.' or '/');
+
+    private static bool Token(string? value, int maximum, int minimum = 1) =>
+        value is not null && value.Length >= minimum && value.Length <= maximum &&
+        value.All(character => character is >= 'a' and <= 'z' or
+            >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.');
 }
