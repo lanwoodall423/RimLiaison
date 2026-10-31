@@ -855,10 +855,15 @@ internal static class DevCheckCommand
             return false;
         string header = content[..Math.Min(content.Length, MaximumWaylithHeaderCharacters)];
         string[] lines = header.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
-        string? Value(string prefix) => lines.Select(line => line.Trim())
-            .Where(line => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            .Select(line => line[prefix.Length..].Trim())
-            .FirstOrDefault();
+        // Two matching labels are ambiguous even if the first one is valid.
+        // A later unrelated diagnostic record cannot change a launch identity.
+        string? Value(string prefix)
+        {
+            string[] matches = lines.Select(line => line.Trim())
+                .Where(line => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Take(2).ToArray();
+            return matches.Length == 1 ? matches[0][prefix.Length..].Trim() : null;
+        }
 
         string? started = Value("Started:");
         string? version = Value("Version:");
@@ -874,19 +879,49 @@ internal static class DevCheckCommand
             string.IsNullOrWhiteSpace(version) ||
             !version.StartsWith("1.7.", StringComparison.Ordinal) ||
             !string.Equals(loggedPath, logPath, StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(command) ||
-            !command.Contains(Path.Combine(rimWorldRoot, "RimWorld.dll"),
-                StringComparison.OrdinalIgnoreCase))
+            string.IsNullOrWhiteSpace(command))
             return false;
+
+        // The game logs Command: on one line and may wrap its options onto
+        // immediately following dash-prefixed lines. No unrelated diagnostic
+        // text or second header is allowed to supply missing launch options.
+        string expectedGameDll = Path.Combine(rimWorldRoot, "RimWorld.dll");
+        string commandArguments;
+        string quotedGameDll = "\"" + expectedGameDll + "\"";
+        if (command.StartsWith(quotedGameDll, StringComparison.OrdinalIgnoreCase) &&
+            (command.Length == quotedGameDll.Length ||
+             char.IsWhiteSpace(command[quotedGameDll.Length])))
+            commandArguments = command[quotedGameDll.Length..];
+        else if (command.StartsWith(expectedGameDll, StringComparison.OrdinalIgnoreCase) &&
+                 (command.Length == expectedGameDll.Length ||
+                  char.IsWhiteSpace(command[expectedGameDll.Length])))
+            commandArguments = command[expectedGameDll.Length..];
+        else
+            return false;
+
+        int commandLine = Array.FindIndex(lines, line =>
+            line.TrimStart().StartsWith("Command:", StringComparison.OrdinalIgnoreCase));
+        if (commandLine < 0)
+            return false;
+        for (int index = commandLine + 1; index < lines.Length; index++)
+        {
+            string continuation = lines[index].Trim();
+            if (!continuation.StartsWith("-", StringComparison.Ordinal))
+                break;
+            commandArguments += " " + continuation;
+        }
 
         string? savedataArg = start.ArgumentList.SingleOrDefault(
             arg => arg.StartsWith("-savedatafolder=", StringComparison.OrdinalIgnoreCase));
         string? modArg = start.ArgumentList.SingleOrDefault(
             arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase));
         if (savedataArg is null || modArg is null ||
-            !HasExactLogArgument(header, savedataArg) ||
-            !HasExactLogArgument(header, modArg) ||
-            !HasExactLogArgument(header, "-Headless"))
+            !HasExactLogArgument(commandArguments, savedataArg) ||
+            !HasExactLogArgument(commandArguments, modArg) ||
+            !HasExactLogArgument(commandArguments, "-Headless") ||
+            CountLogOption(commandArguments, "-savedatafolder=") != 1 ||
+            CountLogOption(commandArguments, "-mod=") != 1 ||
+            CountLogOption(commandArguments, "-Headless") != 1)
             return false;
         reason = "WAYLITH_LOG_VERIFIED";
         return true;
@@ -907,6 +942,23 @@ internal static class DevCheckCommand
                 return true;
         }
         return false;
+    }
+
+    // Reject a valid option accompanied by a conflicting/duplicate option.
+    // Boundary checks prevent substrings inside file names from counting.
+    private static int CountLogOption(string commandArguments, string option)
+    {
+        int count = 0;
+        for (int index = commandArguments.IndexOf(option, StringComparison.OrdinalIgnoreCase);
+             index >= 0;
+             index = commandArguments.IndexOf(
+                 option, index + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            if (index == 0 || char.IsWhiteSpace(commandArguments[index - 1]) ||
+                commandArguments[index - 1] == '"')
+                count++;
+        }
+        return count;
     }
 
     private static async Task<RuntimeResult> RunRuntimeAsync(

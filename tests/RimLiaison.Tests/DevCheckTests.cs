@@ -282,6 +282,66 @@ internal static class DevCheckTests
             Reject(header.Replace("-Headless", ""), "nonheadless");
             Reject(header, "stale timestamp", began.AddMinutes(1));
 
+            // A quoted game assembly and a space-bearing savedata path are
+            // legitimate; the parser must bind their exact command identity.
+            string gameDll = Path.Combine(root, "RimWorld.dll");
+            string quotedCommand = header.Replace(
+                "Command:   " + gameDll, "Command:   \"" + gameDll + "\"",
+                StringComparison.Ordinal);
+            if (!DevCheckCommand.VerifyWaylithLogHeader(
+                    quotedCommand, logPath, root, start, began, exited, out _))
+                throw new InvalidOperationException("Quoted Waylith command was rejected.");
+
+            // No arguments mentioned outside the actual Command: section may
+            // satisfy the current-run invocation, even within the first 8 KiB.
+            string savedataLine = "-savedatafolder=" + savedata + "\n";
+            const string modAndHeadless =
+                "-mod=direct.validation.runtime.signal;target.mod -Headless\n";
+            Reject(header.Replace(savedataLine,
+                "Debug: -savedatafolder=" + savedata + "\n",
+                StringComparison.Ordinal), "savedata argument in diagnostics");
+            Reject(header.Replace(modAndHeadless,
+                "-Headless\nDebug: -mod=direct.validation.runtime.signal;target.mod\n",
+                StringComparison.Ordinal), "mod argument in diagnostics");
+            Reject(header.Replace(modAndHeadless,
+                "-mod=direct.validation.runtime.signal;target.mod\nDebug: -Headless\n",
+                StringComparison.Ordinal), "Headless only in diagnostics");
+            Reject(header.Replace("Command:   " + gameDll,
+                "Command:   " + gameDll + ".bak",
+                StringComparison.Ordinal), "game DLL suffix");
+            Reject(quotedCommand.Replace("\"" + gameDll + "\"",
+                "\"" + gameDll + "\".bak", StringComparison.Ordinal),
+                "quoted game DLL suffix");
+            Reject(header.Replace("Command:   " + gameDll,
+                "Command:   " + Path.Combine(root + "-other", "RimWorld.dll"),
+                StringComparison.Ordinal), "foreign game DLL root");
+            Reject(header.Replace("Command:   " + gameDll,
+                "Command:   C:\\foreign\\RimWorld.dll\nDebug: " + gameDll,
+                StringComparison.Ordinal), "game path only in unrelated diagnostic");
+
+            // Repeated or conflicting metadata/options are not current-run
+            // provenance, even when a correct occurrence is present.
+            Reject(header.Replace("Version:   1.7.4990.1069\n",
+                "Version:   1.7.4990.1069\nVersion:   1.7.4990.1069\n",
+                StringComparison.Ordinal), "duplicate version");
+            Reject(header.Replace("Command:   " + gameDll,
+                "Command:   " + gameDll + "\nCommand:   " + gameDll,
+                StringComparison.Ordinal), "duplicate command");
+            Reject(header.Replace("Log file:  " + logPath + "\n",
+                "Log file:  " + logPath + "\nLog file:  " + logPath + "\n",
+                StringComparison.Ordinal), "duplicate log path");
+            Reject(header + "Started: " + logStarted.ToString("O") + "\n",
+                "duplicate start");
+            Reject(header.Replace(savedataLine,
+                savedataLine + "-savedatafolder=C:\\foreign-profile\n",
+                StringComparison.Ordinal), "duplicate savedata argument");
+            Reject(header.Replace(modAndHeadless,
+                "-mod=direct.validation.runtime.signal;target.mod -mod=other.mod -Headless\n",
+                StringComparison.Ordinal), "conflicting mod argument");
+            Reject(header.Replace(modAndHeadless,
+                "-mod=direct.validation.runtime.signal;target.mod -Headless -Headless\n",
+                StringComparison.Ordinal), "duplicate Headless argument");
+
             File.WriteAllText(logPath, "old log");
             DevCheckCommand.WaylithLogSnapshot prior =
                 DevCheckCommand.CaptureWaylithLogSnapshot(logPath);
