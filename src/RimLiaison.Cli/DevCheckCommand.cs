@@ -15,6 +15,7 @@ internal static class DevCheckCommand
     private const string HelperPackageId = "direct.validation.runtime.signal";
     private const string BehaviorProtocol = "direct-validation-behavior/v1";
     private const int MaximumDiagnosticLength = 8_192;
+    private const int MaximumDefinitionExpectations = 128;
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RuntimeTimeout = TimeSpan.FromSeconds(120);
     internal static TimeSpan WaylithContentLoadTimeout => RuntimeTimeout;
@@ -470,17 +471,15 @@ internal static class DevCheckCommand
             {
                 var document = new XmlDocument { XmlResolver = null };
                 document.Load(input.AbsolutePath);
-                if (!input.RelativePath.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase))
+                if (!input.RelativePath.StartsWith("Defs/", StringComparison.OrdinalIgnoreCase) &&
+                    !input.RelativePath.StartsWith("1.7/Defs/", StringComparison.OrdinalIgnoreCase))
                     continue;
                 XmlNodeList? thingNodes = document.SelectNodes("//ThingDef");
                 if (thingNodes is null)
                     continue;
                 foreach (XmlNode thing in thingNodes)
                 {
-                    string defName = thing.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(defName))
-                        throw new InvalidDataException($"ThingDef in {input.RelativePath} is missing defName.");
-                    state.ChangedDefs.Add(defName);
+                    AddDefinitionExpectation(state, "ThingDef", thing, input.RelativePath);
                     XmlNodeList? projectileNodes = thing.SelectNodes(".//defaultProjectile");
                     if (projectileNodes is not null)
                         foreach (XmlNode node in projectileNodes)
@@ -498,12 +497,53 @@ internal static class DevCheckCommand
                                 state.TargetErrorTokens.Add(value);
                         }
                 }
+                foreach (string type in new[] { "GenStepDef", "TileMutatorDef" })
+                {
+                    XmlNodeList? typedNodes = document.SelectNodes("//" + type);
+                    if (typedNodes is null) continue;
+                    foreach (XmlNode typed in typedNodes)
+                    {
+                        AddDefinitionExpectation(state, type, typed, input.RelativePath);
+                    }
+                }
             }
         }
         finally
         {
             state.StageTimes["xml"] = ElapsedMilliseconds(started);
         }
+    }
+
+    private static void AddDefinitionExpectation(
+        State state, string type, XmlNode node, string relativePath)
+    {
+        string name = node.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
+        string mayRequire = node.Attributes?["MayRequire"]?.Value.Trim() ?? string.Empty;
+        static bool SafeToken(string token) =>
+            token.Length is > 0 and <= 128 &&
+            token.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-');
+        if (!SafeToken(name) || (mayRequire.Length > 0 && !SafeToken(mayRequire)))
+            throw new InvalidDataException("Invalid " + type + " identity or MayRequire in " + relativePath + ".");
+        string expectation = type + "|" + name +
+            (mayRequire.Length > 0 ? "|" + mayRequire : string.Empty);
+        if (state.ChangedDefs.Any(existing =>
+                existing.Split('|')[0] == type && existing.Split('|')[1] == name))
+            throw new InvalidDataException("Duplicate active " + type + " definition in " + relativePath + ".");
+        if (state.ChangedDefs.Count >= MaximumDefinitionExpectations)
+            throw new InvalidDataException("Active definition expectation limit exceeded.");
+        state.ChangedDefs.Add(expectation);
+    }
+
+    // Reuses the actual production discovery and parsing path for inert test fixtures.
+    internal static IReadOnlyList<string> InspectActiveDefinitionExpectations(string workspace)
+    {
+        var state = new State
+        {
+            XmlFiles = DiscoverInputs(workspace)
+                .Where(input => input.Kind == DiscoveredFileKinds.Xml).ToArray()
+        };
+        ValidateXml(state);
+        return state.ChangedDefs.ToArray();
     }
 
     private static object BuildRimContext(State state)
@@ -915,6 +955,7 @@ internal static class DevCheckCommand
             Directory.CreateDirectory(configDirectory);
             string configPath = Path.Combine(configDirectory, "ModsConfig.xml");
             IReadOnlyList<string> activePackages = BuildActiveModPackageIds(state.Mod.PackageId, dependencies);
+            state.ActivePackages = activePackages;
             WriteModsConfig(configPath, activePackages);
             string signalPath = Path.Combine(savedata, "direct-validation-signal.json");
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
@@ -1044,11 +1085,60 @@ internal static class DevCheckCommand
         start.Environment["DIRECT_VALIDATION_SIGNAL_RESULT"] = signalPath;
     }
 
+    // Check the full set of exact typed expectations, not merely a count or
+    // matching name. Optional DLC defs must explicitly report inapplicability.
+    internal static bool ValidateTypedDefinitionEvidence(
+        IReadOnlyList<string> expectations, JsonElement? signal,
+        IReadOnlyList<string> activePackages)
+    {
+        if (expectations.Count == 0)
+            return true; // A legitimate code-only mod has no Defs to attest.
+        if (!signal.HasValue || signal.Value.ValueKind != JsonValueKind.Object ||
+            !signal.Value.TryGetProperty("requestedDefs", out JsonElement reported) ||
+            reported.ValueKind != JsonValueKind.Array ||
+            reported.GetArrayLength() != expectations.Count)
+            return false;
+
+        var pending = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string expectation in expectations)
+        {
+            string[] parts = expectation.Split('|');
+            if ((parts.Length != 2 && parts.Length != 3) ||
+                parts[1].Length == 0 ||
+                (parts[0] != "ThingDef" && parts[0] != "GenStepDef" && parts[0] != "TileMutatorDef") ||
+                !pending.TryAdd(parts[0] + "|" + parts[1], parts.Length == 3 ? parts[2] : ""))
+                return false;
+        }
+
+        foreach (JsonElement item in reported.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object ||
+                !item.TryGetProperty("defType", out JsonElement type) ||
+                type.ValueKind != JsonValueKind.String ||
+                !item.TryGetProperty("defName", out JsonElement name) ||
+                name.ValueKind != JsonValueKind.String ||
+                !item.TryGetProperty("applicable", out JsonElement applicable) ||
+                (applicable.ValueKind != JsonValueKind.True && applicable.ValueKind != JsonValueKind.False) ||
+                !item.TryGetProperty("exists", out JsonElement exists) ||
+                (exists.ValueKind != JsonValueKind.True && exists.ValueKind != JsonValueKind.False))
+                return false;
+            if (!pending.Remove(type.GetString() + "|" + name.GetString(), out string? requiredPackage))
+                return false;
+            bool expectedApplicable = string.IsNullOrEmpty(requiredPackage) ||
+                activePackages.Contains(requiredPackage, StringComparer.OrdinalIgnoreCase);
+            if ((applicable.ValueKind == JsonValueKind.True) != expectedApplicable ||
+                (exists.ValueKind == JsonValueKind.True) != expectedApplicable)
+                return false;
+        }
+        return pending.Count == 0;
+    }
+
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
     {
         bool contentLoaded = false;
         bool targetLoaded = false;
-        bool defsValid = true;
+        bool defsValid = ValidateTypedDefinitionEvidence(
+            state.ChangedDefs, signal, state.ActivePackages);
         bool configured = targetConfigured;
         var assemblyResults = state.TargetAssemblySources
             .Select(source => new AssemblyLoadResult(Path.GetFileNameWithoutExtension(source), false))
@@ -1060,16 +1150,7 @@ internal static class DevCheckCommand
             JsonElement value = signal.Value;
             contentLoaded = value.TryGetProperty("completion", out JsonElement completion) && completion.GetString() == "content-loaded";
             targetLoaded = value.TryGetProperty("targetModLoaded", out JsonElement target) && target.GetBoolean();
-            if (value.TryGetProperty("requestedDefs", out JsonElement requestedDefs))
-            {
-                foreach (string defName in state.ChangedDefs)
-                {
-                    bool found = requestedDefs.EnumerateArray().Any(item =>
-                        item.TryGetProperty("defName", out JsonElement actual) && actual.GetString() == defName &&
-                        item.TryGetProperty("exists", out JsonElement exists) && exists.GetBoolean());
-                    defsValid &= found;
-                }
-            }
+
             if (value.TryGetProperty("targetAssembliesLoaded", out JsonElement loadedAssemblies))
             {
                 foreach (JsonElement loaded in loadedAssemblies.EnumerateArray())
@@ -1151,7 +1232,7 @@ internal static class DevCheckCommand
     {
         if (string.IsNullOrWhiteSpace(log))
             yield break;
-        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs, .. state.TargetErrorTokens, .. state.ChangedFiles.Select(Path.GetFileName)];
+        string[] tokens = [state.Mod.PackageId, state.Mod.Name, .. state.ChangedDefs.Select(item => item.Split('|')[1]), .. state.TargetErrorTokens, .. state.ChangedFiles.Select(Path.GetFileName)];
         foreach (string line in log.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
         {
             bool error = line.Contains("error", StringComparison.OrdinalIgnoreCase) ||
@@ -1540,6 +1621,7 @@ internal static class DevCheckCommand
         public ModIdentity Mod { get; set; } = new("", "");
         public List<string> ChangedFiles { get; } = [];
         public List<string> ChangedDefs { get; } = [];
+        public IReadOnlyList<string> ActivePackages { get; set; } = [];
         public List<string> TargetErrorTokens { get; } = [];
         public List<string> BuildErrors { get; } = [];
         public List<string> StaticErrors { get; } = [];

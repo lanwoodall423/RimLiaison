@@ -647,6 +647,116 @@ internal static class DevCheckTests
         {
             throw new InvalidOperationException("Runtime signal result path was not passed to the launch environment.");
         }
+        VerifyWaylithTypedDefinitionFixtures();
+    }
+
+    // This method is called from an already registered regression case:
+    // no suite/Program edits, game launch, SDK execution or host fixtures.
+    private static void VerifyWaylithTypedDefinitionFixtures()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            string activeDirectory = Path.Combine(root, "1.7", "Defs", "GenStepDefs");
+            string plainDirectory = Path.Combine(root, "Defs", "GenStepDefs");
+            string legacyDirectory = Path.Combine(root, "1.6", "Defs");
+            Directory.CreateDirectory(activeDirectory);
+            Directory.CreateDirectory(plainDirectory);
+            Directory.CreateDirectory(legacyDirectory);
+            File.WriteAllText(Path.Combine(activeDirectory, "NatureTiles.xml"), """
+                <Defs>
+                  <ThingDef><defName>NT_Bramble</defName></ThingDef>
+                  <GenStepDef><defName>NT_BrambleThickets</defName></GenStepDef>
+                  <TileMutatorDef MayRequire="Ludeon.RimWorld.Odyssey">
+                    <defName>NT_BrambleThicketMutator</defName>
+                  </TileMutatorDef>
+                </Defs>
+                """);
+            File.WriteAllText(Path.Combine(plainDirectory, "Unversioned.xml"), """
+                <Defs><GenStepDef><defName>UnversionedStep</defName></GenStepDef></Defs>
+                """);
+            File.WriteAllText(Path.Combine(legacyDirectory, "Old.xml"), """
+                <Defs><ThingDef><defName>InactiveLegacyPlant</defName></ThingDef></Defs>
+                """);
+
+            IReadOnlyList<string> expected = DevCheckCommand.InspectActiveDefinitionExpectations(root);
+            string[] names =
+            [
+                "ThingDef|NT_Bramble",
+                "GenStepDef|NT_BrambleThickets",
+                "TileMutatorDef|NT_BrambleThicketMutator|Ludeon.RimWorld.Odyssey",
+                "GenStepDef|UnversionedStep"
+            ];
+            if (expected.Count != names.Length ||
+                names.Any(item => !expected.Contains(item, StringComparer.Ordinal)) ||
+                expected.Any(item => item.Contains("InactiveLegacyPlant", StringComparison.Ordinal)))
+                throw new InvalidOperationException("Versioned and unversioned typed definitions were not isolated correctly.");
+
+            const string positive = """
+                {"requestedDefs":[
+                  {"defType":"ThingDef","defName":"NT_Bramble","applicable":true,"exists":true},
+                  {"defType":"GenStepDef","defName":"NT_BrambleThickets","applicable":true,"exists":true},
+                  {"defType":"TileMutatorDef","defName":"NT_BrambleThicketMutator","applicable":true,"exists":true},
+                  {"defType":"GenStepDef","defName":"UnversionedStep","applicable":true,"exists":true}
+                ]}
+                """;
+            string withoutOdyssey = positive.Replace(
+                "\"defType\":\"TileMutatorDef\",\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":true",
+                "\"defType\":\"TileMutatorDef\",\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false",
+                StringComparison.Ordinal);
+            string[] noOdyssey = ["ludeon.rimworld", "target.mod"];
+            string[] withOdyssey = ["ludeon.rimworld", "Ludeon.RimWorld.Odyssey", "target.mod"];
+            bool Proves(string json, string[] packages)
+            {
+                using JsonDocument document = JsonDocument.Parse(json);
+                return DevCheckCommand.ValidateTypedDefinitionEvidence(
+                    expected, document.RootElement, packages);
+            }
+
+            if (!Proves(positive, withOdyssey) ||
+                !Proves(withoutOdyssey, noOdyssey) ||
+                Proves(withoutOdyssey, withOdyssey) ||
+                Proves(positive, noOdyssey))
+                throw new InvalidOperationException("Optional Odyssey definition proof was not matched to the selected profile.");
+
+            void MustReject(string altered, string label)
+            {
+                if (Proves(altered, withOdyssey))
+                    throw new InvalidOperationException("Invalid typed-Def evidence accepted: " + label);
+            }
+            MustReject("{}", "missing results");
+            MustReject("""{"requestedDefs":[]}""", "empty results");
+            MustReject(positive.Replace("\"defType\":\"GenStepDef\",\"defName\":\"NT_BrambleThickets\"",
+                "\"defType\":\"ThingDef\",\"defName\":\"NT_BrambleThickets\"", StringComparison.Ordinal), "wrong type");
+            MustReject(positive.Replace("\"defName\":\"NT_BrambleThickets\"",
+                "\"defName\":\"AbsentGenStep\"", StringComparison.Ordinal), "missing GenStep");
+            MustReject(positive.Replace("\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":true",
+                "\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":false", StringComparison.Ordinal), "false existence");
+            MustReject(positive.Replace("{\"defType\":\"GenStepDef\",\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":true},",
+                "", StringComparison.Ordinal), "missing one result");
+            MustReject(positive.Replace("\"defName\":\"NT_BrambleThickets\",\"applicable\":true",
+                "\"defName\":\"NT_BrambleThickets\"", StringComparison.Ordinal), "missing applicability");
+            MustReject(positive.Replace("\"defName\":\"NT_BrambleThickets\",\"applicable\":true",
+                "\"defName\":\"NT_BrambleThickets\",\"applicable\":\"true\"", StringComparison.Ordinal), "invalid applicability type");
+            MustReject(positive.Replace("\"defName\":\"UnversionedStep\"",
+                "\"defName\":\"NT_BrambleThickets\"", StringComparison.Ordinal), "duplicate result");
+            if (!DevCheckCommand.ValidateTypedDefinitionEvidence([], null, noOdyssey))
+                throw new InvalidOperationException("Legitimate no-Def mod was rejected.");
+
+            string duplicate = Path.Combine(activeDirectory, "Duplicate.xml");
+            File.WriteAllText(duplicate, """
+                <Defs><ThingDef><defName>NT_Bramble</defName></ThingDef></Defs>
+                """);
+            bool rejectedDuplicate = false;
+            try { DevCheckCommand.InspectActiveDefinitionExpectations(root); }
+            catch (InvalidDataException) { rejectedDuplicate = true; }
+            if (!rejectedDuplicate)
+                throw new InvalidOperationException("Duplicate active definitions did not fail static discovery.");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
     }
 
 

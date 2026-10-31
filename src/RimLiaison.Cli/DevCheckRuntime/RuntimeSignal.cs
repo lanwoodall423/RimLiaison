@@ -40,10 +40,26 @@ namespace DirectValidationRuntimeSignal
                 bool targetAssemblyLoaded = assemblyResults.Count == 0 || assemblyResults.All(
                     result => result.IndexOf("\"loaded\":true", StringComparison.Ordinal) >= 0);
                 var defResults = new List<string>();
-                foreach (string defName in requestedDefs)
+                var loadedPackages = LoadedModManager.RunningModsListForReading
+                    .Select(mod => mod.PackageId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (string expectation in requestedDefs)
                 {
-                    bool exists = DefDatabase<ThingDef>.GetNamedSilentFail(defName) != null;
-                    defResults.Add("{\"defName\":\"" + Escape(defName) + "\",\"defType\":\"ThingDef\",\"exists\":" + (exists ? "true" : "false") + "}");
+                    string[] parts = expectation.Split('|');
+                    string type = parts.Length > 0 ? parts[0] : "";
+                    string name = parts.Length > 1 ? parts[1] : "";
+                    bool valid = (parts.Length == 2 || parts.Length == 3) &&
+                        name.Length > 0 &&
+                        (type == "ThingDef" || type == "GenStepDef" || type == "TileMutatorDef");
+                    bool applicable = valid &&
+                        (parts.Length == 2 || loadedPackages.Contains(parts[2]));
+                    bool exists = applicable &&
+                        (type == "ThingDef" && DefDatabase<ThingDef>.GetNamedSilentFail(name) != null ||
+                         type == "GenStepDef" && DefDatabase<GenStepDef>.GetNamedSilentFail(name) != null ||
+                         type == "TileMutatorDef" && DefDatabase<TileMutatorDef>.GetNamedSilentFail(name) != null);
+                    defResults.Add("{\"defName\":\"" + Escape(name) +
+                        "\",\"defType\":\"" + Escape(type) +
+                        "\",\"applicable\":" + (applicable ? "true" : "false") +
+                        ",\"exists\":" + (exists ? "true" : "false") + "}");
                 }
 
                 string json = "{\"protocol\":\"" + Protocol + "\",\"timestampUtc\":\"" + Escape(DateTime.UtcNow.ToString("O")) +
