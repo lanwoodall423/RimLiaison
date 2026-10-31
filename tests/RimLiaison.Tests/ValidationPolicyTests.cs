@@ -208,6 +208,176 @@ internal static class ValidationPolicyTests
         }
     }
 
+    public static void CounterfactualHealthyAndMutantAreDistinguished()
+    {
+        for (int seed = 1; seed <= 3; seed++)
+        {
+            CounterfactualContext context = SyntheticContext(seed);
+            CounterfactualAssertion assertion = BrambleRelation();
+            CounterfactualObservation[] healthy = PathSamples(context);
+            CounterfactualResult pass = CounterfactualEvaluator.Evaluate(context, assertion, healthy);
+            AssertEqual(CounterfactualContract.Pass, pass.Status);
+            AssertEqual("SYNTHETIC_RELATION_CONFIRMED", pass.ReasonCode);
+            AssertEqual(1, pass.SampleCount);
+            AssertEqual(30m, pass.ControlValue);
+            AssertEqual(45m, pass.TreatmentValue);
+            AssertEqual("synthetic", pass.Provenance);
+            Assert(!pass.NativeQualified, "A fixture must never qualify a native game run.");
+
+            healthy[1] = healthy[1] with { Value = healthy[0].Value };
+            CounterfactualResult mutation = CounterfactualEvaluator.Evaluate(context, assertion, healthy);
+            AssertEqual(CounterfactualContract.Fail, mutation.Status);
+            AssertEqual("RELATION_VIOLATED", mutation.ReasonCode);
+            Assert(!mutation.NativeQualified, "Even a detected mutant is not native evidence.");
+        }
+    }
+
+    public static void CounterfactualInsufficientCoverageIsInconclusive()
+    {
+        CounterfactualContext context = SyntheticContext(4);
+        CounterfactualObservation[] observations = PathSamples(context);
+        observations[1] = observations[1] with { Coverage = 0 };
+        AssertEqual(CounterfactualContract.Inconclusive,
+            CounterfactualEvaluator.Evaluate(context, BrambleRelation(), observations).Status);
+
+        observations = PathSamples(context);
+        AssertEqual(CounterfactualContract.Inconclusive,
+            CounterfactualEvaluator.Evaluate(context, BrambleRelation(),
+                [observations[1]]).Status);
+        AssertEqual(CounterfactualContract.Inconclusive,
+            CounterfactualEvaluator.Evaluate(context,
+                BrambleRelation() with { MinimumPairs = 2 }, observations).Status);
+        AssertEqual(0, CounterfactualEvaluator.Evaluate(
+            context, BrambleRelation(), Array.Empty<CounterfactualObservation>()).SampleCount);
+    }
+
+    public static void CounterfactualForeignAndMalformedEvidenceIsRejected()
+    {
+        CounterfactualContext context = SyntheticContext(5);
+        CounterfactualObservation[] normal = PathSamples(context);
+        CounterfactualAssertion assertion = BrambleRelation();
+
+        void Reject(CounterfactualContext candidateContext,
+            CounterfactualAssertion candidateAssertion,
+            IReadOnlyList<CounterfactualObservation> candidateEvents,
+            string label)
+        {
+            CounterfactualResult result = CounterfactualEvaluator.Evaluate(
+                candidateContext, candidateAssertion, candidateEvents);
+            AssertEqual(CounterfactualContract.InvalidEvidence, result.Status);
+            Assert(!result.NativeQualified, label + " incorrectly qualified the game.");
+        }
+
+        Reject(context with { Provenance = "live" }, assertion, normal, "fake native evidence");
+        Reject(context with { CurrentLogVerified = true }, assertion, normal, "fake log");
+        Reject(context with { RunnerSha = new string('f', 64) }, assertion, normal, "fake runner");
+        Reject(context with { SourceSha = new string('b', 40) }, assertion, normal, "foreign source");
+        Reject(context with { ExpectedBiome = "BorealForest" }, assertion, normal, "wrong biome");
+        Reject(context with { MapReady = false }, assertion, normal, "missing map-ready");
+        Reject(context with { CleanupComplete = false }, assertion, normal, "missing cleanup");
+        Reject(context with { SchemaVersion = "other" }, assertion, normal, "wrong version");
+
+        Reject(context, assertion, [normal[0], normal[1] with { Nonce = "foreign" }],
+            "foreign nonce");
+        Reject(context, assertion, [normal[0], normal[1] with { SourceSha = new string('c', 40) }],
+            "foreign source event");
+        Reject(context, assertion, [normal[0], normal[1] with { Biome = "BorealForest" }],
+            "wrong event biome");
+        Reject(context, assertion, [normal[0], normal[1] with { Unit = "cells" }],
+            "wrong unit");
+        Reject(context, assertion, [normal[0], normal[1] with { Tick = 101 }],
+            "mismatched ticks");
+        Reject(context, assertion,
+            [normal[0], normal[1] with { ConditionsSha256 = new string('e', 64) }],
+            "mismatched experimental conditions");
+        Reject(context, assertion,
+            [normal[0], normal[1] with { ConditionsSha256 = "not-a-sha256" }],
+            "invalid conditions fingerprint");
+        Reject(context, assertion, [normal[0], normal[1] with { EventId = normal[0].EventId }],
+            "duplicate event");
+        Reject(context, assertion, [normal[0], normal[0] with { EventId = "another-event" }],
+            "duplicate plot/sample");
+        Reject(context, assertion, [normal[0], normal[1] with { EventId = new string('x', 81) }],
+            "oversized token");
+        Reject(context, assertion, [normal[0], normal[1] with { Coverage = -1 }],
+            "negative coverage");
+        Reject(context, assertion,
+            Enumerable.Range(0, 65).Select(index =>
+                normal[0] with { EventId = "e" + index, SampleId = "s" + index }).ToArray(),
+            "oversized observation list");
+        Reject(context, assertion with { Relation = "custom-expression" }, normal,
+            "unknown relation");
+        Reject(context, assertion with { Tolerance = -1m }, normal,
+            "negative tolerance");
+        Reject(context, assertion with { MinimumPairs = 0 }, normal,
+            "vacuous required count");
+    }
+
+    public static void CounterfactualRelationAllowlistHasExplicitBoundaries()
+    {
+        CounterfactualContext context = SyntheticContext(6);
+        CounterfactualObservation[] observations = PathSamples(context);
+        CounterfactualAssertion path = BrambleRelation();
+        CounterfactualResult Evaluate(CounterfactualAssertion assertion,
+            IReadOnlyList<CounterfactualObservation> values) =>
+            CounterfactualEvaluator.Evaluate(context, assertion, values);
+
+        AssertEqual(CounterfactualContract.Pass,
+            Evaluate(path with { Tolerance = 14m }, observations).Status);
+        AssertEqual(CounterfactualContract.Fail,
+            Evaluate(path with { Tolerance = 15m }, observations).Status);
+        AssertEqual(CounterfactualContract.Pass,
+            Evaluate(path with { Relation = "equal", Tolerance = 15m }, observations).Status);
+        AssertEqual(CounterfactualContract.Fail,
+            Evaluate(path with { Relation = "equal", Tolerance = 14m }, observations).Status);
+        AssertEqual(CounterfactualContract.Pass,
+            Evaluate(path with { Relation = "bounded", LowerBound = 40m, UpperBound = 50m },
+                observations).Status);
+        AssertEqual(CounterfactualContract.Fail,
+            Evaluate(path with { Relation = "bounded", LowerBound = 10m, UpperBound = 20m },
+                observations).Status);
+        AssertEqual(CounterfactualContract.InvalidEvidence,
+            Evaluate(path with { Relation = "bounded", LowerBound = 50m, UpperBound = 40m },
+                observations).Status);
+        AssertEqual(CounterfactualContract.Fail,
+            Evaluate(path with { Relation = "no-increase" }, observations).Status);
+        observations[1] = observations[1] with { Value = 30m };
+        AssertEqual(CounterfactualContract.Pass,
+            Evaluate(path with { Relation = "no-increase" }, observations).Status);
+
+        CounterfactualObservation[] twoPairs =
+        [
+            .. PathSamples(context),
+            PathSamples(context)[0] with { EventId = "control2", SampleId = "pair2", Tick = 200 },
+            PathSamples(context)[1] with { EventId = "bramble2", SampleId = "pair2", Tick = 200 }
+        ];
+        CounterfactualResult two = Evaluate(path with { MinimumPairs = 2 }, twoPairs);
+        AssertEqual(CounterfactualContract.Pass, two.Status);
+        AssertEqual(2, two.SampleCount);
+    }
+
+    private static CounterfactualContext SyntheticContext(int seed) =>
+        new(CounterfactualContract.Current, new string('a', 40),
+            "naturetiles", "bramble-route", "fixture-map-" + seed, "nonce-" + seed,
+            seed, "TemperateForest", "TemperateForest", "synthetic",
+            MapReady: true, CurrentLogVerified: false, CleanupComplete: true);
+
+    private static CounterfactualAssertion BrambleRelation() =>
+        new("bramble-path-cost", "path-cost", "ticks", "greater-than",
+            "control", "brambles");
+
+    private static CounterfactualObservation[] PathSamples(CounterfactualContext context) =>
+    [
+        new("control-event", context.SourceSha, context.ScenarioId, context.MapId,
+            context.Nonce, context.Biome, new string('d', 64),
+            "pair1", "control", "path-cost",
+            30m, "ticks", 100, 0),
+        new("bramble-event", context.SourceSha, context.ScenarioId, context.MapId,
+            context.Nonce, context.Biome, new string('d', 64),
+            "pair1", "brambles", "path-cost",
+            45m, "ticks", 100, 4)
+    ];
+
     private static ValidationCheckObservation Observation(
         string id,
         ValidationClassification classification,
