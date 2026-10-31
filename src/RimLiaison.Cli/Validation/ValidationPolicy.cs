@@ -454,7 +454,9 @@ public sealed record MapEventExpectation(
     string PresenceField,
     string IntegrityField,
     string PositiveOutcome,
-    int MaximumCount);
+    int MaximumCount,
+    string? TerminalCountField = null,
+    string? TerminalSelectionField = null);
 
 public sealed record MapEventAssessment(
     string SchemaVersion,
@@ -480,7 +482,8 @@ public static class MapEventEvaluator
 
     private sealed record MapEvent(
         string Schema, int MapId, string Biome, int Width, int Height,
-        string? Outcome, int? Count, bool? Present, bool? Integrity);
+        string? Outcome, int? Count, bool? Present, bool? Integrity,
+        int? TerminalCount = null, bool? TerminalSelected = null);
 
     public static MapEventAssessment Evaluate(
         MapEventExpectation expected, IReadOnlyList<string> logEvents)
@@ -495,23 +498,25 @@ public static class MapEventEvaluator
         MapEventAssessment Invalid(string reason) =>
             Result(MapEventContract.InvalidEvidence, reason);
 
+        string[] declaredFields =
+        [
+            expected.CountField, expected.PresenceField, expected.IntegrityField,
+            .. new[] { expected.TerminalCountField, expected.TerminalSelectionField }
+                .OfType<string>()
+        ];
         if (!Token(expected.EventPrefix, 48) ||
             !SchemaToken(expected.OutcomeSchema) ||
             !SchemaToken(expected.ObservationSchema) ||
             expected.OutcomeSchema == expected.ObservationSchema ||
             !Token(expected.Nonce, 40, minimum: 8) ||
             !Token(expected.ExpectedBiome, 80) ||
-            !Token(expected.CountField, 48) ||
-            !Token(expected.PresenceField, 48) ||
-            !Token(expected.IntegrityField, 48) ||
             !Token(expected.PositiveOutcome, 48) ||
-            new[] { expected.CountField, expected.PresenceField,
-                    expected.IntegrityField }.Distinct(StringComparer.Ordinal).Count() != 3 ||
-            new[] { expected.CountField, expected.PresenceField,
-                    expected.IntegrityField }.Any(value =>
-                    value is "nonce" or "schemaVersion" or "mapUniqueId" or
-                        "mapWidth" or "mapHeight" or "biome" or "outcome" or
-                        "nativeQualified" or "provenance") ||
+            declaredFields.Any(field => !Token(field, 48) ||
+                field is "nonce" or "schemaVersion" or "mapUniqueId" or
+                    "mapWidth" or "mapHeight" or "biome" or "outcome" or
+                    "nativeQualified" or "provenance" or "currentLogVerified" or
+                    "cleanupComplete" or "runnerSha" or "sourceSha") ||
+            declaredFields.Distinct(StringComparer.Ordinal).Count() != declaredFields.Length ||
             expected.MaximumCount is < 1 or > MaximumObservedCount)
             return Invalid("EXPECTATION_CONTRACT_INVALID");
 
@@ -574,8 +579,23 @@ public static class MapEventEvaluator
                     if (!TryString(item, "outcome", out string? outcome) ||
                         !Token(outcome, 48))
                         return Invalid("OUTCOME_FIELD_INVALID");
+                    int? terminalCount = null;
+                    bool? terminalSelected = null;
+                    if (expected.TerminalCountField is not null)
+                    {
+                        if (!TryInteger(item, expected.TerminalCountField, out int value) ||
+                            value is < 0 or > MaximumObservedCount)
+                            return Invalid("TERMINAL_COUNT_INVALID");
+                        terminalCount = value;
+                    }
+                    if (expected.TerminalSelectionField is not null)
+                    {
+                        if (!TryBool(item, expected.TerminalSelectionField, out bool selected))
+                            return Invalid("TERMINAL_SELECTION_INVALID");
+                        terminalSelected = selected;
+                    }
                     record = new(schema, mapId, biome!, width, height,
-                        outcome, null, null, null);
+                        outcome, null, null, null, terminalCount, terminalSelected);
                     if (terminal is not null)
                         return Invalid("DUPLICATE_TERMINAL_EVENT");
                     terminal = record;
@@ -617,6 +637,23 @@ public static class MapEventEvaluator
         if (observed.Integrity != true)
             return Result(MapEventContract.AssertionFailed, "PLACEMENT_INVALID",
                 observed.MapId, metric);
+        if (terminal.TerminalSelected is false &&
+            (terminal.TerminalCount is > 0 ||
+             terminal.Outcome == expected.PositiveOutcome))
+            return Invalid("TERMINAL_SELECTION_CONTRADICTION");
+        if (terminal.TerminalCount is int placed)
+        {
+            if (placed > expected.MaximumCount)
+                return Result(MapEventContract.AssertionFailed,
+                    "TERMINAL_COUNT_BOUND_VIOLATED", observed.MapId, metric);
+            if (placed > metric)
+                return Invalid("TERMINAL_COUNT_OBSERVATION_MISMATCH");
+            if (placed == 0)
+                return terminal.Outcome == expected.PositiveOutcome
+                    ? Invalid("TERMINAL_ZERO_POSITIVE_CONTRADICTION")
+                    : Result(MapEventContract.Inconclusive,
+                        "NO_NEW_FEATURE_PLACED", observed.MapId, metric);
+        }
         if (metric == 0)
             return Result(MapEventContract.Inconclusive, "NO_FEATURE_OBSERVED",
                 observed.MapId, metric);

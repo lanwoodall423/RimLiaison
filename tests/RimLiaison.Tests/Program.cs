@@ -524,6 +524,7 @@ internal static class Program
         ("map event no-feature coverage remains inconclusive", ValidationPolicyTests.MapEventsMissingAndChanceMissStayInconclusive),
         ("map event foreign malformed and duplicates reject", ValidationPolicyTests.MapEventsForeignMalformedAndDuplicateAreInvalid),
         ("map event cap and placement fail closed", ValidationPolicyTests.MapEventsBoundsAndPlacementFailClosed),
+        ("map event terminal and observation consistency", ValidationPolicyTests.MapEventsTerminalGenerationConcordance),
         ("map events support other mod-owned schemas", ValidationPolicyTests.MapEventsAreReusableAcrossModSchemas),
         ("Golden Path completes successfully", GoldenPathTests.SuccessfulGoldenPathCompletion),
         ("Golden Path emits structured production state", GoldenPathTests.ProductionStateAndEventsAreStructured),

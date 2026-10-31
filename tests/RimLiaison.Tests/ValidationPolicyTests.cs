@@ -477,6 +477,100 @@ internal static class ValidationPolicyTests
             MapEventEvaluator.Evaluate(expected, contradictory).Status);
     }
 
+    public static void MapEventsTerminalGenerationConcordance()
+    {
+        MapEventExpectation strict = MapFixture() with
+        {
+            TerminalCountField = "newlyPlaced",
+            TerminalSelectionField = "chanceSelected"
+        };
+        void Expect(string status, string reason, IReadOnlyList<string> events)
+        {
+            MapEventAssessment result = MapEventEvaluator.Evaluate(strict, events);
+            AssertEqual(status, result.Status);
+            AssertEqual(reason, result.ReasonCode);
+            AssertEqual("untrusted-log-text", result.Provenance);
+            Assert(!result.NativeQualified, "Terminal evidence is still untrusted text.");
+        }
+        string[] ChangeTerminal(string source, string replacement)
+        {
+            string[] lines = MapEvents();
+            lines[0] = lines[0].Replace(source, replacement, StringComparison.Ordinal);
+            Assert(lines[0] != MapEvents()[0], "Terminal fixture mutation must apply.");
+            return lines;
+        }
+
+        Expect(MapEventContract.ReadyForNativeReview, "MATCHED_UNTRUSTED_MAP_EVENTS",
+            MapEvents());
+        string[] legitimateMiss = ChangeTerminal(
+            "\"outcome\":\"completed\",\"chanceSelected\":true,\"newlyPlaced\":24",
+            "\"outcome\":\"chance_miss\",\"chanceSelected\":false,\"newlyPlaced\":0");
+        Expect(MapEventContract.Inconclusive, "NO_NEW_FEATURE_PLACED",
+            legitimateMiss); // Existing plants may still be present on the map.
+
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_COUNT_OBSERVATION_MISMATCH",
+            ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":25"));
+        Expect(MapEventContract.AssertionFailed, "TERMINAL_COUNT_BOUND_VIOLATED",
+            ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":351"));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_SELECTION_CONTRADICTION",
+            ChangeTerminal("\"chanceSelected\":true", "\"chanceSelected\":false"));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_ZERO_POSITIVE_CONTRADICTION",
+            ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":0"));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_COUNT_INVALID",
+            ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":\"24\""));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_COUNT_INVALID",
+            ChangeTerminal(",\"newlyPlaced\":24", ""));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_COUNT_INVALID",
+            ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":-1"));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_SELECTION_INVALID",
+            ChangeTerminal("\"chanceSelected\":true", "\"chanceSelected\":\"true\""));
+        Expect(MapEventContract.InvalidEvidence, "TERMINAL_SELECTION_INVALID",
+            ChangeTerminal(",\"chanceSelected\":true", ""));
+
+        AssertEqual("EXPECTATION_CONTRACT_INVALID", MapEventEvaluator.Evaluate(
+            strict with { TerminalCountField = "brambleCount" }, MapEvents()).ReasonCode);
+        AssertEqual("EXPECTATION_CONTRACT_INVALID", MapEventEvaluator.Evaluate(
+            strict with { TerminalSelectionField = "nativeQualified" },
+            MapEvents()).ReasonCode);
+
+        MapEventExpectation other = strict with
+        {
+            EventPrefix = "CrystalQA",
+            OutcomeSchema = "crystal-genstep-outcome/v1",
+            ObservationSchema = "crystal-map-smoke/v1",
+            Nonce = "crystal-run-1234",
+            CountField = "crystalCount",
+            PresenceField = "crystalObserved",
+            IntegrityField = "placementClear",
+            TerminalCountField = "crystalsCreated",
+            TerminalSelectionField = "crystalSelected",
+            PositiveOutcome = "crystals_generated"
+        };
+        string[] independentMod = MapEvents().Select(line => line
+            .Replace("NatureTilesQA", "CrystalQA", StringComparison.Ordinal)
+            .Replace("naturetiles-genstep-outcome/v1", "crystal-genstep-outcome/v1",
+                StringComparison.Ordinal)
+            .Replace("naturetiles-map-smoke/v1", "crystal-map-smoke/v1",
+                StringComparison.Ordinal)
+            .Replace("map-abc12345", "crystal-run-1234", StringComparison.Ordinal)
+            .Replace("brambleCount", "crystalCount", StringComparison.Ordinal)
+            .Replace("featureObserved", "crystalObserved", StringComparison.Ordinal)
+            .Replace("placementValid", "placementClear", StringComparison.Ordinal)
+            .Replace("newlyPlaced", "crystalsCreated", StringComparison.Ordinal)
+            .Replace("chanceSelected", "crystalSelected", StringComparison.Ordinal)
+            .Replace("\"outcome\":\"completed\"", "\"outcome\":\"crystals_generated\"",
+                StringComparison.Ordinal)).ToArray();
+        MapEventAssessment unrelated = MapEventEvaluator.Evaluate(other, independentMod);
+        AssertEqual(MapEventContract.ReadyForNativeReview, unrelated.Status);
+        Assert(!unrelated.NativeQualified, "Other mods cannot claim native proof.");
+
+        // Existing integrations may opt out of terminal-specific evidence,
+        // without any new required field or change in their old outcome.
+        AssertEqual(MapEventContract.ReadyForNativeReview,
+            MapEventEvaluator.Evaluate(MapFixture(),
+                ChangeTerminal("\"newlyPlaced\":24", "\"newlyPlaced\":0")).Status);
+    }
+
     public static void MapEventsAreReusableAcrossModSchemas()
     {
         MapEventExpectation other = MapFixture() with
