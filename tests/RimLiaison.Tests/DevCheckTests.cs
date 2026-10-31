@@ -13,6 +13,179 @@ internal static class DevCheckTests
             throw new InvalidOperationException("dev-check did not preserve its optional workspace positional.");
     }
 
+    public static void WaylithOnlyLayoutRejectsLegacyAndPartialGame()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "Data"));
+            Directory.CreateDirectory(Path.Combine(root, "Mods"));
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "inert");
+            try
+            {
+                DevCheckCommand.ValidateWaylithGameRoot(root);
+                throw new InvalidOperationException("1.6 executable was accepted as Waylith.");
+            }
+            catch (InvalidDataException) { }
+            File.Delete(Path.Combine(root, "RimWorldWin64.exe"));
+            foreach (string name in new[]
+                     { "RimWorld.exe", "Assembly-CSharp.dll", "Waylith.dll", "UnityStubs.dll" })
+                File.WriteAllText(Path.Combine(root, name), "inert");
+            if (DevCheckCommand.ValidateWaylithGameRoot(root) != Path.GetFullPath(root))
+                throw new InvalidOperationException("Complete 1.7 layout was not accepted.");
+            File.Delete(Path.Combine(root, "Waylith.dll"));
+            try
+            {
+                DevCheckCommand.ValidateWaylithGameRoot(root);
+                throw new InvalidOperationException("Partial Waylith root was accepted.");
+            }
+            catch (FileNotFoundException) { }
+            File.WriteAllText(Path.Combine(root, "Waylith.dll"), "inert");
+            File.WriteAllText(Path.Combine(root, "RimWorldWin64.exe"), "inert");
+            try
+            {
+                DevCheckCommand.ValidateWaylithGameRoot(root);
+                throw new InvalidOperationException("Mixed Waylith and Unity root was accepted.");
+            }
+            catch (InvalidDataException) { }
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    public static void WaylithLaunchIsIsolatedAndHasBoundedStartup()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "rimtest-waylith-fixture");
+        string savedata = Path.Combine(root, "owned-test-profile");
+        ProcessStartInfo start = DevCheckCommand.CreateWaylithRuntimeStartInfo(
+            root, savedata,
+            ["ludeon.rimworld", "required.mod", "direct.validation.runtime.signal", "target.mod",
+             "target.mod"]);
+        if (start.FileName != Path.Combine(root, "RimWorld.exe") ||
+            !start.ArgumentList.Contains("-savedatafolder=" + savedata) ||
+            !start.ArgumentList.Contains("-mod=required.mod;direct.validation.runtime.signal;target.mod") ||
+            !start.ArgumentList.Contains("-Headless") ||
+            start.ArgumentList.Contains("-logfile") ||
+            !DevCheckCommand.IsWaylithTargetSelected(start, "target.mod") ||
+            DevCheckCommand.IsWaylithTargetSelected(start, "other.mod") ||
+            !start.RedirectStandardOutput || !start.RedirectStandardError ||
+            DevCheckCommand.WaylithContentLoadTimeout != TimeSpan.FromSeconds(120))
+            throw new InvalidOperationException("Waylith launch lost isolated profile, mod identity or budget.");
+
+        try
+        {
+            DevCheckCommand.CreateWaylithRuntimeStartInfo(
+                root, savedata, ["ludeon.rimworld", "target.mod"]);
+            throw new InvalidOperationException("Waylith start accepted a missing helper.");
+        }
+        catch (InvalidDataException) { }
+    }
+
+    public static void WaylithHelperSdkSelectorStaysInsideFixture()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            string unrelatedSource = Path.Combine(root, "source");
+            string ownedStaging = Path.Combine(root, "staging");
+            Directory.CreateDirectory(unrelatedSource);
+            Directory.CreateDirectory(ownedStaging);
+            string working = DevCheckCommand.PrepareWaylithHelperBuildDirectory(ownedStaging);
+            using JsonDocument json = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(ownedStaging, "global.json")));
+            JsonElement sdk = json.RootElement.GetProperty("sdk");
+            if (working != ownedStaging ||
+                sdk.GetProperty("version").GetString() != "10.0.100" ||
+                sdk.GetProperty("rollForward").GetString() != "latestFeature" ||
+                sdk.GetProperty("allowPrerelease").GetBoolean() ||
+                File.Exists(Path.Combine(unrelatedSource, "global.json")))
+                throw new InvalidOperationException("Private Waylith SDK selection escaped staging.");
+            try
+            {
+                DevCheckCommand.PrepareWaylithHelperBuildDirectory(
+                    Path.Combine(root, "absent"));
+                throw new InvalidOperationException("Missing SDK staging was created implicitly.");
+            }
+            catch (DirectoryNotFoundException) { }
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+    public static void WaylithLogMustMatchExactFreshInvocation()
+    {
+        string root = CreateWorkspace();
+        try
+        {
+            string logPath = Path.Combine(root, "Logs", "Player.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            string savedata = Path.Combine(root, "rimtest-dev-check-savedata-unique-123456");
+            ProcessStartInfo start = DevCheckCommand.CreateWaylithRuntimeStartInfo(
+                root, savedata,
+                ["ludeon.rimworld", "direct.validation.runtime.signal", "target.mod"]);
+            DateTimeOffset began = DateTimeOffset.UtcNow.AddSeconds(-5);
+            DateTimeOffset logStarted = began.AddSeconds(1);
+            DateTimeOffset exited = began.AddSeconds(10);
+            string header = "Started:   " +
+                logStarted.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff zzz",
+                    System.Globalization.CultureInfo.InvariantCulture) +
+                "\nVersion:   1.7.4990.1069\n" +
+                "Log file:  " + logPath + "\n" +
+                "Command:   " + Path.Combine(root, "RimWorld.dll") + "\n" +
+                "-savedatafolder=" + savedata + "\n" +
+                "-mod=direct.validation.runtime.signal;target.mod -Headless\n" +
+                "Other diagnostic output follows.\n";
+
+            if (!DevCheckCommand.VerifyWaylithLogHeader(
+                    header, logPath, root, start, began, exited, out string reason) ||
+                reason != "WAYLITH_LOG_VERIFIED")
+                throw new InvalidOperationException("Valid isolated Waylith log header rejected.");
+
+            void Reject(string altered, string label, DateTimeOffset? alteredBegan = null)
+            {
+                if (DevCheckCommand.VerifyWaylithLogHeader(
+                    altered, logPath, root, start, alteredBegan ?? began,
+                    exited, out _))
+                    throw new InvalidOperationException("Invalid Waylith " + label + " log accepted.");
+            }
+            Reject(header.Replace("unique-123456", "other-run-789"), "wrong run ID");
+            Reject(header.Replace("target.mod -Headless", "other.mod -Headless"), "wrong mods");
+            Reject(header.Replace("1.7.4990.1069", "1.6.4990.1069"), "wrong version");
+            Reject(header.Replace("Log file:  " + logPath, "Log file:  C:\\unrelated.log"), "wrong log path");
+            Reject(header.Replace("-Headless", ""), "nonheadless");
+            Reject(header, "stale timestamp", began.AddMinutes(1));
+
+            File.WriteAllText(logPath, "old log");
+            DevCheckCommand.WaylithLogSnapshot prior =
+                DevCheckCommand.CaptureWaylithLogSnapshot(logPath);
+            File.WriteAllText(logPath, header);
+            if (!DevCheckCommand.TryReadVerifiedWaylithLog(
+                    prior, root, start, began, exited, out string verified,
+                    out string verifiedReason) ||
+                verified != header || verifiedReason != "WAYLITH_LOG_VERIFIED")
+                throw new InvalidOperationException("Fresh matched global Waylith log was rejected.");
+
+            DevCheckCommand.WaylithLogSnapshot now =
+                DevCheckCommand.CaptureWaylithLogSnapshot(logPath);
+            if (DevCheckCommand.TryReadVerifiedWaylithLog(
+                    now, root, start, began, exited, out _, out string unchanged) ||
+                unchanged != "WAYLITH_LOG_UNCHANGED")
+                throw new InvalidOperationException("Unchanged Waylith log was accepted.");
+            File.Delete(logPath);
+            if (DevCheckCommand.TryReadVerifiedWaylithLog(
+                    prior, root, start, began, exited, out _, out _))
+                throw new InvalidOperationException("Missing Waylith log was accepted.");
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
     public static void MissingAboutFailsClosed()
     {
         string workspace = Path.Combine(Path.GetTempPath(), "rimtest-dev-check-test-" + Guid.NewGuid().ToString("N"));
@@ -306,6 +479,8 @@ internal static class DevCheckTests
             File.WriteAllText(Path.Combine(source, "LoadFolders.xml"), "<loadFolders />");
             Directory.CreateDirectory(Path.Combine(source, "1.7", "Assemblies"));
             File.WriteAllText(Path.Combine(source, "1.7", "Assemblies", "Payload.dll"), "payload");
+            Directory.CreateDirectory(Path.Combine(source, "1.6", "Defs"));
+            File.WriteAllText(Path.Combine(source, "1.6", "Defs", "Legacy.xml"), "<Defs />");
             Directory.CreateDirectory(Path.Combine(source, ".git", "objects"));
             File.WriteAllText(Path.Combine(source, ".git", "objects", "read-only-object"), "repository");
             Directory.CreateDirectory(Path.Combine(source, "Source"));
@@ -325,7 +500,7 @@ internal static class DevCheckTests
                 if (!File.Exists(Path.Combine(destination, relative.Replace('/', Path.DirectorySeparatorChar))))
                     throw new InvalidOperationException("Expected runtime payload was not staged: " + relative);
             }
-            string[] forbidden = [".git", "Source", "README.md"];
+            string[] forbidden = [".git", "Source", "README.md", "1.6"];
             foreach (string relative in forbidden)
             {
                 if (Directory.Exists(Path.Combine(destination, relative)) || File.Exists(Path.Combine(destination, relative)))

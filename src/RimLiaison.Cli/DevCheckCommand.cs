@@ -16,7 +16,8 @@ internal static class DevCheckCommand
     private const string BehaviorProtocol = "direct-validation-behavior/v1";
     private const int MaximumDiagnosticLength = 8_192;
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RuntimeTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan RuntimeTimeout = TimeSpan.FromSeconds(120);
+    internal static TimeSpan WaylithContentLoadTimeout => RuntimeTimeout;
 
     public static async Task<int> RunAsync(
         CliRequest request,
@@ -238,6 +239,10 @@ internal static class DevCheckCommand
         {
             string relative = Path.GetRelativePath(workspace, path).Replace(Path.DirectorySeparatorChar, '/');
             string extension = Path.GetExtension(path);
+            if (extension.Equals(".xml", StringComparison.OrdinalIgnoreCase) &&
+                relative.StartsWith("1.", StringComparison.OrdinalIgnoreCase) &&
+                !relative.StartsWith("1.7/", StringComparison.OrdinalIgnoreCase))
+                continue;
             string kind = extension.Equals(".xml", StringComparison.OrdinalIgnoreCase)
                 ? DiscoveredFileKinds.Xml
                 : extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)
@@ -545,19 +550,25 @@ internal static class DevCheckCommand
             state.HelperStagingPath = staging;
             Directory.CreateDirectory(Path.Combine(staging, "About"));
             File.Copy(about, Path.Combine(staging, "About", "About.xml"));
+            // The CLI's .NET 8 global.json must not select an SDK for the
+            // Waylith net10 runtime helper. Only this owned temp dir is written.
+            string helperWorkingDirectory = PrepareWaylithHelperBuildDirectory(staging);
             ProcessResult result = await RunProcessAsync(
                     "dotnet",
-                    ["build", project, "--configuration", "Release", "--nologo", "-p:RimWorldRoot=" + rimWorldRoot, "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
-                    source,
+                    ["build", project, "--configuration", "Release", "--nologo",
+                     "-p:RimWorldRoot=" + rimWorldRoot,
+                     "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar],
+                    helperWorkingDirectory,
                     BuildTimeout,
                     state,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (result.ExitCode != 0 || result.TimedOut)
-                throw new InvalidOperationException("Runtime signal helper build failed: " + Bound(result.Stdout + Environment.NewLine + result.Stderr));
+                throw new InvalidOperationException("Runtime signal helper build failed: " +
+                    Bound(result.Stdout + Environment.NewLine + result.Stderr));
             string assembly = Path.Combine(staging, "1.7", "Assemblies", "DirectValidationRuntimeSignal.dll");
             if (!File.Exists(assembly))
-                throw new InvalidOperationException("Runtime signal helper build produced no assembly.");
+                throw new InvalidOperationException("Runtime signal helper build produced no 1.7 assembly.");
             return staging;
         }
         finally
@@ -566,21 +577,46 @@ internal static class DevCheckCommand
         }
     }
 
+    internal static string PrepareWaylithHelperBuildDirectory(string staging)
+    {
+        if (!Directory.Exists(staging))
+            throw new DirectoryNotFoundException("Owned helper build staging directory is missing.");
+        const string selector =
+            "{\"sdk\":{\"version\":\"10.0.100\",\"rollForward\":\"latestFeature\",\"allowPrerelease\":false}}";
+        File.WriteAllText(Path.Combine(staging, "global.json"), selector, new UTF8Encoding(false));
+        return staging;
+    }
+
     private static string ResolveRimWorldRoot()
     {
         string? configured = Environment.GetEnvironmentVariable("RIMWORLD_ROOT");
         string root = string.IsNullOrWhiteSpace(configured)
             ? @"C:\Games\Steam\steamapps\common\RimWorld"
             : configured;
+        return ValidateWaylithGameRoot(root);
+    }
+
+    // The only supported runtime is 1.7 Waylith. Partial/mixed 1.6 roots
+    // must fail before the game is launched or temporary Mods are staged.
+    internal static string ValidateWaylithGameRoot(string root)
+    {
         string full = Path.GetFullPath(root);
-        if (!File.Exists(Path.Combine(full, "RimWorldWin64.exe")))
-            throw new DirectoryNotFoundException("RimWorld executable is missing: " + full);
-        if (!File.Exists(Path.Combine(full, "Assembly-CSharp.dll")) ||
-            !File.Exists(Path.Combine(full, "Waylith.dll")) ||
-            !File.Exists(Path.Combine(full, "UnityStubs.dll")))
-            throw new FileNotFoundException("Waylith 1.7 game-root assemblies are incomplete.");
-        if (!Directory.Exists(Path.Combine(full, "Mods")))
-            throw new DirectoryNotFoundException("RimWorld Mods directory is missing: " + full);
+        if (!Directory.Exists(full) ||
+            !Directory.Exists(Path.Combine(full, "Data")) ||
+            !Directory.Exists(Path.Combine(full, "Mods")))
+            throw new DirectoryNotFoundException("Waylith 1.7 game root, Data or Mods is missing: " + full);
+
+        if (File.Exists(Path.Combine(full, "RimWorldWin64.exe")) ||
+            File.Exists(Path.Combine(full, "RimWorldWin64_Data", "Managed", "Assembly-CSharp.dll")))
+            throw new InvalidDataException("Mixed or legacy RimWorld 1.6 engine root is unsupported.");
+
+        foreach (string required in new[]
+                 {
+                     "RimWorld.exe", "Assembly-CSharp.dll",
+                     "Waylith.dll", "UnityStubs.dll"
+                 })
+            if (!File.Exists(Path.Combine(full, required)))
+                throw new FileNotFoundException("Incomplete Waylith 1.7 root, missing " + required);
         return full;
     }
 
@@ -600,14 +636,237 @@ internal static class DevCheckCommand
         string projectDirectory = Path.GetDirectoryName(project)!;
         string[] candidates =
         [
-            Path.Combine(workspace, "1.7", "Assemblies", assemblyName + ".dll"),
             Path.Combine(projectDirectory, "bin", "Release", "net10.0", assemblyName + ".dll"),
-            Path.Combine(projectDirectory, "bin", "Release", "net472", assemblyName + ".dll"),
-            Path.Combine(projectDirectory, "bin", "Release", "net48", assemblyName + ".dll"),
-            Path.Combine(projectDirectory, "bin", "Release", "netstandard2.0", assemblyName + ".dll"),
-            Path.Combine(projectDirectory, "bin", "Release", "net8.0", assemblyName + ".dll")
+            Path.Combine(workspace, "1.7", "Assemblies", assemblyName + ".dll")
         ];
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    // Pure launch configuration: only the 1.7 Waylith apphost and an explicit,
+    // isolated list of target/helper/dependencies may be started later by
+    // the separately authorized runtime lease.
+    internal static ProcessStartInfo CreateWaylithRuntimeStartInfo(
+        string rimWorldRoot,
+        string savedata,
+        IReadOnlyList<string> activePackages)
+    {
+        string[] selected = activePackages
+            .Where(id => !id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (selected.Length < 2 ||
+            !selected.Contains(HelperPackageId, StringComparer.OrdinalIgnoreCase) ||
+            selected.All(id => id.Equals(HelperPackageId, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("Waylith isolated launch requires the runtime helper and a target mod.");
+        var start = new ProcessStartInfo(Path.Combine(rimWorldRoot, "RimWorld.exe"))
+        {
+            WorkingDirectory = rimWorldRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("-savedatafolder=" + savedata);
+        start.ArgumentList.Add("-mod=" + string.Join(";", selected));
+        start.ArgumentList.Add("-Headless");
+        return start;
+    }
+
+    internal static bool IsWaylithTargetSelected(ProcessStartInfo start, string packageId) =>
+        start.ArgumentList.Where(arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(arg => arg[5..].Split(';', StringSplitOptions.RemoveEmptyEntries))
+            .Any(id => id.Equals(packageId, StringComparison.OrdinalIgnoreCase));
+
+    private static void EnsureNoConcurrentWaylithGame()
+    {
+        // The game's Player.log is shared even with an isolated savedata
+        // folder; refuse to race another game before staging any mod files.
+        Process[] otherGames = Process.GetProcessesByName("RimWorld");
+        try
+        {
+            if (otherGames.Length > 0)
+                throw new InvalidOperationException(
+                    "WAYLITH_LOG_CONCURRENT_GAME: close RimWorld before isolated dev-check.");
+        }
+        finally
+        {
+            foreach (Process game in otherGames)
+                game.Dispose();
+        }
+    }
+
+    private const long MaximumWaylithLogBytes = 4L * 1024 * 1024;
+    private const int MaximumWaylithHeaderCharacters = 8_192;
+
+    internal sealed record WaylithLogSnapshot(
+        string Path, bool Existed, long Length, DateTime LastWriteUtc);
+
+    internal static string ResolveWaylithLogPath()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Waylith LocalLow log custody requires Windows.");
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(local))
+            throw new DirectoryNotFoundException("Windows LocalAppData is unavailable.");
+        string appData = Path.GetDirectoryName(Path.GetFullPath(local)) ??
+            throw new DirectoryNotFoundException("Cannot determine the Windows AppData root.");
+        return Path.Combine(appData, "LocalLow", "Ludeon Studios",
+            "RimWorld by Ludeon Studios", "Logs", "Player.log");
+    }
+
+    internal static WaylithLogSnapshot CaptureWaylithLogSnapshot(string path)
+    {
+        var info = new FileInfo(path);
+        info.Refresh();
+        return info.Exists
+            ? new WaylithLogSnapshot(path, true, info.Length, info.LastWriteTimeUtc)
+            : new WaylithLogSnapshot(path, false, 0L, DateTime.MinValue);
+    }
+
+    // Inspect the run's global Waylith log without modifying or rotating it.
+    // A matching startup signal alone does not prove that the log belongs to
+    // this child process: the game ignores -savedatafolder for Player.log.
+    internal static bool TryReadVerifiedWaylithLog(
+        WaylithLogSnapshot before,
+        string rimWorldRoot,
+        ProcessStartInfo start,
+        DateTimeOffset childStartedUtc,
+        DateTimeOffset childExitedUtc,
+        out string log,
+        out string reason)
+    {
+        log = string.Empty;
+        reason = "WAYLITH_LOG_MISSING";
+        try
+        {
+            var info = new FileInfo(before.Path);
+            info.Refresh();
+            if (!info.Exists)
+                return false;
+            if (info.Length <= 0 || info.Length > MaximumWaylithLogBytes)
+            {
+                reason = "WAYLITH_LOG_SIZE_UNSUPPORTED";
+                return false;
+            }
+            if (before.Existed &&
+                info.Length == before.Length &&
+                info.LastWriteTimeUtc <= before.LastWriteUtc)
+            {
+                reason = "WAYLITH_LOG_UNCHANGED";
+                return false;
+            }
+            if (info.LastWriteTimeUtc < childStartedUtc.UtcDateTime.AddSeconds(-2))
+            {
+                reason = "WAYLITH_LOG_STALE";
+                return false;
+            }
+
+            string content;
+            long readLength;
+            DateTime readLastWriteUtc = info.LastWriteTimeUtc;
+            using (var stream = new FileStream(before.Path, FileMode.Open,
+                       FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream, Encoding.UTF8,
+                       detectEncodingFromByteOrderMarks: true))
+            {
+                if (stream.Length > MaximumWaylithLogBytes)
+                {
+                    reason = "WAYLITH_LOG_SIZE_UNSUPPORTED";
+                    return false;
+                }
+                readLength = stream.Length;
+                content = reader.ReadToEnd();
+            }
+            info.Refresh();
+            if (!info.Exists || info.Length > MaximumWaylithLogBytes ||
+                info.Length != readLength || info.LastWriteTimeUtc != readLastWriteUtc)
+            {
+                // A changing log is not attributable evidence. Never modify
+                // the normal user log, even if another game starts during us.
+                reason = "WAYLITH_LOG_UNSTABLE";
+                return false;
+            }
+            if (!VerifyWaylithLogHeader(
+                    content, before.Path, rimWorldRoot, start, childStartedUtc,
+                    childExitedUtc, out reason))
+                return false;
+            log = content;
+            reason = "WAYLITH_LOG_VERIFIED";
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            reason = "WAYLITH_LOG_UNREADABLE";
+            return false;
+        }
+    }
+
+    internal static bool VerifyWaylithLogHeader(
+        string content,
+        string logPath,
+        string rimWorldRoot,
+        ProcessStartInfo start,
+        DateTimeOffset childStartedUtc,
+        DateTimeOffset childExitedUtc,
+        out string reason)
+    {
+        reason = "WAYLITH_LOG_PROVENANCE_UNVERIFIED";
+        if (content.Length == 0)
+            return false;
+        string header = content[..Math.Min(content.Length, MaximumWaylithHeaderCharacters)];
+        string[] lines = header.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+        string? Value(string prefix) => lines.Select(line => line.Trim())
+            .Where(line => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .Select(line => line[prefix.Length..].Trim())
+            .FirstOrDefault();
+
+        string? started = Value("Started:");
+        string? version = Value("Version:");
+        string? loggedPath = Value("Log file:");
+        string? command = Value("Command:");
+        if (!DateTimeOffset.TryParse(started,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AllowWhiteSpaces,
+                out DateTimeOffset logStarted))
+            return false;
+        if (logStarted < childStartedUtc.AddSeconds(-2) ||
+            logStarted > childExitedUtc.AddSeconds(2) ||
+            string.IsNullOrWhiteSpace(version) ||
+            !version.StartsWith("1.7.", StringComparison.Ordinal) ||
+            !string.Equals(loggedPath, logPath, StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(command) ||
+            !command.Contains(Path.Combine(rimWorldRoot, "RimWorld.dll"),
+                StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string? savedataArg = start.ArgumentList.SingleOrDefault(
+            arg => arg.StartsWith("-savedatafolder=", StringComparison.OrdinalIgnoreCase));
+        string? modArg = start.ArgumentList.SingleOrDefault(
+            arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase));
+        if (savedataArg is null || modArg is null ||
+            !HasExactLogArgument(header, savedataArg) ||
+            !HasExactLogArgument(header, modArg) ||
+            !HasExactLogArgument(header, "-Headless"))
+            return false;
+        reason = "WAYLITH_LOG_VERIFIED";
+        return true;
+    }
+
+    private static bool HasExactLogArgument(string text, string value)
+    {
+        for (int index = text.IndexOf(value, StringComparison.OrdinalIgnoreCase);
+             index >= 0;
+             index = text.IndexOf(value, index + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            int end = index + value.Length;
+            bool before = index == 0 || char.IsWhiteSpace(text[index - 1]) ||
+                text[index - 1] == '"';
+            bool after = end == text.Length || char.IsWhiteSpace(text[end]) ||
+                text[end] == '"';
+            if (before && after)
+                return true;
+        }
+        return false;
     }
 
     private static async Task<RuntimeResult> RunRuntimeAsync(
@@ -617,6 +876,7 @@ internal static class DevCheckCommand
     {
         long started = Stopwatch.GetTimestamp();
         string modsRoot = Path.Combine(rimWorldRoot, "Mods");
+        EnsureNoConcurrentWaylithGame();
         if (IsWithin(modsRoot, state.Workspace))
             throw new InvalidDataException("The target workspace cannot be inside the active RimWorld Mods directory.");
         string deployment = Path.Combine(modsRoot, ".rimtest-dev-check-" + Guid.NewGuid().ToString("N"));
@@ -654,22 +914,13 @@ internal static class DevCheckCommand
             string configDirectory = Path.Combine(savedata, "Config");
             Directory.CreateDirectory(configDirectory);
             string configPath = Path.Combine(configDirectory, "ModsConfig.xml");
-            WriteModsConfig(configPath, BuildActiveModPackageIds(state.Mod.PackageId, dependencies));
+            IReadOnlyList<string> activePackages = BuildActiveModPackageIds(state.Mod.PackageId, dependencies);
+            WriteModsConfig(configPath, activePackages);
             string signalPath = Path.Combine(savedata, "direct-validation-signal.json");
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
-            string logPath = Path.Combine(savedata, "rimworld-direct-validation.log");
-            string executable = Path.Combine(rimWorldRoot, "RimWorldWin64.exe");
-            var start = new ProcessStartInfo(executable)
-            {
-                WorkingDirectory = rimWorldRoot,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            start.ArgumentList.Add("-savedatafolder=" + savedata);
-            start.ArgumentList.Add("-logfile");
-            start.ArgumentList.Add(logPath);
+            string logPath = ResolveWaylithLogPath();
+            WaylithLogSnapshot priorGlobalLog = CaptureWaylithLogSnapshot(logPath);
+            ProcessStartInfo start = CreateWaylithRuntimeStartInfo(rimWorldRoot, savedata, activePackages);
             start.Environment["DIRECT_VALIDATION_TARGET_PACKAGE"] = state.Mod.PackageId;
             start.Environment["DIRECT_VALIDATION_TARGET_DEFS"] = string.Join(';', state.ChangedDefs);
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
@@ -679,9 +930,10 @@ internal static class DevCheckCommand
             process = new Process { StartInfo = start };
             state.LaunchedProcess = process;
             state.RuntimeProcessExitConfirmed = false;
+            DateTimeOffset childStartedUtc = DateTimeOffset.UtcNow;
             if (!process.Start())
                 throw new InvalidOperationException("RimWorld process did not start.");
-            state.Processes.Add("RimWorldWin64.exe");
+            state.Processes.Add("RimWorld.exe");
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
             DateTime deadline = DateTime.UtcNow + RuntimeTimeout;
@@ -714,13 +966,15 @@ internal static class DevCheckCommand
                     terminateIfRunning: true,
                     cancellationToken)
                 .ConfigureAwait(false);
+            DateTimeOffset childExitedUtc = DateTimeOffset.UtcNow;
             state.RuntimeProcessExitConfirmed = true;
             state.LaunchedProcess = null;
             process.Dispose();
             process = null;
-            string log = File.Exists(logPath) ? ReadRuntimeLog(logPath) : string.Empty;
+            bool logVerified = TryReadVerifiedWaylithLog(priorGlobalLog, rimWorldRoot,
+                start, childStartedUtc, childExitedUtc, out string log, out string logFailure);
             state.RelevantErrors.AddRange(FindTargetErrors(log, state));
-            bool targetConfigured = IsTargetConfigured(configPath, state.Mod.PackageId);
+            bool targetConfigured = IsWaylithTargetSelected(start, state.Mod.PackageId);
             RuntimeResult result = ParseRuntime(
                 signal,
                 state,
@@ -728,10 +982,15 @@ internal static class DevCheckCommand
                 targetConfigured,
                 completed.ControlledTermination,
                 completed.ExitCode);
+            if (!logVerified)
+                result = result with { Status = "RUNTIME_LOAD_FAIL", Reason = logFailure };
             return result with
             {
                 RuntimeSeconds = Math.Round(ElapsedMilliseconds(started) / 1000d, 3),
-                LogProduced = File.Exists(logPath)
+                LogProduced = logVerified,
+                Evidence = [.. result.Evidence,
+                    "waylithLogVerified=" + logVerified,
+                    "waylithLogStatus=" + logFailure]
             };
         }
         finally
@@ -1158,17 +1417,12 @@ internal static class DevCheckCommand
             Directory.CreateDirectory(destination);
             File.Copy(loadFolders, Path.Combine(destination, "LoadFolders.xml"), overwrite: true);
         }
-        foreach (string directory in Directory.EnumerateDirectories(source, "1.*", SearchOption.TopDirectoryOnly)
-                     .Where(path => IsVersionedRuntimeDirectory(Path.GetFileName(path))))
-        {
-            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
-        }
+        // Historical 1.6 and other runtime directories are source inputs,
+        // not deployable content in this 1.7-only game test.
+        string waylith = Path.Combine(source, "1.7");
+        if (Directory.Exists(waylith))
+            CopyDirectory(waylith, Path.Combine(destination, "1.7"));
     }
-
-    private static bool IsVersionedRuntimeDirectory(string name) =>
-        name.StartsWith("1.", StringComparison.Ordinal) &&
-        name.Length > 2 &&
-        name[2..].All(char.IsDigit);
 
     private static void CopyDirectory(string source, string destination)
     {
