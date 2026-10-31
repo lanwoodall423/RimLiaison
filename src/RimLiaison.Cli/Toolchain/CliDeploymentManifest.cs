@@ -892,6 +892,124 @@ internal static class NativeRimtestPackageVerificationCommand
         }));
 }
 
+// Read-only fixed-account candidate identity handoff for a *future* PN-owned
+// child process. This command does not resolve PATH, import, install or spawn.
+// No caller directory, apphost name, command or environment override is allowed.
+internal static class NativeRimtestChildPreflightCommand
+{
+    internal const string Name = "rimtest-child-preflight";
+    private const string Schema = "rimtest-child-preflight/v1";
+
+    internal static bool IsRequested(IReadOnlyList<string> args) =>
+        args.Count > 0 && args[0] == Name;
+
+    internal static bool TryParse(
+        IReadOnlyList<string> args, out string? sourceCommit,
+        out string? packageSha256)
+    {
+        sourceCommit = packageSha256 = null;
+        if (args.Count != 4 || args[0] != Name || args[3] != "--json" ||
+            !LowerHex(args[1], 40) || !LowerHex(args[2], 64))
+            return false;
+        sourceCommit = args[1];
+        packageSha256 = args[2];
+        return true;
+    }
+
+    internal static int Run(string[] args, TextWriter stdout)
+    {
+        if (!OperatingSystem.IsWindows())
+            return Block(stdout, "RIMTEST_CHILD_WINDOWS_REQUIRED");
+        string local = Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(local))
+            return Block(stdout, "RIMTEST_CHILD_ACCOUNT_ROOT_UNAVAILABLE");
+        return RunForTests(args, stdout, Path.Combine(
+            local, "RimLiaison", "Rimtest", "CandidatePackages"));
+    }
+
+    // The test-only injected root never appears in a user-facing CLI arg.
+    internal static int RunForTests(
+        IReadOnlyList<string> args, TextWriter stdout, string candidateParent)
+    {
+        if (!TryParse(args, out string? sourceCommit,
+                out string? packageSha256))
+            return Block(stdout, "RIMTEST_CHILD_ARGUMENTS_INVALID");
+
+        try
+        {
+            string parent = Path.GetFullPath(candidateParent);
+            string root = Path.Combine(parent, "rimtest-" + sourceCommit);
+            if (!NativeRimtestPackageService.Verify(root, sourceCommit, out _))
+                return Block(stdout, "RIMTEST_CHILD_CANDIDATE_INVALID");
+
+            string manifestPath = Path.Combine(
+                root, CliDeploymentManifestService.FileName);
+            if (!CliDeploymentManifestService.Verify(
+                    root, manifestPath, null, packageSha256,
+                    out CliDeploymentManifest? manifest, out _) ||
+                manifest is null || manifest.SourceCommit != sourceCommit ||
+                manifest.TargetFramework != "net8.0" ||
+                manifest.PackageSha256 != packageSha256)
+                return Block(stdout, "RIMTEST_CHILD_PACKAGE_HASH_MISMATCH");
+
+            string runner = Path.Combine(
+                root, NativeRimtestPackageService.RunnerExecutableFileName);
+            string runnerSha256 = ToolchainFileHash.Sha256(runner);
+            string manifestSha256 = ToolchainFileHash.Sha256(manifestPath);
+
+            // This is observational identity evidence, NOT launch authority.
+            stdout.WriteLine(JsonSerializer.Serialize(new
+            {
+                schemaVersion = Schema,
+                status = "candidate-child-preflight-only",
+                sourceCommit,
+                packageSha256,
+                manifestSha256,
+                runnerExeSha256 = runnerSha256,
+                runnerExecutablePath = runner,
+                installed = false,
+                pathConfigured = false,
+                qualified = false,
+                pnCheckPassed = false,
+                gameLaunchAuthorized = false,
+                hostMutationAuthorized = false,
+                childProcessAuthorized = false
+            }));
+            return RimLiaison.CliExitCodes.Success;
+        }
+        catch (Exception exception) when (exception is IOException or
+            UnauthorizedAccessException or ArgumentException or
+            NotSupportedException or InvalidDataException or JsonException or
+            System.Security.SecurityException)
+        {
+            return Block(stdout, "RIMTEST_CHILD_EVIDENCE_UNAVAILABLE");
+        }
+    }
+
+    private static bool LowerHex(string? value, int length) =>
+        value is not null && value.Length == length &&
+        value.All(ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static int Block(TextWriter output, string code)
+    {
+        output.WriteLine(JsonSerializer.Serialize(new
+        {
+            schemaVersion = Schema,
+            status = "blocked",
+            code,
+            installed = false,
+            pathConfigured = false,
+            qualified = false,
+            pnCheckPassed = false,
+            gameLaunchAuthorized = false,
+            hostMutationAuthorized = false,
+            childProcessAuthorized = false
+        }));
+        return RimLiaison.CliExitCodes.ConservativeSelection;
+    }
+}
+
 // Purely observational prerequisite for the trusted NatureTiles
 // "rimtest dev-check --json" check. This inspects the current PROCESS's
 // Windows PATH, not a future PN executor's PATH or process spawn result.

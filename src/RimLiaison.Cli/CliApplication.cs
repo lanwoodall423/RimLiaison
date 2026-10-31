@@ -114,6 +114,8 @@ public static class CliApplication
                 args, stdout, cancellationToken).ConfigureAwait(false);
         if (NativeRimtestPackageVerificationCommand.IsRequested(args))
             return NativeRimtestPackageVerificationCommand.Run(args, stdout);
+        if (NativeRimtestChildPreflightCommand.IsRequested(args))
+            return NativeRimtestChildPreflightCommand.Run(args, stdout);
         if (NativeRimtestPathPreflightCommand.IsRequested(args))
             return NativeRimtestPathPreflightCommand.Run(args, stdout);
         if (NativeRimtestSourcePublishCommand.IsRequested(args))

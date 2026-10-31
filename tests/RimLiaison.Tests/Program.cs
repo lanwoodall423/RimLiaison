@@ -162,6 +162,7 @@ internal static class Program
         ("native candidate install preserves full closure without changing PATH", CliDeploymentTests.NativeCandidateInstallCopiesVerifiedClosureWithoutPATHChanges),
         ("native publisher resolves only pinned Windows .NET hosts", CliDeploymentTests.NativePublisherResolvesOnlyExplicitOrKnownWindowsDotnetHosts),
         ("native source-pinned publish is bounded and candidate-only", CliDeploymentTests.NativeRimtestSourcePublishIsPinnedAndNeverInstalls),
+        ("read-only child preflight binds imported candidate to source and package hash", CliDeploymentTests.NativeChildPreflightOnlyReturnsVerifiedCandidateForFutureChild),
         ("native PATH preflight rejects missing and shadowed runners", CliDeploymentTests.NativeRimtestPathPreflightRejectsMissingShadowedAndCorruptExecutables),
         ("native candidate verification fails closed and makes no changes", CliDeploymentTests.NativeRimtestCandidateVerificationIsReadOnlyAndBoundToExactPackage),
         ("native candidate packaging CLI rejects invalid commands", CliDeploymentTests.NativeRimtestCandidatePackagingCommandIsStrictAndInertOnBadInput),

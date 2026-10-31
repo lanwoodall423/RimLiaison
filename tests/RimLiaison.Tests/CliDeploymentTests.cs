@@ -571,6 +571,132 @@ internal static class CliDeploymentTests
         }
     }
 
+    public static void NativeChildPreflightOnlyReturnsVerifiedCandidateForFutureChild()
+    {
+        (string root, string source, string publish, string packages) =
+            NativePackageFixture();
+        string commit = new('a', 40);
+        try
+        {
+            NativeRimtestPackageCandidate candidate =
+                NativeRimtestPackageService.StageForTestsAsync(
+                        source, publish, commit, packages,
+                        new FixtureNativeGitState(source, commit))
+                    .GetAwaiter().GetResult();
+            string runner = Path.Combine(candidate.PackageRoot, "rimtest.exe");
+            string manifest = Path.Combine(
+                candidate.PackageRoot, CliDeploymentManifestService.FileName);
+            string[] cmd =
+            [
+                NativeRimtestChildPreflightCommand.Name,
+                commit, candidate.PackageSha256, "--json"
+            ];
+
+            static (int Exit, JsonDocument Json) Run(
+                IReadOnlyList<string> args, string packages)
+            {
+                using StringWriter output = new();
+                int exit = NativeRimtestChildPreflightCommand.RunForTests(
+                    args, output, packages);
+                JsonDocument result = JsonDocument.Parse(output.ToString());
+                foreach (string flag in new[]
+                         {
+                             "installed", "pathConfigured", "qualified",
+                             "pnCheckPassed", "gameLaunchAuthorized",
+                             "hostMutationAuthorized", "childProcessAuthorized"
+                         })
+                    Assert(!result.RootElement.GetProperty(flag).GetBoolean(),
+                        "child identity preflight must never grant " + flag);
+                return (exit, result);
+            }
+
+            Assert(NativeRimtestChildPreflightCommand.TryParse(
+                       cmd, out string? sourceSha, out string? packageSha) &&
+                   sourceSha == commit && packageSha == candidate.PackageSha256,
+                "child preflight must accept only a canonical source and package hash");
+            string prior = SnapshotTree(root);
+            var (exit, positive) = Run(cmd, packages);
+            using (positive)
+            {
+                JsonElement doc = positive.RootElement;
+                Assert(exit == CliExitCodes.Success &&
+                       doc.GetProperty("status").GetString() ==
+                           "candidate-child-preflight-only" &&
+                       doc.GetProperty("sourceCommit").GetString() == commit &&
+                       doc.GetProperty("packageSha256").GetString() ==
+                           candidate.PackageSha256 &&
+                       doc.GetProperty("manifestSha256").GetString() ==
+                           ToolchainFileHash.Sha256(manifest) &&
+                       doc.GetProperty("runnerExeSha256").GetString() ==
+                           ToolchainFileHash.Sha256(runner) &&
+                       doc.GetProperty("runnerExecutablePath").GetString() ==
+                           runner && SnapshotTree(root) == prior,
+                    "full-closure candidate must produce read-only identity for a later child");
+            }
+
+            foreach (string[] malformed in new[]
+                     {
+                         cmd[..^1],
+                         new[] { cmd[0], commit.ToUpperInvariant(), cmd[2], "--json" },
+                         new[] { cmd[0], commit, cmd[2].ToUpperInvariant(), "--json" },
+                         new[] { cmd[0], commit, cmd[2], "--install" },
+                         new[] { cmd[0], commit, cmd[2], "--json", "--force" },
+                         new[] { cmd[0], @"C:\RimWorld", cmd[2], "--json" },
+                     })
+            {
+                var result = Run(malformed, packages);
+                using (result.Json)
+                    Assert(result.Exit == CliExitCodes.ConservativeSelection &&
+                           result.Json.RootElement.GetProperty("code").GetString() ==
+                               "RIMTEST_CHILD_ARGUMENTS_INVALID",
+                        "noncanonical or host-changing flags must be rejected");
+            }
+            var absent = Run(cmd, Path.Combine(root, "absent"));
+            using (absent.Json)
+                Assert(absent.Exit == CliExitCodes.ConservativeSelection &&
+                       absent.Json.RootElement.GetProperty("code").GetString() ==
+                           "RIMTEST_CHILD_CANDIDATE_INVALID",
+                    "missing candidate cannot supply executable identity");
+            var mismatch = Run(
+                [cmd[0], commit, new string('b', 64), "--json"], packages);
+            using (mismatch.Json)
+                Assert(mismatch.Exit == CliExitCodes.ConservativeSelection &&
+                       mismatch.Json.RootElement.GetProperty("code").GetString() ==
+                           "RIMTEST_CHILD_PACKAGE_HASH_MISMATCH",
+                    "wrong package hash must fail even with valid native source");
+            var foreign = Run(
+                [cmd[0], new string('b', 40), cmd[2], "--json"], packages);
+            using (foreign.Json)
+                Assert(foreign.Exit == CliExitCodes.ConservativeSelection,
+                    "wrong source package must be unavailable");
+
+            string deps = Path.Combine(
+                candidate.PackageRoot, "rimliaison.deps.json");
+            File.AppendAllText(deps, "tampered");
+            var tampered = Run(cmd, packages);
+            using (tampered.Json)
+                Assert(tampered.Exit == CliExitCodes.ConservativeSelection &&
+                       tampered.Json.RootElement.GetProperty("code").GetString() ==
+                           "RIMTEST_CHILD_CANDIDATE_INVALID",
+                    "modified native runtime dependency must fail closed");
+
+            // The only files written in this test are in the owned fixture tree.
+            Assert(!Directory.Exists(Path.Combine(root, "Installed")) &&
+                   !Directory.EnumerateDirectories(packages,
+                       ".rimtest-import-*").Any(),
+                "read-only preflight cannot install, stage or change PATH");
+            NativeRimtestRunner.Dispatch? denied = NativeRimtestRunner.Prepare(
+                runner, cmd, source);
+            Assert(denied is not null && !denied.Allowed &&
+                   denied.ErrorCode == "DEV_RUNNER_COMMAND_NOT_ALLOWED",
+                "the restricted runner must not expose this normal CLI command");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static void NativeRimtestPathPreflightRejectsMissingShadowedAndCorruptExecutables()
     {
         (string root, string source, string publish, string packages) = NativePackageFixture();
