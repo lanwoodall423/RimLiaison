@@ -183,6 +183,7 @@ internal static class Program
         ("Waylith root rejects partial and legacy engines", DevCheckTests.WaylithOnlyLayoutRejectsLegacyAndPartialGame),
         ("Waylith launch has owned savedata mod selection and 120s limit", DevCheckTests.WaylithLaunchIsIsolatedAndHasBoundedStartup),
         ("Waylith SDK selector stays in owned test directory", DevCheckTests.WaylithHelperSdkSelectorStaysInsideFixture),
+        ("Waylith net10 standalone helper compiles with pinned reference", DevCheckTests.WaylithRuntimeHelperCompilesAgainstPinnedReferences),
         ("Waylith log must identify fresh exact child", DevCheckTests.WaylithLogMustMatchExactFreshInvocation),
         ("dev-check missing About fails closed", DevCheckTests.MissingAboutFailsClosed),
         ("dev-check selects referenced production projects", DevCheckTests.SelectsReferencedProductionProjects),

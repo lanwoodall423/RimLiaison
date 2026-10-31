@@ -116,6 +116,129 @@ internal static class DevCheckTests
         }
     }
 
+    // The CLI solution build intentionally copies this source as Content rather
+    // than compiling it. This game-free regression proves the real net10 helper
+    // compiles with the separately pinned Waylith reference assemblies.
+    public static void WaylithRuntimeHelperCompilesAgainstPinnedReferences()
+    {
+        string? sourceRoot = Path.GetFullPath(AppContext.BaseDirectory);
+        string? helperProject = null;
+        string? helperSource = null;
+        for (int depth = 0; depth < 10 && sourceRoot is not null; depth++)
+        {
+            string candidate = Path.Combine(sourceRoot, "src", "RimLiaison.Cli", "DevCheckRuntime");
+            string project = Path.Combine(candidate, "DirectValidationRuntimeSignal.csproj");
+            string source = Path.Combine(candidate, "RuntimeSignal.cs");
+            if (File.Exists(project) && File.Exists(source))
+            {
+                helperProject = project;
+                helperSource = source;
+                break;
+            }
+            sourceRoot = Directory.GetParent(sourceRoot)?.FullName;
+        }
+        if (helperProject is null || helperSource is null)
+            throw new InvalidOperationException("Tracked standalone Waylith helper source was not found.");
+
+        static void RequirePinnedHelper(string project, string source)
+        {
+            if (!File.Exists(project) || !File.Exists(source) || new FileInfo(source).Length == 0)
+                throw new InvalidDataException("Standalone Waylith helper inputs are missing.");
+            var document = System.Xml.Linq.XDocument.Load(project);
+            string? framework = document.Descendants()
+                .FirstOrDefault(x => x.Name.LocalName == "TargetFramework")?.Value.Trim();
+            string? outputType = document.Descendants()
+                .FirstOrDefault(x => x.Name.LocalName == "OutputType")?.Value.Trim();
+            var pins = document.Descendants()
+                .Where(x => x.Name.LocalName == "PackageReference" &&
+                    (string?)x.Attribute("Include") == "Krafs.Rimworld.Ref")
+                .ToArray();
+            if (framework != "net10.0" || outputType != "Library" ||
+                pins.Length != 1 || (string?)pins[0].Attribute("Version") != "1.7.4990-unstable")
+                throw new InvalidDataException("Standalone Waylith helper version or references drifted.");
+        }
+
+        RequirePinnedHelper(helperProject, helperSource);
+        string staging = Path.Combine(Path.GetTempPath(),
+            "rimliaison-waylith-helper-compile-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string ownedSource = Path.Combine(staging, "helper");
+            Directory.CreateDirectory(ownedSource);
+            string project = Path.Combine(ownedSource, "DirectValidationRuntimeSignal.csproj");
+            string source = Path.Combine(ownedSource, "RuntimeSignal.cs");
+            File.Copy(helperProject, project);
+            File.Copy(helperSource, source);
+            RequirePinnedHelper(project, source);
+            string working = DevCheckCommand.PrepareWaylithHelperBuildDirectory(staging);
+            var start = new ProcessStartInfo("dotnet")
+            {
+                WorkingDirectory = working,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            foreach (string argument in new[]
+            {
+                "build", project, "--configuration", "Release", "--nologo",
+                "-p:DevCheckRuntimePackageRoot=" + staging + Path.DirectorySeparatorChar
+            })
+                start.ArgumentList.Add(argument);
+            start.Environment["DOTNET_CLI_HOME"] = staging;
+            start.Environment["DOTNET_NOLOGO"] = "1";
+            using Process child = Process.Start(start) ??
+                throw new InvalidOperationException("Pinned Waylith helper compiler process did not start.");
+            Task<string> output = child.StandardOutput.ReadToEndAsync();
+            Task<string> error = child.StandardError.ReadToEndAsync();
+            if (!child.WaitForExit(150_000))
+            {
+                child.Kill(entireProcessTree: true);
+                if (!child.WaitForExit(10_000))
+                    throw new InvalidOperationException("Waylith helper compiler process exit not confirmed.");
+                throw new InvalidOperationException("Waylith helper compilation exceeded its timeout.");
+            }
+            Task.WhenAll(output, error).GetAwaiter().GetResult();
+            if (child.ExitCode != 0)
+            {
+                string message = (output.Result + Environment.NewLine + error.Result);
+                throw new InvalidOperationException("Pinned Waylith helper compilation failed: " +
+                    message[..Math.Min(message.Length, 1800)]);
+            }
+            string assembly = Path.Combine(staging, "1.7", "Assemblies",
+                "DirectValidationRuntimeSignal.dll");
+            if (!File.Exists(assembly) || new FileInfo(assembly).Length < 2)
+                throw new InvalidOperationException("Pinned Waylith compiler produced no runtime helper DLL.");
+            using (FileStream compiled = File.OpenRead(assembly))
+            {
+                if (compiled.ReadByte() != 'M' || compiled.ReadByte() != 'Z')
+                    throw new InvalidOperationException("Pinned Waylith helper output is not a PE assembly.");
+            }
+
+            // The input guards are exercised on disposable copies; no game files.
+            string tampered = File.ReadAllText(project)
+                .Replace("1.7.4990-unstable", "1.6.4871", StringComparison.Ordinal);
+            File.WriteAllText(project, tampered);
+            try
+            {
+                RequirePinnedHelper(project, source);
+                throw new InvalidOperationException("Wrong Waylith reference version was accepted.");
+            }
+            catch (InvalidDataException) { }
+            File.Delete(source);
+            try
+            {
+                RequirePinnedHelper(project, source);
+                throw new InvalidOperationException("Missing helper source was accepted.");
+            }
+            catch (InvalidDataException) { }
+        }
+        finally
+        {
+            DeleteWorkspace(staging);
+        }
+    }
+
     public static void WaylithLogMustMatchExactFreshInvocation()
     {
         string root = CreateWorkspace();
