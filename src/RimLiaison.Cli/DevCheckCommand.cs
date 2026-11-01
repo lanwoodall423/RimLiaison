@@ -517,12 +517,19 @@ internal static class DevCheckCommand
     private static void AddDefinitionExpectation(
         State state, string type, XmlNode node, string relativePath)
     {
-        string name = node.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
         string mayRequire = node.Attributes?["MayRequire"]?.Value.Trim() ?? string.Empty;
         static bool SafeToken(string token) =>
             token.Length is > 0 and <= 128 &&
             token.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-');
-        if (!SafeToken(name) || (mayRequire.Length > 0 && !SafeToken(mayRequire)))
+        if (mayRequire.Length > 0 && !SafeToken(mayRequire))
+            throw new InvalidDataException("Invalid " + type + " identity or MayRequire in " + relativePath + ".");
+        // RimWorld Abstract=True Defs are inheritance templates, not registered
+        // concrete definitions; their Name need not be a defName.
+        if (string.Equals(node.Attributes?["Abstract"]?.Value.Trim(), "True",
+                StringComparison.OrdinalIgnoreCase))
+            return;
+        string name = node.SelectSingleNode("./defName")?.InnerText.Trim() ?? string.Empty;
+        if (!SafeToken(name))
             throw new InvalidDataException("Invalid " + type + " identity or MayRequire in " + relativePath + ".");
         string expectation = type + "|" + name +
             (mayRequire.Length > 0 ? "|" + mayRequire : string.Empty);

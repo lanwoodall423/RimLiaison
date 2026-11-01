@@ -725,8 +725,11 @@ internal static class DevCheckTests
             Directory.CreateDirectory(legacyDirectory);
             File.WriteAllText(Path.Combine(activeDirectory, "NatureTiles.xml"), """
                 <Defs>
-                  <ThingDef><defName>NT_Bramble</defName></ThingDef>
-                  <GenStepDef><defName>NT_BrambleThickets</defName></GenStepDef>
+                  <ThingDef Name="NT_BrambleTemplate" Abstract="True"><label>template only</label></ThingDef>
+                  <ThingDef ParentName="NT_BrambleTemplate"><defName>NT_Bramble</defName></ThingDef>
+                  <GenStepDef Name="NT_GenStepTemplate" Abstract="true" />
+                  <GenStepDef ParentName="NT_GenStepTemplate"><defName>NT_BrambleThickets</defName></GenStepDef>
+                  <TileMutatorDef Name="NT_TileTemplate" Abstract="True" />
                   <TileMutatorDef MayRequire="Ludeon.RimWorld.Odyssey">
                     <defName>NT_BrambleThicketMutator</defName>
                   </TileMutatorDef>
@@ -812,6 +815,17 @@ internal static class DevCheckTests
             catch (InvalidDataException) { rejectedDuplicate = true; }
             if (!rejectedDuplicate)
                 throw new InvalidOperationException("Duplicate active definitions did not fail static discovery.");
+
+            File.Delete(duplicate);
+            string missing = Path.Combine(activeDirectory, "MissingIdentity.xml");
+            File.WriteAllText(missing, """
+                <Defs><ThingDef ParentName="NT_BrambleTemplate"><label>unnamed concrete Def</label></ThingDef></Defs>
+                """);
+            bool rejectedMissingIdentity = false;
+            try { DevCheckCommand.InspectActiveDefinitionExpectations(root); }
+            catch (InvalidDataException) { rejectedMissingIdentity = true; }
+            if (!rejectedMissingIdentity)
+                throw new InvalidOperationException("Concrete ThingDef without defName was accepted.");
         }
         finally
         {
