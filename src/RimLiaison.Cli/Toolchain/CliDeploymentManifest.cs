@@ -1707,8 +1707,12 @@ internal static class NativeRimtestManagedArtifactImportCommand
             string operations = Path.GetFullPath(operationsRoot);
             string candidates = Path.GetFullPath(candidatesRoot);
             string operationFile = Path.Combine(operations, operationId! + ".json");
+            // ProjectNexus captures into operationPaths(id).outputs directly:
+            // <id>.outputs/artifacts/<declared filename>. The operation's
+            // evidencePath begins with logical "outputs/" relative to its
+            // durable evidence root; it is NOT another physical subfolder.
             string captured = Path.Combine(operations, operationId + ".outputs",
-                "outputs", "artifacts");
+                "artifacts");
             string archive = Path.Combine(captured, "rimtest-native-candidate.zip");
             string receiptFile = Path.Combine(captured, "rimtest-native-build.json");
 

@@ -1307,8 +1307,15 @@ internal static class CliDeploymentTests
         string commit = new('a', 40);
         string operationId = Guid.NewGuid().ToString("D");
         string operations = Path.Combine(root, "pn-operations");
+        // Match ProjectNexus's actual outputCaptureRoot=<id>.outputs and
+        // declared output path artifacts/<filename>, not duplicated outputs.
         string captured = Path.Combine(operations, operationId + ".outputs",
-            "outputs", "artifacts");
+            "artifacts");
+        string legacyDuplicated = Path.Combine(operations,
+            operationId + ".outputs", "outputs", "artifacts");
+        Assert(!Path.GetFullPath(captured).Equals(
+            Path.GetFullPath(legacyDuplicated), StringComparison.OrdinalIgnoreCase),
+            "actual captured output directory must not contain duplicated outputs");
         string zip = Path.Combine(captured, "rimtest-native-candidate.zip");
         string receipt = Path.Combine(captured, "rimtest-native-build.json");
         string record = Path.Combine(operations, operationId + ".json");
