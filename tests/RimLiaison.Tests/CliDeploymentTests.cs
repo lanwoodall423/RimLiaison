@@ -110,7 +110,7 @@ internal static class CliDeploymentTests
         JsonElement capabilities = manifest.RootElement.GetProperty("capabilities");
         JsonElement[] operations = capabilities.GetProperty("localOperations")
             .EnumerateArray().ToArray();
-        Assert(operations.Length == 1 &&
+        Assert(operations.Length == 2 &&
                operations[0].GetProperty("operationId").GetString() ==
                    "native.rimtest-artifact-build" &&
                operations[0].GetProperty("sideEffectClass").GetString() ==
@@ -149,6 +149,37 @@ internal static class CliDeploymentTests
         Assert(inputs.Contains("global.json") &&
                inputs.Contains("src/RimLiaison.Cli/Toolchain/CliDeploymentManifest.cs"),
             "managed operation trust must bind SDK pin and artifact producer source");
+
+        JsonElement audit = operations[1];
+        JsonElement auditCommand = audit.GetProperty("command");
+        string[] auditArgs = auditCommand.GetProperty("args")
+            .EnumerateArray().Select(x => x.GetString()!).ToArray();
+        JsonElement[] auditOutputs = audit.GetProperty("outputs")
+            .EnumerateArray().ToArray();
+        Assert(audit.GetProperty("operationId").GetString() ==
+                   "native.rimtest-capture-verify" &&
+               audit.GetProperty("sideEffectClass").GetString() ==
+                   "artifact-generation" &&
+               auditCommand.GetProperty("executable").GetString() == "dotnet" &&
+               auditArgs.SequenceEqual(new[]
+               {
+                   "run", "--project", "src/RimLiaison.Cli/RimLiaison.Cli.csproj",
+                   "--configuration", "Release", "--",
+                   NativeRimtestCapturedArtifactAuditCommand.Name, "--json"
+               }) &&
+               auditOutputs.Length == 1 &&
+               auditOutputs[0].GetProperty("path").GetString() ==
+                   NativeRimtestCapturedArtifactAuditCommand.OutputPath &&
+               auditOutputs[0].GetProperty("maxBytes").GetInt32() == 16384,
+            "capture verification must be fixed, PN-managed and bounded");
+        Assert(NativeRimtestCapturedArtifactAuditCommand.TryParse(
+                   [NativeRimtestCapturedArtifactAuditCommand.Name, "--json"]) &&
+               !NativeRimtestCapturedArtifactAuditCommand.TryParse(
+                   [NativeRimtestCapturedArtifactAuditCommand.Name, "--install"]) &&
+               !NativeRimtestCapturedArtifactAuditCommand.TryParse(
+                   [NativeRimtestCapturedArtifactAuditCommand.Name,
+                       "C:\\RimWorld", "--json"]),
+            "capture audit must reject caller-selected paths and host actions");
     }
 
     public static void NativeCandidateInstallCopiesVerifiedClosureWithoutPATHChanges()
@@ -1389,6 +1420,72 @@ internal static class CliDeploymentTests
             ];
             WriteReceipt();
             WriteRecord();
+
+            // New read-only validation branch uses all original PN evidence,
+            // checks ZIP entry hashes and manifest closure, but never creates
+            // an account candidate directory or executes a native apphost.
+            string[] auditArgs =
+            [
+                NativeRimtestManagedArtifactImportCommand.Name,
+                operationId, commit, zipHash, "--verify-json"
+            ];
+            using StringWriter auditOutput = new();
+            int auditExit = NativeRimtestManagedArtifactImportCommand.RunForTests(
+                auditArgs, auditOutput, operations, rejectedCandidates);
+            using JsonDocument auditJson = JsonDocument.Parse(auditOutput.ToString());
+            JsonElement proof = auditJson.RootElement;
+            Assert(auditExit == CliExitCodes.Success &&
+                   proof.GetProperty("status").GetString() == "zip-closure-verified" &&
+                   proof.GetProperty("sourceBuildEvidenceMatched").GetBoolean() &&
+                   proof.GetProperty("zipClosureVerified").GetBoolean() &&
+                   proof.GetProperty("verifiedFileCount").GetInt32() >= 6 &&
+                   !proof.GetProperty("qualified").GetBoolean() &&
+                   !proof.GetProperty("pnCheckPassed").GetBoolean() &&
+                   !Directory.Exists(rejectedCandidates),
+                "complete capture ZIP must verify in memory without any account import");
+
+            using StringWriter mismatchedOutput = new();
+            int mismatchedExit = NativeRimtestManagedArtifactImportCommand.RunForTests(
+                auditArgs, mismatchedOutput, operations, rejectedCandidates,
+                expectedDefinition: "sha256:" + new string('0', 64));
+            using JsonDocument mismatchedJson =
+                JsonDocument.Parse(mismatchedOutput.ToString());
+            Assert(mismatchedExit == CliExitCodes.ConservativeSelection &&
+                   mismatchedJson.RootElement.GetProperty("status").GetString() ==
+                       "blocked" &&
+                   !Directory.Exists(rejectedCandidates),
+                "wrong exact PN local-operation definition must block without account writes");
+
+            byte[] originalZip = File.ReadAllBytes(zip);
+            File.AppendAllText(zip, "mutated content");
+            using StringWriter changedOutput = new();
+            int changedExit = NativeRimtestManagedArtifactImportCommand.RunForTests(
+                auditArgs, changedOutput, operations, rejectedCandidates);
+            Assert(changedExit == CliExitCodes.ConservativeSelection &&
+                   !Directory.Exists(rejectedCandidates),
+                "changed archive after capture must block without account writes");
+            File.WriteAllBytes(zip, originalZip);
+
+            // The fixed production wrapper never accepts the fixture producer
+            // as the pinned live operation, but its one declared workspace
+            // result is written without creating a candidate or importing.
+            string auditWorkspace = Path.Combine(root, "audit-workspace");
+            using StringWriter fixedOutput = new();
+            int fixedExit = NativeRimtestCapturedArtifactAuditCommand.RunForTests(
+                [NativeRimtestCapturedArtifactAuditCommand.Name, "--json"],
+                fixedOutput, operations, auditWorkspace);
+            using JsonDocument fixedJson = JsonDocument.Parse(
+                File.ReadAllText(Path.Combine(auditWorkspace,
+                    NativeRimtestCapturedArtifactAuditCommand.OutputPath)));
+            Assert(fixedExit == CliExitCodes.ConservativeSelection &&
+                   fixedJson.RootElement.GetProperty("status").GetString() ==
+                       "blocked" &&
+                   !fixedJson.RootElement.GetProperty("qualified").GetBoolean() &&
+                   !Directory.Exists(Path.Combine(auditWorkspace,
+                       "never-used-candidate-root")) &&
+                   !Directory.Exists(rejectedCandidates),
+                "fixed read-only audit must refuse synthetic producer without import");
+
             Assert(NativeRimtestManagedArtifactImportCommand.TryParse(
                 args, out string? op, out string? source, out string? archiveSha) &&
                 op == operationId && source == commit && archiveSha == zipHash,
