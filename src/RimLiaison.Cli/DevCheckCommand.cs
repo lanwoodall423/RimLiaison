@@ -1144,8 +1144,38 @@ internal static class DevCheckCommand
         start.Environment["DIRECT_VALIDATION_SIGNAL_RESULT"] = signalPath;
     }
 
-    // Check the full set of exact typed expectations, not merely a count or
-    // matching name. Optional DLC defs must explicitly report inapplicability.
+    // Waylith may load official DLC independently of the explicit -mod
+    // request. A requested profile alone cannot prove the effective DLC state.
+    // Accept only the helper's separate, typed observation for Odyssey; never
+    // infer it from an individual Def's own applicable/existence flags.
+    private static bool TryGetObservedOdysseyLoaded(JsonElement? signal, out bool loaded)
+    {
+        loaded = false;
+        if (!signal.HasValue || signal.Value.ValueKind != JsonValueKind.Object ||
+            !signal.Value.TryGetProperty("odysseyLoaded", out JsonElement value) ||
+            (value.ValueKind != JsonValueKind.True && value.ValueKind != JsonValueKind.False))
+            return false;
+        loaded = value.GetBoolean();
+        return true;
+    }
+
+    private static bool TryResolveExpectedApplicability(
+        string requiredPackage, JsonElement? signal,
+        IReadOnlyList<string> requestedPackages, out bool expectedApplicable)
+    {
+        if (string.Equals(requiredPackage, "Ludeon.RimWorld.Odyssey",
+            StringComparison.OrdinalIgnoreCase))
+            return TryGetObservedOdysseyLoaded(signal, out expectedApplicable);
+
+        // Non-Odyssey requirements still follow the explicit isolated profile.
+        expectedApplicable = requiredPackage.Length == 0 ||
+            requestedPackages.Contains(requiredPackage, StringComparer.OrdinalIgnoreCase);
+        return true;
+    }
+
+    // Check each exact typed expectation, not merely a count or matching name.
+    // DLC-conditional Defs must attest the actual effective DLC state, and
+    // their observed existence must match that state, including when inactive.
     internal static bool ValidateTypedDefinitionEvidence(
         IReadOnlyList<string> expectations, JsonElement? signal,
         IReadOnlyList<string> activePackages)
@@ -1183,8 +1213,9 @@ internal static class DevCheckCommand
                 return false;
             if (!pending.Remove(type.GetString() + "|" + name.GetString(), out string? requiredPackage))
                 return false;
-            bool expectedApplicable = string.IsNullOrEmpty(requiredPackage) ||
-                activePackages.Contains(requiredPackage, StringComparer.OrdinalIgnoreCase);
+            if (!TryResolveExpectedApplicability(
+                requiredPackage, signal, activePackages, out bool expectedApplicable))
+                return false;
             if ((applicable.ValueKind == JsonValueKind.True) != expectedApplicable ||
                 (exists.ValueKind == JsonValueKind.True) != expectedApplicable)
                 return false;
@@ -1253,8 +1284,9 @@ internal static class DevCheckCommand
                 !pending.Remove(type.GetString() + "|" + name.GetString(), out var required))
                 return "TARGET_DEFS_SIGNAL_INVALID";
 
-            bool expectedApplicable = required.RequiredPackage.Length == 0 ||
-                activePackages.Contains(required.RequiredPackage, StringComparer.OrdinalIgnoreCase);
+            if (!TryResolveExpectedApplicability(
+                required.RequiredPackage, signal, activePackages, out bool expectedApplicable))
+                return "TARGET_DEFS_DLC_STATE_UNPROVEN";
             if (applicable.GetBoolean() != expectedApplicable)
                 return "TARGET_DEFS_APPLICABILITY_MISMATCH";
             if (exists.GetBoolean() != expectedApplicable)
@@ -1335,8 +1367,10 @@ internal static class DevCheckCommand
             {
             }
         }
+        bool odysseyObserved = TryGetObservedOdysseyLoaded(signal, out bool odysseyLoaded);
         string[] evidence =
         [
+            "odysseyRuntimeLoaded=" + (odysseyObserved ? odysseyLoaded.ToString() : "unverified"),
             "signalObserved=" + signal.HasValue,
             "targetModConfigured=" + configured,
             "targetModLoaded=" + targetLoaded,

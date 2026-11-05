@@ -42,6 +42,7 @@ namespace DirectValidationRuntimeSignal
                 var defResults = new List<string>();
                 var loadedPackages = LoadedModManager.RunningModsListForReading
                     .Select(mod => mod.PackageId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                bool odysseyLoaded = loadedPackages.Contains("Ludeon.RimWorld.Odyssey");
                 foreach (string expectation in requestedDefs)
                 {
                     string[] parts = expectation.Split('|');
@@ -52,7 +53,9 @@ namespace DirectValidationRuntimeSignal
                         (type == "ThingDef" || type == "GenStepDef" || type == "TileMutatorDef");
                     bool applicable = valid &&
                         (parts.Length == 2 || loadedPackages.Contains(parts[2]));
-                    bool exists = applicable &&
+                    // Observe existence even for a supposedly inactive DLC Def:
+                    // a wrongly loaded optional Def must not be hidden as absent.
+                    bool exists = valid &&
                         (type == "ThingDef" && DefDatabase<ThingDef>.GetNamedSilentFail(name) != null ||
                          type == "GenStepDef" && DefDatabase<GenStepDef>.GetNamedSilentFail(name) != null ||
                          type == "TileMutatorDef" && DefDatabase<TileMutatorDef>.GetNamedSilentFail(name) != null);
@@ -65,6 +68,7 @@ namespace DirectValidationRuntimeSignal
                 string json = "{\"protocol\":\"" + Protocol + "\",\"timestampUtc\":\"" + Escape(DateTime.UtcNow.ToString("O")) +
                     "\",\"helperPackageId\":\"" + HelperPackageId + "\",\"targetPackageId\":\"" + Escape(targetPackageId) +
                     "\",\"targetModLoaded\":" + (targetModLoaded ? "true" : "false") +
+                    ",\"odysseyLoaded\":" + (odysseyLoaded ? "true" : "false") +
                     ",\"targetAssemblyLoaded\":" + (targetAssemblyLoaded ? "true" : "false") +
                     ",\"targetAssembliesLoaded\":[" + string.Join(",", assemblyResults) + "]" +
                     ",\"requestedDefs\":[" + string.Join(",", defResults) + "] ,\"completion\":\"content-loaded\"}";

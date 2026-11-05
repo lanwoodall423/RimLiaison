@@ -756,7 +756,7 @@ internal static class DevCheckTests
                 throw new InvalidOperationException("Versioned and unversioned typed definitions were not isolated correctly.");
 
             const string positive = """
-                {"requestedDefs":[
+                {"odysseyLoaded":true,"requestedDefs":[
                   {"defType":"ThingDef","defName":"NT_Bramble","applicable":true,"exists":true},
                   {"defType":"GenStepDef","defName":"NT_BrambleThickets","applicable":true,"exists":true},
                   {"defType":"TileMutatorDef","defName":"NT_BrambleThicketMutator","applicable":true,"exists":true},
@@ -766,6 +766,8 @@ internal static class DevCheckTests
             string withoutOdyssey = positive.Replace(
                 "\"defType\":\"TileMutatorDef\",\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":true",
                 "\"defType\":\"TileMutatorDef\",\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false",
+                StringComparison.Ordinal).Replace(
+                "\"odysseyLoaded\":true", "\"odysseyLoaded\":false",
                 StringComparison.Ordinal);
             string[] noOdyssey = ["ludeon.rimworld", "target.mod"];
             string[] withOdyssey = ["ludeon.rimworld", "Ludeon.RimWorld.Odyssey", "target.mod"];
@@ -778,9 +780,9 @@ internal static class DevCheckTests
 
             if (!Proves(positive, withOdyssey) ||
                 !Proves(withoutOdyssey, noOdyssey) ||
-                Proves(withoutOdyssey, withOdyssey) ||
-                Proves(positive, noOdyssey))
-                throw new InvalidOperationException("Optional Odyssey definition proof was not matched to the selected profile.");
+                !Proves(withoutOdyssey, withOdyssey) ||
+                !Proves(positive, noOdyssey))
+                throw new InvalidOperationException("Optional Odyssey definition proof did not match observed runtime DLC state.");
 
             void MustReject(string altered, string label)
             {
@@ -789,6 +791,10 @@ internal static class DevCheckTests
             }
             MustReject("{}", "missing results");
             MustReject("""{"requestedDefs":[]}""", "empty results");
+            MustReject(positive.Replace("\"odysseyLoaded\":true,", "",
+                StringComparison.Ordinal), "missing observed DLC state");
+            MustReject(positive.Replace("\"odysseyLoaded\":true", "\"odysseyLoaded\":\"true\"",
+                StringComparison.Ordinal), "untyped observed DLC state");
             MustReject(positive.Replace("\"defType\":\"GenStepDef\",\"defName\":\"NT_BrambleThickets\"",
                 "\"defType\":\"ThingDef\",\"defName\":\"NT_BrambleThickets\"", StringComparison.Ordinal), "wrong type");
             MustReject(positive.Replace("\"defName\":\"NT_BrambleThickets\"",
@@ -846,7 +852,7 @@ internal static class DevCheckTests
         string[] withOdyssey = ["ludeon.rimworld", "Ludeon.RimWorld.Odyssey", "target.mod"];
         string[] noOdyssey = ["ludeon.rimworld", "target.mod"];
         const string allPresent = """
-            {"requestedDefs":[
+            {"odysseyLoaded":true,"requestedDefs":[
               {"defType":"ThingDef","defName":"NT_Bramble","applicable":true,"exists":true},
               {"defType":"GenStepDef","defName":"NT_BrambleThickets","applicable":true,"exists":true},
               {"defType":"TileMutatorDef","defName":"NT_BrambleThicketMutator","applicable":true,"exists":true}
@@ -868,7 +874,8 @@ internal static class DevCheckTests
                 throw new InvalidOperationException("Wrong bounded typed-Def failure reason: " + actual);
         }
 
-        string noDlc = Replace(allPresent,
+        string noDlc = Replace(Replace(allPresent,
+            "\"odysseyLoaded\":true", "\"odysseyLoaded\":false"),
             "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":true",
             "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false");
         using (JsonDocument positive = JsonDocument.Parse(allPresent))
@@ -877,8 +884,12 @@ internal static class DevCheckTests
             if (!DevCheckCommand.ValidateTypedDefinitionEvidence(
                     expectations, positive.RootElement, withOdyssey) ||
                 !DevCheckCommand.ValidateTypedDefinitionEvidence(
+                    expectations, positive.RootElement, noOdyssey) ||
+                !DevCheckCommand.ValidateTypedDefinitionEvidence(
+                    expectations, optional.RootElement, withOdyssey) ||
+                !DevCheckCommand.ValidateTypedDefinitionEvidence(
                     expectations, optional.RootElement, noOdyssey))
-                throw new InvalidOperationException("Positive DLC/non-DLC definitions did not pass.");
+                throw new InvalidOperationException("Observed DLC/non-DLC definitions did not pass.");
         }
         Verify(Replace(allPresent,
             "\"defName\":\"NT_Bramble\",\"applicable\":true,\"exists\":true",
@@ -907,7 +918,15 @@ internal static class DevCheckTests
         Verify(Replace(allPresent, "\"applicable\":true,\"exists\":true",
             "\"applicable\":false,\"exists\":true"),
             withOdyssey, "TARGET_DEFS_APPLICABILITY_MISMATCH");
-        Verify(allPresent, noOdyssey, "TARGET_DEFS_APPLICABILITY_MISMATCH");
+        Verify(Replace(allPresent,
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true",
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false"),
+            noOdyssey, "TARGET_DEFS_APPLICABILITY_MISMATCH");
+        Verify(Replace(allPresent, "\"odysseyLoaded\":true",
+            "\"odysseyLoaded\":\"true\""),
+            withOdyssey, "TARGET_DEFS_DLC_STATE_UNPROVEN");
+        Verify(Replace(allPresent, "\"odysseyLoaded\":true,",
+            ""), noOdyssey, "TARGET_DEFS_DLC_STATE_UNPROVEN");
         Verify(Replace(noDlc,
             "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false",
             "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":true"),
