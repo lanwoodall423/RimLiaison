@@ -834,6 +834,86 @@ internal static class DevCheckTests
     }
 
 
+
+    public static void RuntimeDefFailureReportsBoundedCategory()
+    {
+        string[] expectations =
+        [
+            "ThingDef|NT_Bramble",
+            "GenStepDef|NT_BrambleThickets",
+            "TileMutatorDef|NT_BrambleThicketMutator|Ludeon.RimWorld.Odyssey"
+        ];
+        string[] withOdyssey = ["ludeon.rimworld", "Ludeon.RimWorld.Odyssey", "target.mod"];
+        string[] noOdyssey = ["ludeon.rimworld", "target.mod"];
+        const string allPresent = """
+            {"requestedDefs":[
+              {"defType":"ThingDef","defName":"NT_Bramble","applicable":true,"exists":true},
+              {"defType":"GenStepDef","defName":"NT_BrambleThickets","applicable":true,"exists":true},
+              {"defType":"TileMutatorDef","defName":"NT_BrambleThicketMutator","applicable":true,"exists":true}
+            ]}
+            """;
+
+        static string Replace(string source, string fragment, string replacement) =>
+            source.Replace(fragment, replacement, StringComparison.Ordinal);
+
+        void Verify(string json, string[] packages, string expectedReason)
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (DevCheckCommand.ValidateTypedDefinitionEvidence(
+                expectations, document.RootElement, packages))
+                throw new InvalidOperationException("Failed typed-Def fixture unexpectedly passed the strict validator.");
+            string actual = DevCheckCommand.ClassifyTypedDefinitionEvidenceFailure(
+                expectations, document.RootElement, packages);
+            if (actual != expectedReason)
+                throw new InvalidOperationException("Wrong bounded typed-Def failure reason: " + actual);
+        }
+
+        string noDlc = Replace(allPresent,
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false");
+        using (JsonDocument positive = JsonDocument.Parse(allPresent))
+        using (JsonDocument optional = JsonDocument.Parse(noDlc))
+        {
+            if (!DevCheckCommand.ValidateTypedDefinitionEvidence(
+                    expectations, positive.RootElement, withOdyssey) ||
+                !DevCheckCommand.ValidateTypedDefinitionEvidence(
+                    expectations, optional.RootElement, noOdyssey))
+                throw new InvalidOperationException("Positive DLC/non-DLC definitions did not pass.");
+        }
+        Verify(Replace(allPresent,
+            "\"defName\":\"NT_Bramble\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_Bramble\",\"applicable\":true,\"exists\":false"),
+            withOdyssey, "TARGET_THINGDEF_NOT_OBSERVED");
+        Verify(Replace(allPresent,
+            "\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":false"),
+            withOdyssey, "TARGET_GENSTEPDEF_NOT_OBSERVED");
+        Verify(Replace(allPresent,
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":true,\"exists\":false"),
+            withOdyssey, "TARGET_TILEMUTATORDEF_NOT_OBSERVED");
+        Verify(Replace(Replace(allPresent,
+            "\"defName\":\"NT_Bramble\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_Bramble\",\"applicable\":true,\"exists\":false"),
+            "\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":true",
+            "\"defName\":\"NT_BrambleThickets\",\"applicable\":true,\"exists\":false"),
+            withOdyssey, "TARGET_MULTIPLE_DEFS_NOT_OBSERVED");
+        Verify("{}", withOdyssey, "TARGET_DEFS_SIGNAL_INCOMPLETE");
+        Verify("""{"requestedDefs":[]}""", withOdyssey, "TARGET_DEFS_SIGNAL_INCOMPLETE");
+        Verify(Replace(allPresent, "\"defType\":\"ThingDef\"", "\"defType\":\"UnknownDef\""),
+            withOdyssey, "TARGET_DEFS_SIGNAL_INVALID");
+        Verify(Replace(allPresent, "\"defName\":\"NT_Bramble\"", "\"defName\":\"OtherBramble\""),
+            withOdyssey, "TARGET_DEFS_SIGNAL_INVALID");
+        Verify(Replace(allPresent, "\"applicable\":true,\"exists\":true",
+            "\"applicable\":false,\"exists\":true"),
+            withOdyssey, "TARGET_DEFS_APPLICABILITY_MISMATCH");
+        Verify(allPresent, noOdyssey, "TARGET_DEFS_APPLICABILITY_MISMATCH");
+        Verify(Replace(noDlc,
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":false",
+            "\"defName\":\"NT_BrambleThicketMutator\",\"applicable\":false,\"exists\":true"),
+            noOdyssey, "TARGET_DEFS_SIGNAL_INVALID");
+    }
+
     public static void RuntimeTargetLoadFailureIdentifiesMissingAttestation()
     {
         static void Verify(bool configured, bool modLoaded, bool defsValid,

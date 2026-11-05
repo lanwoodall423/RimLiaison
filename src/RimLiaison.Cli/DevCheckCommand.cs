@@ -1211,6 +1211,73 @@ internal static class DevCheckCommand
         return null;
     }
 
+
+    // The isolated VM reports only a bounded reason token, never raw guest
+    // logs or arbitrary Def names. Diagnose only the already-failed strict
+    // typed-Def proof, distinguishing malformed/missing observations from
+    // a genuinely unobserved registered Def category at signal time.
+    internal static string ClassifyTypedDefinitionEvidenceFailure(
+        IReadOnlyList<string> expectations, JsonElement? signal,
+        IReadOnlyList<string> activePackages)
+    {
+        if (!signal.HasValue || signal.Value.ValueKind != JsonValueKind.Object ||
+            !signal.Value.TryGetProperty("requestedDefs", out JsonElement reported) ||
+            reported.ValueKind != JsonValueKind.Array ||
+            reported.GetArrayLength() != expectations.Count)
+            return "TARGET_DEFS_SIGNAL_INCOMPLETE";
+
+        var pending = new Dictionary<string, (string Type, string RequiredPackage)>(StringComparer.Ordinal);
+        foreach (string expectation in expectations)
+        {
+            string[] parts = expectation.Split('|');
+            if ((parts.Length != 2 && parts.Length != 3) ||
+                parts[1].Length == 0 ||
+                (parts[0] != "ThingDef" && parts[0] != "GenStepDef" && parts[0] != "TileMutatorDef") ||
+                !pending.TryAdd(parts[0] + "|" + parts[1],
+                    (parts[0], parts.Length == 3 ? parts[2] : "")))
+                return "TARGET_DEFS_SIGNAL_INVALID";
+        }
+
+        var unobserved = new HashSet<string>(StringComparer.Ordinal);
+        foreach (JsonElement item in reported.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object ||
+                !item.TryGetProperty("defType", out JsonElement type) ||
+                type.ValueKind != JsonValueKind.String ||
+                !item.TryGetProperty("defName", out JsonElement name) ||
+                name.ValueKind != JsonValueKind.String ||
+                !item.TryGetProperty("applicable", out JsonElement applicable) ||
+                (applicable.ValueKind != JsonValueKind.True && applicable.ValueKind != JsonValueKind.False) ||
+                !item.TryGetProperty("exists", out JsonElement exists) ||
+                (exists.ValueKind != JsonValueKind.True && exists.ValueKind != JsonValueKind.False) ||
+                !pending.Remove(type.GetString() + "|" + name.GetString(), out var required))
+                return "TARGET_DEFS_SIGNAL_INVALID";
+
+            bool expectedApplicable = required.RequiredPackage.Length == 0 ||
+                activePackages.Contains(required.RequiredPackage, StringComparer.OrdinalIgnoreCase);
+            if (applicable.GetBoolean() != expectedApplicable)
+                return "TARGET_DEFS_APPLICABILITY_MISMATCH";
+            if (exists.GetBoolean() != expectedApplicable)
+            {
+                if (!expectedApplicable)
+                    return "TARGET_DEFS_SIGNAL_INVALID";
+                unobserved.Add(required.Type);
+            }
+        }
+
+        if (pending.Count != 0)
+            return "TARGET_DEFS_SIGNAL_INVALID";
+        if (unobserved.Count > 1)
+            return "TARGET_MULTIPLE_DEFS_NOT_OBSERVED";
+        if (unobserved.Contains("ThingDef"))
+            return "TARGET_THINGDEF_NOT_OBSERVED";
+        if (unobserved.Contains("GenStepDef"))
+            return "TARGET_GENSTEPDEF_NOT_OBSERVED";
+        if (unobserved.Contains("TileMutatorDef"))
+            return "TARGET_TILEMUTATORDEF_NOT_OBSERVED";
+        return "TARGET_DEFS_SIGNAL_INVALID"; // Never turn a failed gate into PASS.
+    }
+
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
     {
         bool contentLoaded = false;
@@ -1286,7 +1353,9 @@ internal static class DevCheckCommand
         else if (ClassifyTargetLoadProofFailure(configured, targetLoaded, defsValid, assemblyLoaded) is { } missingProof)
         {
             status = "RUNTIME_LOAD_FAIL";
-            reason = missingProof;
+            reason = missingProof == "TARGET_DEFS_NOT_PROVEN"
+                ? ClassifyTypedDefinitionEvidenceFailure(state.ChangedDefs, signal, state.ActivePackages)
+                : missingProof;
         }
         else if (state.RelevantErrors.Count > 0)
         {
