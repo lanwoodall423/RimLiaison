@@ -1192,6 +1192,25 @@ internal static class DevCheckCommand
         return pending.Count == 0;
     }
 
+    // Keep the strict proof requirement while distinguishing missing signals.
+    // A missing AppDomain assembly observation does not by itself prove a
+    // NatureTiles source defect; it identifies the unproven runtime gate.
+    internal static string? ClassifyTargetLoadProofFailure(
+        bool configured, bool targetLoaded, bool defsValid, bool? assemblyLoaded)
+    {
+        if (!configured)
+            return "TARGET_NOT_CONFIGURED";
+        if (!targetLoaded)
+            return "TARGET_MOD_NOT_LOADED";
+        if (!defsValid && assemblyLoaded == false)
+            return "TARGET_DEFS_AND_ASSEMBLIES_NOT_PROVEN";
+        if (!defsValid)
+            return "TARGET_DEFS_NOT_PROVEN";
+        if (assemblyLoaded == false)
+            return "TARGET_ASSEMBLIES_NOT_PROVEN";
+        return null;
+    }
+
     private static RuntimeResult ParseRuntime(JsonElement? signal, State state, string behaviorPath, bool targetConfigured, bool controlledTermination, int? exitCode)
     {
         bool contentLoaded = false;
@@ -1264,10 +1283,10 @@ internal static class DevCheckCommand
             status = "RUNTIME_LOAD_FAIL";
             reason = "CONTENT_LOAD_SIGNAL_NOT_OBSERVED";
         }
-        else if (!configured || !targetLoaded || !defsValid || assemblyLoaded == false)
+        else if (ClassifyTargetLoadProofFailure(configured, targetLoaded, defsValid, assemblyLoaded) is { } missingProof)
         {
             status = "RUNTIME_LOAD_FAIL";
-            reason = "TARGET_LOAD_NOT_PROVEN";
+            reason = missingProof;
         }
         else if (state.RelevantErrors.Count > 0)
         {

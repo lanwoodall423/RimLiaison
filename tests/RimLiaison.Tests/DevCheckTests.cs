@@ -834,6 +834,31 @@ internal static class DevCheckTests
     }
 
 
+    public static void RuntimeTargetLoadFailureIdentifiesMissingAttestation()
+    {
+        static void Verify(bool configured, bool modLoaded, bool defsValid,
+            bool? assembliesLoaded, string? expected)
+        {
+            string? actual = DevCheckCommand.ClassifyTargetLoadProofFailure(
+                configured, modLoaded, defsValid, assembliesLoaded);
+            if (!string.Equals(expected, actual, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "Runtime target proof classification mismatch: expected " +
+                    (expected ?? "no failure") + ", got " + (actual ?? "no failure") + ".");
+        }
+
+        Verify(true, true, true, true, null);
+        Verify(true, true, true, null, null); // XML-only mod has no assembly gate.
+        Verify(false, true, true, true, "TARGET_NOT_CONFIGURED");
+        Verify(true, false, true, true, "TARGET_MOD_NOT_LOADED");
+        Verify(true, true, false, true, "TARGET_DEFS_NOT_PROVEN");
+        Verify(true, true, true, false, "TARGET_ASSEMBLIES_NOT_PROVEN");
+        Verify(true, true, false, false, "TARGET_DEFS_AND_ASSEMBLIES_NOT_PROVEN");
+        Verify(true, true, false, null, "TARGET_DEFS_NOT_PROVEN");
+        Verify(false, false, false, false, "TARGET_NOT_CONFIGURED");
+        Verify(true, false, false, false, "TARGET_MOD_NOT_LOADED");
+    }
+
     public static void DeclaredRequiredDependencyIsIncluded()
     {
         string target = CreateWorkspace();

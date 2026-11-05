@@ -194,6 +194,7 @@ internal static class Program
         ("dev-check ambiguous projects fail closed", DevCheckTests.AmbiguousProductionProjectsFailClosed),
         ("dev-check stages only explicit runtime payload", DevCheckTests.StagesOnlyExplicitRuntimePayload),
         ("dev-check passes runtime signal result path", DevCheckTests.RuntimeSignalResultPathIsPassedToChildEnvironment),
+        ("dev-check distinguishes missing target runtime attestations", DevCheckTests.RuntimeTargetLoadFailureIdentifiesMissingAttestation),
         ("dev-check includes declared runtime dependencies", DevCheckTests.DeclaredRequiredDependencyIsIncluded),
         ("dev-check excludes nested fixture metadata", DevCheckTests.NestedFixtureAboutIsNotDiscovered),
         ("dev-check ignores malformed nested fixture metadata", DevCheckTests.MalformedNestedFixtureDoesNotAbortDiscovery),
