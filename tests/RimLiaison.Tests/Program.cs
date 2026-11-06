@@ -180,6 +180,8 @@ internal static class Program
         ("child process start failure retains evidence", CliDeploymentTests.ChildProcessStartFailureRetainsBoundedEvidence),
         ("child process environment overrides are applied", CliDeploymentTests.ChildProcessEnvironmentOverridesAreApplied),
         ("dev-check parses optional workspace", DevCheckTests.ParsesOptionalWorkspace),
+        ("map-check only observes nonce-qualified isolated map events", DevCheckTests.MapCheckModeRequiresSafeFixtureAndActualMapEvidence),
+        ("map-check only observes nonce-qualified isolated map events", DevCheckTests.MapCheckModeRequiresSafeFixtureAndActualMapEvidence),
         ("Waylith root rejects partial and legacy engines", DevCheckTests.WaylithOnlyLayoutRejectsLegacyAndPartialGame),
         ("Waylith launch has owned savedata mod selection and 120s limit", DevCheckTests.WaylithLaunchIsIsolatedAndHasBoundedStartup),
         ("Waylith SDK selector stays in owned test directory", DevCheckTests.WaylithHelperSdkSelectorStaysInsideFixture),

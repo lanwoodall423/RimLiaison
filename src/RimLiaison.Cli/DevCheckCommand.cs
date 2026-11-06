@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
+using RimLiaison.Validation;
 using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
@@ -18,6 +21,7 @@ internal static class DevCheckCommand
     private const int MaximumDefinitionExpectations = 128;
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RuntimeTimeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan MapObservationTimeout = TimeSpan.FromSeconds(150);
     internal static TimeSpan WaylithContentLoadTimeout => RuntimeTimeout;
 
     public static async Task<int> RunAsync(
@@ -25,13 +29,18 @@ internal static class DevCheckCommand
         TextWriter stdout,
         CancellationToken cancellationToken)
     {
-        var state = new State();
+        var state = new State { MapMode = request.Command == CliCommand.MapCheck };
         long started = Stopwatch.GetTimestamp();
         int exitCode = CliExitCodes.InternalError;
         try
         {
             state.Workspace = ResolveWorkspace(request.Id);
             state.Mod = ReadIdentity(state.Workspace);
+            if (state.MapMode)
+            {
+                state.MapNonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+                state.MapScenario = ReadMapScenario(state.Workspace, state.MapNonce);
+            }
             IReadOnlyList<DiscoveredInput> inputs = DiscoverInputs(state.Workspace);
             state.ChangedFiles.AddRange(inputs.Select(input => input.RelativePath));
             state.SourceFiles = inputs.Where(input => input.Kind == DiscoveredFileKinds.Source).ToArray();
@@ -54,9 +63,15 @@ internal static class DevCheckCommand
             }
             else
             {
+                var buildArguments = new List<string>
+                {
+                    "build", state.BuildProject, "--configuration", "Release", "--nologo"
+                };
+                if (state.MapScenario is not null)
+                    buildArguments.Add("-p:DefineConstants=" + state.MapScenario.QaDefine);
                 ProcessResult build = await RunProcessAsync(
                         "dotnet",
-                        ["build", state.BuildProject, "--configuration", "Release", "--nologo"],
+                        buildArguments,
                         state.Workspace,
                         BuildTimeout,
                         state,
@@ -108,7 +123,11 @@ internal static class DevCheckCommand
                         cancellationToken)
                     .ConfigureAwait(false);
             }
-            exitCode = state.BuildStatus == "BUILD_FAIL" ||
+            // Native map qualification additionally requires independently proven
+            // map seed, screenshot and host execution custody. A source-only
+            // observation must never be returned as a completed gameplay PASS.
+            exitCode = state.MapMode ||
+                state.BuildStatus == "BUILD_FAIL" ||
                 state.StaticStatus == "STATIC_FAIL" ||
                 state.Runtime.Status != "RUNTIME_LOAD_PASS"
                 ? CliExitCodes.TestFailure
@@ -197,8 +216,150 @@ internal static class DevCheckCommand
                 processNames = state.Processes
             }
         };
-        stdout.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = false }));
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
+        };
+        if (!state.MapMode)
+        {
+            stdout.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
+        }
+        else
+        {
+            JsonNode output = JsonSerializer.SerializeToNode(result, jsonOptions)!;
+            output["schemaVersion"] = "rimtest-map-check/v1";
+            output["map"] = JsonSerializer.SerializeToNode(new
+            {
+                status = state.MapAssessment?.Status ?? "NOT_RUN",
+                reason = state.MapAssessment?.ReasonCode ?? "MAP_NOT_RUN",
+                mapUniqueId = state.MapAssessment?.MapUniqueId,
+                observedCount = state.MapAssessment?.ObservedCount,
+                currentLogVerified = state.Runtime.LogProduced,
+                seedVerified = false,
+                screenshotVerified = false,
+                nativeQualified = false,
+                cleanupComplete = state.CleanupStatus == "CLEANUP_PASS"
+            });
+            stdout.WriteLine(output.ToJsonString());
+        }
         return exitCode;
+    }
+
+
+    // Source-declared scenario only. No command strings, paths, plugin names
+    // or arbitrary environment variables can be injected into this runner.
+    internal sealed record MapScenario(
+        string QaDefine, string NonceEnvironment, MapEventExpectation Expectation);
+
+    internal sealed record MapScenarioConfig(
+        string SchemaVersion, string QaDefine, string NonceEnvironment,
+        string EventPrefix, string OutcomeSchema, string ObservationSchema,
+        string ExpectedBiome, string CountField, string PresenceField,
+        string IntegrityField, string PositiveOutcome, int MaximumCount,
+        string? TerminalCountField = null, string? TerminalSelectionField = null);
+
+    internal static MapScenario ReadMapScenario(string workspace, string nonce)
+    {
+        string path = Path.Combine(workspace, "TestCatalog", "rimtest.mapcheck.json");
+        var info = new FileInfo(path);
+        info.Refresh();
+        if (!info.Exists || info.Length is <= 0 or > 8192 ||
+            (info.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("MAP_SCENARIO_MISSING_OR_UNSAFE");
+
+        MapScenarioConfig? config;
+        try
+        {
+            string json = File.ReadAllText(path);
+            using JsonDocument parsed = JsonDocument.Parse(json, new JsonDocumentOptions
+            {
+                MaxDepth = 4,
+                CommentHandling = JsonCommentHandling.Disallow,
+                AllowTrailingCommas = false
+            });
+            if (parsed.RootElement.ValueKind != JsonValueKind.Object ||
+                parsed.RootElement.EnumerateObject().Select(property => property.Name)
+                    .Distinct(StringComparer.Ordinal).Count() !=
+                parsed.RootElement.EnumerateObject().Count())
+                throw new InvalidDataException("MAP_SCENARIO_INVALID");
+            config = JsonSerializer.Deserialize<MapScenarioConfig>(
+                json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException)
+        {
+            throw new InvalidDataException("MAP_SCENARIO_INVALID");
+        }
+        static bool SafeQaSymbol(string? value) =>
+            value is { Length: >= 8 and <= 64 } &&
+            value.EndsWith("_GAMEPLAY_QA", StringComparison.Ordinal) &&
+            value[0] is >= 'A' and <= 'Z' &&
+            value.All(ch => ch is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
+        static bool SafeNonceVariable(string? value) =>
+            value is { Length: >= 10 and <= 64 } &&
+            value.EndsWith("_QA_NONCE", StringComparison.Ordinal) &&
+            value[0] is >= 'A' and <= 'Z' &&
+            value.All(ch => ch is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
+
+        if (config is null || config.SchemaVersion != "rimtest-map-scenario/v1" ||
+            !SafeQaSymbol(config.QaDefine) ||
+            !SafeNonceVariable(config.NonceEnvironment))
+            throw new InvalidDataException("MAP_SCENARIO_INVALID");
+
+        var expectation = new MapEventExpectation(
+            config.EventPrefix, config.OutcomeSchema, config.ObservationSchema,
+            nonce, config.ExpectedBiome, config.CountField, config.PresenceField,
+            config.IntegrityField, config.PositiveOutcome, config.MaximumCount,
+            config.TerminalCountField, config.TerminalSelectionField);
+        if (MapEventEvaluator.Evaluate(expectation, []).Status ==
+            MapEventContract.InvalidEvidence)
+            throw new InvalidDataException("MAP_SCENARIO_INVALID");
+        return new MapScenario(config.QaDefine, config.NonceEnvironment, expectation);
+    }
+
+    internal static IReadOnlyList<string> ExtractMapEvents(
+        MapScenario scenario, string verifiedLog)
+    {
+        string prefix = "[" + scenario.Expectation.EventPrefix + "] ";
+        return verifiedLog.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.StartsWith(prefix, StringComparison.Ordinal) &&
+                (line.Contains("\"schemaVersion\":\"" + scenario.Expectation.OutcomeSchema + "\"",
+                    StringComparison.Ordinal) ||
+                 line.Contains("\"schemaVersion\":\"" + scenario.Expectation.ObservationSchema + "\"",
+                    StringComparison.Ordinal)))
+            .Take(9)
+            .ToArray();
+    }
+
+    internal static MapEventAssessment EvaluateMapEvents(
+        MapScenario scenario, string verifiedLog) =>
+        MapEventEvaluator.Evaluate(scenario.Expectation,
+            ExtractMapEvents(scenario, verifiedLog));
+
+    // Only a launch-stop hint, never a provenance assertion. Final QA accepts
+    // only a fully stable, separately verified current-run Player.log.
+    private static bool HasMapEventPairHint(string path, MapScenario scenario)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length is <= 0 or > MaximumWaylithLogBytes)
+                return false;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, true);
+            string[] lines = ExtractMapEvents(scenario, reader.ReadToEnd()).ToArray();
+            return lines.Any(line => line.Contains(
+                    "\"schemaVersion\":\"" + scenario.Expectation.OutcomeSchema + "\"",
+                    StringComparison.Ordinal)) &&
+                lines.Any(line => line.Contains(
+                    "\"schemaVersion\":\"" + scenario.Expectation.ObservationSchema + "\"",
+                    StringComparison.Ordinal));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static string ResolveWorkspace(string? requested)
@@ -695,7 +856,8 @@ internal static class DevCheckCommand
     internal static ProcessStartInfo CreateWaylithRuntimeStartInfo(
         string rimWorldRoot,
         string savedata,
-        IReadOnlyList<string> activePackages)
+        IReadOnlyList<string> activePackages,
+        bool mapCheck = false)
     {
         string[] selected = activePackages
             .Where(id => !id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase))
@@ -715,7 +877,7 @@ internal static class DevCheckCommand
         };
         start.ArgumentList.Add("-savedatafolder=" + savedata);
         start.ArgumentList.Add("-mod=" + string.Join(";", selected));
-        start.ArgumentList.Add("-Headless");
+        start.ArgumentList.Add(mapCheck ? "-quicktest" : "-Headless");
         return start;
     }
 
@@ -922,13 +1084,17 @@ internal static class DevCheckCommand
             arg => arg.StartsWith("-savedatafolder=", StringComparison.OrdinalIgnoreCase));
         string? modArg = start.ArgumentList.SingleOrDefault(
             arg => arg.StartsWith("-mod=", StringComparison.OrdinalIgnoreCase));
+        bool mapCheck = start.ArgumentList.Contains("-quicktest");
+        string requiredMode = mapCheck ? "-quicktest" : "-Headless";
+        string forbiddenMode = mapCheck ? "-Headless" : "-quicktest";
         if (savedataArg is null || modArg is null ||
             !HasExactLogArgument(commandArguments, savedataArg) ||
             !HasExactLogArgument(commandArguments, modArg) ||
-            !HasExactLogArgument(commandArguments, "-Headless") ||
+            !HasExactLogArgument(commandArguments, requiredMode) ||
             CountLogOption(commandArguments, "-savedatafolder=") != 1 ||
             CountLogOption(commandArguments, "-mod=") != 1 ||
-            CountLogOption(commandArguments, "-Headless") != 1)
+            CountLogOption(commandArguments, requiredMode) != 1 ||
+            CountLogOption(commandArguments, forbiddenMode) != 0)
             return false;
         reason = "WAYLITH_LOG_VERIFIED";
         return true;
@@ -1020,7 +1186,10 @@ internal static class DevCheckCommand
             string behaviorPath = Path.Combine(savedata, "direct-validation-behavior.json");
             string logPath = ResolveWaylithLogPath();
             WaylithLogSnapshot priorGlobalLog = CaptureWaylithLogSnapshot(logPath);
-            ProcessStartInfo start = CreateWaylithRuntimeStartInfo(rimWorldRoot, savedata, activePackages);
+            ProcessStartInfo start = CreateWaylithRuntimeStartInfo(
+                rimWorldRoot, savedata, activePackages, mapCheck: state.MapMode);
+            if (state.MapScenario is not null)
+                start.Environment[state.MapScenario.NonceEnvironment] = state.MapNonce!;
             start.Environment["DIRECT_VALIDATION_TARGET_PACKAGE"] = state.Mod.PackageId;
             start.Environment["DIRECT_VALIDATION_TARGET_DEFS"] = string.Join(';', state.ChangedDefs);
             start.Environment["DIRECT_VALIDATION_TARGET_ASSEMBLIES"] = string.Join(
@@ -1036,7 +1205,8 @@ internal static class DevCheckCommand
             state.Processes.Add("RimWorld.exe");
             Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
             Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            DateTime deadline = DateTime.UtcNow + RuntimeTimeout;
+            DateTime deadline = DateTime.UtcNow +
+                (state.MapMode ? MapObservationTimeout : RuntimeTimeout);
             JsonElement? signal = null;
             while (DateTime.UtcNow < deadline && !process.HasExited)
             {
@@ -1049,7 +1219,8 @@ internal static class DevCheckCommand
                         if (candidate.TryGetProperty("protocol", out JsonElement protocol) && protocol.GetString() == "direct-validation-signal/v1")
                         {
                             signal = candidate;
-                            if (candidate.TryGetProperty("completion", out JsonElement completion) && completion.GetString() == "content-loaded")
+                            if (candidate.TryGetProperty("completion", out JsonElement completion) &&
+                                completion.GetString() == "content-loaded" && !state.MapMode)
                                 break;
                         }
                     }
@@ -1057,6 +1228,9 @@ internal static class DevCheckCommand
                     {
                     }
                 }
+                if (state.MapScenario is not null &&
+                    HasMapEventPairHint(logPath, state.MapScenario))
+                    break;
                 await Task.Delay(250, cancellationToken).ConfigureAwait(false);
             }
             ProcessLifecycleResult completed = await CompleteProcessAsync(
@@ -1084,6 +1258,13 @@ internal static class DevCheckCommand
                 completed.ExitCode);
             if (!logVerified)
                 result = result with { Status = "RUNTIME_LOAD_FAIL", Reason = logFailure };
+            if (state.MapScenario is not null)
+            {
+                state.MapAssessment = result.Status == "RUNTIME_LOAD_PASS" && logVerified
+                    ? EvaluateMapEvents(state.MapScenario, log)
+                    : new MapEventAssessment(MapEventContract.Current,
+                        MapEventContract.InvalidEvidence, "RUNTIME_OR_LOG_NOT_PROVEN", null, null);
+            }
             return result with
             {
                 RuntimeSeconds = Math.Round(ElapsedMilliseconds(started) / 1000d, 3),
@@ -1798,6 +1979,10 @@ internal static class DevCheckCommand
 
     private sealed class State
     {
+        public bool MapMode { get; init; }
+        public string? MapNonce { get; set; }
+        public MapScenario? MapScenario { get; set; }
+        public MapEventAssessment? MapAssessment { get; set; }
         public string Workspace { get; set; } = string.Empty;
         public ModIdentity Mod { get; set; } = new("", "");
         public List<string> ChangedFiles { get; } = [];

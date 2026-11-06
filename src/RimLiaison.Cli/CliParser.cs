@@ -35,6 +35,7 @@ internal enum CliCommand
     ToolchainPromotion,
     Content,
     DevCheck,
+    MapCheck,
     RimDev
 }
 
@@ -544,6 +545,10 @@ internal static class CliParser
                 command = CliCommand.DevCheck;
                 id = positionals.Count == 2 ? positionals[1] : null;
                 break;
+            case "map-check" when positionals.Count is 1 or 2:
+                command = CliCommand.MapCheck;
+                id = positionals.Count == 2 ? positionals[1] : null;
+                break;
             case "content" when positionals.Count == 1:
                 command = CliCommand.Content;
                 break;
@@ -983,6 +988,7 @@ internal static class CliParser
                 "doctor",
                 "context",
                 "dev-check [<workspace>]",
+                "map-check [<workspace>] (source-only, opt-in QA; no native map proof)",
                 "content query [<selector>]",
                 "publish check",
                 "qualification [burn-in]",

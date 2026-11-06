@@ -175,7 +175,7 @@ public static class CliApplication
                 exitCode = CliExitCodes.Success;
                 return exitCode;
             }
-            if (request.Command == CliCommand.DevCheck)
+            if (request.Command is CliCommand.DevCheck or CliCommand.MapCheck)
             {
                 return await DevCheckCommand.RunAsync(
                         request,

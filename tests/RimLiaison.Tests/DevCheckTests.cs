@@ -13,6 +13,135 @@ internal static class DevCheckTests
             throw new InvalidOperationException("dev-check did not preserve its optional workspace positional.");
     }
 
+
+    public static void MapCheckModeRequiresSafeFixtureAndActualMapEvidence()
+    {
+        CliRequest request = CliParser.Parse(["map-check", "C:/isolated-mod", "--json"]);
+        if (request.Command != CliCommand.MapCheck || request.Id != "C:/isolated-mod")
+            throw new InvalidOperationException("map-check did not preserve its explicit isolated workspace.");
+
+        string root = CreateWorkspace();
+        try
+        {
+            string catalog = Path.Combine(root, "TestCatalog");
+            Directory.CreateDirectory(catalog);
+            string path = Path.Combine(catalog, "rimtest.mapcheck.json");
+            const string definition = """
+                {
+                  "schemaVersion":"rimtest-map-scenario/v1",
+                  "qaDefine":"NATURETILES_GAMEPLAY_QA",
+                  "nonceEnvironment":"NATURETILES_QA_NONCE",
+                  "eventPrefix":"NatureTilesQA",
+                  "outcomeSchema":"naturetiles-genstep-outcome/v1",
+                  "observationSchema":"naturetiles-map-smoke/v1",
+                  "expectedBiome":"TemperateForest",
+                  "countField":"brambleCount",
+                  "presenceField":"featureObserved",
+                  "integrityField":"placementValid",
+                  "positiveOutcome":"completed",
+                  "maximumCount":350,
+                  "terminalCountField":"newlyPlaced",
+                  "terminalSelectionField":"chanceSelected"
+                }
+                """;
+            File.WriteAllText(path, definition);
+            const string nonce = "MAPCHECK01234567890";
+            DevCheckCommand.MapScenario scenario =
+                DevCheckCommand.ReadMapScenario(root, nonce);
+            if (scenario.QaDefine != "NATURETILES_GAMEPLAY_QA" ||
+                scenario.NonceEnvironment != "NATURETILES_QA_NONCE" ||
+                scenario.Expectation.Nonce != nonce)
+                throw new InvalidOperationException("Map QA contract lost the mod-declared scope.");
+
+            ProcessStartInfo start = DevCheckCommand.CreateWaylithRuntimeStartInfo(
+                root, Path.Combine(root, "owned-map-profile"),
+                ["ludeon.rimworld", "direct.validation.runtime.signal", "target.mod"],
+                mapCheck: true);
+            if (!start.ArgumentList.Contains("-quicktest") ||
+                start.ArgumentList.Contains("-Headless") ||
+                !start.ArgumentList.Any(arg => arg.StartsWith("-savedatafolder=", StringComparison.Ordinal)) ||
+                !DevCheckCommand.IsWaylithTargetSelected(start, "target.mod"))
+                throw new InvalidOperationException("Map check must retain owned Waylith profile and target.");
+
+            string logPath = Path.Combine(root, "Logs", "Player.log");
+            DateTimeOffset began = DateTimeOffset.UtcNow.AddSeconds(-6);
+            DateTimeOffset exited = began.AddSeconds(10);
+            string logStarted = began.AddSeconds(1).ToLocalTime().ToString(
+                "yyyy-MM-dd HH:mm:ss.fff zzz",
+                System.Globalization.CultureInfo.InvariantCulture);
+            string header = "Started:   " + logStarted + "\n" +
+                "Version:   1.7.4990.1069\nLog file:  " + logPath + "\n" +
+                "Command:   " + Path.Combine(root, "RimWorld.dll") + "\n" +
+                "-savedatafolder=" + Path.Combine(root, "owned-map-profile") + "\n" +
+                "-mod=direct.validation.runtime.signal;target.mod -quicktest\n";
+            if (!DevCheckCommand.VerifyWaylithLogHeader(
+                    header, logPath, root, start, began, exited, out _) ||
+                DevCheckCommand.VerifyWaylithLogHeader(
+                    header.Replace("-quicktest", "-Headless", StringComparison.Ordinal),
+                    logPath, root, start, began, exited, out _))
+                throw new InvalidOperationException("Quicktest log provenance must be isolated from Headless.");
+
+            string terminal = "[NatureTilesQA] " +
+                """{"schemaVersion":"naturetiles-genstep-outcome/v1","nonce":"MAPCHECK01234567890","mapUniqueId":1,"biome":"TemperateForest","mapWidth":250,"mapHeight":250,"outcome":"completed","newlyPlaced":8,"chanceSelected":true}""";
+            string observed = "[NatureTilesQA] " +
+                """{"schemaVersion":"naturetiles-map-smoke/v1","nonce":"MAPCHECK01234567890","mapUniqueId":1,"biome":"TemperateForest","mapWidth":250,"mapHeight":250,"brambleCount":8,"featureObserved":true,"placementValid":true}""";
+            var positive = DevCheckCommand.EvaluateMapEvents(scenario,
+                header + terminal + "\n" + observed + "\n");
+            if (positive.Status != RimLiaison.Validation.MapEventContract.ReadyForNativeReview ||
+                positive.NativeQualified || positive.MapUniqueId != 1 || positive.ObservedCount != 8)
+                throw new InvalidOperationException("Matched map events lost non-native classification.");
+            void Reject(string log, string reason)
+            {
+                var actual = DevCheckCommand.EvaluateMapEvents(scenario, log);
+                if (actual.Status != RimLiaison.Validation.MapEventContract.InvalidEvidence ||
+                    actual.ReasonCode != reason)
+                    throw new InvalidOperationException("Invalid map evidence accepted: " + actual.ReasonCode);
+            }
+            Reject(terminal.Replace(nonce, "WRONGNONCE0000000", StringComparison.Ordinal) +
+                "\n" + observed, "EVENT_IDENTITY_INVALID");
+            Reject(terminal + "\n" + observed.Replace(
+                "TemperateForest", "BorealForest", StringComparison.Ordinal),
+                "EVENT_IDENTITY_INVALID");
+            Reject(terminal + "\n" + terminal + "\n" + observed,
+                "DUPLICATE_TERMINAL_EVENT");
+            Reject(terminal.Replace(
+                "\"newlyPlaced\":8", "\"newlyPlaced\":9", StringComparison.Ordinal) +
+                "\n" + observed, "TERMINAL_COUNT_OBSERVATION_MISMATCH");
+            if (DevCheckCommand.EvaluateMapEvents(scenario, terminal).Status !=
+                RimLiaison.Validation.MapEventContract.Inconclusive)
+                throw new InvalidOperationException("No map observation was treated as success.");
+
+            File.WriteAllText(path, definition.Replace(
+                "NATURETILES_QA_NONCE", "PATH", StringComparison.Ordinal));
+            try
+            {
+                DevCheckCommand.ReadMapScenario(root, nonce);
+                throw new InvalidOperationException("Host environment injection was accepted.");
+            }
+            catch (InvalidDataException) { }
+            File.WriteAllText(path, definition.Replace(
+                "NATURETILES_GAMEPLAY_QA", "NATURETILES_GAMEPLAY_QA;SHELL", StringComparison.Ordinal));
+            try
+            {
+                DevCheckCommand.ReadMapScenario(root, nonce);
+                throw new InvalidOperationException("Unsafe build property was accepted.");
+            }
+            catch (InvalidDataException) { }
+            File.Delete(path);
+            try
+            {
+                DevCheckCommand.ReadMapScenario(root, nonce);
+                throw new InvalidOperationException("Missing map QA scenario was accepted.");
+            }
+            catch (InvalidDataException) { }
+        }
+        finally
+        {
+            DeleteWorkspace(root);
+        }
+    }
+
+
     public static void WaylithOnlyLayoutRejectsLegacyAndPartialGame()
     {
         string root = CreateWorkspace();
@@ -548,7 +677,10 @@ internal static class DevCheckTests
                 !errors.Any(error => error.Contains("Broken.csproj", StringComparison.OrdinalIgnoreCase) ||
                                      error.Contains("Broken.cs", StringComparison.OrdinalIgnoreCase)))
             {
-                throw new InvalidOperationException("production project compiler failure did not identify its owning project.");
+                string summary = "exit=" + exitCode +
+                    "; build=" + result.RootElement.GetProperty("build").GetProperty("status").GetString() +
+                    "; errors=" + string.Join(" | ", errors.Take(6).Select(error => error.Length > 320 ? error[..320] : error));
+                throw new InvalidOperationException("production project compiler failure did not identify its owning project: " + summary);
             }
         }
         finally
