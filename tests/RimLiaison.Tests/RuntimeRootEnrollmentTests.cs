@@ -432,8 +432,20 @@ internal static class RuntimeRootEnrollmentTests
         Task<string> firstStderr = first.StandardError.ReadToEndAsync();
         Task<string> secondStdout = second.StandardOutput.ReadToEndAsync();
         Task<string> secondStderr = second.StandardError.ReadToEndAsync();
-        Assert(first.WaitForExit(120_000), "first concurrent enrollment exceeded its bound");
-        Assert(second.WaitForExit(120_000), "second concurrent enrollment exceeded its bound");
+        // Keep both concurrent child waits within the enclosing test runner's
+        // 60-second deadline so a timeout retains a specific test diagnostic.
+        Stopwatch enrollmentWait = Stopwatch.StartNew();
+        bool firstCompleted = first.WaitForExit(35_000);
+        bool secondCompleted = second.WaitForExit(
+            Math.Max(0, 35_000 - (int)enrollmentWait.ElapsedMilliseconds));
+        if (!firstCompleted || !secondCompleted)
+        {
+            TerminateProbe(first);
+            TerminateProbe(second);
+            throw new InvalidOperationException(
+                $"concurrent enrollment child deadline first={firstCompleted} " +
+                $"second={secondCompleted}; elapsedMs={enrollmentWait.ElapsedMilliseconds}");
+        }
         string firstOutput = firstStdout.GetAwaiter().GetResult();
         string secondOutput = secondStdout.GetAwaiter().GetResult();
         string firstError = firstStderr.GetAwaiter().GetResult();
@@ -522,6 +534,26 @@ internal static class RuntimeRootEnrollmentTests
         Assert(audit.Status == "READY", "workspace probe did not resolve a ready workspace");
         Assert(audit.Projects.Single().Health is ProjectBindingHealthStates.Healthy or ProjectBindingHealthStates.Repaired,
             "workspace probe did not observe a canonical healthy enrollment");
+    }
+
+    private static void TerminateProbe(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(2_000);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The child exited between checking HasExited and Kill.
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // The enclosing test runner still owns its child-process cleanup.
+        }
     }
 
     private static Process StartProbe(TestEnvironment environment, string filter)

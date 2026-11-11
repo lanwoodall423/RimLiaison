@@ -932,6 +932,7 @@ internal static class Program
 
         int failures = 0;
         List<string> failedTestNames = [];
+        List<string> failedTestDetails = [];
         Queue<string> recentTests = new();
         int timeoutSeconds = ReadTestTimeoutSeconds();
         foreach ((string name, _) in selected)
@@ -944,6 +945,10 @@ internal static class Program
             {
                 failures++;
                 failedTestNames.Add(name);
+                if (failedTestDetails.Count < 5)
+                {
+                    failedTestDetails.Add($"{name}: TIMEOUT {duration}");
+                }
                 Console.Error.WriteLine("TEST_TIMEOUT");
                 Console.Error.WriteLine($"test={name}");
                 Console.Error.WriteLine(duration);
@@ -959,9 +964,14 @@ internal static class Program
             {
                 failures++;
                 failedTestNames.Add(name);
-                string details = FirstNonEmpty(result.StandardError, result.StandardOutput);
-                Console.Error.WriteLine(
-                    $"FAIL {name} {duration}: {BoundedSingleLine(details)}");
+                string details = BoundedSingleLine(
+                    FirstNonEmpty(result.StandardError, result.StandardOutput));
+                if (failedTestDetails.Count < 5)
+                {
+                    failedTestDetails.Add(
+                        $"{name}: {details[..Math.Min(details.Length, 1_024)]}");
+                }
+                Console.Error.WriteLine($"FAIL {name} {duration}: {details}");
             }
 
             recentTests.Enqueue(name);
@@ -973,7 +983,13 @@ internal static class Program
 
         Console.WriteLine($"{selected.Length - failures}/{selected.Length} tests passed.");
         if (failedTestNames.Count != 0)
+        {
             Console.Error.WriteLine("FAILED_TEST_NAMES: " + string.Join(" | ", failedTestNames));
+            foreach (string detail in failedTestDetails)
+            {
+                Console.Error.WriteLine("FAILED_TEST_DETAIL: " + detail);
+            }
+        }
         return failures == 0 ? 0 : 1;
     }
 
