@@ -703,3 +703,140 @@ public static class MapEventEvaluator
         value.All(character => character is >= 'a' and <= 'z' or
             >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.');
 }
+
+/// <summary>
+/// Source-only shape and concordance gate for a future independently owned
+/// guest/map/screenshot receipt. A structurally complete caller-supplied
+/// receipt is not a native attestation, even if every field is plausible.
+/// </summary>
+public static class MapWitnessContract
+{
+    public const string Current = "rimliaison-map-witness/v1";
+    public const string ReadyForAttestation = "READY_FOR_INDEPENDENT_ATTESTATION";
+    public const string Incomplete = "INCOMPLETE";
+    public const string InvalidEvidence = "INVALID_EVIDENCE";
+}
+
+public sealed record MapWitnessReceipt(
+    string SchemaVersion,
+    string SourceHead,
+    string RunnerHead,
+    string RunId,
+    string ScreenshotRunId,
+    string Nonce,
+    string GameVersion,
+    string Biome,
+    string WorldSeed,
+    int WorldTile,
+    int MapUniqueId,
+    int ObservedCount,
+    string ScreenshotSha256,
+    long ScreenshotByteCount,
+    DateTimeOffset RunStartedUtc,
+    DateTimeOffset ScreenshotCapturedUtc,
+    DateTimeOffset RunEndedUtc,
+    bool CurrentLogVerified,
+    bool CleanupComplete);
+
+public sealed record MapWitnessAssessment(
+    string SchemaVersion, string Status, string ReasonCode,
+    bool NativeQualified = false, bool SeedVerified = false,
+    bool ScreenshotVerified = false);
+
+public static class MapWitnessEvaluator
+{
+    private static bool Hex(string? value, int length) =>
+        value is not null && value.Length == length &&
+        value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool RunId(string? value) =>
+        value is not null && Guid.TryParseExact(value, "D", out Guid id) &&
+        id != Guid.Empty && value == id.ToString("D");
+
+    private static bool Seed(string? value) =>
+        value is { Length: >= 1 and <= 80 } &&
+        value.All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or
+            >= '0' and <= '9' or ' ' or '-' or '_');
+
+    /// <summary>
+    /// The expected identity/seed/tile must ultimately be provided by a
+    /// trusted launcher, not copied from mod logs. This pure method has no
+    /// such launcher authority and therefore NEVER returns native success.
+    /// </summary>
+    public static MapWitnessAssessment Evaluate(
+        MapEventExpectation expected,
+        MapEventAssessment events,
+        MapWitnessReceipt? receipt,
+        string expectedSourceHead,
+        string expectedRunnerHead,
+        string expectedRunId,
+        string expectedWorldSeed,
+        int expectedWorldTile)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(events);
+        MapWitnessAssessment Result(string status, string reason) =>
+            new(MapWitnessContract.Current, status, reason);
+
+        if (!Hex(expectedSourceHead, 40) || !Hex(expectedRunnerHead, 40) ||
+            !RunId(expectedRunId) || !Seed(expectedWorldSeed) ||
+            expectedWorldTile is < 0 or > 1_000_000)
+            return Result(MapWitnessContract.InvalidEvidence, "EXPECTED_CUSTODY_INVALID");
+
+        if (events.SchemaVersion != MapEventContract.Current ||
+            events.Status != MapEventContract.ReadyForNativeReview ||
+            events.NativeQualified || events.Provenance != "untrusted-log-text" ||
+            events.MapUniqueId is not >= 0 || events.ObservedCount is not > 0)
+            return Result(MapWitnessContract.Incomplete, "SOURCE_EVENT_NOT_READY");
+
+        if (receipt is null)
+            return Result(MapWitnessContract.Incomplete, "NATIVE_WITNESS_MISSING");
+        if (receipt.SchemaVersion != MapWitnessContract.Current ||
+            !Hex(receipt.SourceHead, 40) || !Hex(receipt.RunnerHead, 40) ||
+            !RunId(receipt.RunId) || !RunId(receipt.ScreenshotRunId))
+            return Result(MapWitnessContract.InvalidEvidence, "WITNESS_ENVELOPE_INVALID");
+
+        if (receipt.SourceHead != expectedSourceHead ||
+            receipt.RunnerHead != expectedRunnerHead)
+            return Result(MapWitnessContract.InvalidEvidence, "SOURCE_RUNNER_MISMATCH");
+        if (receipt.RunId != expectedRunId ||
+            receipt.ScreenshotRunId != expectedRunId ||
+            receipt.Nonce != expected.Nonce)
+            return Result(MapWitnessContract.InvalidEvidence, "RUN_NONCE_MISMATCH");
+
+        if (receipt.GameVersion is null ||
+            !receipt.GameVersion.StartsWith("1.7.", StringComparison.Ordinal) ||
+            receipt.GameVersion.Length > 40)
+            return Result(MapWitnessContract.InvalidEvidence, "GAME_VERSION_MISMATCH");
+        if (receipt.WorldSeed != expectedWorldSeed ||
+            receipt.WorldTile != expectedWorldTile)
+            return Result(MapWitnessContract.InvalidEvidence, "SEED_TILE_MISMATCH");
+        if (receipt.MapUniqueId != events.MapUniqueId ||
+            receipt.ObservedCount != events.ObservedCount ||
+            receipt.Biome != expected.ExpectedBiome)
+            return Result(MapWitnessContract.InvalidEvidence, "MAP_IDENTITY_MISMATCH");
+
+        if (receipt.RunStartedUtc.Offset != TimeSpan.Zero ||
+            receipt.RunEndedUtc.Offset != TimeSpan.Zero ||
+            receipt.ScreenshotCapturedUtc.Offset != TimeSpan.Zero ||
+            receipt.RunStartedUtc >= receipt.RunEndedUtc ||
+            receipt.RunEndedUtc - receipt.RunStartedUtc > TimeSpan.FromMinutes(60) ||
+            receipt.ScreenshotCapturedUtc < receipt.RunStartedUtc ||
+            receipt.ScreenshotCapturedUtc > receipt.RunEndedUtc)
+            return Result(MapWitnessContract.InvalidEvidence, "SCREENSHOT_RUN_TIME_MISMATCH");
+        if (!Hex(receipt.ScreenshotSha256, 64) ||
+            receipt.ScreenshotByteCount is < 24 or > 16_777_216)
+            return Result(MapWitnessContract.Incomplete, "SCREENSHOT_EVIDENCE_MISSING");
+        if (!receipt.CurrentLogVerified)
+            return Result(MapWitnessContract.Incomplete, "CURRENT_LOG_UNVERIFIED");
+        if (!receipt.CleanupComplete)
+            return Result(MapWitnessContract.Incomplete, "OWNED_CLEANUP_UNVERIFIED");
+
+        // The above validates structural consistency ONLY. Screenshot bytes,
+        // source/runner provenance and actual seed/tile remain untrusted until
+        // a separately reviewed guest custody implementation proves them.
+        return Result(MapWitnessContract.ReadyForAttestation,
+            "STRUCTURE_VALID_NATIVE_AUTHORITY_UNPROVEN");
+    }
+}
+

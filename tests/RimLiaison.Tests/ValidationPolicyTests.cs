@@ -366,6 +366,7 @@ internal static class ValidationPolicyTests
         AssertEqual("untrusted-log-text", result.Provenance);
         Assert(!result.NativeQualified, "Source event text cannot qualify RimWorld.");
         Assert(result.Status != "PASS", "An untrusted event must not be reported as PASS.");
+        MapWitnessSourceOnlyEvidenceIsNeverNative();
     }
 
     public static void MapEventsMissingAndChanceMissStayInconclusive()
@@ -604,6 +605,86 @@ internal static class ValidationPolicyTests
         Assert(!result.NativeQualified, "Generic source events remain untrusted.");
         AssertEqual(MapEventContract.InvalidEvidence,
             MapEventEvaluator.Evaluate(MapFixture(), converted).Status);
+    }
+
+
+    public static void MapWitnessSourceOnlyEvidenceIsNeverNative()
+    {
+        string source = new('a', 40);
+        string runner = new('b', 40);
+        string run = "a4f77b80-b536-4515-9d44-2e06ff087c34";
+        string seed = "bramble seed 42";
+        const int tile = 451;
+        DateTimeOffset started = new(2026, 11, 10, 21, 30, 0, TimeSpan.Zero);
+        MapEventExpectation expectation = MapFixture();
+        MapEventAssessment events = MapEventEvaluator.Evaluate(expectation, MapEvents());
+        var witness = new MapWitnessReceipt(
+            MapWitnessContract.Current, source, runner, run, run,
+            expectation.Nonce, "1.7.4990", expectation.ExpectedBiome, seed,
+            tile, 17, 24, new string('c', 64), 2048,
+            started, started.AddMinutes(2), started.AddMinutes(4),
+            CurrentLogVerified: true, CleanupComplete: true);
+        MapWitnessAssessment Evaluate(MapWitnessReceipt? receipt) =>
+            MapWitnessEvaluator.Evaluate(expectation, events, receipt,
+                source, runner, run, seed, tile);
+        void Reject(MapWitnessReceipt receipt, string reason)
+        {
+            MapWitnessAssessment result = Evaluate(receipt);
+            AssertEqual(reason, result.ReasonCode);
+            Assert(!result.NativeQualified && !result.SeedVerified &&
+                !result.ScreenshotVerified,
+                "Untrusted witness fields may never qualify native gameplay.");
+        }
+
+        MapWitnessAssessment complete = Evaluate(witness);
+        AssertEqual(MapWitnessContract.ReadyForAttestation, complete.Status);
+        Assert(!complete.NativeQualified && !complete.SeedVerified &&
+            !complete.ScreenshotVerified,
+            "Plausible synthetic source fixtures are not native proof.");
+        AssertEqual("NATIVE_WITNESS_MISSING", Evaluate(null).ReasonCode);
+        Reject(witness with { SourceHead = new string('d', 40) },
+            "SOURCE_RUNNER_MISMATCH");
+        Reject(witness with { RunnerHead = new string('d', 40) },
+            "SOURCE_RUNNER_MISMATCH");
+        Reject(witness with { RunId = "bd851990-0eb4-42f1-8d2f-01a30389bdce" },
+            "RUN_NONCE_MISMATCH");
+        Reject(witness with { ScreenshotRunId = "bd851990-0eb4-42f1-8d2f-01a30389bdce" },
+            "RUN_NONCE_MISMATCH");
+        Reject(witness with { Nonce = "foreign-run-1234" },
+            "RUN_NONCE_MISMATCH");
+        Reject(witness with { GameVersion = "1.6.5000" },
+            "GAME_VERSION_MISMATCH");
+        Reject(witness with { WorldSeed = "foreign seed" },
+            "SEED_TILE_MISMATCH");
+        Reject(witness with { WorldTile = tile + 1 },
+            "SEED_TILE_MISMATCH");
+        Reject(witness with { MapUniqueId = 18 },
+            "MAP_IDENTITY_MISMATCH");
+        Reject(witness with { ObservedCount = 0 },
+            "MAP_IDENTITY_MISMATCH");
+        Reject(witness with { Biome = "BorealForest" },
+            "MAP_IDENTITY_MISMATCH");
+        Reject(witness with { ScreenshotSha256 = "" },
+            "SCREENSHOT_EVIDENCE_MISSING");
+        Reject(witness with { ScreenshotByteCount = 0 },
+            "SCREENSHOT_EVIDENCE_MISSING");
+        Reject(witness with { ScreenshotCapturedUtc = started.AddDays(-1) },
+            "SCREENSHOT_RUN_TIME_MISMATCH");
+        Reject(witness with { CurrentLogVerified = false },
+            "CURRENT_LOG_UNVERIFIED");
+        Reject(witness with { CleanupComplete = false },
+            "OWNED_CLEANUP_UNVERIFIED");
+        Reject(witness with { SchemaVersion = "rimliaison-map-witness/v0" },
+            "WITNESS_ENVELOPE_INVALID");
+
+        MapWitnessAssessment noMap = MapWitnessEvaluator.Evaluate(expectation,
+            events with { Status = MapEventContract.Inconclusive },
+            witness, source, runner, run, seed, tile);
+        AssertEqual("SOURCE_EVENT_NOT_READY", noMap.ReasonCode);
+        Assert(!noMap.NativeQualified, "Missing map readiness is not native proof.");
+        AssertEqual("EXPECTED_CUSTODY_INVALID",
+            MapWitnessEvaluator.Evaluate(expectation, events, witness,
+                source, runner, run, seed, -1).ReasonCode);
     }
 
     private static MapEventExpectation MapFixture() => new(
