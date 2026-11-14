@@ -1515,15 +1515,15 @@ internal static class NativeRimtestCapturedArtifactAuditCommand
 {
     internal const string Name = "rimtest-capture-verify";
     internal const string OutputPath = "artifacts/rimtest-capture-audit.json";
-    internal const string OperationId = "5ec57e34-633c-44d1-b7fa-43e55aa2dd9c";
-    internal const string SourceCommit = "771549d4bc6041150a7e9bbace086fa85455ce6e";
-    internal const string SourceTree = "bcb14eee742cd1dba6911c7acd00f03384f2af3d";
+    internal const string OperationId = "66c6a5f5-912b-4092-a60c-a74900d97c0c";
+    internal const string SourceCommit = "af75fe41add7a329eb80d7d65bc8fa29063a5fc0";
+    internal const string SourceTree = "44676589a378c33dc6e630fc464eb6ceb66126d5";
     internal const string ArchiveHash =
-        "1e311ec6e9583e67a33e58f574333d085b2a534e37c3afe6e807dc70ec94cb2f";
+        "80a85c5e5ef048f9add8319c6f3dca9b49cb05471434d80a0b374b660dd6848a";
     internal const string ReceiptHash =
-        "f9111ebe590fad71c08fb5a832b62fd3cb2dcbcb926c3b33021ed358f8d7dfb5";
+        "dd98c821a6d76baf6ca338a98df2e43e390fbedec3a9009eba89305eb92314e0";
     internal const string DefinitionId =
-        "sha256:db7f327a9c912825503b6748109a394578b5bfe394cbb8e27eedccffd87774b3";
+        "sha256:99d1e67a47be48b3e1147261ffdcc061c9910620ca45a461493f99bfc9f412f8";
 
     internal static bool IsRequested(IReadOnlyList<string> args) =>
         args.Count > 0 && args[0] == Name;

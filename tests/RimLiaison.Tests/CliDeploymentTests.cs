@@ -180,6 +180,21 @@ internal static class CliDeploymentTests
                    [NativeRimtestCapturedArtifactAuditCommand.Name,
                        "C:\\RimWorld", "--json"]),
             "capture audit must reject caller-selected paths and host actions");
+        Assert(NativeRimtestCapturedArtifactAuditCommand.OperationId ==
+                   "66c6a5f5-912b-4092-a60c-a74900d97c0c" &&
+               NativeRimtestCapturedArtifactAuditCommand.OperationId !=
+                   "5ec57e34-633c-44d1-b7fa-43e55aa2dd9c" &&
+               NativeRimtestCapturedArtifactAuditCommand.SourceCommit ==
+                   "af75fe41add7a329eb80d7d65bc8fa29063a5fc0" &&
+               NativeRimtestCapturedArtifactAuditCommand.SourceTree ==
+                   "44676589a378c33dc6e630fc464eb6ceb66126d5" &&
+               NativeRimtestCapturedArtifactAuditCommand.ArchiveHash ==
+                   "80a85c5e5ef048f9add8319c6f3dca9b49cb05471434d80a0b374b660dd6848a" &&
+               NativeRimtestCapturedArtifactAuditCommand.ReceiptHash ==
+                   "dd98c821a6d76baf6ca338a98df2e43e390fbedec3a9009eba89305eb92314e0" &&
+               NativeRimtestCapturedArtifactAuditCommand.DefinitionId ==
+                   "sha256:99d1e67a47be48b3e1147261ffdcc061c9910620ca45a461493f99bfc9f412f8",
+            "capture audit must pin the newly captured exact producer, never historical evidence");
     }
 
     public static void NativeCandidateInstallCopiesVerifiedClosureWithoutPATHChanges()
