@@ -880,8 +880,8 @@ public static class MapWitnessScreenshotBinder
             return Result(MapWitnessContract.Incomplete,
                 "SCREENSHOT_BYTES_MISSING_OR_OUT_OF_BOUNDS");
 
-        // Validate bounded PNG framing and each chunk CRC. This is not image
-        // decoding, and does not establish when/where the PNG was captured.
+        // Validate CRCs, bounded zlib decompression and scanline framing.
+        // Decodable pixels still do NOT establish game/host provenance.
         if (!IsPngContainer(screenshotPng.Span))
             return Result(MapWitnessContract.InvalidEvidence,
                 "SCREENSHOT_PNG_INVALID");
@@ -911,13 +911,16 @@ public static class MapWitnessScreenshotBinder
     {
         ReadOnlySpan<byte> signature =
             [137, 80, 78, 71, 13, 10, 26, 10];
-        if (!png[..8].SequenceEqual(signature))
+        if (png.Length < 57 || !png[..8].SequenceEqual(signature))
             return false;
 
         bool hasHeader = false;
         bool hasImageData = false;
         bool imageDataEnded = false;
         bool hasPalette = false;
+        int rowBytes = 0;
+        int rowCount = 0;
+        using MemoryStream compressedPixels = new();
         int cursor = 8;
         int chunks = 0;
         while (cursor <= png.Length - 12 && ++chunks <= 128)
@@ -954,19 +957,27 @@ public static class MapWitnessScreenshotBinder
                     .ReadUInt32BigEndian(data[..4]);
                 uint height = System.Buffers.Binary.BinaryPrimitives
                     .ReadUInt32BigEndian(data.Slice(4, 4));
+                // An 8192x8192 PNG header alone is not evidence that its
+                // uncompressed pixel allocation is safe.
                 if (width is 0 or > 8192 || height is 0 or > 8192 ||
+                    (ulong)width * height > MaximumBytes ||
                     data[8] != 8 || data[9] is not (2 or 6) ||
-                    data[10] != 0 || data[11] != 0 || data[12] > 1)
+                    data[10] != 0 || data[11] != 0 || data[12] != 0)
                     return false;
+                rowBytes = checked((int)width * (data[9] == 6 ? 4 : 3));
+                rowCount = (int)height;
                 hasHeader = true;
             }
             else if (type.SequenceEqual("IEND"u8))
-                return count == 0 && hasImageData && next == png.Length;
+                return count == 0 && hasImageData && next == png.Length &&
+                    HasValidPngScanlines(compressedPixels, rowBytes, rowCount);
             else if (type.SequenceEqual("IDAT"u8))
             {
-                // PNG image-data chunks must be consecutive.
+                // PNG image-data chunks must be consecutive; collect only
+                // bytes already bounded by the 16 MiB screenshot limit.
                 if (count == 0 || imageDataEnded)
                     return false;
+                compressedPixels.Write(data);
                 hasImageData = true;
             }
             else
@@ -988,6 +999,38 @@ public static class MapWitnessScreenshotBinder
             cursor = next;
         }
         return false;
+    }
+
+    private static bool HasValidPngScanlines(
+        MemoryStream compressedPixels, int rowBytes, int rowCount)
+    {
+        if (rowBytes is < 1 or > 32768 || rowCount is < 1 or > 8192)
+            return false;
+
+        // Each scanline has one PNG filter byte and 3/4 bytes per pixel.
+        // Read row-by-row: a valid small PNG cannot expand into a memory
+        // bomb, and neither extra rows nor truncated zlib may be accepted.
+        try
+        {
+            compressedPixels.Position = 0;
+            using var zlib = new System.IO.Compression.ZLibStream(
+                compressedPixels,
+                System.IO.Compression.CompressionMode.Decompress,
+                leaveOpen: true);
+            byte[] scanline = new byte[rowBytes + 1];
+            for (int row = 0; row < rowCount; row++)
+            {
+                zlib.ReadExactly(scanline);
+                if (scanline[0] > 4)
+                    return false;
+            }
+            return zlib.ReadByte() == -1;
+        }
+        catch (Exception exception) when (exception is
+            InvalidDataException or IOException)
+        {
+            return false;
+        }
     }
 
     private static uint PngCrc(ReadOnlySpan<byte> bytes)

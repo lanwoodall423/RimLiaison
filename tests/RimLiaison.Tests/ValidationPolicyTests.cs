@@ -737,17 +737,41 @@ internal static class ValidationPolicyTests
             return chunk;
         }
 
-        void RejectInvalidContainer(byte[] bytes)
+        MapWitnessReceipt ClaimForPng(byte[] bytes) => bound with
         {
-            MapWitnessReceipt claim = bound with
-            {
-                ScreenshotSha256 = Convert.ToHexString(
-                    System.Security.Cryptography.SHA256.HashData(bytes))
-                    .ToLowerInvariant(),
-                ScreenshotByteCount = bytes.Length
-            };
-            RejectBytes(claim, bytes, "SCREENSHOT_PNG_INVALID");
+            ScreenshotSha256 = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(bytes))
+                .ToLowerInvariant(),
+            ScreenshotByteCount = bytes.Length
+        };
+
+        void RejectInvalidContainer(byte[] bytes) =>
+            RejectBytes(ClaimForPng(bytes), bytes, "SCREENSHOT_PNG_INVALID");
+
+        void AcceptDecodedPng(byte[] bytes)
+        {
+            MapWitnessScreenshotBinding result = Bind(ClaimForPng(bytes), bytes);
+            AssertEqual(MapWitnessContract.ReadyForAttestation, result.Status);
+            AssertEqual("SCREENSHOT_BYTES_BOUND_NATIVE_AUTHORITY_UNPROVEN",
+                result.ReasonCode);
+            Assert(result.Receipt is not null && !result.NativeQualified &&
+                !result.SeedVerified && !result.ScreenshotVerified,
+                "Decodable PNG does not prove authentic host/game capture.");
         }
+
+        static byte[] PngZlib(byte[] raw)
+        {
+            using MemoryStream output = new();
+            using (var zlib = new System.IO.Compression.ZLibStream(
+                output, System.IO.Compression.CompressionLevel.Optimal,
+                leaveOpen: true))
+                zlib.Write(raw);
+            return output.ToArray();
+        }
+
+        // Fixture has a standard 13-byte IHDR and one IDAT, followed by IEND.
+        byte[] PngWithData(byte[] imageData) =>
+            [.. png[..33], .. PngChunk("IDAT", imageData), .. png[^12..]];
 
         MapWitnessScreenshotBinding bytesBound = Bind(bound, png);
         AssertEqual(MapWitnessContract.ReadyForAttestation, bytesBound.Status);
@@ -799,6 +823,50 @@ internal static class ValidationPolicyTests
             [.. png[..^12], .. PngChunk("PLTE", [0, 0, 0]),
              .. png[^12..]];
         RejectInvalidContainer(latePalette);
+
+        // A correct CRC on every PNG chunk is not evidence that IDAT
+        // decompresses into actual valid image scanlines.
+        byte[] rgbaPixels = [0, 255, 32, 64, 255];
+        byte[] encoded = PngZlib(rgbaPixels);
+        AcceptDecodedPng(PngWithData(encoded));
+        int midpoint = Math.Max(1, encoded.Length / 2);
+        byte[] splitData =
+            [.. png[..33],
+             .. PngChunk("IDAT", encoded[..midpoint]),
+             .. PngChunk("IDAT", encoded[midpoint..]),
+             .. png[^12..]];
+        AcceptDecodedPng(splitData);
+
+        // RGB and RGBA are supported, but only non-interlaced 8-bit.
+        byte[] header = png.AsSpan(16, 13).ToArray();
+        header[9] = 2;
+        byte[] rgb =
+            [.. png[..8], .. PngChunk("IHDR", header),
+             .. PngChunk("IDAT", PngZlib([0, 1, 2, 3])),
+             .. png[^12..]];
+        AcceptDecodedPng(rgb);
+
+        RejectInvalidContainer(PngWithData([0]));
+        RejectInvalidContainer(PngWithData(PngZlib([0, 1])));
+        RejectInvalidContainer(PngWithData(PngZlib([5, 0, 0, 0, 0])));
+        RejectInvalidContainer(PngWithData(
+            PngZlib([0, 0, 0, 0, 0, 255])));
+        byte[] corruptZlib = (byte[])encoded.Clone();
+        corruptZlib[^1] ^= 1;
+        RejectInvalidContainer(PngWithData(corruptZlib));
+
+        byte[] hugeHeader = png.AsSpan(16, 13).ToArray();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+            hugeHeader.AsSpan(0, 4), 8192);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+            hugeHeader.AsSpan(4, 4), 8192);
+        RejectInvalidContainer(
+            [.. png[..8], .. PngChunk("IHDR", hugeHeader), .. png[33..]]);
+        byte[] interlacedHeader = png.AsSpan(16, 13).ToArray();
+        interlacedHeader[12] = 1;
+        RejectInvalidContainer(
+            [.. png[..8], .. PngChunk("IHDR", interlacedHeader), .. png[33..]]);
+
         const string foreignRunId = "bd851990-0eb4-42f1-8d2f-01a30389bdce";
         RejectBytes(bound with { RunId = foreignRunId }, png,
             "RUN_NONCE_MISMATCH");
