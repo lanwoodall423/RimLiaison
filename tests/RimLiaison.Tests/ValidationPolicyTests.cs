@@ -685,6 +685,141 @@ internal static class ValidationPolicyTests
         AssertEqual("EXPECTED_CUSTODY_INVALID",
             MapWitnessEvaluator.Evaluate(expectation, events, witness,
                 source, runner, run, seed, -1).ReasonCode);
+
+        // Source-only bytes-to-receipt binding. The image is a generated 1x1
+        // synthetic PNG fixture, not a captured RimWorld game screenshot.
+        byte[] png = Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlE" +
+            "QVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==");
+        string hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(png))
+            .ToLowerInvariant();
+        MapWitnessReceipt bound = witness with
+        {
+            ScreenshotSha256 = hash,
+            ScreenshotByteCount = png.Length
+        };
+        MapWitnessScreenshotBinding Bind(
+            MapWitnessReceipt? receipt, ReadOnlyMemory<byte> bytes) =>
+            MapWitnessScreenshotBinder.Bind(expectation, events, receipt,
+                bytes, source, runner, run, seed, tile);
+        void RejectBytes(MapWitnessReceipt? receipt, ReadOnlyMemory<byte> bytes,
+            string reason)
+        {
+            MapWitnessScreenshotBinding result = Bind(receipt, bytes);
+            AssertEqual(reason, result.ReasonCode);
+            Assert(result.Receipt is null,
+                "Failed byte custody cannot return any witness receipt.");
+            Assert(!result.NativeQualified && !result.SeedVerified &&
+                !result.ScreenshotVerified,
+                "Byte custody has no guest provenance or native authority.");
+        }
+
+        // Build synthetic chunks with correct CRCs so the parser must
+        // reject invalid PNG structure, not just damaged checksums.
+        static byte[] PngChunk(string type, byte[] payload)
+        {
+            byte[] chunk = new byte[payload.Length + 12];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+                chunk.AsSpan(0, 4), (uint)payload.Length);
+            System.Text.Encoding.ASCII.GetBytes(type).CopyTo(chunk, 4);
+            payload.CopyTo(chunk, 8);
+            uint crc = 0xffffffffu;
+            foreach (byte value in chunk.AsSpan(4, payload.Length + 4))
+            {
+                crc ^= value;
+                for (int bit = 0; bit < 8; bit++)
+                    crc = (crc & 1) == 0 ? crc >> 1 :
+                        (crc >> 1) ^ 0xedb88320u;
+            }
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+                chunk.AsSpan(payload.Length + 8, 4), ~crc);
+            return chunk;
+        }
+
+        void RejectInvalidContainer(byte[] bytes)
+        {
+            MapWitnessReceipt claim = bound with
+            {
+                ScreenshotSha256 = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(bytes))
+                    .ToLowerInvariant(),
+                ScreenshotByteCount = bytes.Length
+            };
+            RejectBytes(claim, bytes, "SCREENSHOT_PNG_INVALID");
+        }
+
+        MapWitnessScreenshotBinding bytesBound = Bind(bound, png);
+        AssertEqual(MapWitnessContract.ReadyForAttestation, bytesBound.Status);
+        AssertEqual("SCREENSHOT_BYTES_BOUND_NATIVE_AUTHORITY_UNPROVEN",
+            bytesBound.ReasonCode);
+        AssertEqual(hash, bytesBound.Receipt?.ScreenshotSha256);
+        AssertEqual((long)png.Length,
+            bytesBound.Receipt?.ScreenshotByteCount ?? -1L);
+        Assert(!bytesBound.NativeQualified && !bytesBound.SeedVerified &&
+            !bytesBound.ScreenshotVerified,
+            "Even exact real bytes only qualify for independent attestation.");
+
+        RejectBytes(null, png, "NATIVE_WITNESS_MISSING");
+        RejectBytes(bound, ReadOnlyMemory<byte>.Empty,
+            "SCREENSHOT_BYTES_MISSING_OR_OUT_OF_BOUNDS");
+        RejectBytes(witness, png, "SCREENSHOT_BYTES_DIGEST_MISMATCH");
+        RejectBytes(bound with { ScreenshotByteCount = png.Length - 1 }, png,
+            "SCREENSHOT_BYTES_DIGEST_MISMATCH");
+        byte[] corrupt = (byte[])png.Clone();
+        corrupt[45] ^= 0x01;
+        RejectBytes(bound, corrupt, "SCREENSHOT_PNG_INVALID");
+        byte[] appended = [.. png, 0x00];
+        RejectBytes(bound, appended, "SCREENSHOT_PNG_INVALID");
+        // An ancillary chunk after image data is permitted, but neither an
+        // invalid reserved chunk name nor resumed IDAT data is valid PNG.
+        byte[] textChunk = PngChunk("tEXt", [(byte)'k', 0, (byte)'v']);
+        byte[] validAncillary =
+            [.. png[..^12], .. textChunk, .. png[^12..]];
+        MapWitnessScreenshotBinding ancillaryBound = Bind(bound with
+        {
+            ScreenshotSha256 = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(validAncillary))
+                .ToLowerInvariant(),
+            ScreenshotByteCount = validAncillary.Length
+        }, validAncillary);
+        AssertEqual(MapWitnessContract.ReadyForAttestation,
+            ancillaryBound.Status);
+        byte[] invalidReserved =
+            [.. png[..^12], .. PngChunk("texT", []), .. png[^12..]];
+        RejectInvalidContainer(invalidReserved);
+        byte[] invalidLetters =
+            [.. png[..^12], .. PngChunk("t3Xt", []), .. png[^12..]];
+        RejectInvalidContainer(invalidLetters);
+        byte[] resumedImageData =
+            [.. png[..^12], .. textChunk,
+             .. PngChunk("IDAT", [0]), .. png[^12..]];
+        RejectInvalidContainer(resumedImageData);
+        byte[] latePalette =
+            [.. png[..^12], .. PngChunk("PLTE", [0, 0, 0]),
+             .. png[^12..]];
+        RejectInvalidContainer(latePalette);
+        const string foreignRunId = "bd851990-0eb4-42f1-8d2f-01a30389bdce";
+        RejectBytes(bound with { RunId = foreignRunId }, png,
+            "RUN_NONCE_MISMATCH");
+        RejectBytes(bound with { ScreenshotRunId = foreignRunId }, png,
+            "RUN_NONCE_MISMATCH");
+        RejectBytes(bound with { Nonce = "another-run" }, png,
+            "RUN_NONCE_MISMATCH");
+        RejectBytes(bound with { SourceHead = new string('d', 40) }, png,
+            "SOURCE_RUNNER_MISMATCH");
+        RejectBytes(bound with { WorldTile = tile + 1 }, png,
+            "SEED_TILE_MISMATCH");
+        RejectBytes(bound with { GameVersion = "1.6.1" }, png,
+            "GAME_VERSION_MISMATCH");
+        RejectBytes(bound with { MapUniqueId = 18 }, png,
+            "MAP_IDENTITY_MISMATCH");
+        RejectBytes(bound with { ScreenshotCapturedUtc = started.AddHours(3) },
+            png, "SCREENSHOT_RUN_TIME_MISMATCH");
+        RejectBytes(bound with { CurrentLogVerified = false }, png,
+            "CURRENT_LOG_UNVERIFIED");
+        RejectBytes(bound with { CleanupComplete = false }, png,
+            "OWNED_CLEANUP_UNVERIFIED");
     }
 
     private static MapEventExpectation MapFixture() => new(

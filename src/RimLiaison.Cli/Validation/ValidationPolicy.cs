@@ -840,3 +840,167 @@ public static class MapWitnessEvaluator
     }
 }
 
+/// <summary>
+/// Source-only binding of candidate map witness metadata to actual PNG bytes.
+/// It has no filesystem, VM, guest, screenshot or approval authority. A fully
+/// bound candidate is still NOT independently authenticated native evidence.
+/// </summary>
+public sealed record MapWitnessScreenshotBinding(
+    string SchemaVersion, string Status, string ReasonCode,
+    MapWitnessReceipt? Receipt = null,
+    bool NativeQualified = false, bool SeedVerified = false,
+    bool ScreenshotVerified = false);
+
+public static class MapWitnessScreenshotBinder
+{
+    private const int MaximumBytes = 16_777_216;
+
+    public static MapWitnessScreenshotBinding Bind(
+        MapEventExpectation expected,
+        MapEventAssessment events,
+        MapWitnessReceipt? claimedReceipt,
+        ReadOnlyMemory<byte> screenshotPng,
+        string expectedSourceHead,
+        string expectedRunnerHead,
+        string expectedRunId,
+        string expectedWorldSeed,
+        int expectedWorldTile)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(events);
+
+        MapWitnessScreenshotBinding Result(string status, string reason,
+            MapWitnessReceipt? receipt = null) =>
+            new(MapWitnessContract.Current, status, reason, receipt);
+
+        if (claimedReceipt is null)
+            return Result(MapWitnessContract.Incomplete, "NATIVE_WITNESS_MISSING");
+
+        if (screenshotPng.Length is < 57 or > MaximumBytes)
+            return Result(MapWitnessContract.Incomplete,
+                "SCREENSHOT_BYTES_MISSING_OR_OUT_OF_BOUNDS");
+
+        // Validate bounded PNG framing and each chunk CRC. This is not image
+        // decoding, and does not establish when/where the PNG was captured.
+        if (!IsPngContainer(screenshotPng.Span))
+            return Result(MapWitnessContract.InvalidEvidence,
+                "SCREENSHOT_PNG_INVALID");
+
+        string bytesSha = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(screenshotPng.Span))
+            .ToLowerInvariant();
+        if (claimedReceipt.ScreenshotSha256 != bytesSha ||
+            claimedReceipt.ScreenshotByteCount != screenshotPng.Length)
+            return Result(MapWitnessContract.InvalidEvidence,
+                "SCREENSHOT_BYTES_DIGEST_MISMATCH");
+
+        MapWitnessAssessment assessment = MapWitnessEvaluator.Evaluate(
+            expected, events, claimedReceipt, expectedSourceHead,
+            expectedRunnerHead, expectedRunId, expectedWorldSeed,
+            expectedWorldTile);
+        if (assessment.Status != MapWitnessContract.ReadyForAttestation)
+            return Result(assessment.Status, assessment.ReasonCode);
+
+        // Only a later independently authorized host/guest custody verifier
+        // can verify game origin, seed/tile, time, cleanup, and visible pixels.
+        return Result(MapWitnessContract.ReadyForAttestation,
+            "SCREENSHOT_BYTES_BOUND_NATIVE_AUTHORITY_UNPROVEN", claimedReceipt);
+    }
+
+    private static bool IsPngContainer(ReadOnlySpan<byte> png)
+    {
+        ReadOnlySpan<byte> signature =
+            [137, 80, 78, 71, 13, 10, 26, 10];
+        if (!png[..8].SequenceEqual(signature))
+            return false;
+
+        bool hasHeader = false;
+        bool hasImageData = false;
+        bool imageDataEnded = false;
+        bool hasPalette = false;
+        int cursor = 8;
+        int chunks = 0;
+        while (cursor <= png.Length - 12 && ++chunks <= 128)
+        {
+            uint length = System.Buffers.Binary.BinaryPrimitives
+                .ReadUInt32BigEndian(png.Slice(cursor, 4));
+            if (length > (uint)(png.Length - cursor - 12))
+                return false;
+
+            int count = (int)length;
+            ReadOnlySpan<byte> type = png.Slice(cursor + 4, 4);
+            ReadOnlySpan<byte> data = png.Slice(cursor + 8, count);
+            uint crc = System.Buffers.Binary.BinaryPrimitives
+                .ReadUInt32BigEndian(png.Slice(cursor + 8 + count, 4));
+            if (crc != PngCrc(png.Slice(cursor + 4, count + 4)))
+                return false;
+            // Every chunk name is four ASCII letters with the PNG reserved
+            // (third) letter uppercase. CRC correctness alone is insufficient.
+            foreach (byte letter in type)
+            {
+                if (!((letter >= (byte)'A' && letter <= (byte)'Z') ||
+                      (letter >= (byte)'a' && letter <= (byte)'z')))
+                    return false;
+            }
+            if ((type[2] & 32) != 0)
+                return false;
+
+            int next = cursor + count + 12;
+            if (!hasHeader)
+            {
+                if (!type.SequenceEqual("IHDR"u8) || count != 13)
+                    return false;
+                uint width = System.Buffers.Binary.BinaryPrimitives
+                    .ReadUInt32BigEndian(data[..4]);
+                uint height = System.Buffers.Binary.BinaryPrimitives
+                    .ReadUInt32BigEndian(data.Slice(4, 4));
+                if (width is 0 or > 8192 || height is 0 or > 8192 ||
+                    data[8] != 8 || data[9] is not (2 or 6) ||
+                    data[10] != 0 || data[11] != 0 || data[12] > 1)
+                    return false;
+                hasHeader = true;
+            }
+            else if (type.SequenceEqual("IEND"u8))
+                return count == 0 && hasImageData && next == png.Length;
+            else if (type.SequenceEqual("IDAT"u8))
+            {
+                // PNG image-data chunks must be consecutive.
+                if (count == 0 || imageDataEnded)
+                    return false;
+                hasImageData = true;
+            }
+            else
+            {
+                if (hasImageData)
+                    imageDataEnded = true;
+                if (type.SequenceEqual("PLTE"u8))
+                {
+                    if (hasPalette || hasImageData ||
+                        count is < 3 or > 768 || count % 3 != 0)
+                        return false;
+                    hasPalette = true;
+                }
+                else if (type.SequenceEqual("IHDR"u8) ||
+                    (type[0] & 32) == 0)
+                    return false;
+            }
+
+            cursor = next;
+        }
+        return false;
+    }
+
+    private static uint PngCrc(ReadOnlySpan<byte> bytes)
+    {
+        uint crc = 0xffffffffu;
+        foreach (byte value in bytes)
+        {
+            crc ^= value;
+            for (int bit = 0; bit < 8; bit++)
+                crc = (crc & 1) == 0 ? crc >> 1 :
+                    (crc >> 1) ^ 0xedb88320u;
+        }
+        return ~crc;
+    }
+}
+
